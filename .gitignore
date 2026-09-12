@@ -1,0 +1,5 @@
+/.build/
+.DS_Store
+msw.rtf
+transcription_raw.json.claude/
+example/
