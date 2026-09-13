@@ -1,16 +1,16 @@
-import XCTest
+import Foundation
 @testable import DictationCore
 
 final class WAVEncoderTests: XCTestCase {
 
     // MARK: - Existing
 
-    func testEmpty() {
+    @objc func testEmpty() {
         let data = WAVEncoder.encode(samples: [])
         XCTAssertEqual(data.count, 44) // only header
     }
 
-    func testKnownSamples() {
+    @objc func testKnownSamples() {
         let samples: [Int16] = [1000, -1000, 32767, -32768]
         let data = WAVEncoder.encode(samples: samples)
         // header (44) + 4 samples * 2 bytes = 52
@@ -48,7 +48,7 @@ final class WAVEncoderTests: XCTestCase {
         XCTAssertEqual(sample1, -1000)
     }
 
-    func testSampleRate() {
+    @objc func testSampleRate() {
         let data = WAVEncoder.encode(samples: [0], sampleRate: 44100)
         let bytes = [UInt8](data)
         // sampleRate at offset 24 (LE uint32)
@@ -61,7 +61,7 @@ final class WAVEncoderTests: XCTestCase {
 
     // MARK: - sampleRate 8000
 
-    func testSampleRate8000() {
+    @objc func testSampleRate8000() {
         let data = WAVEncoder.encode(samples: [0, 0], sampleRate: 8000)
         let bytes = [UInt8](data)
 
@@ -74,7 +74,7 @@ final class WAVEncoderTests: XCTestCase {
 
     // MARK: - Int16.max / Int16.min edge samples
 
-    func testEdgeInt16Samples() {
+    @objc func testEdgeInt16Samples() {
         let samples: [Int16] = [Int16.max, Int16.min]
         let data = WAVEncoder.encode(samples: samples)
         let bytes = [UInt8](data)
@@ -96,7 +96,7 @@ final class WAVEncoderTests: XCTestCase {
 
     // MARK: - Binary structure at 16kHz mono
 
-    func testBinaryStructure16kHzMono16bit() {
+    @objc func testBinaryStructure16kHzMono16bit() {
         let samples: [Int16] = [100, -200, 300]
         let data = WAVEncoder.encode(samples: samples, sampleRate: 16000)
         let bytes = [UInt8](data)
@@ -120,14 +120,14 @@ final class WAVEncoderTests: XCTestCase {
 
     // MARK: - fileSize = 36 + dataSize
 
-    func testFileSizeFormula() {
+    @objc func testFileSizeFormula() {
         let samples: [Int16] = [1, 2, 3, 4, 5]
         let data = WAVEncoder.encode(samples: samples)
         let bytes = [UInt8](data)
 
         let fileSize = bytes[4...7].withUnsafeBytes { $0.load(as: UInt32.self) }
         let dataSize = Int32(samples.count * 2)
-        XCTAssertEqual(fileSize, 36 + dataSize)
+        XCTAssertEqual(fileSize, 36 + UInt32(dataSize))
 
         // Total file = 8 (RIFF header) + fileSize
         XCTAssertEqual(data.count, 8 + Int(fileSize))
@@ -135,7 +135,7 @@ final class WAVEncoderTests: XCTestCase {
 
     // MARK: - Tags: "RIFF", "WAVE", "fmt ", "data"
 
-    func testChunkTags() {
+    @objc func testChunkTags() {
         let data = WAVEncoder.encode(samples: [0])
         let bytes = [UInt8](data)
 

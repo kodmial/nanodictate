@@ -144,8 +144,14 @@ public struct DoubleAltDetector {
     /// Максимальный интервал между двумя нажатиями (секунды) для детекта двойного тапа.
     public let maxInterval: TimeInterval
 
-    /// Timestamp последнего нажатия; `0` означает «нет предыдущего нажатия».
-    private var lastTimestamp: TimeInterval = 0
+    /// Допуск при сравнении интервалов: `5.4 - 5.0` в Double равно
+    /// `0.40000000000000036`, поэтому граница сравнивается с эпсилоном.
+    private let epsilon: TimeInterval = 1e-9
+
+    /// Timestamp последнего нажатия; `nil` — «нет предыдущего нажатия».
+    /// Optional вместо sentinel-нуля: тап секунда в момент 0.0 (как в тестах)
+    /// не должен «съедать» следующий тап (0.0 не `> 0`).
+    private var lastTimestamp: TimeInterval?
 
     public init(maxInterval: TimeInterval = 0.4) {
         self.maxInterval = maxInterval
@@ -155,13 +161,13 @@ public struct DoubleAltDetector {
     /// второй тап в пределах `maxInterval` от предыдущего. После срабатывания
     /// детектор сбрасывается: следующее нажатие начинает новое окно детекта.
     public mutating func registerTap(at timestamp: TimeInterval) -> Bool {
-        guard lastTimestamp > 0 else {
+        guard let last = lastTimestamp else {
             lastTimestamp = timestamp
             return false
         }
 
-        if timestamp - lastTimestamp <= maxInterval {
-            lastTimestamp = 0 // сброс — детектируем пары, а не серии
+        if timestamp - last <= maxInterval + epsilon {
+            lastTimestamp = nil // сброс — детектируем пары, а не серии
             return true
         }
 
@@ -171,7 +177,7 @@ public struct DoubleAltDetector {
 
     /// Полный сброс состояния.
     public mutating func reset() {
-        lastTimestamp = 0
+        lastTimestamp = nil
     }
 }
 

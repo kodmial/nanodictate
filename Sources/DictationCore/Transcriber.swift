@@ -35,6 +35,7 @@ public final class Transcriber {
     private let baseURL: String
     private let model: String
     private let apiKey: String
+    private let proxyKey: String
     private let timeout: TimeInterval
     private let transport: HTTPTransport?
 
@@ -42,12 +43,14 @@ public final class Transcriber {
         baseURL: String,
         model: String,
         apiKey: String,
+        proxyKey: String = "",
         timeout: TimeInterval = 120,
         transport: HTTPTransport? = nil
     ) {
         self.baseURL = baseURL
         self.model = model
         self.apiKey = apiKey
+        self.proxyKey = proxyKey
         self.timeout = timeout
         self.transport = transport
     }
@@ -68,6 +71,9 @@ public final class Transcriber {
         request.httpBody = body
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if !proxyKey.isEmpty {
+            request.setValue(proxyKey, forHTTPHeaderField: "X-Proxy-Key")
+        }
         request.timeoutInterval = timeout
 
         // 2 attempts total: initial + 1 retry (network errors only).

@@ -46,12 +46,21 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             baseURL: config.baseURL,
             model: config.model,
             apiKey: config.apiKey,
+            proxyKey: config.proxyKey,
             timeout: config.timeoutSeconds
         )
         super.init()
 
         self.audio.levelDelegate = self
         self.hotkeys.delegate = self
+
+        // Принудительная остановка по жёсткому лимиту (60 с) идёт тем же путём,
+        // что и обычный стоп: сэмплы → WAV → транскрибация.
+        self.audio.onRecordingLimitReached = { [weak self] samples in
+            DispatchQueue.main.async {
+                self?.handleRecordingLimitReached(samples: samples)
+            }
+        }
     }
 
     func start() throws {
@@ -163,10 +172,12 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     }
 
     /// Логика старта записи: двигает агента в состояние .recording.
+    /// Панель показывается здесь и держится ВЕСЬ цикл записи/распознавания;
+    /// hide() вызывается только из терминальных точек (стоп/ошибка/вставка).
     private func startRecording() {
         sounds.playStart()
         overlay.show()
-        overlay.setStatus("Слушаю…")
+        overlay.setStatus("Записываю…")
         Logger.log("record start")
 
         do {
@@ -181,13 +192,20 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     private func showMicrophoneError() {
         overlay.setStatus("Нет доступа к микрофону (Настройки → Конфиденциальность)")
         sounds.playCancel()
-        hideAfter(2.0)
+        hideAfter(2.0, reason: "mic denied")
     }
 
     private func sendRecording() {
         let samples = audio.stop()
+        processSamples(samples)
+    }
+
+    /// Обычный путь финализации записи: сэмплы → WAV → транскрибация.
+    /// Вызывается и по стопу пользователем, и после принудительной остановки
+    /// по лимиту длительности (см. `onRecordingLimitReached`).
+    private func processSamples(_ samples: [Int16]) {
         state = .transcribing
-        overlay.setStatus("Отправляю…")
+        overlay.setStatus("Распознаю…")
         sounds.playEnd()
         Logger.log("transcribe submit (\(samples.count) samples)")
 
@@ -212,17 +230,25 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         }
     }
 
+    /// Запись остановлена по жёсткому лимиту (60 с / 960 000 сэмплов) —
+    /// финализируем собранные сэмплы стандартным путём.
+    private func handleRecordingLimitReached(samples: [Int16]) {
+        guard state == .recording else { return }
+        Logger.log("record limit reached (\(samples.count) samples)", level: "info")
+        processSamples(samples)
+    }
+
     private func completeInsertion(_ text: String) {
         Inserter.insert(text: text)
-        overlay.setStatus("Готово")
-        hideAfter(0.8)
+        overlay.setStatus("Завершаю…")
+        hideAfter(0.8, reason: "insert done")
         state = .idle
         Logger.log("transcription inserted (\(text.count) chars)")
     }
 
     private func failTranscription(_ message: String) {
         overlay.setStatus("Ошибка: \(message)")
-        hideAfter(2.0)
+        hideAfter(2.0, reason: "transcription failed")
         state = .idle
         Logger.log("transcription failed: \(message)", level: "error")
     }
@@ -232,17 +258,21 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         audio.cancel()
         overlay.setStatus("Отменено")
         sounds.playCancel()
-        hideAfter(0.8)
+        hideAfter(0.8, reason: "cancelled")
         state = .idle
         Logger.log("record cancelled")
     }
 
     // MARK: - Helpers
 
-    private func hideAfter(_ seconds: TimeInterval) {
+    /// Единственная точка вызова hide() — терминальные события цикла.
+    /// Задержка оставляет на экране финальный статус («Завершаю…»/«Отменено»).
+    /// Панель НЕ прячется, если к моменту срабатывания запись уже начата заново
+    /// (state != .idle) — оверлей остаётся виден весь новый цикл.
+    private func hideAfter(_ seconds: TimeInterval, reason: String) {
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
             guard let self = self, self.state == .idle else { return }
-            self.overlay.hide()
+            self.overlay.hide(reason: reason)
         }
     }
 

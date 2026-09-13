@@ -147,8 +147,8 @@ func maskAPIKey(in content: String) -> String {
     for line in content.components(separatedBy: .newlines) {
         let keyPart = line.split(separator: "=", maxSplits: 1).first
             .map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
-        if keyPart == "api_key" {
-            lines.append("api_key = \"***\"")
+        if keyPart == "api_key" || keyPart == "proxy_key" {
+            lines.append("\(keyPart) = \"***\"")
         } else {
             lines.append(line)
         }
@@ -198,6 +198,7 @@ func cmdConfig(_ args: [String]) -> Int32 {
     print("double_alt_max_interval: \(config.doubleAltMaxInterval)")
     print("log_level: \(config.logLevel)")
     print("api_key: ***")
+    print("proxy_key: ***")
     return 0
 }
 
@@ -249,6 +250,7 @@ func cmdTranscribe(_ args: [String]) -> Int32 {
         baseURL: config.baseURL,
         model: config.model,
         apiKey: config.apiKey,
+        proxyKey: config.proxyKey,
         timeout: config.timeoutSeconds
     )
     // Данные всегда WAV (не-WAV конвертируется выше); сервер строг к расширению,

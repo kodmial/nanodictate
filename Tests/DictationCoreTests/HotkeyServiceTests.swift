@@ -1,28 +1,28 @@
-import XCTest
+import Foundation
 @testable import DictationCore
 
 final class HotkeyServiceTests: XCTestCase {
 
     // MARK: - DoubleAltDetector
 
-    func testTwoTapsWithinIntervalIsDoubleTap() {
+    @objc func testTwoTapsWithinIntervalIsDoubleTap() {
         var detector = DoubleAltDetector(maxInterval: 0.4)
         XCTAssertFalse(detector.registerTap(at: 1.0))
         XCTAssertTrue(detector.registerTap(at: 1.25)) // 0.25s < 0.4s
     }
 
-    func testTwoTapsWithLargerIntervalIsNotDoubleTap() {
+    @objc func testTwoTapsWithLargerIntervalIsNotDoubleTap() {
         var detector = DoubleAltDetector(maxInterval: 0.4)
         XCTAssertFalse(detector.registerTap(at: 1.0))
         XCTAssertFalse(detector.registerTap(at: 1.5)) // 0.5s > 0.4s
     }
 
-    func testSingleTapIsNeverDoubleTap() {
+    @objc func testSingleTapIsNeverDoubleTap() {
         var detector = DoubleAltDetector(maxInterval: 0.4)
         XCTAssertFalse(detector.registerTap(at: 1.0))
     }
 
-    func testThreeFastTapsDetectPairAndReset() {
+    @objc func testThreeFastTapsDetectPairAndReset() {
         var detector = DoubleAltDetector(maxInterval: 0.4)
         XCTAssertFalse(detector.registerTap(at: 1.0))
         // Второй тап в пределах интервала — двойной тап...
@@ -33,7 +33,7 @@ final class HotkeyServiceTests: XCTestCase {
         XCTAssertTrue(detector.registerTap(at: 1.25))
     }
 
-    func testDetectorIsResetAfterDoubleTap() {
+    @objc func testDetectorIsResetAfterDoubleTap() {
         var detector = DoubleAltDetector(maxInterval: 0.4)
         XCTAssertFalse(detector.registerTap(at: 0.0))
         XCTAssertTrue(detector.registerTap(at: 0.1))
@@ -41,7 +41,7 @@ final class HotkeyServiceTests: XCTestCase {
         XCTAssertFalse(detector.registerTap(at: 0.2)) // после reset — одиночное нажатие
     }
 
-    func testTapExactlyAtIntervalBoundaryIsDoubleTap() {
+    @objc func testTapExactlyAtIntervalBoundaryIsDoubleTap() {
         var detector = DoubleAltDetector(maxInterval: 0.4)
         XCTAssertFalse(detector.registerTap(at: 5.0))
         XCTAssertTrue(detector.registerTap(at: 5.4)) // ровно maxInterval
@@ -49,12 +49,12 @@ final class HotkeyServiceTests: XCTestCase {
 
     // MARK: - HotkeyService public API (конструктор не бросает, свойства доступны)
 
-    func testDefaultMaxInterval() {
+    @objc func testDefaultMaxInterval() {
         let service = HotkeyService()
         XCTAssertEqual(service.doubleTapMaxInterval, 0.4)
     }
 
-    func testCustomMaxInterval() {
+    @objc func testCustomMaxInterval() {
         let service = HotkeyService(doubleTapMaxInterval: 1.0)
         XCTAssertEqual(service.doubleTapMaxInterval, 1.0)
     }

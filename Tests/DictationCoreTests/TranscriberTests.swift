@@ -1,4 +1,4 @@
-import XCTest
+import Foundation
 @testable import DictationCore
 
 // MARK: - MockTransport
@@ -71,7 +71,7 @@ final class TranscriberTests: XCTestCase {
 
     // MARK: Success
 
-    func testSuccessReturnsText() {
+    @objc func testSuccessReturnsText() {
         let json = #"{"text":"привет мир"}"#
         let transport = MockTransport(status: 200, body: Data(json.utf8))
         let transcriber = makeTranscriber(transport: transport)
@@ -86,7 +86,7 @@ final class TranscriberTests: XCTestCase {
 
     // MARK: HTTP error
 
-    func testHTTP500ThrowsHTTPError() {
+    @objc func testHTTP500ThrowsHTTPError() {
         let transport = MockTransport(status: 500, body: Data(#"{"error":"boom"}"#.utf8))
         let transcriber = makeTranscriber(transport: transport)
 
@@ -108,7 +108,7 @@ final class TranscriberTests: XCTestCase {
 
     // MARK: Request contents
 
-    func testRequestContainsBoundaryFileModelAndAuthorization() {
+    @objc func testRequestContainsBoundaryFileModelAndAuthorization() {
         let transport = MockTransport(status: 200, body: Data(#"{"text":"ok"}"#.utf8))
         let transcriber = makeTranscriber(transport: transport)
 
@@ -151,13 +151,14 @@ final class TranscriberTests: XCTestCase {
             XCTAssertTrue(bodyText.contains("gigaam-v3"))
 
             // WAV bytes present verbatim
-            XCTAssertTrue(body.contains(self.wavData))
+            // Data.contains(_ other: Data) требует macOS 13 — на 12 используем range.
+            XCTAssertTrue(body.range(of: self.wavData) != nil)
         }
     }
 
     // MARK: Retry on network error
 
-    func testNetworkErrorRetriesTwice() {
+    @objc func testNetworkErrorRetriesTwice() {
         let transport = MockTransport(status: 0,
                                       body: Data(),
                                       sendError: URLError(.cannotConnectToHost))
@@ -181,7 +182,7 @@ final class TranscriberTests: XCTestCase {
 
     // MARK: Invalid response
 
-    func testInvalidResponseThrows() {
+    @objc func testInvalidResponseThrows() {
         let transport = MockTransport(status: 200, body: Data("not json".utf8))
         let transcriber = makeTranscriber(transport: transport)
 
@@ -203,7 +204,7 @@ final class TranscriberTests: XCTestCase {
 
     // MARK: - NEW: HTTP 500 with body text
 
-    func testHTTP500WithBodyContainsBodyText() {
+    @objc func testHTTP500WithBodyContainsBodyText() {
         let bodyText = "Internal Server Error: quota exceeded"
         let transport = MockTransport(status: 500, body: Data(bodyText.utf8))
         let transcriber = makeTranscriber(transport: transport)
@@ -225,7 +226,7 @@ final class TranscriberTests: XCTestCase {
 
     // MARK: - NEW: Invalid JSON → .invalidResponse
 
-    func testInvalidJSONReturnsInvalidResponse() {
+    @objc func testInvalidJSONReturnsInvalidResponse() {
         let transport = MockTransport(status: 200, body: Data("{not json at all".utf8))
         let transcriber = makeTranscriber(transport: transport)
 
@@ -245,7 +246,7 @@ final class TranscriberTests: XCTestCase {
 
     // MARK: - NEW: JSON missing "text" field
 
-    func testMissingTextFieldReturnsInvalidResponse() {
+    @objc func testMissingTextFieldReturnsInvalidResponse() {
         let transport = MockTransport(status: 200, body: Data(#"{"no_text":"hello"}"#.utf8))
         let transcriber = makeTranscriber(transport: transport)
 
@@ -265,7 +266,7 @@ final class TranscriberTests: XCTestCase {
 
     // MARK: - NEW: Empty text → OK
 
-    func testEmptyTextReturnsOK() {
+    @objc func testEmptyTextReturnsOK() {
         let json = #"{"text":""}"#
         let transport = MockTransport(status: 200, body: Data(json.utf8))
         let transcriber = makeTranscriber(transport: transport)
@@ -278,7 +279,7 @@ final class TranscriberTests: XCTestCase {
 
     // MARK: - NEW: Success with usage field → text extracted
 
-    func testSuccessWithUsageField() {
+    @objc func testSuccessWithUsageField() {
         let json = #"{"text":"привет","usage":{"seconds":1.5}}"#
         let transport = MockTransport(status: 200, body: Data(json.utf8))
         let transcriber = makeTranscriber(transport: transport)
@@ -291,7 +292,7 @@ final class TranscriberTests: XCTestCase {
 
     // MARK: - NEW: Retry: first call error → second success → return text
 
-    func testRetryFirstFailsSecondSucceeds() {
+    @objc func testRetryFirstFailsSecondSucceeds() {
         let json = #"{"text":"ok after retry"}"#
         let transport = MockTransport(status: 200, body: Data(json.utf8))
         transport.sendError = URLError(.cannotConnectToHost)
@@ -307,7 +308,7 @@ final class TranscriberTests: XCTestCase {
 
     // MARK: - NEW: Timeout error → .network
 
-    func testTimeoutErrorReturnsNetwork() {
+    @objc func testTimeoutErrorReturnsNetwork() {
         let transport = MockTransport(status: 0, body: Data(),
                                       sendError: URLError(.timedOut))
         let transcriber = makeTranscriber(transport: transport)
@@ -329,7 +330,7 @@ final class TranscriberTests: XCTestCase {
 
     // MARK: - NEW: Authorization header contains Bearer
 
-    func testAuthorizationBearerHeader() {
+    @objc func testAuthorizationBearerHeader() {
         let transport = MockTransport(status: 200, body: Data(#"{"text":"x"}"#.utf8))
         let transcriber = Transcriber(baseURL: "https://test.api/endpoint",
                                       model: "m",
@@ -346,9 +347,46 @@ final class TranscriberTests: XCTestCase {
         }
     }
 
+    // MARK: - NEW: X-Proxy-Key sent only when proxyKey is set
+
+    @objc func testProxyKeyHeaderSentWhenSet() {
+        let transport = MockTransport(status: 200, body: Data(#"{"text":"x"}"#.utf8))
+        let transcriber = Transcriber(baseURL: "https://test.api/endpoint",
+                                      model: "m",
+                                      apiKey: "k",
+                                      proxyKey: "proxy-secret",
+                                      transport: transport)
+
+        runAsync("testProxyKeySet") {
+            _ = try await transcriber.transcribe(wav: self.wavData)
+            guard let req = transport.lastRequest else {
+                XCTFail("No request")
+                return
+            }
+            XCTAssertEqual(req.value(forHTTPHeaderField: "X-Proxy-Key"), "proxy-secret")
+        }
+    }
+
+    @objc func testProxyKeyHeaderAbsentWhenEmpty() {
+        let transport = MockTransport(status: 200, body: Data(#"{"text":"x"}"#.utf8))
+        let transcriber = Transcriber(baseURL: "https://test.api/endpoint",
+                                      model: "m",
+                                      apiKey: "k",
+                                      transport: transport)
+
+        runAsync("testProxyKeyEmpty") {
+            _ = try await transcriber.transcribe(wav: self.wavData)
+            guard let req = transport.lastRequest else {
+                XCTFail("No request")
+                return
+            }
+            XCTAssertNil(req.value(forHTTPHeaderField: "X-Proxy-Key"))
+        }
+    }
+
     // MARK: - NEW: Multipart body field names
 
-    func testMultipartBodyFieldNames() {
+    @objc func testMultipartBodyFieldNames() {
         let transport = MockTransport(status: 200, body: Data(#"{"text":"x"}"#.utf8))
         let transcriber = makeTranscriber(transport: transport)
 

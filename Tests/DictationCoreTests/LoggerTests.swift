@@ -1,5 +1,5 @@
 import Foundation
-import XCTest
+import Foundation
 @testable import DictationCore
 
 final class LoggerTests: XCTestCase {
@@ -24,7 +24,7 @@ final class LoggerTests: XCTestCase {
         super.tearDown()
     }
 
-    func testLogCreatesFileWithMessageAndLevel() throws {
+    @objc func testLogCreatesFileWithMessageAndLevel() throws {
         let dir = setUpTempLogDirectory()
 
         Logger.log("test message", level: "error")
@@ -37,7 +37,7 @@ final class LoggerTests: XCTestCase {
         XCTAssertTrue(content.contains("[error]"), "содержимое должно включать уровень")
     }
 
-    func testLogLineMatchesDateFormat() throws {
+    @objc func testLogLineMatchesDateFormat() throws {
         let dir = setUpTempLogDirectory()
 
         Logger.log("date check", level: "info")
@@ -53,7 +53,7 @@ final class LoggerTests: XCTestCase {
         )
     }
 
-    func testAppendWritesSecondLine() throws {
+    @objc func testAppendWritesSecondLine() throws {
         let dir = setUpTempLogDirectory()
 
         Logger.log("first line", level: "info")
@@ -68,7 +68,7 @@ final class LoggerTests: XCTestCase {
         XCTAssertEqual(lines.count, 2, "обе строки должны быть дописаны")
     }
 
-    func testLogDoesNotThrowWithUnwritableDirectory() {
+    @objc func testLogDoesNotThrowWithUnwritableDirectory() {
         Logger.logDirectory = "/nonexistent-dir-\(UUID().uuidString)/logs"
         // Не должно быть ни краха, ни исключения.
         Logger.log("no crash", level: "error")

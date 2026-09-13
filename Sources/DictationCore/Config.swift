@@ -8,6 +8,7 @@ public struct AppConfig: Equatable {
     public var model: String
     public var apiKey: String
     public var apiKeyFile: String?
+    public var proxyKey: String
     public var timeoutSeconds: Double
     public var doubleAltMaxInterval: Double
     public var soundsEnabled: Bool
@@ -20,6 +21,7 @@ public struct AppConfig: Equatable {
         model: "gigaam-v3",
         apiKey: "",
         apiKeyFile: nil,
+        proxyKey: "",
         timeoutSeconds: 120,
         doubleAltMaxInterval: 0.4,
         soundsEnabled: true,
@@ -75,6 +77,7 @@ public struct AppConfig: Equatable {
         var model: String = defaults.model
         var apiKey: String = defaults.apiKey
         var apiKeyFile: String? = defaults.apiKeyFile
+        var proxyKey: String = defaults.proxyKey
         var timeoutSeconds: Double = defaults.timeoutSeconds
         var doubleAltMaxInterval: Double = defaults.doubleAltMaxInterval
         var soundsEnabled: Bool = defaults.soundsEnabled
@@ -104,6 +107,8 @@ public struct AppConfig: Equatable {
                 apiKey = try parseString(valuePart, line: index + 1, rawLine: rawLine)
             case "api_key_file":
                 apiKeyFile = try parseStringOptional(valuePart, line: index + 1, rawLine: rawLine)
+            case "proxy_key":
+                proxyKey = try parseString(valuePart, line: index + 1, rawLine: rawLine)
             case "timeout_seconds":
                 timeoutSeconds = try parseDouble(valuePart, line: index + 1, rawLine: rawLine)
             case "double_alt_max_interval":
@@ -123,6 +128,7 @@ public struct AppConfig: Equatable {
             model: model,
             apiKey: apiKey,
             apiKeyFile: apiKeyFile,
+            proxyKey: proxyKey,
             timeoutSeconds: timeoutSeconds,
             doubleAltMaxInterval: doubleAltMaxInterval,
             soundsEnabled: soundsEnabled,

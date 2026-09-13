@@ -1,11 +1,11 @@
-import XCTest
+import Foundation
 @testable import DictationCore
 
 final class ConfigTests: XCTestCase {
 
     // MARK: - Existing
 
-    func testParseBasic() throws {
+    @objc func testParseBasic() throws {
         let content = """
         base_url = "https://x"
         model = "gigaam-v3"
@@ -21,19 +21,20 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.timeoutSeconds, 90)
     }
 
-    func testDefaultPath() {
+    @objc func testDefaultPath() {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         XCTAssertEqual(AppConfig.defaultPath(), "\(home)/.config/dictation/config.toml")
     }
 
     // MARK: - Full TOML with all keys
 
-    func testParseFullTOML() throws {
+    @objc func testParseFullTOML() throws {
         let content = """
         base_url = "https://custom.api/v1"
         model = "custom-model"
         api_key = "my-key"
         api_key_file = "/some/path"
+        proxy_key = "test-proxy-123"
         timeout_seconds = 60
         double_alt_max_interval = 0.8
         sounds_enabled = false
@@ -48,15 +49,26 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.model, "custom-model")
         XCTAssertEqual(config.apiKey, "my-key")
         XCTAssertEqual(config.apiKeyFile, "/some/path")
+        XCTAssertEqual(config.proxyKey, "test-proxy-123")
         XCTAssertEqual(config.timeoutSeconds, 60)
         XCTAssertEqual(config.doubleAltMaxInterval, 0.8)
         XCTAssertFalse(config.soundsEnabled)
         XCTAssertEqual(config.logLevel, "debug")
     }
 
+    // MARK: - proxy_key
+
+    @objc func testParseProxyKey() throws {
+        let content = """
+        proxy_key = "test-proxy-123"
+        """
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.proxyKey, "test-proxy-123")
+    }
+
     // MARK: - Comments and empty lines
 
-    func testParseIgnoresCommentsAndEmptyLines() throws {
+    @objc func testParseIgnoresCommentsAndEmptyLines() throws {
         let content = """
         # this is a comment
         base_url = "https://x"
@@ -70,20 +82,21 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.model, "m")
         // everything else is default
         XCTAssertEqual(config.apiKey, "")
+        XCTAssertEqual(config.proxyKey, "")
         XCTAssertEqual(config.timeoutSeconds, 120)
         XCTAssertTrue(config.soundsEnabled)
     }
 
     // MARK: - Missing file via load()
 
-    func testLoadMissingFileReturnsDefaults() throws {
+    @objc func testLoadMissingFileReturnsDefaults() throws {
         let config = try AppConfig.load(from: "/tmp/nonexistent_dictation_config_\(UUID()).toml")
         XCTAssertEqual(config, AppConfig.defaults)
     }
 
     // MARK: - api_key_file="" → nil
 
-    func testParseEmptyApiKeyFileReturnsNil() throws {
+    @objc func testParseEmptyApiKeyFileReturnsNil() throws {
         let content = """
         api_key_file = ""
         """
@@ -93,7 +106,7 @@ final class ConfigTests: XCTestCase {
 
     // MARK: - api_key_file with temp file → key read + trim + quote stripping
 
-    func testLoadWithApiKeyFileReadsKey() throws {
+    @objc func testLoadWithApiKeyFileReadsKey() throws {
         // key file contains: surrounding whitespace + quotes → trimmed to raw key
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("test_api_key_\(UUID().uuidString).txt")
@@ -110,7 +123,7 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(result.apiKey, "my-secret-key")
     }
 
-    func testApiKeyFileUnquotedKey() throws {
+    @objc func testApiKeyFileUnquotedKey() throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("test_api_key_\(UUID().uuidString).txt")
         try "bare-key-value".data(using: .utf8)!.write(to: tmp)
@@ -126,7 +139,7 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(result.apiKey, "bare-key-value")
     }
 
-    func testApiKeyFileBlankLinesSkipped() throws {
+    @objc func testApiKeyFileBlankLinesSkipped() throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("test_api_key_\(UUID().uuidString).txt")
         try "\n\n  \n  real-key\n".data(using: .utf8)!.write(to: tmp)
@@ -144,7 +157,7 @@ final class ConfigTests: XCTestCase {
 
     // MARK: - Invalid timeout → throw
 
-    func testParseInvalidTimeoutThrows() {
+    @objc func testParseInvalidTimeoutThrows() {
         let content = "timeout_seconds = not_a_number\n"
         XCTAssertThrowsError(try AppConfig.parse(content)) { error in
             guard case AppConfig.AppConfigError.invalidLine = error else {
@@ -154,7 +167,7 @@ final class ConfigTests: XCTestCase {
         }
     }
 
-    func testParseInvalidBoolThrows() {
+    @objc func testParseInvalidBoolThrows() {
         let content = "sounds_enabled = yes\n"
         XCTAssertThrowsError(try AppConfig.parse(content)) { error in
             guard case AppConfig.AppConfigError.invalidLine = error else {
@@ -166,7 +179,7 @@ final class ConfigTests: XCTestCase {
 
     // MARK: - Unknown keys ignored
 
-    func testParseIgnoresUnknownKeys() throws {
+    @objc func testParseIgnoresUnknownKeys() throws {
         let content = """
         unknown_key = "foo"
         another_unknown = 42
@@ -178,7 +191,7 @@ final class ConfigTests: XCTestCase {
 
     // MARK: - Defaults are correct
 
-    func testDefaults() {
+    @objc func testDefaults() {
         let d = AppConfig.defaults
         XCTAssertTrue(d.baseURL.contains("gpt.mwsapis.ru"))
         XCTAssertEqual(d.model, "gigaam-v3")
