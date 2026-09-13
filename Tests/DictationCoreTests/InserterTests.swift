@@ -114,4 +114,84 @@ final class InserterTests: XCTestCase {
     @objc func testFinalizeMultiplePunctuation() {
         XCTAssertEqual(TextRefinement.finalize("привет!!"), "Привет!!")
     }
+
+    // MARK: - NEW: delete-батчинг (undo не спит на каждый символ)
+    //
+    // Мок-таймер: хуки Inserter.sleepHook / postHook подменяют usleep и post
+    // CGEvent-ов — тест считает паузы и события, ничего не печатая в активное
+    // приложение (isTestRun и так заглушил бы пост).
+
+    /// Длинное стирание (500 графем) спит паузами между пачками по chunkSize,
+    /// а не на каждый backspace: ceil(500/16) = 32 пачки → 31 пауза вместо 499.
+    /// Время undo падает с ~2.5 с до ~155 мс — главный поток агента не
+    /// блокируется на секунды.
+    @objc func testDeleteLongBatchSleepsPerChunk() {
+        let count = 500
+        var sleeps = 0
+        var posts = 0
+        Inserter.sleepHook = { _ in sleeps += 1 }
+        Inserter.postHook = { _, _ in posts += 1 }
+        defer {
+            Inserter.sleepHook = nil
+            Inserter.postHook = nil
+        }
+
+        Inserter.delete(count: count)
+
+        let chunks = (count + Inserter.chunkSize - 1) / Inserter.chunkSize // 32
+        XCTAssertEqual(sleeps, chunks - 1) // паузы только между пачками (как в insert)
+        XCTAssertTrue(sleeps < count)      // главное: НЕ count пауз
+        XCTAssertEqual(posts, count * 2)   // стёрто ровно count графем (keyDown+keyUp)
+    }
+
+    /// Стирание в пределах одной пачки — без пауз вообще: удаление короткого
+    /// текста не затягивается ни на миллисекунду.
+    @objc func testDeleteShortNoSleep() {
+        var sleeps = 0
+        Inserter.sleepHook = { _ in sleeps += 1 }
+        Inserter.postHook = { _, _ in }
+        defer {
+            Inserter.sleepHook = nil
+            Inserter.postHook = nil
+        }
+
+        Inserter.delete(count: 10)
+
+        XCTAssertEqual(sleeps, 0)
+        XCTAssertEqual(Inserter.chunkSize, 16) // страж: формула теста про пачки завязана на размер
+    }
+
+    /// count = 0 / отрицательный — no-op: ни пауз, ни событий.
+    @objc func testDeleteZeroIsNoOp() {
+        var posts = 0
+        var sleeps = 0
+        Inserter.sleepHook = { _ in sleeps += 1 }
+        Inserter.postHook = { _, _ in posts += 1 }
+        defer {
+            Inserter.sleepHook = nil
+            Inserter.postHook = nil
+        }
+
+        Inserter.delete(count: 0)
+        Inserter.delete(count: -5)
+
+        XCTAssertEqual(posts, 0)
+        XCTAssertEqual(sleeps, 0)
+    }
+
+    /// delete(characters:) делегирует в delete(count:) — публичная сигнатура,
+    /// которую зовёт main.swift/undo, сохранена и стирает по символам строки.
+    @objc func testDeleteCharactersDelegatesToCount() {
+        var posts = 0
+        Inserter.sleepHook = { _ in }
+        Inserter.postHook = { _, _ in posts += 1 }
+        defer {
+            Inserter.sleepHook = nil
+            Inserter.postHook = nil
+        }
+
+        Inserter.delete(characters: "привет")
+
+        XCTAssertEqual(posts, 6 * 2) // 6 графем → 6 backspace'ов (keyDown+keyUp)
+    }
 }
