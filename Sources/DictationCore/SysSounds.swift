@@ -32,11 +32,15 @@ public final class SysSounds {
     private static let startSoundName = "Tink"
     private static let endSoundName = "Pop"
     private static let cancelSoundName = "Ping"
+    /// Классический «звук ошибки» macOS — для сетевых сбоев (нет интернета /
+    /// таймаут STT).
+    private static let errorSoundName = "Basso"
 
     // Ленивый кэш: NSSound создаётся один раз на имя и переиспользуется.
     private var startSound: NSSound?
     private var endSound: NSSound?
     private var cancelSound: NSSound?
+    private var errorSound: NSSound?
 
     /// Звук, который сейчас играет (останавливаем его при смене звука).
     private var playingSound: NSSound?
@@ -65,6 +69,11 @@ public final class SysSounds {
         play(Self.cancelSoundName, label: "cancel")
     }
 
+    /// Ошибка диктовки (нет интернета / таймаут STT).
+    public func playError() {
+        play(Self.errorSoundName, label: "error")
+    }
+
     /// Защита от дублей: пропустить ли повторное воспроизведение `name`.
     /// Пропускаем только тогда, когда это тот же самый звук и он действительно
     /// ещё играет — иначе звук с тем же именем можно играть повторно.
@@ -81,6 +90,8 @@ public final class SysSounds {
         guard let sound = sound(name: name) else {
             // Звук не найден в системном каталоге — молча пропускаем
             // (как раньше AudioServices молча игнорировал SystemSoundID).
+            // Диагностика причины тишины — на уровне debug.
+            Logger.log("sounds: \(name) not found in system catalog — skipped", level: "debug")
             return
         }
 
@@ -110,6 +121,9 @@ public final class SysSounds {
         case Self.cancelSoundName:
             if cancelSound == nil { cancelSound = NSSound(named: name) }
             return cancelSound
+        case Self.errorSoundName:
+            if errorSound == nil { errorSound = NSSound(named: name) }
+            return errorSound
         default:
             return NSSound(named: name)
         }

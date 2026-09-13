@@ -73,4 +73,26 @@ final class SysSoundsTests: XCTestCase {
         // Тот же звук, но уже завершился — можно играть снова.
         XCTAssertFalse(sounds.shouldSkipReplay(of: "Tink", currentlyPlaying: false))
     }
+
+    // MARK: - Звук ошибки сети (Basso)
+
+    /// Basso — системный «звук ошибки» macOS, должен существовать в
+    /// /System/Library/Sounds, иначе playError молча пропустит сбой.
+    @objc func testErrorSoundExists() {
+        XCTAssertNotNil(NSSound(named: "Basso"))
+    }
+
+    /// playError() играет Basso и помечает его играющим (как остальные звуки).
+    @objc func testPlayErrorUsesBasso() {
+        let sounds = SysSounds(enabled: true)
+        sounds.playError()
+        XCTAssertEqual(sounds.playingName, "Basso")
+    }
+
+    /// Отключённые звуки: playError — no-op без падения.
+    @objc func testPlayErrorDisabledIsNoOp() {
+        let sounds = SysSounds(enabled: false)
+        sounds.playError()
+        XCTAssertNil(sounds.playingName)
+    }
 }

@@ -142,7 +142,8 @@ final class DebugDumpTests: XCTestCase {
             model: "gigaam-v3",
             apiKey: "k",
             logLevel: "info",
-            transport: transport
+            transport: transport,
+            networkChecker: { true }
         )
 
         runAsync("transcribeInfo") {
@@ -166,7 +167,8 @@ final class DebugDumpTests: XCTestCase {
             apiKey: "secret-key",
             proxyKey: "proxy-key-123",
             logLevel: "debug",
-            transport: transport
+            transport: transport,
+            networkChecker: { true }
         )
 
         runAsync("transcribeDebug") {
@@ -233,7 +235,8 @@ final class DebugDumpTests: XCTestCase {
             model: "gigaam-v3",
             apiKey: "k",
             logLevel: "debug",
-            transport: transport
+            transport: transport,
+            networkChecker: { true }
         )
 
         runAsync("transcribeDebugSavesAudio") {
@@ -260,7 +263,8 @@ final class DebugDumpTests: XCTestCase {
             model: "gigaam-v3",
             apiKey: "k",
             logLevel: "info",
-            transport: transport
+            transport: transport,
+            networkChecker: { true }
         )
 
         runAsync("transcribeInfoNoAudio") {
@@ -283,7 +287,8 @@ final class DebugDumpTests: XCTestCase {
             model: "gigaam-v3",
             apiKey: "k",
             logLevel: "debug",
-            transport: transport
+            transport: transport,
+            networkChecker: { true }
         )
 
         runAsync("transcribeDebugDumpRecording") {
@@ -313,7 +318,8 @@ final class DebugDumpTests: XCTestCase {
             model: "gigaam-v3",
             apiKey: "k",
             logLevel: "debug",
-            transport: transport
+            transport: transport,
+            networkChecker: { true }
         )
 
         // runAsync грохает тест, если transcribe бросит исключение.

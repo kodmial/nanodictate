@@ -258,4 +258,47 @@ final class OverlayControllerTests: XCTestCase {
         )
         controller.hide()
     }
+
+    // MARK: - Маппинг сетевых ошибок на текст оверлея (OverlayErrorText)
+
+    @objc func testOverlayErrorText_NoInternet() {
+        // Нет интернета → короткое сообщение «Нет интернета» (а не безликий текст ошибки).
+        XCTAssertEqual(
+            OverlayErrorText.text(for: TranscribeError.network(Transcriber.noInternetMessage)),
+            "Нет интернета"
+        )
+        XCTAssertEqual(OverlayErrorText.networkText(Transcriber.noInternetMessage), "Нет интернета")
+    }
+
+    @objc func testOverlayErrorText_SttTimeout() {
+        XCTAssertEqual(
+            OverlayErrorText.text(for: TranscribeError.network(Transcriber.sttTimeoutMessage)),
+            "Таймаут STT"
+        )
+        XCTAssertEqual(OverlayErrorText.networkText(Transcriber.sttTimeoutMessage), "Таймаут STT")
+    }
+
+    @objc func testOverlayErrorText_NonNetworkErrorsAreNotMapped() {
+        // HTTP/JSON-ошибки оверлей НЕ трогает — текст берётся из обычного message(for:).
+        XCTAssertNil(OverlayErrorText.text(for: TranscribeError.http(500, "boom")))
+        XCTAssertNil(OverlayErrorText.text(for: TranscribeError.invalidResponse("no text")))
+        XCTAssertNil(OverlayErrorText.networkText("произвольная сетевая ошибка"))
+        XCTAssertNil(OverlayErrorText.text(for: NSError(domain: "x", code: 1)))
+    }
+
+    // MARK: - Гарантия завершения фазы «обработка»
+
+    @objc func testProcessingMaxDuration_BoundsProcessingPhase() {
+        // Анимация точек не может жить дольше жёсткого таймаута запроса + запас.
+        XCTAssertEqual(
+            OverlayController.processingMaxDuration,
+            Transcriber.networkRequestTimeout + 5,
+            accuracy: 0.001
+        )
+        XCTAssertGreaterThanOrEqual(
+            OverlayController.processingMaxDuration,
+            Transcriber.networkRequestTimeout + 1,
+            "запас поверх таймаута должен быть хотя бы 1 с"
+        )
+    }
 }

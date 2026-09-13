@@ -244,6 +244,37 @@ private struct ProcessingDots: View {
     }
 }
 
+// MARK: - Текст ошибки для оверлея (чистый маппинг)
+
+/// Чистый маппинг ошибки диктовки → короткий текст ошибки для оверлея.
+/// Сетевые сбои показываются человечно («Нет интернета» / «Таймаут STT»)
+/// вместо бесконечных точек; для всех остальных ошибок возвращается nil —
+/// оверлей идёт обычным путём «Ошибка: <текст>».
+public enum OverlayErrorText {
+
+    /// Текст для оверлея, если ошибка — известный сетевой сбой; иначе nil.
+    public static func text(for error: Error) -> String? {
+        guard let transcribeError = error as? TranscribeError else { return nil }
+        if case .network(let message) = transcribeError {
+            return networkText(message)
+        }
+        return nil
+    }
+
+    /// Маппинг сообщения сетевой ошибки в короткий человечный текст.
+    /// Неизвестные сетевые сообщения → nil (обычный путь «Ошибка: <текст>»).
+    public static func networkText(_ message: String) -> String? {
+        switch message {
+        case Transcriber.noInternetMessage:
+            return "Нет интернета"
+        case Transcriber.sttTimeoutMessage:
+            return "Таймаут STT"
+        default:
+            return nil
+        }
+    }
+}
+
 /// Чистая логика позиционирования панели: без AppKit-окна, на входе только
 /// точка (каретка), экран и размер панели. Вынесена отдельно, чтобы поведение
 /// «панель всегда видна, над кареткой, не вылезает за экран» покрывалось
@@ -307,6 +338,12 @@ public enum OverlayLayout {
 }
 
 public final class OverlayController: NSObject {
+
+    /// Верхняя граница фазы «обработка» (точки): жёсткий сетевой таймаут STT
+    /// + небольшой запас. Используется агентом (watchdog), чтобы анимация точек
+    /// гарантированно погасла, даже если запрос зависнет ниже URLSession.
+    public static let processingMaxDuration: TimeInterval = Transcriber.networkRequestTimeout + 5
+
     private var panel: NSPanel?
     private let state = OverlayState()
     /// Точка показа из последнего show(at:) — на неё пересчитывается frame
@@ -323,6 +360,7 @@ public final class OverlayController: NSObject {
     }
 
     private var isDebug: Bool { logLevel.lowercased() == "debug" }
+
     deinit {
         hide()
     }

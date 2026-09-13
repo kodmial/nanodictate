@@ -29,6 +29,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
 
     private var state: DictationState = .idle
 
+    /// Сессионный токен фазы «обработка»: каждая новая отправка в STT
+    /// инкрементирует его, и страж (watchdog) старого цикла видит расхождение
+    /// токенов и не мешает новому циклу.
+    private var processingSession = 0
+
     /// Retain-свойство для таймера автоподхвата права Accessibility
     /// (Timer.scheduledTimer с repeats:true не должен попадать под ARC/GC).
     private var accessibilityPollTimer: Timer?
@@ -248,9 +253,31 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             ), level: "debug")
         }
 
+        // Страж фазы «обработка»: анимация точек не может жить дольше жёсткого
+        // таймаута запроса + небольшого запаса (processingMaxDuration). Если STT
+        // за это время не завершился (сеть зависла, транспорт молчит) — цикл
+        // завершаем сами, с сообщением «Таймаут STT». Сессионный токен не даёт
+        // стражу старого цикла оборвать новый (пользователь уже начал новую
+        // диктовку); проверка state == .transcribing делает страж no-op после
+        // любого терминального события.
+        processingSession += 1
+        let session = processingSession
+        DispatchQueue.main.asyncAfter(deadline: .now() + OverlayController.processingMaxDuration) { [weak self] in
+            guard let self = self,
+                  self.processingSession == session,
+                  self.state == .transcribing else { return }
+            self.failTranscription(Transcriber.sttTimeoutMessage, isNetworkFailure: true)
+        }
+
         Task { [weak self] in
             guard let self = self else { return }
 
+            // Тот же страж, что у watchdog-а выше: сессия «обработки»,
+            // зафиксированная в момент отправки. Если к моменту завершения
+            // Task сессия сменилась (новая диктовка) или цикл уже завершён
+            // терминальным событием (watchdog «Таймаут STT» поставил state в
+            // .idle) — терминальные вызовы становятся no-op, повторный
+            // failTranscription/completeInsertion невозможен.
             let wav = WAVEncoder.encode(samples: samples)
 
             do {
@@ -258,12 +285,17 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
                 let text = TextRefinement.finalize(result.text)
 
                 DispatchQueue.main.async {
+                    guard self.processingSession == session,
+                          self.state == .transcribing else { return }
                     self.completeInsertion(text)
                 }
             } catch {
-                let message = Self.message(for: error)
+                let networkText = OverlayErrorText.text(for: error)
+                let message = networkText ?? Self.message(for: error)
                 DispatchQueue.main.async {
-                    self.failTranscription(message)
+                    guard self.processingSession == session,
+                          self.state == .transcribing else { return }
+                    self.failTranscription(message, isNetworkFailure: networkText != nil)
                 }
             }
         }
@@ -286,7 +318,15 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         Logger.log("transcription inserted (\(text.count) chars)")
     }
 
-    private func failTranscription(_ message: String) {
+    /// Терминальная точка цикла при ошибке STT (сеть, HTTP, таймаут).
+    /// `isNetworkFailure == true` (нет интернета / таймаут STT) — дополнительно
+    /// играем системный звук ошибки (Basso), чтобы пользователь понял сбой
+    /// даже не глядя на оверлей.
+    private func failTranscription(_ message: String, isNetworkFailure: Bool) {
+        if isNetworkFailure {
+            sounds.playError()
+        }
+        overlay.resetPhase()
         overlay.setStatus("Ошибка: \(message)")
         hideAfter(2.0, reason: "transcription failed")
         state = .idle

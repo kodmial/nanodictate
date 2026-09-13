@@ -52,7 +52,8 @@ final class TranscriberTests: XCTestCase {
         Transcriber(baseURL: "https://example.test/v1/audio/transcriptions",
                     model: "gigaam-v3",
                     apiKey: "test-key",
-                    transport: transport)
+                    transport: transport,
+                    networkChecker: { true })
     }
 
     /// Runs an async closure to completion inside a synchronous test method.
@@ -122,7 +123,7 @@ final class TranscriberTests: XCTestCase {
 
             XCTAssertEqual(request.httpMethod, "POST")
             XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-key")
-            XCTAssertEqual(request.timeoutInterval, 120)
+            XCTAssertEqual(request.timeoutInterval, 20, "сетевой таймаут запроса — жёстко 20 с (networkRequestTimeout)")
 
             guard let contentType = request.value(forHTTPHeaderField: "Content-Type") else {
                 XCTFail("No Content-Type header")
@@ -325,7 +326,7 @@ final class TranscriberTests: XCTestCase {
         }
     }
 
-    // MARK: - NEW: Timeout error → .network
+    // MARK: - NEW: Timeout error → terminal .network("Таймаут STT") WITHOUT retry
 
     @objc func testTimeoutErrorReturnsNetwork() {
         let transport = MockTransport(status: 0, body: Data(),
@@ -338,12 +339,13 @@ final class TranscriberTests: XCTestCase {
                 XCTFail("Expected .network")
             } catch let error as TranscribeError {
                 if case .network(let msg) = error {
-                    XCTAssertFalse(msg.isEmpty)
+                    XCTAssertEqual(msg, Transcriber.sttTimeoutMessage, "таймаут — это каноническое «Таймаут STT»")
                 } else {
                     XCTFail("Expected .network, got \(error)")
                 }
             }
-            XCTAssertEqual(transport.requestCount, 2)
+            XCTAssertEqual(transport.requestCount, 1,
+                           "сетевой таймаут терминальный — повторный запрос почти наверняка упрётся в тот же таймаут")
         }
     }
 
@@ -354,7 +356,8 @@ final class TranscriberTests: XCTestCase {
         let transcriber = Transcriber(baseURL: "https://test.api/endpoint",
                                       model: "m",
                                       apiKey: "my-secret-token",
-                                      transport: transport)
+                                      transport: transport,
+                                      networkChecker: { true })
 
         runAsync("testAuthHeader") {
             _ = try await transcriber.transcribe(wav: self.wavData)
@@ -374,7 +377,8 @@ final class TranscriberTests: XCTestCase {
                                       model: "m",
                                       apiKey: "k",
                                       proxyKey: "proxy-secret",
-                                      transport: transport)
+                                      transport: transport,
+                                      networkChecker: { true })
 
         runAsync("testProxyKeySet") {
             _ = try await transcriber.transcribe(wav: self.wavData)
@@ -391,7 +395,8 @@ final class TranscriberTests: XCTestCase {
         let transcriber = Transcriber(baseURL: "https://test.api/endpoint",
                                       model: "m",
                                       apiKey: "k",
-                                      transport: transport)
+                                      transport: transport,
+                                      networkChecker: { true })
 
         runAsync("testProxyKeyEmpty") {
             _ = try await transcriber.transcribe(wav: self.wavData)
@@ -451,7 +456,8 @@ final class TranscriberTests: XCTestCase {
                                       model: "m",
                                       apiKey: "k",
                                       language: "",
-                                      transport: transport)
+                                      transport: transport,
+                                      networkChecker: { true })
 
         runAsync("testLanguageEmpty") {
             _ = try await transcriber.transcribe(wav: self.wavData, filename: "audio.wav")
@@ -462,5 +468,136 @@ final class TranscriberTests: XCTestCase {
             }
             XCTAssertFalse(text.contains("name=\"language\""), "при пустом language поле должно отсутствовать")
         }
+    }
+
+    // MARK: - NEW: Preflight сети — сети нет → запрос НЕ отправляется вовсе
+
+    @objc func testNoNetwork_NoRequestSent_ImmediateNoInternetError() {
+        let transport = MockTransport(status: 200, body: Data(#"{"text":"не должно дойти"}"#.utf8))
+        let transcriber = Transcriber(baseURL: "https://example.test/v1/audio/transcriptions",
+                                      model: "gigaam-v3",
+                                      apiKey: "test-key",
+                                      transport: transport,
+                                      networkChecker: { false })
+
+        runAsync("testPreflightBlocked") {
+            do {
+                _ = try await transcriber.transcribe(wav: self.wavData)
+                XCTFail("Expected .network («Нет интернета»)")
+            } catch let error as TranscribeError {
+                if case .network(let msg) = error {
+                    XCTAssertEqual(msg, Transcriber.noInternetMessage,
+                                   "нет сети — каноническое сообщение для оверлея")
+                } else {
+                    XCTFail("Expected .network, got \(error)")
+                }
+            }
+            XCTAssertEqual(transport.requestCount, 0,
+                           "preflight зарубил запрос — HTTP-вызовов быть не должно")
+        }
+    }
+
+    @objc func testNoNetworkInDebug_NoRequestSent_NoInternetError() {
+        // Нет сети, даже при log_level == "debug": preflight рубит запрос до
+        // HTTP — исходящих вызовов нет, ошибка каноническое «Нет интернета».
+        // (Сам дамп и сохранение записи этим тестом не проверяются.)
+        let transport = MockTransport(status: 200, body: Data())
+        let transcriber = Transcriber(baseURL: "https://example.test/v1/audio/transcriptions",
+                                      model: "gigaam-v3",
+                                      apiKey: "k",
+                                      logLevel: "debug",
+                                      transport: transport,
+                                      networkChecker: { false })
+
+        runAsync("testNoNetworkInDebugNoRequestSent") {
+            do {
+                _ = try await transcriber.transcribe(wav: self.wavData)
+                XCTFail("Expected .network")
+            } catch let error as TranscribeError {
+                if case .network(let msg) = error {
+                    XCTAssertEqual(msg, Transcriber.noInternetMessage)
+                } else {
+                    XCTFail("Expected .network, got \(error)")
+                }
+            }
+            XCTAssertEqual(transport.requestCount, 0)
+        }
+    }
+
+    @objc func testNetworkAvailable_RequestIsSent() {
+        let transport = MockTransport(status: 200, body: Data(#"{"text":"должно дойти"}"#.utf8))
+        let transcriber = Transcriber(baseURL: "https://example.test/v1/audio/transcriptions",
+                                      model: "gigaam-v3",
+                                      apiKey: "test-key",
+                                      transport: transport,
+                                      networkChecker: { true })
+
+        runAsync("testPreflightAllowed") {
+            let result = try await transcriber.transcribe(wav: self.wavData)
+            XCTAssertEqual(result.text, "должно дойти")
+            XCTAssertEqual(transport.requestCount, 1, "preflight пропустил — запрос уходит")
+        }
+    }
+
+    // MARK: - NEW: Жёсткий сетевой таймаут (min(config, networkRequestTimeout))
+
+    @objc func testTimeoutInterval_CapsByNetworkRequestTimeout() {
+        // Конфиг по умолчанию (120 с) не может поднять сетевой таймаут выше 20 с.
+        let transport = MockTransport(status: 200, body: Data(#"{"text":"x"}"#.utf8))
+        let transcriber = Transcriber(baseURL: "https://test.api/endpoint",
+                                      model: "m",
+                                      apiKey: "k",
+                                      timeout: 120,
+                                      transport: transport,
+                                      networkChecker: { true })
+
+        runAsync("testTimeoutCap") {
+            _ = try await transcriber.transcribe(wav: self.wavData)
+            guard let req = transport.lastRequest else {
+                XCTFail("No request")
+                return
+            }
+            XCTAssertEqual(req.timeoutInterval, Transcriber.networkRequestTimeout,
+                           "конфиг 120 с должен обрезаться до жёстких 20 с")
+        }
+    }
+
+    @objc func testTimeoutInterval_ConfigSmallerThanCapIsRespected() {
+        // Меньшее значение из конфига (5 с) ОГРАНИЧИВАЕТ сетевой таймаут.
+        let transport = MockTransport(status: 200, body: Data(#"{"text":"x"}"#.utf8))
+        let transcriber = Transcriber(baseURL: "https://test.api/endpoint",
+                                      model: "m",
+                                      apiKey: "k",
+                                      timeout: 5,
+                                      transport: transport,
+                                      networkChecker: { true })
+
+        runAsync("testTimeoutConfigLower") {
+            _ = try await transcriber.transcribe(wav: self.wavData)
+            guard let req = transport.lastRequest else {
+                XCTFail("No request")
+                return
+            }
+            XCTAssertEqual(req.timeoutInterval, 5, "меньший таймаут конфига должен работать")
+        }
+    }
+
+    // MARK: - NEW: NetworkReachability — чистая логика «есть ли интернет»
+
+    @objc func testReachability_Unsatisfied_AlwaysNoInternet() {
+        XCTAssertFalse(NetworkReachability.isReachable(status: .unsatisfied, possibleExternalRoute: true))
+        XCTAssertFalse(NetworkReachability.isReachable(status: .unsatisfied, possibleExternalRoute: false))
+    }
+
+    @objc func testReachability_RequiresConnection_ProbeOptimistically() {
+        // Маршрут по требованию (VPN/PPP) — пробуем запрос, таймаут подстрахует.
+        XCTAssertTrue(NetworkReachability.isReachable(status: .requiresConnection, possibleExternalRoute: false))
+        XCTAssertTrue(NetworkReachability.isReachable(status: .requiresConnection, possibleExternalRoute: true))
+    }
+
+    @objc func testReachability_Satisfied_NeedsExternalRoute() {
+        // Одна лишь локальная петля (loopback-only) до внешнего API не достанет.
+        XCTAssertTrue(NetworkReachability.isReachable(status: .satisfied, possibleExternalRoute: true))
+        XCTAssertFalse(NetworkReachability.isReachable(status: .satisfied, possibleExternalRoute: false))
     }
 }

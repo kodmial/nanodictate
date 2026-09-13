@@ -1,4 +1,5 @@
 import Foundation
+import Network
 
 // MARK: - TranscriptionResult
 
@@ -20,6 +21,111 @@ public enum TranscribeError: Error {
     case invalidResponse(String) // not JSON or missing "text" field
 }
 
+// MARK: - Сетевая доступность (preflight)
+
+/// Быстрая проверка наличия сети перед STT-запросом через Network framework.
+///
+/// NWPathMonitor создаётся на ОДИН асинхронный замер текущего состояния и сразу
+/// отменяется — постоянного слушателя держать не нужно. Проверяется ОБЩАЯ
+/// связность, а не наличие локального интерфейса: STT уходит на внешний API
+/// (провайдер через Render-форвардер или GigaAM). Случай «роутер есть, интернета
+/// нет» этот замер не видит — его добивает жёсткий сетевой таймаут запроса
+/// (`Transcriber.networkRequestTimeout`).
+public enum NetworkReachability {
+
+    /// Упрощённый статус пути для чистой логики (из NWPath.status).
+    public enum PathStatus {
+        case satisfied
+        case requiresConnection
+        case unsatisfied
+    }
+
+    /// Чистое решение «есть ли общий доступ в сеть» — тестируется без реальной сети.
+    /// - `unsatisfied` — маршрута нет вовсе → интернета нет.
+    /// - `requiresConnection` — маршрут есть, но по требованию (VPN/PPP) →
+    ///   пробуем запрос, жёсткий таймаут подстрахует.
+    /// - `satisfied` — маршрут есть; интернет достижим, только если в маршруте
+    ///   есть не-loopback интерфейс (иначе это лишь локальная петля, до внешнего
+    ///   API не достучаться).
+    public static func isReachable(status: PathStatus, possibleExternalRoute: Bool) -> Bool {
+        switch status {
+        case .unsatisfied:
+            return false
+        case .requiresConnection:
+            return true
+        case .satisfied:
+            return possibleExternalRoute
+        }
+    }
+
+    /// Асинхронный замер текущего состояния сети: один NWPathMonitor, первое
+    /// обновление пути, немедленная отмена.
+    public static func isInternetReachable() async -> Bool {
+        guard let snapshot = await currentPathSnapshot() else {
+            // Monitor не ответил за отведённое время — не блокируем диктовку:
+            // оптимистично считаем сеть доступной, жёсткий таймаут подстрахует.
+            return true
+        }
+        return isReachable(status: snapshot.status, possibleExternalRoute: snapshot.possibleExternalRoute)
+    }
+
+    // MARK: - NWPath
+
+    private struct PathSnapshot {
+        let status: PathStatus
+        let possibleExternalRoute: Bool
+    }
+
+    /// Ждёт первый (текущий) путь от NWPathMonitor; максимум 2 секунды — после
+    /// этого возвращает nil, чтобы диктовка не зависла на самом preflight.
+    private static func currentPathSnapshot() async -> PathSnapshot? {
+        let monitor = NWPathMonitor()
+        return await withCheckedContinuation { continuation in
+            let lock = NSLock()
+            var finished = false
+            let resume: (PathSnapshot?) -> Void = { value in
+                lock.lock()
+                guard !finished else { lock.unlock(); return }
+                finished = true
+                lock.unlock()
+                // Обнуляем handler ДО cancel: иначе монитор держится замыканием
+                // (а то — continuation-ом и lock-ом) и не освобождается. Оба пути
+                // (первый путь и 2-секундный фоллбэк) приходят только сюда,
+                // а finished гарантирует ровно один вызов — nil+cancel один раз.
+                monitor.pathUpdateHandler = nil
+                monitor.cancel()
+                continuation.resume(returning: value)
+            }
+            monitor.pathUpdateHandler = { path in
+                resume(snapshot(path: path))
+            }
+            monitor.start(queue: DispatchQueue(label: "dictation.network-monitor", qos: .utility))
+            // Фоллбэк: первый путь обязан прийти быстро; если NWPathMonitor молчит —
+            // не держим диктовку, возвращаем nil (оптимистично, таймаут подстрахует).
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.0) {
+                resume(nil)
+            }
+        }
+    }
+
+    private static func snapshot(path: NWPath) -> PathSnapshot {
+        let status: PathStatus
+        switch path.status {
+        case .satisfied:
+            status = .satisfied
+        case .requiresConnection:
+            status = .requiresConnection
+        default:
+            status = .unsatisfied
+        }
+        let interfaces = path.availableInterfaces
+        // Пустой список интерфейсов — «неизвестно»: оптимистично считаем внешний
+        // маршрут возможным (пусть запрос попробует, таймаут решит).
+        let possibleExternalRoute = interfaces.isEmpty || interfaces.contains { $0.type != .loopback }
+        return PathSnapshot(status: status, possibleExternalRoute: possibleExternalRoute)
+    }
+}
+
 // MARK: - HTTPTransport
 
 public protocol HTTPTransport: AnyObject {
@@ -32,14 +138,37 @@ public protocol HTTPTransport: AnyObject {
 
 public final class Transcriber {
 
+    // MARK: - Константы
+
+    /// Жёсткий сетевой таймаут HTTP-запроса STT (сек), ~15–20 с. Отдельная
+    /// константа от конфигурационного `timeout_seconds` (Transcriber.timeout):
+    /// конфиг может только ОГРАНИЧИТЬ его меньшим значением, но не увеличить —
+    /// иначе диктовка снова будет висеть до 120 с. Таймаут терминальный (без
+    /// ретрая), поэтому фаза «обработка» в оверлее живёт не дольше таймаута
+    /// + небольшой запас.
+    public static let networkRequestTimeout: TimeInterval = 20
+
+    /// Каноническое сообщение «нет интернета» — на него опирается маппинг
+    /// оверлея `OverlayErrorText` и тесты.
+    public static let noInternetMessage = "Нет интернета"
+
+    /// Каноническое сообщение «таймаут STT» — на него опирается маппинг
+    /// оверлея `OverlayErrorText` и тесты.
+    public static let sttTimeoutMessage = "Таймаут STT"
+
     private let baseURL: String
     private let model: String
     private let apiKey: String
     private let proxyKey: String
     private let language: String
+    /// Таймаут из конфига (`timeout_seconds`); фактический таймаут запроса —
+    /// `min(timeout, networkRequestTimeout)`.
     private let timeout: TimeInterval
     private let logLevel: String
     private let transport: HTTPTransport?
+    /// Preflight сети перед отправкой: true — сеть доступна. По умолчанию
+    /// реальный замер через NetworkReachability; тесты инъецируют мок.
+    private let networkChecker: () async -> Bool
 
     public init(
         baseURL: String,
@@ -49,7 +178,8 @@ public final class Transcriber {
         language: String = "ru",
         timeout: TimeInterval = 120,
         logLevel: String = "info",
-        transport: HTTPTransport? = nil
+        transport: HTTPTransport? = nil,
+        networkChecker: (() async -> Bool)? = nil
     ) {
         self.baseURL = baseURL
         self.model = model
@@ -59,6 +189,7 @@ public final class Transcriber {
         self.timeout = timeout
         self.logLevel = logLevel
         self.transport = transport
+        self.networkChecker = networkChecker ?? { await NetworkReachability.isInternetReachable() }
     }
 
     /// Transcribe WAV audio via a multipart/form-data POST to the transcription endpoint.
@@ -73,6 +204,7 @@ public final class Transcriber {
             ), level: "debug")
         }
         guard let url = URL(string: baseURL) else {
+            Logger.log("STT error: invalid base URL", level: "error")
             throw TranscribeError.network("Invalid base URL")
         }
 
@@ -87,15 +219,25 @@ public final class Transcriber {
         if !proxyKey.isEmpty {
             request.setValue(proxyKey, forHTTPHeaderField: "X-Proxy-Key")
         }
-        request.timeoutInterval = timeout
+        request.timeoutInterval = min(timeout, Self.networkRequestTimeout)
 
         // При log_level == "debug" сохраняем саму аудиозапись (WAV) на диск
         // один раз, до отправки; информация о файле уходит в debug-дамп.
         let recording = saveRecordingIfDebug(wav: wav)
 
+        // Preflight сети: сети нет — HTTP-запрос не отправляем вовсе, ошибка
+        // мгновенная («Нет интернета»), вместо зависшего оверлея на 120 с.
+        if !(await networkChecker()) {
+            Logger.log("STT not sent: no internet (preflight)", level: "error")
+            debugDump(request: request, wavByteCount: wav.count, filename: filename, recording: recording, response: nil)
+            throw TranscribeError.network(Self.noInternetMessage)
+        }
+
         // 2 attempts total: initial + 1 retry (network errors only).
         var lastError: TranscribeError?
+        var attempt = 0
         for _ in 0..<2 {
+            attempt += 1
             do {
                 let started = CFAbsoluteTimeGetCurrent()
                 let response = try await send(request: request)
@@ -113,15 +255,28 @@ public final class Transcriber {
                 return result
             } catch let error as TranscribeError {
                 // http / invalidResponse — do not retry.
+                Logger.log("STT error (attempt \(attempt)): \(Self.describe(error))", level: "error")
                 throw error
             } catch is CancellationError {
                 // Do not retry cancelled requests.
+                Logger.log("STT cancelled (attempt \(attempt))", level: "error")
                 throw TranscribeError.network("Request cancelled")
             } catch let error as URLError where error.code == .cancelled {
+                Logger.log("STT cancelled (URLError.cancelled, attempt \(attempt))", level: "error")
                 throw TranscribeError.network("Request cancelled")
+            } catch let error as URLError where error.code == .timedOut {
+                // Жёсткий сетевой таймаут запроса (networkRequestTimeout).
+                // Терминальный, БЕЗ ретрая: повторный запрос почти наверняка
+                // упрётся в тот же таймаут и снова заставит оверлей крутить
+                // точки — поэтому фаза «обработка» не живёт дольше таймаута
+                // + небольшой запас (см. OverlayController.processingMaxDuration).
+                Logger.log("STT timeout (attempt \(attempt)): \(error.localizedDescription)", level: "error")
+                throw TranscribeError.network(Self.sttTimeoutMessage)
             } catch {
                 // Transport-level (network) failure — eligible for retry.
-                lastError = TranscribeError.network(error.localizedDescription)
+                let message = error.localizedDescription
+                Logger.log("STT network error (attempt \(attempt)/2): \(message)", level: "error")
+                lastError = TranscribeError.network(message)
             }
         }
         // Все попытки упали на транспортном уровне — ответа так и нет.
