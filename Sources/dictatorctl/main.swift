@@ -139,6 +139,20 @@ func cmdStatus() -> Int32 {
     } else {
         print("pid: none")
     }
+
+    do {
+        let providers = try ProviderStore.loadProviders()
+        if let active = ProviderStore.activeProvider {
+            print("provider: \(active.name)")
+        } else if providers.isEmpty {
+            print("provider: (нет провайдеров — legacy-конфиг)")
+        } else {
+            print("provider: (не выбран — `dictatorctl provider use <имя>`)")
+        }
+    } catch {
+        print("provider: (ошибка: \(error))")
+    }
+
     return running ? 0 : 1
 }
 
@@ -201,6 +215,145 @@ func cmdConfig(_ args: [String]) -> Int32 {
     print("api_key: ***")
     print("proxy_key: ***")
     return 0
+}
+
+// MARK: - Providers (несколько STT-провайдеров)
+
+func providerList() -> Int32 {
+    do {
+        let (activeID, providers) = try AppConfig.loadProvidersOnly(from: nil)
+        guard !providers.isEmpty else {
+            print("Нет секций [providers.X] в конфиге (используется legacy-конфиг).")
+            return 0
+        }
+        for p in providers {
+            let marker = p.id == activeID ? "*" : " "
+            let display = p.name.isEmpty ? p.id : p.name
+            print("\(marker) \(display) [\(p.id)]")
+            print("    base_url: \(p.baseURL)")
+            print("    model: \(p.model)")
+            print("    api_key: \(p.apiKey.isEmpty ? "(пусто)" : "***")")
+            if let keyFile = p.apiKeyFile {
+                print("    api_key_file: \(keyFile)")
+            }
+            print("    proxy_key: \(p.proxyKey.isEmpty ? "(пусто)" : "***")")
+        }
+        print("(* — активный провайдер)")
+        return 0
+    } catch {
+        eprint("ОШИБКА: \(error)")
+        return 1
+    }
+}
+
+func providerUse(_ name: String, _ args: [String]) -> Int32 {
+    do {
+        try ProviderStore.setActive(providerID: name)
+    } catch let ProviderStoreError.unknownProvider(providerID: id, available: available) {
+        eprint("ОШИБКА: провайдер '\(id)' не найден. Доступные: \(available.joined(separator: ", "))")
+        return 2
+    } catch {
+        eprint("ОШИБКА: \(error)")
+        return 1
+    }
+    print("Активный провайдер: \(name)")
+    if args.contains("--no-restart") {
+        print("Агент не перезапущен (--no-restart)")
+    } else {
+        let target = "\(guiDomain)/com.dima.altdictation"
+        let kick = runProcess("/bin/launchctl", ["kickstart", "-k", target])
+        if kick.status == 0 {
+            print("Агент перезапущен")
+        } else {
+            let msg = kick.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            eprint("Агент не перезапущен (запустите `dictatorctl start`): \(msg.isEmpty ? kick.stdout : msg)")
+        }
+    }
+    return 0
+}
+
+func providerStatus() -> Int32 {
+    let printResult = runProcess("/bin/launchctl", ["print", "\(guiDomain)/com.dima.altdictation"])
+    let running = printResult.status == 0
+    do {
+        let providers = try ProviderStore.loadProviders()
+        if let active = ProviderStore.activeProvider {
+            print("active: \(active.name) [\(active.id)]")
+            print("model: \(active.model)")
+            print("base_url: \(active.baseURL)")
+        } else if providers.isEmpty {
+            print("active: (нет провайдеров — legacy-конфиг)")
+        } else {
+            print("active: (не выбран — `dictatorctl provider use <имя>`)")
+        }
+    } catch {
+        eprint("ОШИБКА: \(error)")
+        return 1
+    }
+    print(running ? "agent: running" : "agent: not running")
+    return running ? 0 : 1
+}
+
+func providerShow(_ name: String) -> Int32 {
+    do {
+        let (activeID, providers) = try AppConfig.loadProvidersOnly(from: nil)
+        guard let p = providers.first(where: { $0.id == name }) else {
+            let available = providers.map { $0.id }
+            eprint("ОШИБКА: провайдер '\(name)' не найден. Доступные: \(available.joined(separator: ", "))")
+            return 2
+        }
+        print("id: \(p.id)")
+        print("name: \(p.name.isEmpty ? p.id : p.name)")
+        print("active: \(p.id == activeID)")
+        print("base_url: \(p.baseURL)")
+        print("model: \(p.model)")
+        if p.apiKey.isEmpty {
+            print("api_key: (пусто)")
+            print("! api_key: ВНИМАНИЕ — секрет не задан")
+        } else {
+            print("api_key: ***")
+        }
+        if let keyFile = p.apiKeyFile {
+            let expanded = (keyFile as NSString).expandingTildeInPath
+            print("api_key_file: \(keyFile)")
+            if !FileManager.default.fileExists(atPath: expanded) {
+                print("! api_key_file: ВНИМАНИЕ — файл не существует (\(expanded))")
+            }
+        }
+        if p.proxyKey.isEmpty {
+            print("proxy_key: (пусто)")
+        } else {
+            print("proxy_key: ***")
+        }
+        return 0
+    } catch {
+        eprint("ОШИБКА: \(error)")
+        return 1
+    }
+}
+
+func cmdProvider(_ args: [String]) -> Int32 {
+    switch args.first?.lowercased() {
+    case "list":
+        return providerList()
+    case "use":
+        guard let name = args.dropFirst().first else {
+            eprint("Использование: dictatorctl provider use <имя> [--no-restart]")
+            return 1
+        }
+        return providerUse(name, Array(args.dropFirst()))
+    case "status":
+        return providerStatus()
+    case "show":
+        guard let name = args.dropFirst().first else {
+            eprint("Использование: dictatorctl provider show <имя>")
+            return 1
+        }
+        return providerShow(name)
+    default:
+        eprint("Использование: dictatorctl provider list|use|status|show")
+        return 1
+    }
 }
 
 func cmdTranscribe(_ args: [String]) -> Int32 {
@@ -309,6 +462,13 @@ let usage = """
   config                           Показать конфиг (api_key маскируется как ***)
     config --path                  Только путь к конфиг-файлу
     config --show-file             Содержимое конфиг-файла с маскировкой api_key
+  provider list                    Список STT-провайдеров из config.toml (* — активный)
+    provider use ИМЯ [--no-restart]
+                                   Сделать ИМЯ активным провайдером: правка
+                                   active_provider в config.toml, chmod 600 и
+                                   перезапуск агента (--no-restart без перезапуска)
+    provider status                Активный провайдер + статус агента
+    provider show ИМЯ              Подробно о провайдере (секреты маскируются)
   transcribe ФАЙЛ [--json]         Разовая расшифровка аудиофайла
                                    (не-WAV конвертируется через afconvert; с --json
                                    сырой ответ сохраняется в transcription_raw.json рядом с ФАЙЛ)
@@ -334,6 +494,8 @@ case "status":
     exit(cmdStatus())
 case "config":
     exit(cmdConfig(Array(args.dropFirst())))
+case "provider":
+    exit(cmdProvider(Array(args.dropFirst())))
 case "transcribe":
     exit(cmdTranscribe(Array(args.dropFirst())))
 case "logs":
