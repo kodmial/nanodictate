@@ -481,6 +481,10 @@ let usage = """
 let args = Array(CommandLine.arguments.dropFirst())
 
 guard let command = args.first?.lowercased() else {
+    // Без команды в интерактивном терминале — лёгкое меню; в пайпе/скрипте — usage.
+    if MenuGate.shouldRunMenu(hasCommand: false, tty: isTTY()) {
+        exit(runMenu())
+    }
     print(usage)
     exit(0)
 }
