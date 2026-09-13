@@ -11,6 +11,7 @@ import ObjectiveC
 
 let suites: [XCTestCase.Type] = [
     HotkeyServiceTests.self,
+    AudioMetricsTests.self,
     LoggerTests.self,
     ConfigTests.self,
     SysSoundsTests.self,
@@ -18,6 +19,7 @@ let suites: [XCTestCase.Type] = [
     WAVEncoderTests.self,
     RecordingLimitTests.self,
     TranscriberTests.self,
+    DebugDumpTests.self,
     OverlayControllerTests.self,
     OverlayLifecycleTests.self,
 ]

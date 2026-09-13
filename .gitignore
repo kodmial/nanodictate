@@ -5,3 +5,4 @@ transcription_raw.json
 transcription_raw.json.claude/
 example/
 .claude/
+.playwright-mcp/

@@ -253,7 +253,8 @@ func cmdTranscribe(_ args: [String]) -> Int32 {
         apiKey: config.apiKey,
         proxyKey: config.proxyKey,
         language: config.language,
-        timeout: config.timeoutSeconds
+        timeout: config.timeoutSeconds,
+        logLevel: config.logLevel
     )
     // Данные всегда WAV (не-WAV конвертируется выше); сервер строг к расширению,
     // поэтому в multipart-поле файла всегда слать "audio.wav", а не исходное имя.

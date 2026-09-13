@@ -23,6 +23,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     private let hotkeys: HotkeyService
     private let transcriber: Transcriber
 
+    /// Уровень логирования из конфига: при "debug" в лог дополнительно пишется
+    /// метрология (уровень RMS записи перед отправкой в STT).
+    private let logLevel: String
+
     private var state: DictationState = .idle
 
     /// Retain-свойство для таймера автоподхвата права Accessibility
@@ -30,9 +34,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     private var accessibilityPollTimer: Timer?
 
     init(config: AppConfig) {
+        self.logLevel = config.logLevel
         self.sounds = SysSounds(enabled: config.soundsEnabled)
         self.overlay = OverlayController()
-        self.audio = AudioService()
+        self.audio = AudioService(logLevel: config.logLevel)
         self.hotkeys = HotkeyService(doubleTapMaxInterval: config.doubleAltMaxInterval)
         self.transcriber = Transcriber(
             baseURL: config.baseURL,
@@ -40,7 +45,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             apiKey: config.apiKey,
             proxyKey: config.proxyKey,
             language: config.language,
-            timeout: config.timeoutSeconds
+            timeout: config.timeoutSeconds,
+            logLevel: config.logLevel
         )
         super.init()
 
@@ -148,6 +154,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     /// запросить — и при granted начинаем запись.
     private func requestMicrophoneAndStart() {
         let status = AVCaptureDevice.authorizationStatus(for: .audio)
+        // Каждый запрос доступа к микрофону фиксируется в логе: сам факт проверки,
+        // текущий статус TCC и результат системного диалога (granted/denied).
+        Logger.log("mic permission check: \(MicrophoneAuth.statusText(status))", level: "info")
         switch status {
         case .authorized:
             startRecording()
@@ -156,6 +165,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .audio) { granted in
                 DispatchQueue.main.async {
+                    Logger.log("mic permission request result: \(granted ? "granted" : "denied")", level: "info")
                     granted ? self.startRecording() : self.showMicrophoneError()
                 }
             }
@@ -200,7 +210,22 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         state = .transcribing
         overlay.setStatus("Распознаю…")
         sounds.playEnd()
-        Logger.log("transcribe submit (\(samples.count) samples)")
+        // Длительность по фактически собранным сэмплам (16 кГц моно) —
+        // видно, в каких единицах уходит аудио в STT.
+        let duration = Double(samples.count) / 16000.0
+        Logger.log(String(format: "transcribe submit (\(samples.count) samples, %.2f s)", duration), level: "info")
+
+        // Что именно уходит в LLM: длительность + уровень RMS + флаг «около-тишины».
+        // Метрология — только при log_level == "debug" (не спамить).
+        if logLevel.lowercased() == "debug" {
+            let rms = AudioMetrics.rms(samples: samples)
+            let nearSilence = AudioMetrics.isNearSilence(avgRMS: rms)
+            Logger.log(String(
+                format: "STT input: duration=%.2f s, rms=%.4f (%.1f dBFS), nearSilence=%@",
+                duration, Double(rms), Double(AudioMetrics.dbfs(rms)),
+                nearSilence ? "true" : "false"
+            ), level: "debug")
+        }
 
         Task { [weak self] in
             guard let self = self else { return }

@@ -53,6 +53,11 @@ public struct RecordingLimit {
 public final class AudioService {
     public weak var levelDelegate: AudioLevelDelegate?
 
+    /// Уровень логирования: `"debug"` включает метрологию (min/avg/max RMS,
+    /// флаг «около-тишины»). Не влияет на логи доступа к микрофону и lifecycle
+    /// записи — они пишутся всегда, на уровне `info`.
+    private let logLevel: String
+
     /// Вызывается после ПРИНУДИТЕЛЬНОЙ остановки по лимиту (на главной очереди)
     /// с собранными сэмплами — тот же путь финализации, что и у `stop()`
     /// (сборка сэмплов → WAV → транскрибация). nil-безопасно: если никто не
@@ -68,11 +73,15 @@ public final class AudioService {
     /// может превысить эти значения (см. `process` и `scheduleLimitStop`).
     private var limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
     private var recordStartTime: CFAbsoluteTime = 0
+    /// История RMS (линейный, 0...1) по буферам текущей записи — источник
+    /// сводных метрик уровня (min/avg/max) в `logRecordingFinale`.
+    private var rmsHistory: [Float] = []
     /// Гарантирует, что принудительная остановка планируется ровно один раз.
     private let lock = NSLock()
     private var limitStopScheduled = false
 
-    public init() {
+    public init(logLevel: String = "info") {
+        self.logLevel = logLevel
         // Формат, в который пересэмплируем всё аудио: 16 кГц, моно, Float32.
         // Данный init гарантированно валиден на macOS 12+.
         // swiftlint:disable:next force_unwrapping
@@ -87,6 +96,7 @@ public final class AudioService {
     /// Начинает запись. Бросает ошибку при недоступности микрофона.
     public func start() throws {
         collectedSamples = []
+        rmsHistory = []
         // Новый сеанс — чистый лимит (после предыдущей принудительной остановки).
         limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
         recordStartTime = CFAbsoluteTimeGetCurrent()
@@ -99,6 +109,13 @@ public final class AudioService {
             throw AudioServiceError.unsupportedFormat
         }
         self.converter = converter
+
+        // Доступ к микрофону (TCC) при каждом создании/повторном старте записи.
+        // Повторный системный запрос доступа (главная жалоба) выглядит в логе
+        // как статус notDetermined перед стартом — сразу видно, что грант теряется.
+        let mic = MicrophoneAuth.statusText(AVCaptureDevice.authorizationStatus(for: .audio))
+        Logger.log("mic permission: \(mic) (record start)", level: "info")
+        Logger.log("record start: sampleRate=\(Int(targetFormat.sampleRate)) Hz, channels=\(targetFormat.channelCount), hwFormat=\(Int(hwFormat.sampleRate)) Hz", level: "info")
 
         // Tap вешается на аппаратный формат; конвертация выполняется в блоке.
         input.installTap(
@@ -116,21 +133,34 @@ public final class AudioService {
     /// Останавливает запись и возвращает собранные сэмплы (Int16, 16кГц).
     public func stop() -> [Int16] {
         guard isRecording else { return [] }
+        let duration = CFAbsoluteTimeGetCurrent() - recordStartTime
         isRecording = false
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         converter = nil
-        return collectedSamples
+        let samples = collectedSamples
+        logRecordingFinale(samples: samples, duration: duration)
+        return samples
     }
 
     /// Отменяет запись, отбрасывая данные.
     public func cancel() {
         guard isRecording else { return }
+        let duration = CFAbsoluteTimeGetCurrent() - recordStartTime
+        let frames = collectedSamples.count
         isRecording = false
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         converter = nil
         collectedSamples = []
+        // Отмена тоже завершает запись — без отправки в STT; длительность и
+        // объём помогают отличать «пустую» отмену от отмены после реальной речи.
+        if logLevel.lowercased() == "debug" {
+            Logger.log(String(
+                format: "record cancel: duration=%.2f s, frames=%d, bytes=%d",
+                duration, frames, frames * 2
+            ), level: "debug")
+        }
     }
 
     // MARK: - Private
@@ -163,6 +193,9 @@ public final class AudioService {
         }
         let rms = frameLength > 0 ? sqrt(sum / Float(frameLength)) : 0
         levelDelegate?.audioLevelChanged(rms: rms)
+        // История RMS по буферам — для сводных метрик уровня в конце записи.
+        // 60 c при буфере 4096 фреймов и 48 кГц ≈ 700 значений — памятью не жертвуем.
+        rmsHistory.append(rms)
 
         // Ограничение памяти: добавляем не больше, чем укладывается в лимит
         // (960 000 сэмплов на 60 с). Буфер никогда не превышает этот предел.
@@ -211,12 +244,35 @@ public final class AudioService {
     private func performLimitStop(samples: [Int16]) {
         // Пользователь уже остановил запись — не дублируем финализацию.
         guard isRecording else { return }
+        let duration = CFAbsoluteTimeGetCurrent() - recordStartTime
         isRecording = false
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         converter = nil
         collectedSamples = []
+        logRecordingFinale(samples: samples, duration: duration)
         onRecordingLimitReached?(samples)
+    }
+
+    /// Единый финальный лог записи для `stop()` и принудительной остановки по
+    /// лимиту: lifecycle (всегда, `info`) + метрологию уровня (только при
+    /// `logLevel == "debug"`). Ошибок не бросает: логирование не должно ронять
+    /// запись.
+    private func logRecordingFinale(samples: [Int16], duration: TimeInterval) {
+        Logger.log(String(
+            format: "record stop: duration=%.2f s, sampleRate=%d, channels=%d, frames=%d, bytes=%d",
+            duration, 16000, 1, samples.count, samples.count * 2
+        ), level: "info")
+
+        guard logLevel.lowercased() == "debug" else { return }
+        let m = AudioMetrics.summarize(rmsValues: rmsHistory)
+        Logger.log(String(
+            format: "record metering: rms min=%.4f (%.1f dBFS), avg=%.4f (%.1f dBFS), max=%.4f (%.1f dBFS), nearSilence=%@",
+            Double(m.minRMS), Double(AudioMetrics.dbfs(m.minRMS)),
+            Double(m.avgRMS), Double(AudioMetrics.dbfs(m.avgRMS)),
+            Double(m.maxRMS), Double(AudioMetrics.dbfs(m.maxRMS)),
+            m.nearSilence ? "true" : "false"
+        ), level: "debug")
     }
 }
 

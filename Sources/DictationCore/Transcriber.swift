@@ -38,6 +38,7 @@ public final class Transcriber {
     private let proxyKey: String
     private let language: String
     private let timeout: TimeInterval
+    private let logLevel: String
     private let transport: HTTPTransport?
 
     public init(
@@ -47,6 +48,7 @@ public final class Transcriber {
         proxyKey: String = "",
         language: String = "ru",
         timeout: TimeInterval = 120,
+        logLevel: String = "info",
         transport: HTTPTransport? = nil
     ) {
         self.baseURL = baseURL
@@ -55,6 +57,7 @@ public final class Transcriber {
         self.proxyKey = proxyKey
         self.language = language
         self.timeout = timeout
+        self.logLevel = logLevel
         self.transport = transport
     }
 
@@ -79,11 +82,16 @@ public final class Transcriber {
         }
         request.timeoutInterval = timeout
 
+        // При log_level == "debug" сохраняем саму аудиозапись (WAV) на диск
+        // один раз, до отправки; информация о файле уходит в debug-дамп.
+        let recording = saveRecordingIfDebug(wav: wav)
+
         // 2 attempts total: initial + 1 retry (network errors only).
         var lastError: TranscribeError?
         for _ in 0..<2 {
             do {
                 let response = try await send(request: request)
+                debugDump(request: request, wavByteCount: wav.count, filename: filename, recording: recording, response: response)
                 return try Self.parseResponse(response)
             } catch let error as TranscribeError {
                 // http / invalidResponse — do not retry.
@@ -98,6 +106,10 @@ public final class Transcriber {
                 lastError = TranscribeError.network(error.localizedDescription)
             }
         }
+        // Все попытки упали на транспортном уровне — ответа так и нет.
+        // В debug-дампе фиксируем и сам факт запроса (метод/URL/заголовки/поля),
+        // чтобы было видно, что до HTTP дело не дошло; ошибки дампа не роняют.
+        debugDump(request: request, wavByteCount: wav.count, filename: filename, recording: recording, response: nil)
         throw lastError ?? TranscribeError.network("Unknown transport error")
     }
 
@@ -112,6 +124,58 @@ public final class Transcriber {
             throw URLError(.badServerResponse)
         }
         return (httpResponse.statusCode, data)
+    }
+
+    // MARK: - Debug dump (log_level == "debug")
+
+    /// При `log_level == "debug"` сохраняет WAV в `recordingsDirectory` и
+    /// возвращает информацию о файле (путь + размер) для дампа; иначе `nil`.
+    /// Пустые данные не сохраняются. Ошибки записи не бросаются наружу.
+    private func saveRecordingIfDebug(wav: Data) -> DebugDump.RecordingInfo? {
+        guard logLevel.lowercased() == "debug", wav.count > 0 else { return nil }
+        let path = DebugDump.recordingPath(for: Date())
+        DebugDump.saveRecording(data: wav, to: path)
+        return DebugDump.RecordingInfo(path: path, byteCount: wav.count)
+    }
+
+    /// При `log_level == "debug"` дописывает в `~/Library/Logs/Dictation/
+    /// transcriber-debug.log` точный исходящий запрос (метод, URL, заголовки с
+    /// маскировкой, form-поля, метаданные file-парта), путь и размер сохранённой
+    /// аудиозаписи — и ответ (HTTP-статус + тело целиком). Если `response` — nil
+    /// (все попытки упали на транспортном уровне до HTTP), в секции ответа
+    /// пишется `(no response — transport error)`. Поведение запроса/ответа не
+    /// меняет; ошибок не бросает.
+    private func debugDump(request: URLRequest, wavByteCount: Int, filename: String, recording: DebugDump.RecordingInfo?, response: (status: Int, body: Data)?) {
+        guard logLevel.lowercased() == "debug" else { return }
+
+        var headers: [(name: String, value: String)] = []
+        for (name, value) in request.allHTTPHeaderFields ?? [:] {
+            headers.append((name: name, value: value))
+        }
+
+        var fields: [(name: String, value: String)] = [(name: "model", value: model)]
+        if !language.isEmpty {
+            fields.append((name: "language", value: language))
+        }
+
+        let filePart = DebugDump.FilePart(
+            fieldName: "file",
+            filename: filename,
+            contentType: "audio/wav",
+            byteCount: wavByteCount
+        )
+
+        let entry = DebugDump.summarize(
+            method: request.httpMethod ?? "POST",
+            url: request.url?.absoluteString ?? baseURL,
+            headers: headers,
+            fields: fields,
+            filePart: filePart,
+            recording: recording,
+            status: response?.status,
+            responseBody: response?.body
+        )
+        DebugDump.append(entry: entry)
     }
 
     // MARK: - Response parsing
