@@ -582,6 +582,56 @@ final class TranscriberTests: XCTestCase {
         }
     }
 
+    // MARK: - NEW: prompt — контекст сегментов (пошаговая диктовка)
+
+    @objc func testPromptFieldAddedWhenProvided() {
+        let transport = MockTransport(status: 200, body: Data(#"{"text":"x"}"#.utf8))
+        let transcriber = makeTranscriber(transport: transport)
+
+        runAsync("testPromptAdded") {
+            _ = try await transcriber.transcribe(wav: self.wavData, filename: "seg-1.wav", prompt: "Один два.")
+            guard let body = transport.lastRequest?.httpBody,
+                  let text = String(data: body, encoding: .utf8) else {
+                XCTFail("No HTTP body")
+                return
+            }
+            XCTAssertTrue(text.contains("name=\"prompt\""), "multipart должен содержать поле prompt")
+            XCTAssertTrue(text.contains("Один два."), "поле prompt должно нести контекст сегментов")
+        }
+    }
+
+    @objc func testPromptFieldAbsentWhenNil() {
+        let transport = MockTransport(status: 200, body: Data(#"{"text":"x"}"#.utf8))
+        let transcriber = makeTranscriber(transport: transport)
+
+        runAsync("testPromptAbsent") {
+            // Старый путь (chunked = false): prompt не передаётся вообще.
+            _ = try await transcriber.transcribe(wav: self.wavData)
+            guard let body = transport.lastRequest?.httpBody,
+                  let text = String(data: body, encoding: .utf8) else {
+                XCTFail("No HTTP body")
+                return
+            }
+            XCTAssertFalse(text.contains("name=\"prompt\""), "при nil prompt поле должно отсутствовать")
+        }
+    }
+
+    @objc func testPromptFieldAbsentWhenEmptyString() {
+        let transport = MockTransport(status: 200, body: Data(#"{"text":"x"}"#.utf8))
+        let transcriber = makeTranscriber(transport: transport)
+
+        runAsync("testPromptEmpty") {
+            // Пустой prompt (нечего давать в контекст) — поля быть не должно.
+            _ = try await transcriber.transcribe(wav: self.wavData, prompt: "")
+            guard let body = transport.lastRequest?.httpBody,
+                  let text = String(data: body, encoding: .utf8) else {
+                XCTFail("No HTTP body")
+                return
+            }
+            XCTAssertFalse(text.contains("name=\"prompt\""), "при пустом prompt поле должно отсутствовать")
+        }
+    }
+
     // MARK: - NEW: NetworkReachability — чистая логика «есть ли интернет»
 
     @objc func testReachability_Unsatisfied_AlwaysNoInternet() {

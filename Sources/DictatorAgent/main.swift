@@ -27,6 +27,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     /// метрология (уровень RMS записи перед отправкой в STT).
     private let logLevel: String
 
+    /// Пошаговая диктовка (флаг `chunked = true` в конфиге): сегменты →
+    /// инкрементальная вставка → финальный проход по всему WAV. OFF — ровно
+    /// текущее поведение (один запрос).
+    private let chunked: Bool
+
     private var state: DictationState = .idle
 
     /// Сессионный токен фазы «обработка»: каждая новая отправка в STT
@@ -67,6 +72,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
 
     init(config: AppConfig) {
         self.logLevel = config.logLevel
+        self.chunked = config.chunked
         self.sounds = SysSounds(enabled: config.soundsEnabled)
         self.overlay = OverlayController(logLevel: config.logLevel)
         self.audio = AudioService(logLevel: config.logLevel)
@@ -330,6 +336,16 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     /// Вызывается и по стопу пользователем, и после принудительной остановки
     /// по лимиту длительности (см. `onRecordingLimitReached`).
     private func processSamples(_ samples: [Int16]) {
+        if chunked {
+            processChunked(samples)
+            return
+        }
+        processSingleRequest(samples)
+    }
+
+    /// Обычный путь финализации записи: сэмплы → WAV → ОДНА транскрибация.
+    /// Ровно текущее поведение (регрессионный путь при chunked = false).
+    private func processSingleRequest(_ samples: [Int16]) {
         state = .transcribing
         // Фаза «обработка»: вместо иконки — анимация точек, пока идёт STT.
         overlay.setProcessingPhase()
@@ -398,6 +414,97 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
                 }
             }
         }
+    }
+
+    /// Пошаговая диктовка (chunked = true): VAD-сегментация записи → каждый
+    /// сегмент отдельным запросом (prompt = уже распознанный текст) → инкре-
+    /// ментальная вставка → финальный проход по всему WAV одним запросом →
+    /// по-словный diff → замена изменившегося диапазона одним действием.
+    private func processChunked(_ samples: [Int16]) {
+        state = .transcribing
+        overlay.setProcessingPhase()
+        overlay.setStatus("Распознаю…")
+        sounds.playEnd()
+        let duration = Double(samples.count) / 16000.0
+        Logger.log(String(format: "chunked transcribe submit (\(samples.count) samples, %.2f s)", duration), level: "info")
+
+        // Страж фазы «обработка»: несколько сегментов + финальный проход —
+        // каждый запрос до networkRequestTimeout; сторож считает по числу
+        // запросов (N сегментов, count > 1 ⇒ ещё +1 финальный). Тот же
+        // механизм сессионного токена, что и в processSingleRequest.
+        let segments = AudioSegmenter.segments(samples: samples)
+        let requestCount = segments.count <= 1 ? 1 : segments.count + 1
+        let chunkedMaxDuration = Double(requestCount) * Transcriber.networkRequestTimeout + 5
+
+        processingSession += 1
+        let session = processingSession
+        DispatchQueue.main.asyncAfter(deadline: .now() + chunkedMaxDuration) { [weak self] in
+            guard let self = self,
+                  self.processingSession == session,
+                  self.state == .transcribing else { return }
+            self.failTranscription(Transcriber.sttTimeoutMessage, isNetworkFailure: true)
+        }
+
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let outcome = try await ChunkedPipeline().run(
+                    samples: samples,
+                    stt: { wav, filename, prompt in
+                        let result = try await self.transcriber.transcribe(wav: wav, filename: filename, prompt: prompt)
+                        return result.text
+                    },
+                    insert: { operation in
+                        DispatchQueue.main.async {
+                            switch operation {
+                            case .appendSegment(let index, let text):
+                                Inserter.append(text)
+                                Logger.log("chunked append segment \(index + 1) (\(text.count) chars)", level: "info")
+                            case .replaceTail(let old, let new):
+                                Inserter.replaceRange(old: old, new: new)
+                                Logger.log("chunked final replace: backspace \(old.count) chars, type \(new.count) chars", level: "info")
+                            }
+                        }
+                    },
+                    onPhase: { phase in
+                        DispatchQueue.main.async {
+                            switch phase {
+                            case .segment(let index):
+                                self.overlay.setStatus("Распознаю… (часть \(index + 1))")
+                            case .finalizing:
+                                self.overlay.setStatus("Финальная обработка…")
+                            }
+                        }
+                    }
+                )
+                DispatchQueue.main.async {
+                    guard self.processingSession == session,
+                          self.state == .transcribing else { return }
+                    self.completeChunkedInsertion(outcome: outcome)
+                }
+            } catch {
+                let networkText = OverlayErrorText.text(for: error)
+                let message = networkText ?? Self.message(for: error)
+                DispatchQueue.main.async {
+                    guard self.processingSession == session,
+                          self.state == .transcribing else { return }
+                    self.failTranscription(message, isNetworkFailure: networkText != nil)
+                }
+            }
+        }
+    }
+
+    /// Терминальная точка чанкового цикла: вставка уже сделана конвейером
+    /// (append-операциями и финальной replace), здесь — статус и скрытие.
+    private func completeChunkedInsertion(outcome: ChunkedPipeline.Outcome) {
+        overlay.resetPhase()
+        overlay.setStatus("Завершаю…")
+        hideAfter(0.8, reason: "chunked insert done")
+        state = .idle
+        Logger.log(
+            "chunked transcription inserted: segments=\(outcome.segmentCount) finalized=\(outcome.finalized) finalChanged=\(outcome.finalChanged) (\(outcome.insertedText.count) chars)",
+            level: "info"
+        )
     }
 
     /// Запись остановлена по жёсткому лимиту (60 с / 960 000 сэмплов) —

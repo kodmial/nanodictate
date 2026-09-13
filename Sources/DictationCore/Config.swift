@@ -15,6 +15,10 @@ public struct AppConfig: Equatable {
     public var logLevel: String
     public var language: String
 
+    /// Пошаговая (чанковая) диктовка: сегменты → инкрементальная вставка →
+    /// финальный проход по всему WAV. OFF по умолчанию — ровно текущее поведение.
+    public var chunked: Bool
+
     // MARK: Провайдеры STT
 
     /// Имя активной секции `[providers.X]` (пусто — не задан: legacy-конфиг).
@@ -39,6 +43,7 @@ public struct AppConfig: Equatable {
         soundsEnabled: true,
         logLevel: "info",
         language: "ru",
+        chunked: false,
         activeProvider: "",
         providers: []
     )
@@ -165,6 +170,7 @@ public struct AppConfig: Equatable {
         var soundsEnabled: Bool = defaults.soundsEnabled
         var logLevel: String = defaults.logLevel
         var language: String = defaults.language
+        var chunked: Bool = defaults.chunked
 
         var activeProvider: String = ""
         var providers: [Provider] = []
@@ -280,6 +286,8 @@ public struct AppConfig: Equatable {
                 logLevel = try parseString(valuePart, line: index + 1, rawLine: rawLine)
             case "language":
                 language = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+            case "chunked":
+                chunked = try parseBool(valuePart, line: index + 1, rawLine: rawLine)
             default:
                 // Unknown key — ignore
                 break
@@ -297,6 +305,7 @@ public struct AppConfig: Equatable {
             soundsEnabled: soundsEnabled,
             logLevel: logLevel,
             language: language,
+            chunked: chunked,
             activeProvider: activeProvider,
             providers: providers
         )
