@@ -23,6 +23,26 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     private let hotkeys: HotkeyService
     private let transcriber: Transcriber
 
+    /// Последний WAV в памяти + повторное распознавание другим провайдером.
+    /// Serves и автоfailover (см. `transcribeAutomatically`), и ручной retry
+    /// из `dictatorctl retry <provider>` (через DistributedNotificationCenter).
+    private let retryProvider: RetryProvider
+
+    /// UX-настройки из конфига (прод-дефолты: метод cgevent, failover/review выкл).
+    private let insertMethod: InsertMethod
+    private let autoFailover: Bool
+    private let reviewBeforeInsert: Bool
+
+    /// Провайдеры в порядке failover (без активного): кандидаты на автоповтор.
+    private let failoverCandidates: [AppConfig.Provider]
+    /// Все провайдеры по id — для ручного retry через IPC.
+    private let providersByID: [String: AppConfig.Provider]
+    /// Имя активного провайдера (nil — legacy-конфиг без секций).
+    private let activeProviderID: String?
+
+    /// Наблюдатель DistributedNotificationCenter для ручного retry из CLI.
+    private var retryObserver: NSObjectProtocol?
+
     /// Уровень логирования из конфига: при "debug" в лог дополнительно пишется
     /// метрология (уровень RMS записи перед отправкой в STT).
     private let logLevel: String
@@ -83,6 +103,36 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             timeout: config.timeoutSeconds,
             logLevel: config.logLevel
         )
+        self.insertMethod = config.insertMethod
+        self.autoFailover = config.autoFailover
+        self.reviewBeforeInsert = config.reviewBeforeInsert
+        // Активный провайдер: явный active_provider, либо (по документированному
+        // сценарию «только секции [providers.X], без active_provider») — первый
+        // провайдер по порядку. От него зависит, КОГО исключать из failover-очереди:
+        // повторять падение основного провайдера при автоfailover нельзя.
+        self.activeProviderID = config.activeProvider.isEmpty
+            ? config.providers.first?.id
+            : config.activeProvider
+        self.failoverCandidates = config.failoverProviders(excluding: self.activeProviderID)
+        var byID: [String: AppConfig.Provider] = [:]
+        for provider in config.providers { byID[provider.id] = provider }
+        self.providersByID = byID
+        // Функция распознавания retry/failover собирает Transcriber из полей
+        // провайдера и ОБЩИХ настроек конфига (language/timeout/log_level), чтобы
+        // повторы вели себя как основной путь: тот же язык, таймаут и уровень лога
+        // (иначе debug-конвейер и language молчат на failover-запросах).
+        self.retryProvider = RetryProvider(transcribeFunction: { wav, provider in
+            let transcriber = Transcriber(
+                baseURL: provider.baseURL,
+                model: provider.model,
+                apiKey: RetryProvider.resolveAPIKey(for: provider),
+                proxyKey: provider.proxyKey,
+                language: config.language,
+                timeout: config.timeoutSeconds,
+                logLevel: config.logLevel
+            )
+            return try await transcriber.transcribe(wav: wav)
+        })
         super.init()
 
         self.audio.levelDelegate = self
@@ -94,6 +144,24 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             DispatchQueue.main.async {
                 self?.handleRecordingLimitReached(samples: samples)
             }
+        }
+
+        // Ручной retry из dictatorctl: «Повторить распознавание другим провайдером».
+        // CLI ставит distributed-нотификацию — агент распознаёт свой lastWAV из
+        // памяти (доступность и вставка — как в обычном цикле).
+        retryObserver = DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.dima.altdictation.retryRequest"),
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self = self else { return }
+            guard let userInfo = notification.userInfo,
+                  let providerID = userInfo["provider"] as? String,
+                  let provider = self.providersByID[providerID] else {
+                Logger.log("retry request ignored: unknown provider payload", level: "error")
+                return
+            }
+            self.handleRetryRequest(provider: provider)
         }
     }
 
@@ -378,9 +446,15 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             // .idle) — терминальные вызовы становятся no-op, повторный
             // failTranscription/completeInsertion невозможен.
             let wav = WAVEncoder.encode(samples: samples)
+            // Последний WAV держим в памяти (RetryProvider): ручной retry другим
+            // провайдером (`dictatorctl retry`) и автоfailover используют его же.
+            self.retryProvider.store(wav: wav)
 
             do {
-                let result = try await self.transcriber.transcribe(wav: wav)
+                let (result, providerID) = try await self.transcribeAutomatically(wav: wav)
+                if let providerID = providerID {
+                    Logger.log("transcription succeeded via failover provider '\(providerID)'", level: "info")
+                }
                 let text = TextRefinement.finalize(result.text)
 
                 DispatchQueue.main.async {
@@ -409,12 +483,143 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     }
 
     private func completeInsertion(_ text: String) {
-        Inserter.insert(text: text)
+        // Ревью перед вставкой (review_before_insert = true): текст печатается
+        // в stdout, вставка только по Enter; Esc/другое — отмена. Под launchd
+        // (агент без терминала) ReviewGate.confirm вернула бы nil → молчаливая
+        // отмена ВСЕХ вставок — гейт пропускаем (текст вставляется как обычно).
+        if reviewBeforeInsert && hasInteractiveStdin {
+            switch ReviewGate.confirm(text: text) {
+            case .insert:
+                break
+            case .cancel:
+                overlay.resetPhase()
+                overlay.setStatus("Отменено")
+                hideAfter(0.8, reason: "review cancelled")
+                state = .idle
+                Logger.log("transcription cancelled by review gate")
+                return
+            }
+        } else if reviewBeforeInsert {
+            Logger.log("review_before_insert включён, но stdin не терминал (launchd?) — ревью пропущено", level: "info")
+        }
+        // Способ вставки по конфигу: cgevent (прод-дефолт) или clipboard.
+        Inserter.insert(text: text, method: insertMethod)
         overlay.resetPhase()
         overlay.setStatus("Завершаю…")
         hideAfter(0.8, reason: "insert done")
         state = .idle
         Logger.log("transcription inserted (\(text.count) chars)")
+        // Маркер для `dictatorctl last` (последний распознанный текст); переводы
+        // строк заменяем, чтобы маркер остался одной строкой лога.
+        Logger.log("LAST_TEXT: \(text.replacingOccurrences(of: "\n", with: " "))")
+    }
+
+    /// Распознавание с автоматическим failover (auto_failover = true):
+    /// основной провайдер — self.transcriber (активный из конфига); при
+    /// TranscribeError пробуем кандидатов из failover-порядка. Ошибка, НЕ
+    /// относящаяся к провайдеру (микрофон и т.п.), failover не запускает.
+    /// Возвращает (результат, id failover-провайдера; nil — основной).
+    private func transcribeAutomatically(wav: Data) async throws -> (TranscriptionResult, String?) {
+        do {
+            let result = try await transcriber.transcribe(wav: wav)
+            return (result, nil)
+        } catch {
+            guard autoFailover,
+                  let transcribeError = error as? TranscribeError,
+                  !failoverCandidates.isEmpty else {
+                throw error
+            }
+            Logger.log("primary provider failed (\(transcribeError)) — trying failover providers",
+                       level: "info")
+            retryProvider.lastFailedProviderID = activeProviderID
+            var lastError: Error = transcribeError
+            for provider in failoverCandidates {
+                do {
+                    if let retryResult = try await retryProvider.retranscribe(with: provider) {
+                        return (retryResult, provider.id)
+                    }
+                    throw TranscribeError.invalidResponse("failover retry lost the stored WAV")
+                } catch let nextError as TranscribeError {
+                    lastError = nextError
+                } catch {
+                    // Не-TranscribeError на повторе — прерываем цепочку.
+                    throw error
+                }
+            }
+            throw lastError
+        }
+    }
+
+    /// Обработка ручного retry из CLI (`dictatorctl retry <provider>`).
+    /// Распознаёт последний WAV из памяти (если он есть) выбранным провайдером
+    /// и вставляет результат стандартным путём (ревью/метод вставки учитываются).
+    private func handleRetryRequest(provider: AppConfig.Provider) {
+        guard retryProvider.hasLastRecording else {
+            Logger.log("retry request ignored: no recording in this session", level: "info")
+            return
+        }
+        let display = provider.name.isEmpty ? provider.id : provider.name
+        Logger.log("retry with provider '\(display)' started", level: "info")
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                guard let result = try await self.retryProvider.retranscribe(with: provider) else {
+                    Logger.log("retry with provider '\(display)': no stored WAV", level: "info")
+                    return
+                }
+                let text = TextRefinement.finalize(result.text)
+                DispatchQueue.main.async {
+                    self.retryInsertion(text)
+                }
+            } catch {
+                let networkText = OverlayErrorText.text(for: error)
+                Logger.log("retry with provider '\(display)' failed: \(error)", level: "error")
+                DispatchQueue.main.async {
+                    // Показываем ошибку ТОЛЬКО если цикл диктовки не активен:
+                    // иначе оверлей живого цикла («Записываю…»/«Распознаю…») затирается.
+                    guard self.state == .idle else {
+                        Logger.log("retry error ignored: dictation cycle active", level: "info")
+                        return
+                    }
+                    self.overlay.resetPhase()
+                    self.overlay.setStatus("Ошибка retry: \(networkText ?? Self.message(for: error))")
+                    self.hideAfter(2.0, reason: "retry failed")
+                }
+            }
+        }
+    }
+
+    /// Вставка результата ручного retry: общий путь completeInsertion
+    /// (ревью-гейт, способ вставки, маркер LAST_TEXT), но вне state-машины
+    /// записи — retry не трогает state и сессию обработки.
+    private func retryInsertion(_ text: String) {
+        // Ретрай вне state-машины цикла: если пользователь уже начал новый цикл
+        // (запись/распознавание), устаревший текст ретрая не вставляем и оверлей
+        // живого цикла не трогаем.
+        guard state == .idle else {
+            Logger.log("retry result dropped: dictation cycle active (state=\(String(describing: state)))",
+                       level: "info")
+            return
+        }
+        if reviewBeforeInsert && hasInteractiveStdin {
+            switch ReviewGate.confirm(text: text) {
+            case .insert:
+                break
+            case .cancel:
+                overlay.setStatus("Retry отменён")
+                hideAfter(0.8, reason: "retry review cancelled")
+                Logger.log("retry cancelled by review gate")
+                return
+            }
+        } else if reviewBeforeInsert {
+            Logger.log("review_before_insert включён, но stdin не терминал — ревью ретрая пропущено", level: "info")
+        }
+        Inserter.insert(text: text, method: insertMethod)
+        overlay.resetPhase()
+        overlay.setStatus("Retry вставлен")
+        hideAfter(1.0, reason: "retry inserted")
+        Logger.log("retry transcription inserted (\(text.count) chars)")
+        Logger.log("LAST_TEXT: \(text.replacingOccurrences(of: "\n", with: " "))")
     }
 
     /// Терминальная точка цикла при ошибке STT (сеть, HTTP, таймаут).
@@ -444,6 +649,13 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     }
 
     // MARK: - Helpers
+
+    /// Стандартный ввод — терминал? ReviewGate читает stdin; под launchd (GUI-
+    /// агент без терминала) гейт не блокирует и не отменяет вставки (см.
+    /// completeInsertion/retryInsertion).
+    private var hasInteractiveStdin: Bool {
+        isatty(STDIN_FILENO) == 1
+    }
 
     /// Единственная точка вызова hide() — терминальные события цикла
     /// (mic denied, insert done, transcription failed, cancelled; лимит идёт

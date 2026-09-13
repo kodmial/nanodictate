@@ -205,4 +205,127 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(d.logLevel, "info")
         XCTAssertEqual(d.language, "ru")
     }
+
+    // MARK: - Новые UX-ключи: providers / auto_failover / insert_method / review_before_insert
+
+    @objc func testParseProvidersOrderArray() throws {
+        let content = """
+        providers = ["groq", "gigaam"]
+        auto_failover = true
+        insert_method = "clipboard"
+        review_before_insert = true
+
+        [providers.groq]
+        name = "Groq"
+        model = "whisper-large-v3"
+
+        [providers.gigaam]
+        name = "GigaAM"
+        model = "gigaam-v3"
+        """
+        let config = try AppConfig.parse(content)
+
+        XCTAssertEqual(config.providersOrder, ["groq", "gigaam"])
+        XCTAssertTrue(config.autoFailover)
+        XCTAssertEqual(config.insertMethod, .clipboard)
+        XCTAssertTrue(config.reviewBeforeInsert)
+    }
+
+    @objc func testParseDefaultsForNewKeys() throws {
+        let content = "base_url = \"https://x\"\n"
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.providersOrder, [])
+        XCTAssertFalse(config.autoFailover)
+        XCTAssertEqual(config.insertMethod, .cgevent)
+        XCTAssertFalse(config.reviewBeforeInsert)
+    }
+
+    @objc func testParseEmptyProvidersArray() throws {
+        let content = "providers = []\n"
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.providersOrder, [])
+    }
+
+    @objc func testParseBadInsertMethodThrows() {
+        let content = "insert_method = \"paste\"\n"
+        XCTAssertThrowsError(try AppConfig.parse(content)) { error in
+            guard case AppConfig.AppConfigError.invalidValue = error else {
+                XCTFail("Expected invalidValue error, got \(error)")
+                return
+            }
+        }
+    }
+
+    @objc func testParseBadBoolForReviewThrows() {
+        let content = "review_before_insert = maybe\n"
+        XCTAssertThrowsError(try AppConfig.parse(content)) { error in
+            guard case AppConfig.AppConfigError.invalidLine = error else {
+                XCTFail("Expected invalidLine error, got \(error)")
+                return
+            }
+        }
+    }
+
+    // MARK: - failoverOrderNames / failoverProviders
+
+    @objc func testFailoverOrderNamesDefaultsToProviderSections() throws {
+        let content = """
+        [providers.b]
+        name = "B"
+
+        [providers.a]
+        name = "A"
+        """
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.failoverOrderNames, ["b", "a"])
+    }
+
+    @objc func testFailoverOrderNamesUsesExplicitProviders() throws {
+        let content = """
+        providers = ["groq"]
+
+        [providers.groq]
+        name = "Groq"
+
+        [providers.gigaam]
+        name = "GigaAM"
+        """
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.failoverOrderNames, ["groq"], "Явный список providers перекрывает порядок секций")
+    }
+
+    @objc func testFailoverProvidersFiltersFailedAndUnknown() throws {
+        let content = """
+        providers = ["groq", "gigaam", "missing"]
+
+        [providers.groq]
+        name = "Groq"
+
+        [providers.gigaam]
+        name = "GigaAM"
+        """
+        let config = try AppConfig.parse(content)
+        let all = config.failoverProviders(excluding: nil)
+        XCTAssertEqual(all.map { $0.id }, ["groq", "gigaam"], "Неизвестные имена пропускаются")
+
+        let withoutFailed = config.failoverProviders(excluding: "groq")
+        XCTAssertEqual(withoutFailed.map { $0.id }, ["gigaam"], "Упавший провайдер исключается")
+    }
+
+    // MARK: - writeReviewBeforeInsert roundtrip
+
+    @objc func testWriteReviewBeforeInsertRoundtrip() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_review_\(UUID().uuidString).toml")
+        try "base_url = \"https://x\"\n".data(using: .utf8)!.write(to: path)
+        defer { try? FileManager.default.removeItem(at: path) }
+
+        try AppConfig.writeReviewBeforeInsert(value: true, to: path.path)
+
+        let content = try String(contentsOf: path, encoding: .utf8)
+        XCTAssertTrue(content.contains("review_before_insert = true"))
+
+        let config = try AppConfig.load(from: path.path)
+        XCTAssertTrue(config.reviewBeforeInsert)
+    }
 }

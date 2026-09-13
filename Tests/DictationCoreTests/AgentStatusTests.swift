@@ -134,10 +134,16 @@ final class AgentStatusTests: XCTestCase {
 
     @objc func testStatusMenuItemsWhenAgentRunning() {
         let items = AgentScreen.statusMenuItems(agentRunning: true)
-        XCTAssertEqual(items.map { $0.key }, ["1", "2", "3", "q"])
+        // 4/5/6 — пункты UX-улучшений: последний текст, retry другим провайдером,
+        // тумблер ревью. Базовые 1/2/3/q сохраняют места.
+        XCTAssertEqual(items.map { $0.key }, ["1", "2", "3", "4", "5", "6", "q"])
         XCTAssertEqual(items[0].label, "Провайдеры")
         XCTAssertEqual(items[1].label, "Логи")
         XCTAssertEqual(items[2].label, "Остановить агента")
+        XCTAssertEqual(items[3].label, "Показать последний текст распознавания")
+        XCTAssertEqual(items[4].label, "Повторить распознавание другим провайдером")
+        XCTAssertEqual(items[5].label, "Ревью перед вставкой (вкл/выкл)")
+        XCTAssertEqual(items[6].label, "Выход")
     }
 
     @objc func testStatusMenuItemsWhenAgentStopped() {
