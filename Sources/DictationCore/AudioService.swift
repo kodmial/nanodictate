@@ -165,24 +165,72 @@ public final class AudioService {
 
     // MARK: - Private
 
+    /// Реальный объём выхода при ресемплинге пропорционален частотам:
+    /// `inputFrames × outputRate / inputRate` + запас (¼), чтобы конвертер
+    /// наполнил выход за один проход из одного входного буфера.
+    internal static func outputFrameCapacity(
+        forInputFrames inputFrames: AVAudioFrameCount,
+        inputRate: Double,
+        outputRate: Double
+    ) -> AVAudioFrameCount {
+        // Защита от деления на ноль: в проде недостижимо, но helper внутренний
+        // и тестируемый.
+        guard inputRate > 0, outputRate > 0 else { return 0 }
+        let base = Int(Double(inputFrames) * outputRate / inputRate)
+        return AVAudioFrameCount(base + max(1, base / 4))
+    }
+
+    /// Один проход конвертера (драйв входа). Входной буфер отдаётся РОВНО один
+    /// раз (`.haveData`), при всех последующих запросах — `nil` + `.noDataNow`:
+    /// конвертер не тянет один и тот же кусок повторно, а `.noDataNow` (в отличие
+    /// от `.endOfStream`) не защёлкивает конвертер — он остаётся живым для
+    /// следующих буферов.
+    /// Непустой выход валиден при `.haveData`/`.inputRanDry`/`.endOfStream`;
+    /// отбрасываются только пустые результаты и ошибки.
+    internal static func convertOnce(
+        input: AVAudioPCMBuffer,
+        inputFormat: AVAudioFormat,
+        converter: AVAudioConverter,
+        targetFormat: AVAudioFormat
+    ) -> (converted: AVAudioPCMBuffer, status: AVAudioConverterOutputStatus)? {
+        guard let converted = AVAudioPCMBuffer(
+            pcmFormat: targetFormat,
+            frameCapacity: outputFrameCapacity(
+                forInputFrames: input.frameLength,
+                inputRate: inputFormat.sampleRate,
+                outputRate: targetFormat.sampleRate
+            )
+        ) else { return nil }
+
+        var fedInput = false
+        let status = converter.convert(to: converted, error: nil) { _, outStatus in
+            if fedInput {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            fedInput = true
+            outStatus.pointee = .haveData
+            return input
+        }
+        guard converted.frameLength > 0, status != .error else { return nil }
+        return (converted, status)
+    }
+
     private func process(_ buffer: AVAudioPCMBuffer) {
         // После принудительной остановки по лимиту «хвост» не записываем:
         // буфер в памяти дальше не растёт.
         guard !limit.isExhausted else { return }
         guard let converter = converter,
-              let converted = AVAudioPCMBuffer(
-                  pcmFormat: targetFormat,
-                  frameCapacity: buffer.frameLength
-              ) else { return }
-
-        var conversionError: NSError?
-        let status = converter.convert(to: converted, error: &conversionError) { _, outStatus in
-            outStatus.pointee = .haveData
-            return buffer
-        }
-        guard status == .haveData, let channel = converted.floatChannelData?[0] else {
+              let result = AudioService.convertOnce(
+                  input: buffer,
+                  inputFormat: buffer.format,
+                  converter: converter,
+                  targetFormat: targetFormat
+              ),
+              let channel = result.converted.floatChannelData?[0] else {
             return
         }
+        let converted = result.converted
         let frameLength = Int(converted.frameLength)
 
         // RMS для анимации
