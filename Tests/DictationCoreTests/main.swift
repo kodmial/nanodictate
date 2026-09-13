@@ -18,6 +18,7 @@ let suites: [XCTestCase.Type] = [
     ConfigTests.self,
     ProviderTests.self,
     AgentStatusTests.self,
+    MicErrorCooldownTests.self,
     SysSoundsTests.self,
     InserterTests.self,
     WAVEncoderTests.self,

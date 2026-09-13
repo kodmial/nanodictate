@@ -45,6 +45,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     private var micRequestSession = 0
     /// Системный диалог TCC уже висит — повторный Alt+Alt не открывает второй.
     private var micPermissionRequestInFlight = false
+    /// Cooldown терминальных микрофонных ошибок (showMicrophoneError): пока
+    /// доступ к микрофону не выдан / движок не поднялся, каждый Alt+Alt не
+    /// должен снова играть Basso и мигать оверлеем — сообщение один раз в 3 с.
+    private var micErrorCooldown = MicErrorCooldown(interval: 3.0)
 
     /// Жёсткий сторож подъёма аудиодвижка: `engine.start()` умеет блокироваться
     /// (смена устройства, инициализация после TCC-гранта). Старт идёт на фоновой
@@ -298,6 +302,15 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     /// ошибки (Basso). Одна точка hide — оверлей гаснет, state уже .idle,
     /// следующий Alt+Alt начинает новый цикл.
     private func showMicrophoneError(_ message: String) {
+        // Cooldown: повторный Alt+Alt в сломанном состоянии (denied / движок
+        // молчит) не должен заново играть звук ошибки и перерисовывать оверлей
+        // — иначе при каждом нажатии слышен Basso и мигает панель.
+        guard micErrorCooldown.allow(at: CFAbsoluteTimeGetCurrent()) else {
+            if isDebug {
+                Logger.log("mic error suppressed (cooldown active)", level: "debug")
+            }
+            return
+        }
         overlay.setStatus(message)
         sounds.playError()
         hideAfter(2.0, reason: "mic failed")
