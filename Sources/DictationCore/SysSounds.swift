@@ -36,17 +36,39 @@ public final class SysSounds {
     /// таймаут STT).
     private static let errorSoundName = "Basso"
 
+    // MARK: Новые кейсы (быстрые UX-победы). Каждый — отдельный кейс с дефолтным
+    // поведением: существующие кейсы/методы (start/end/cancel/error) НЕ меняются.
+
+    /// Звук успешного завершения ПОСЛЕ вставки текста. Дефолт — тот же Pop,
+    /// что у playEnd, но отдельный кейс/метод: новая очередь «вставка → звук»
+    /// закреплена за ним, старый playEnd не трогается.
+    private static let completionAfterInsertSoundName = "Pop"
+    /// Звук «пустого результата»: STT вернул меньше двух слов — текст не
+    /// вставляем, вместо успеха играем Funk (не Basso — это не ошибка).
+    private static let emptyResultSoundName = "Funk"
+    /// Звук отката последней вставки (undo двойным Alt).
+    private static let undoSoundName = "Pop"
+
     // Ленивый кэш: NSSound создаётся один раз на имя и переиспользуется.
     private var startSound: NSSound?
     private var endSound: NSSound?
     private var cancelSound: NSSound?
     private var errorSound: NSSound?
+    /// Кэш остальных имён (новые кейсы вроде "Funk", а также "Pop" как
+    /// completionAfterInsert/undo): один NSSound на имя, как у четырёх старых.
+    private var otherSounds: [String: NSSound] = [:]
 
     /// Звук, который сейчас играет (останавливаем его при смене звука).
     private var playingSound: NSSound?
 
     /// Имя звука, помеченного играющим (internal — читается тестами).
     internal private(set) var playingName: String?
+
+    /// Метка последнего запрошенного звука (start/end/cancel/error/
+    /// completionAfterInsert/emptyResult/undo). Даёт тестам различать разные
+    /// кейсы с одним и тем же звуком ("Pop" у end и completionAfterInsert),
+    /// тогда как playingName хранит только имя файла.
+    internal private(set) var lastPlayedLabel: String?
 
     private let lock = NSLock()
 
@@ -74,6 +96,26 @@ public final class SysSounds {
         play(Self.errorSoundName, label: "error")
     }
 
+    // MARK: Новые методы (UX quick wins)
+
+    /// Звук завершения ПОСЛЕ вставки текста (а не до неё). Вызывается из
+    /// completeInsertion после Inserter.insert, чтобы пользователь слышал
+    /// звук только когда текст гарантированно вставлен.
+    public func playCompletionAfterInsert() {
+        play(Self.completionAfterInsertSoundName, label: "completionAfterInsert")
+    }
+
+    /// Звук «пустого результата»: STT вернул <2 слов — ничего не вставляем.
+    /// Отдельный от ошибки микрофона (Basso): «пустота» ≠ сбой.
+    public func playEmptyResult() {
+        play(Self.emptyResultSoundName, label: "emptyResult")
+    }
+
+    /// Звук отката последней вставки (undo двойным Alt в пределах окна).
+    public func playUndo() {
+        play(Self.undoSoundName, label: "undo")
+    }
+
     /// Защита от дублей: пропустить ли повторное воспроизведение `name`.
     /// Пропускаем только тогда, когда это тот же самый звук и он действительно
     /// ещё играет — иначе звук с тем же именем можно играть повторно.
@@ -87,13 +129,16 @@ public final class SysSounds {
 
         // Тестовый раннер (DICTATION_TESTS=1): реальный системный звук НЕ
         // проигрываем — пользователя ничем не тревожим. Но намерение звука
-        // фиксируем (playingName), потому что на нём строятся тесты: какой
-        // звук вызывается и защита от повторного переигрывания.
+        // фиксируем (playingName, lastPlayedLabel), потому что на них
+        // строятся тесты: какой звук вызывается и защита от повторного
+        // переигрывания. lastPlayedLabel различает кейсы с одним звуком
+        // (end и completionAfterInsert оба "Pop", но разные лейблы).
         if RuntimeEnvironment.isTestRun {
             lock.lock()
             defer { lock.unlock() }
             playingSound = nil
             playingName = name
+            lastPlayedLabel = label
             return
         }
 
@@ -121,6 +166,7 @@ public final class SysSounds {
         sound.play()
         playingSound = sound
         playingName = name
+        lastPlayedLabel = label
     }
 
     private func sound(name: String) -> NSSound? {
@@ -138,7 +184,12 @@ public final class SysSounds {
             if errorSound == nil { errorSound = NSSound(named: name) }
             return errorSound
         default:
-            return NSSound(named: name)
+            // Новые кейсы (completionAfterInsert/undo — "Pop", emptyResult —
+            // "Funk") кэшируем по имени. Старые четыре кейса выше не тронуты.
+            if let cached = otherSounds[name] { return cached }
+            guard let created = NSSound(named: name) else { return nil }
+            otherSounds[name] = created
+            return created
         }
     }
 }

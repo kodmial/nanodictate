@@ -15,6 +15,14 @@ public struct AppConfig: Equatable {
     public var logLevel: String
     public var language: String
 
+    // MARK: Быстрые UX-победы
+
+    /// Окно undo последней вставки (сек): двойной Alt в пределах этого окна
+    /// после успешной вставки стирает вставленный текст (ключ `undo_max_interval`).
+    public var undoMaxInterval: Double
+    /// Играть ли звук отката вставки (ключ `undo_sound_enabled`).
+    public var undoSoundEnabled: Bool
+
     // MARK: Провайдеры STT
 
     /// Имя активной секции `[providers.X]` (пусто — не задан: legacy-конфиг).
@@ -39,6 +47,8 @@ public struct AppConfig: Equatable {
         soundsEnabled: true,
         logLevel: "info",
         language: "ru",
+        undoMaxInterval: 2.0,
+        undoSoundEnabled: true,
         activeProvider: "",
         providers: []
     )
@@ -165,6 +175,8 @@ public struct AppConfig: Equatable {
         var soundsEnabled: Bool = defaults.soundsEnabled
         var logLevel: String = defaults.logLevel
         var language: String = defaults.language
+        var undoMaxInterval: Double = defaults.undoMaxInterval
+        var undoSoundEnabled: Bool = defaults.undoSoundEnabled
 
         var activeProvider: String = ""
         var providers: [Provider] = []
@@ -280,6 +292,10 @@ public struct AppConfig: Equatable {
                 logLevel = try parseString(valuePart, line: index + 1, rawLine: rawLine)
             case "language":
                 language = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+            case "undo_max_interval":
+                undoMaxInterval = try parseDouble(valuePart, line: index + 1, rawLine: rawLine)
+            case "undo_sound_enabled":
+                undoSoundEnabled = try parseBool(valuePart, line: index + 1, rawLine: rawLine)
             default:
                 // Unknown key — ignore
                 break
@@ -297,6 +313,8 @@ public struct AppConfig: Equatable {
             soundsEnabled: soundsEnabled,
             logLevel: logLevel,
             language: language,
+            undoMaxInterval: undoMaxInterval,
+            undoSoundEnabled: undoSoundEnabled,
             activeProvider: activeProvider,
             providers: providers
         )

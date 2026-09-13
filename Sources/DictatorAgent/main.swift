@@ -50,6 +50,29 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     /// должен снова играть Basso и мигать оверлеем — сообщение один раз в 3 с.
     private var micErrorCooldown = MicErrorCooldown(interval: 3.0)
 
+    // MARK: UX quick wins
+
+    /// Токен отмены фазы «Распознаю…»: Esc во время STT ставит его, и результат
+    /// вернувшегося запроса игнорируется (текст не вставляется). Сбрасывается
+    /// при каждом новом цикле (processSamples).
+    private var cancelRecognition = false
+
+    /// Состояние undo: последняя УСПЕШНАЯ вставка (текст + момент времени).
+    /// Двойной Alt в пределах undoMaxInterval после вставки стирает её.
+    private var lastInsertedText: String?
+    private var lastInsertedAt: TimeInterval?
+
+    /// Окно undo и звук отката — из конфига (undo_max_interval /
+    /// undo_sound_enabled). Значения копируются в init, чтобы не менять
+    /// дата-класс конфига в процессе работы.
+    private let undoMaxInterval: TimeInterval
+    private let undoSoundEnabled: Bool
+
+    /// Cooldown звука «пустой результат»: повторный Alt+Alt в тишине (<2 слов
+    /// распознавания) не спамит Funk каждое нажатие. Отдельный от
+    /// micErrorCooldown: «пустая диктовка» ≠ «ошибка микрофона».
+    private var emptyResultCooldown = MicErrorCooldown(interval: 3.0)
+
     /// Жёсткий сторож подъёма аудиодвижка: `engine.start()` умеет блокироваться
     /// (смена устройства, инициализация после TCC-гранта). Старт идёт на фоновой
     /// очереди AudioService — главный поток не замирает, но без сторожа зависшая
@@ -67,6 +90,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
 
     init(config: AppConfig) {
         self.logLevel = config.logLevel
+        self.undoMaxInterval = config.undoMaxInterval
+        self.undoSoundEnabled = config.undoSoundEnabled
         self.sounds = SysSounds(enabled: config.soundsEnabled)
         self.overlay = OverlayController(logLevel: config.logLevel)
         self.audio = AudioService(logLevel: config.logLevel)
@@ -177,7 +202,19 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         }
         switch state {
         case .idle:
-            requestMicrophoneAndStart()
+            // Undo-окно: двойной Alt в пределах undoMaxInterval после успешной
+            // вставки (state = .idle) стирает вставленный текст. Во всех
+            // остальных состояниях Alt ведёт себя как раньше (см. .recording).
+            if DictationFlow.shouldUndoInsteadOfStart(
+                state: state,
+                lastInsertedAt: lastInsertedAt,
+                now: CFAbsoluteTimeGetCurrent(),
+                undoWindow: undoMaxInterval
+            ) {
+                undoLastInsertion()
+            } else {
+                requestMicrophoneAndStart()
+            }
         case .recording:
             sendRecording()
         case .transcribing:
@@ -331,12 +368,14 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     /// по лимиту длительности (см. `onRecordingLimitReached`).
     private func processSamples(_ samples: [Int16]) {
         state = .transcribing
+        // Новый цикл — токен отмены прошлого распознавания не действует.
+        cancelRecognition = false
         // Фаза «обработка»: вместо иконки — анимация точек, пока идёт STT.
         overlay.setProcessingPhase()
         overlay.setStatus("Распознаю…")
-        sounds.playEnd()
         // Длительность по фактически собранным сэмплам (16 кГц моно) —
-        // видно, в каких единицах уходит аудио в STT.
+        // видно, в каких единицах уходит аудио в STT. Звук завершения играем
+        // НЕ здесь, а в completeInsertion ПОСЛЕ вставки текста.
         let duration = Double(samples.count) / 16000.0
         Logger.log(String(format: "transcribe submit (\(samples.count) samples, %.2f s)", duration), level: "info")
 
@@ -384,8 +423,14 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
                 let text = TextRefinement.finalize(result.text)
 
                 DispatchQueue.main.async {
-                    guard self.processingSession == session,
-                          self.state == .transcribing else { return }
+                    // Страж доставки: сессия «обработка» активна (токен совпал,
+                    // state все ещё .transcribing) И распознавание не отменено
+                    // по Esc. Отмена по Esc ставит cancelRecognition и уводит
+                    // state в .idle — текст вставлен не будет.
+                    guard DictationFlow.shouldDeliverResult(
+                        isCancelled: self.cancelRecognition,
+                        sessionActive: self.processingSession == session && self.state == .transcribing
+                    ) else { return }
                     self.completeInsertion(text)
                 }
             } catch {
@@ -408,13 +453,75 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         processSamples(samples)
     }
 
+    /// Вставка результата STT в активное приложение.
+    /// Пустой результат (<2 слов) вставлять нельзя: мусор не появляется в
+    /// тексте, вместо звука успеха — звук «пусто» (Funk), не чаще раза в 3 с.
+    /// Звук завершения играется ПОСЛЕ вставки (CGEvent), а не до неё.
     private func completeInsertion(_ text: String) {
+        if DictationFlow.outcome(for: text) == .empty {
+            handleEmptyResult()
+            return
+        }
+
+        // 1) Вставка текста (CGEvent) — единственная операция, которую можно
+        // откатить undo-ом ниже.
         Inserter.insert(text: text)
+        lastInsertedText = text
+        lastInsertedAt = CFAbsoluteTimeGetCurrent()
+
+        // 2) UI+звук — только после гарантированной вставки.
         overlay.resetPhase()
         overlay.setStatus("Завершаю…")
+        sounds.playCompletionAfterInsert()
         hideAfter(0.8, reason: "insert done")
         state = .idle
         Logger.log("transcription inserted (\(text.count) chars)")
+    }
+
+    /// «Пустая» диктовка: STT вернул <2 слов (или тишину). Текст не вставляем,
+    /// звук успеха не играем. Отдельный звук Funk вместо Basso — пустая
+    /// диктовка это НЕ ошибка микрофона; cooldown пустых результатов отдельный.
+    private func handleEmptyResult() {
+        if emptyResultCooldown.allow(at: CFAbsoluteTimeGetCurrent()) {
+            sounds.playEmptyResult()
+        } else if isDebug {
+            Logger.log("empty-result sound suppressed (cooldown active)", level: "debug")
+        }
+        // Свежая «вставка» не состоялась — undo-окно не открывается.
+        lastInsertedText = nil
+        lastInsertedAt = nil
+        overlay.resetPhase()
+        overlay.setStatus("Пустой результат")
+        hideAfter(0.8, reason: "empty result")
+        state = .idle
+        Logger.log("empty transcription result — not inserted", level: "info")
+    }
+
+    /// Откат последней вставки двойным Alt в пределах undoMaxInterval.
+    /// Стираем ровно столько символов, сколько вставили (backspace — зеркало
+    /// к Inserter.insert), статус оверлея — «Отмена вставки», звук отката —
+    /// по конфигу (undo_sound_enabled). Может перезапустить оверлей, если панель
+    /// успела скрыться после «Завершаю…».
+    private func undoLastInsertion() {
+        guard let text = lastInsertedText else {
+            // Вставки нет (например, окно истекло при отложенном прерывании) —
+            // закрываем undo-окно и уходим.
+            lastInsertedAt = nil
+            lastInsertedText = nil
+            return
+        }
+        overlay.show()
+        overlay.resetPhase()
+        overlay.setStatus("Отменена вставка")
+        Inserter.delete(characters: text)
+        if undoSoundEnabled {
+            sounds.playUndo()
+        }
+        lastInsertedText = nil
+        lastInsertedAt = nil
+        // state уже .idle — следующий Alt+Alt начнёт новую запись.
+        hideAfter(0.8, reason: "insertion undone")
+        Logger.log("insertion undone (\(text.count) chars)")
     }
 
     /// Терминальная точка цикла при ошибке STT (сеть, HTTP, таймаут).
@@ -432,15 +539,28 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         Logger.log("transcription failed: \(message)", level: "error")
     }
 
+    /// Esc: отмена текущей фазы. Ветки состояния специфичны только в первом шаге
+    /// (recording — остановить движок; transcribing — поставить токен отмены,
+    /// чтобы результат вернувшегося STT-запроса не вставлялся), далее общий
+    /// терминальный хвост: статус «Отменено», звук отмены (Ping, НЕ Basso — это
+    /// не ошибка), ровно один hide. Каждая терминальная точка планирует hide
+    /// ровно один раз.
     private func handleCancel() {
-        guard state == .recording else { return }
-        audio.cancel()
+        switch state {
+        case .recording:
+            audio.cancel()
+            Logger.log("record cancelled")
+        case .transcribing:
+            cancelRecognition = true
+            Logger.log("recognition cancelled by Esc")
+        case .idle:
+            return
+        }
         overlay.resetPhase()
         overlay.setStatus("Отменено")
         sounds.playCancel()
         hideAfter(0.8, reason: "cancelled")
         state = .idle
-        Logger.log("record cancelled")
     }
 
     // MARK: - Helpers

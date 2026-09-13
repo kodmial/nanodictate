@@ -27,6 +27,7 @@ let suites: [XCTestCase.Type] = [
     AgentStatusTests.self,
     MicErrorCooldownTests.self,
     SysSoundsTests.self,
+    SysSoundsUXTests.self,
     InserterTests.self,
     WAVEncoderTests.self,
     RecordingLimitTests.self,
@@ -34,6 +35,7 @@ let suites: [XCTestCase.Type] = [
     DebugDumpTests.self,
     OverlayControllerTests.self,
     OverlayLifecycleTests.self,
+    DictationFlowTests.self,
 ]
 
 var passed = 0

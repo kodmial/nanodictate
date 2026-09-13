@@ -60,6 +60,38 @@ public enum Inserter {
         }
     }
 
+    // MARK: - Откат (undo)
+
+    /// Стереть ровно столько графем, сколько было вставлено: backspace
+    /// (virtualKey 51 / kVK_Delete) по числу символов — симметричный откат
+    /// к `insert(text:)` (между нажатиями та же пауза 5 мс). count = 0 —
+    /// no-op; отрицательные безопасно обрезаются до no-op.
+    public static func delete(characters: String) {
+        delete(count: characters.count)
+    }
+
+    public static func delete(count: Int) {
+        guard count > 0 else { return }
+        let source = CGEventSource(stateID: .hidSystemState)
+        for index in 0..<count {
+            // keyDown
+            if let keyDown = CGEvent(keyboardEventSource: source,
+                                     virtualKey: 51,
+                                     keyDown: true) {
+                keyDown.post(tap: .cghidEventTap)
+            }
+            // keyUp
+            if let keyUp = CGEvent(keyboardEventSource: source,
+                                  virtualKey: 51,
+                                  keyDown: false) {
+                keyUp.post(tap: .cghidEventTap)
+            }
+            if index < count - 1 {
+                usleep(delayUSec)
+            }
+        }
+    }
+
     // MARK: - Private
 
     private static func sendChunk(_ chunk: String, source: CGEventSource?) {
