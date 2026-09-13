@@ -304,15 +304,17 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     private func showMicrophoneError(_ message: String) {
         // Cooldown: повторный Alt+Alt в сломанном состоянии (denied / движок
         // молчит) не должен заново играть звук ошибки и перерисовывать оверлей
-        // — иначе при каждом нажатии слышен Basso и мигает панель.
-        guard micErrorCooldown.allow(at: CFAbsoluteTimeGetCurrent()) else {
-            if isDebug {
-                Logger.log("mic error suppressed (cooldown active)", level: "debug")
-            }
-            return
+        // — иначе при каждом нажатии слышен Basso и мигает панель. Cooldown
+        // подавляет ТОЛЬКО звук и сообщение; hide ниже — всегда: панель,
+        // показанная неудавшимся startRecording, не зависает со статусом
+        // «Записываю…» до следующего Alt+Alt.
+        let showFeedback = micErrorCooldown.allow(at: CFAbsoluteTimeGetCurrent())
+        if showFeedback {
+            overlay.setStatus(message)
+            sounds.playError()
+        } else if isDebug {
+            Logger.log("mic error suppressed (cooldown active)", level: "debug")
         }
-        overlay.setStatus(message)
-        sounds.playError()
         hideAfter(2.0, reason: "mic failed")
     }
 

@@ -67,18 +67,8 @@ final class OverlayLifecycleTests: XCTestCase {
     /// failed, cancelled) вызывает hideAfter ровно один раз; лимит идёт через
     /// processSamples к тем же терминальным точкам (тоже один hide).
     @objc func testEachTerminalPoint_SchedulesExactlyOneHide() {
-        let fileDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        let candidates = [
-            fileDir
-                .deletingLastPathComponent()
-                .deletingLastPathComponent()
-                .appendingPathComponent("Sources/DictatorAgent/main.swift"),
-            URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-                .appendingPathComponent("Sources/DictatorAgent/main.swift"),
-        ]
-        guard let sourceURL = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }),
-              let source = try? String(contentsOf: sourceURL, encoding: .utf8) else {
-            XCTFail("Не удалось прочитать Sources/DictatorAgent/main.swift (искал в \(candidates.map { $0.path }))")
+        guard let source = Self.agentMainSource() else {
+            XCTFail("Не удалось прочитать Sources/DictatorAgent/main.swift")
             return
         }
 
@@ -108,7 +98,45 @@ final class OverlayLifecycleTests: XCTestCase {
         )
     }
 
+    /// Минор #1: подавленная (cooldown) ветка showMicrophoneError тоже обязана
+    /// скрывать оверлей — панель, показанная неудавшимся startRecording, не
+    /// должна зависать со статусом «Записываю…» до следующего Alt+Alt. Структурно:
+    /// в теле showMicrophoneError нет ни одного раннего return — все пути
+    /// (разрешённая И подавленная ветки) доходят до единственного hideAfter.
+    /// Логика приватная и живёт в executable-таргете, поэтому тестируется
+    /// структурно, как и остальные терминальные точки (см. выше).
+    @objc func testMicError_SuppressedBranchStillSchedulesHide() {
+        guard let source = Self.agentMainSource() else {
+            XCTFail("Не удалось прочитать Sources/DictatorAgent/main.swift")
+            return
+        }
+        let body = Self.functionBody(named: "showMicrophoneError", in: source)
+        XCTAssertFalse(body.contains("return"), "Ни одна ветка showMicrophoneError не должна выходить раньше hideAfter")
+        XCTAssertEqual(
+            body.components(separatedBy: "hideAfter(").count - 1, 1,
+            "showMicrophoneError планирует ровно один hide (в т.ч. в подавленной ветке)"
+        )
+    }
+
     // MARK: - Helpers
+
+    /// Загружает исходник агента (для структурных проверок терминальных точек).
+    private static func agentMainSource() -> String? {
+        let fileDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let candidates = [
+            fileDir
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/DictatorAgent/main.swift"),
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("Sources/DictatorAgent/main.swift"),
+        ]
+        guard let sourceURL = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }),
+              let source = try? String(contentsOf: sourceURL, encoding: .utf8) else {
+            return nil
+        }
+        return source
+    }
 
     /// Возвращает тело функции (от «func NAME(» до следующей функции/секции
     /// на том же уровне отступа). Если функция не найдена — пустая строка.
