@@ -84,6 +84,19 @@ public final class SysSounds {
     private func play(_ name: String, label: String) {
         guard enabled else { return } // enabled == false — полный no-op
         Logger.log("sounds: \(label)", level: "debug")
+
+        // Тестовый раннер (DICTATION_TESTS=1): реальный системный звук НЕ
+        // проигрываем — пользователя ничем не тревожим. Но намерение звука
+        // фиксируем (playingName), потому что на нём строятся тесты: какой
+        // звук вызывается и защита от повторного переигрывания.
+        if RuntimeEnvironment.isTestRun {
+            lock.lock()
+            defer { lock.unlock() }
+            playingSound = nil
+            playingName = name
+            return
+        }
+
         lock.lock()
         defer { lock.unlock() }
 
@@ -146,7 +159,16 @@ public enum Logger {
         lock.lock()
         defer { lock.unlock() }
 
-        let expanded = (logDirectory as NSString).expandingTildeInPath
+        // Тестовый раннер: боевой ~/Library/Logs/Dictation/agent.log не
+        // трогаем — тестовые строки уходят в /tmp/dictation-tests/agent.log.
+        // Если какой-то тест сам перенаправил logDirectory (LoggerTests) —
+        // уважаем его настройку.
+        var effectiveDirectory = logDirectory
+        if RuntimeEnvironment.isTestRun && logDirectory == "~/Library/Logs/Dictation" {
+            effectiveDirectory = "/tmp/dictation-tests"
+        }
+
+        let expanded = (effectiveDirectory as NSString).expandingTildeInPath
         let fileManager = FileManager.default
 
         var isDirectory: ObjCBool = false

@@ -404,11 +404,6 @@ public final class OverlayController: NSObject {
         let panelWidth: CGFloat = 260
         let panelHeight = desiredPanelHeight()
 
-        // Рендер-усиление для фонового агента без .app-бандла: принудительная
-        // активация (без перехвата фокуса — ignoringOtherApps:false) до порядка
-        // фронт, чтобы WindowServer реально вывел окно поверх чужого приложения.
-        NSApp.activate(ignoringOtherApps: false)
-
         let screen = OverlayLayout.screenContaining(point)
         let frame = OverlayLayout.panelFrame(
             near: point,
@@ -422,11 +417,26 @@ public final class OverlayController: NSObject {
         // включая поверх полноэкранных приложений. (уже настроено в ensurePanel,
         // но повторяем здесь на случай пересоздания окна между сеансами)
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-        // orderFront(nil) НЕ показывает окно из неактивного фонового агента —
-        // orderFrontRegardless покажет панель без активации приложения.
-        panel.orderFrontRegardless()
-        panel.makeKeyAndOrderFront(nil)
-        panel.orderFrontRegardless()
+
+        // Тестовый раннер (DICTATION_TESTS=1): панель создаётся и фреймится —
+        // тесты проверяют frame/фазы через состояние, но НА ЭКРАН не выводится
+        // (никаких orderFront / активации NSApp) — пользователя ничем не
+        // тревожим. Прод: реальный вывод окна.
+        if !RuntimeEnvironment.isTestRun {
+            // Рендер-усиление для фонового агента без .app-бандла: принудительная
+            // активация (без перехвата фокуса — ignoringOtherApps:false) до порядка
+            // фронт, чтобы WindowServer реально вывел окно поверх чужого приложения.
+            NSApp.activate(ignoringOtherApps: false)
+            // orderFront(nil) НЕ показывает окно из неактивного фонового агента —
+            // orderFrontRegardless покажет панель без активации приложения.
+            panel.orderFrontRegardless()
+            panel.makeKeyAndOrderFront(nil)
+            panel.orderFrontRegardless()
+
+            // Отложенная проверка того, что окно РЕАЛЬНО попало на экран
+            // (CGWindowList видит только окна, показанные WindowServer'ом).
+            scheduleRenderCheck()
+        }
 
         if isDebug {
             let flags = [
@@ -446,10 +456,6 @@ public final class OverlayController: NSObject {
             "overlay show at (\(point.x), \(point.y)) frame=\(NSStringFromRect(frame)) screen=\(NSStringFromRect(screen)) visible=\(panel.isVisible)",
             level: "info"
         )
-
-        // Отложенная проверка того, что окно РЕАЛЬНО попало на экран
-        // (CGWindowList видит только окна, показанные WindowServer'ом).
-        scheduleRenderCheck()
     }
 
     public func hide(reason: String? = nil) {

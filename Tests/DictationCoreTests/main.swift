@@ -1,6 +1,13 @@
 import Foundation
 import ObjectiveC
 
+// Тестовый раннер: помечаем процесс как тестовый (setenv — не аргумент CLI).
+// На этом признаке (RuntimeEnvironment.isTestRun) гейтятся реальные эффекты,
+// которые тревожат пользователя при прогонах тестов: системные звуки SysSounds
+// не играют, панель оверлея не выводится на экран, Logger не пишет в боевой
+// ~/Library/Logs/Dictation/agent.log (пишет в /tmp/dictation-tests/agent.log).
+setenv("DICTATION_TESTS", "1", 1)
+
 // MARK: - Раннер тестов (мини-XCTest без Xcode)
 //
 // Все suite-классы перечислены явно (objc_copyClassList неудобен из Swift).
