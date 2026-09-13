@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 @testable import DictationCore
 
@@ -40,5 +41,36 @@ final class SysSoundsTests: XCTestCase {
         sounds.playStart()
         sounds.playEnd()
         sounds.playCancel()
+    }
+
+    // MARK: - Новое поведение (NSSound + защита от дублей)
+
+    /// Системные звуки macOS (Tink/Pop/Ping) обязаны существовать
+    /// в /System/Library/Sounds — иначе NSSound(named:) вернёт nil.
+    @objc func testSystemSoundsExist() {
+        XCTAssertNotNil(NSSound(named: "Tink"))
+        XCTAssertNotNil(NSSound(named: "Pop"))
+        XCTAssertNotNil(NSSound(named: "Ping"))
+    }
+
+    /// После playStart звук помечается играющим — это состояние,
+    /// на котором строится защита от повторного переигрывания.
+    @objc func testPlayStartMarksCurrentlyPlaying() {
+        let sounds = SysSounds(enabled: true)
+        sounds.playStart()
+        XCTAssertEqual(sounds.playingName, "Tink")
+    }
+
+    /// Защита от дублей: тот же звук, помеченный играющим, — повтор пропускаем;
+    /// другой звук или завершившийся тот же самый — пропускать не нужно.
+    @objc func testDuplicateReplayIsSkippedForSamePlayingSound() {
+        let sounds = SysSounds(enabled: true)
+        sounds.playStart() // играем "Tink" — первый вызов никогда не скипается
+        // Тот же звук и помечен играющим — повторно не запускаем.
+        XCTAssertTrue(sounds.shouldSkipReplay(of: "Tink", currentlyPlaying: true))
+        // Другой звук — играем (предыдущий при этом останавливается).
+        XCTAssertFalse(sounds.shouldSkipReplay(of: "Pop", currentlyPlaying: true))
+        // Тот же звук, но уже завершился — можно играть снова.
+        XCTAssertFalse(sounds.shouldSkipReplay(of: "Tink", currentlyPlaying: false))
     }
 }

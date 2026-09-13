@@ -3,29 +3,46 @@
 //  DictationCore
 //
 //  Короткие системные звуки начала/окончания диктовки + файловый логгер.
-//  Только AppKit + AudioToolbox + Foundation (macOS 12, Swift 5.7).
+//  Только AppKit + Foundation (macOS 12, Swift 5.7).
 //
-//  SystemSoundID (macOS, безопасный набор):
-//    start  = 1103 — "Tink"   (KeyPressed / Tink.caf)
-//    end    = 1053 — "Pop"    (короткий акцент успеха)
-//    cancel = 1006 — default alert beep
-//  Если ID не сработает — AudioServices молча его игнорирует, падать не будем.
+//  Звуки берутся из системных звуков macOS через NSSound(named:):
+//  файлы лежат в /System/Library/Sounds/*.aiff (Tink, Pop, Ping и др.).
+//  Числовые SystemSoundID из iOS-каталога macOS молча игнорирует,
+//  поэтому играем именно через NSSound.
+//
+//  Защита от повторного переигрывания: перед play() останавливаем предыдущее
+//  воспроизведение (NSSound.stop), а если запрошен тот же самый звук и он ещё
+//  играет (NSSound.isPlaying) — повторно не запускаем, чтобы не накладывать
+//  звук сам на себя (перезапуск того же звука допустим только после того,
+//  как он завершился).
 //
 
-import AudioToolbox
+import AppKit
 import Foundation
 
 // MARK: - Системные звуки
 
-/// Воспроизводит короткие системные звуки macOS через AudioServices.
+/// Воспроизводит короткие системные звуки macOS через NSSound.
 public final class SysSounds {
 
     /// `enabled == false` — полностью молчит.
     public var enabled: Bool
 
-    private static let startSoundID: SystemSoundID = 1103
-    private static let endSoundID: SystemSoundID = 1053
-    private static let cancelSoundID: SystemSoundID = 1006
+    /// Системные звуки macOS (имена файлов без расширения из /System/Library/Sounds).
+    private static let startSoundName = "Tink"
+    private static let endSoundName = "Pop"
+    private static let cancelSoundName = "Ping"
+
+    // Ленивый кэш: NSSound создаётся один раз на имя и переиспользуется.
+    private var startSound: NSSound?
+    private var endSound: NSSound?
+    private var cancelSound: NSSound?
+
+    /// Звук, который сейчас играет (останавливаем его при смене звука).
+    private var playingSound: NSSound?
+
+    /// Имя звука, помеченного играющим (internal — читается тестами).
+    internal private(set) var playingName: String?
 
     private let lock = NSLock()
 
@@ -35,24 +52,67 @@ public final class SysSounds {
 
     /// Начало диктовки.
     public func playStart() {
-        play(Self.startSoundID)
+        play(Self.startSoundName, label: "start")
     }
 
     /// Удачное завершение (текст вставлен).
     public func playEnd() {
-        play(Self.endSoundID)
+        play(Self.endSoundName, label: "end")
     }
 
     /// Отмена (Esc).
     public func playCancel() {
-        play(Self.cancelSoundID)
+        play(Self.cancelSoundName, label: "cancel")
     }
 
-    private func play(_ soundID: SystemSoundID) {
-        guard enabled else { return }
+    /// Защита от дублей: пропустить ли повторное воспроизведение `name`.
+    /// Пропускаем только тогда, когда это тот же самый звук и он действительно
+    /// ещё играет — иначе звук с тем же именем можно играть повторно.
+    internal func shouldSkipReplay(of name: String, currentlyPlaying: Bool) -> Bool {
+        playingName == name && currentlyPlaying
+    }
+
+    private func play(_ name: String, label: String) {
+        guard enabled else { return } // enabled == false — полный no-op
+        Logger.log("sounds: \(label)", level: "debug")
         lock.lock()
         defer { lock.unlock() }
-        AudioServicesPlaySystemSound(soundID)
+
+        guard let sound = sound(name: name) else {
+            // Звук не найден в системном каталоге — молча пропускаем
+            // (как раньше AudioServices молча игнорировал SystemSoundID).
+            return
+        }
+
+        // Не перезапускаем тот же звук, если он ещё играет.
+        guard !shouldSkipReplay(of: name, currentlyPlaying: sound.isPlaying) else {
+            return
+        }
+
+        // Звук сменился и ещё играет — останавливаем предыдущее воспроизведение.
+        if let current = playingSound, current !== sound, current.isPlaying {
+            current.stop()
+        }
+
+        sound.play()
+        playingSound = sound
+        playingName = name
+    }
+
+    private func sound(name: String) -> NSSound? {
+        switch name {
+        case Self.startSoundName:
+            if startSound == nil { startSound = NSSound(named: name) }
+            return startSound
+        case Self.endSoundName:
+            if endSound == nil { endSound = NSSound(named: name) }
+            return endSound
+        case Self.cancelSoundName:
+            if cancelSound == nil { cancelSound = NSSound(named: name) }
+            return cancelSound
+        default:
+            return NSSound(named: name)
+        }
     }
 }
 
