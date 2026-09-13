@@ -79,6 +79,9 @@ public final class AudioService {
     /// Гарантирует, что принудительная остановка планируется ровно один раз.
     private let lock = NSLock()
     private var limitStopScheduled = false
+    /// Первый буфер сеанса логируется отдельно (debug): длительность и энергия
+    /// показывают, пошёл ли реально звук в движок после старта.
+    private var didLogFirstBuffer = false
 
     public init(logLevel: String = "info") {
         self.logLevel = logLevel
@@ -97,6 +100,7 @@ public final class AudioService {
     public func start() throws {
         collectedSamples = []
         rmsHistory = []
+        didLogFirstBuffer = false
         // Новый сеанс — чистый лимит (после предыдущей принудительной остановки).
         limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
         recordStartTime = CFAbsoluteTimeGetCurrent()
@@ -106,6 +110,7 @@ public final class AudioService {
         let input = engine.inputNode
         let hwFormat = input.outputFormat(forBus: 0)
         guard let converter = AVAudioConverter(from: hwFormat, to: targetFormat) else {
+            Logger.log("record engine: AVAudioConverter init failed (hw=\(Int(hwFormat.sampleRate)) Hz -> target=\(Int(targetFormat.sampleRate)) Hz)", level: "error")
             throw AudioServiceError.unsupportedFormat
         }
         self.converter = converter
@@ -117,6 +122,20 @@ public final class AudioService {
         Logger.log("mic permission: \(mic) (record start)", level: "info")
         Logger.log("record start: sampleRate=\(Int(targetFormat.sampleRate)) Hz, channels=\(targetFormat.channelCount), hwFormat=\(Int(hwFormat.sampleRate)) Hz", level: "info")
 
+        // Хлебные крошки перед каждым шагом старта движка: если следующий вызов
+        // AVFoundation крэшнет (известный класс — SetOutputFormat внутри
+        // installTap/prepare/start), последняя строка лога укажет точное место.
+        if logLevel.lowercased() == "debug" {
+            let inFmt = input.outputFormat(forBus: 0)
+            Logger.log(String(
+                format: "record engine: inputNode format=%.0f Hz, %d ch, commonFormat=%@, interleaved=%@; target=%.0f Hz, %d ch",
+                inFmt.sampleRate, inFmt.channelCount,
+                String(describing: inFmt.commonFormat), inFmt.isInterleaved ? "yes" : "no",
+                targetFormat.sampleRate, targetFormat.channelCount
+            ), level: "debug")
+            Logger.log("record engine: installing tap (bus 0, bufferSize 4096, hwFormat=\(Int(hwFormat.sampleRate)) Hz)", level: "debug")
+        }
+
         // Tap вешается на аппаратный формат; конвертация выполняется в блоке.
         input.installTap(
             onBus: 0,
@@ -125,9 +144,12 @@ public final class AudioService {
         ) { [weak self] buffer, _ in
             self?.process(buffer)
         }
+        if logLevel.lowercased() == "debug" { Logger.log("record engine: tap installed, engine.prepare()…", level: "debug") }
         engine.prepare()
+        if logLevel.lowercased() == "debug" { Logger.log("record engine: prepared, engine.start()…", level: "debug") }
         try engine.start()
         isRecording = true
+        if logLevel.lowercased() == "debug" { Logger.log("record engine: started OK", level: "debug") }
     }
 
     /// Останавливает запись и возвращает собранные сэмплы (Int16, 16кГц).
@@ -135,6 +157,11 @@ public final class AudioService {
         guard isRecording else { return [] }
         let duration = CFAbsoluteTimeGetCurrent() - recordStartTime
         isRecording = false
+        // Хлебная крошка перед teardown движка (removeTap/engine.stop могут
+        // крэшнуть при гонке с аудиопотоком — последний лог укажет, что стоп пошёл).
+        if logLevel.lowercased() == "debug" {
+            Logger.log("record stop: tearing engine down (collected=\(collectedSamples.count) samples, duration=\(String(format: "%.2f", duration)) s)", level: "debug")
+        }
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         converter = nil
@@ -220,14 +247,21 @@ public final class AudioService {
         // После принудительной остановки по лимиту «хвост» не записываем:
         // буфер в памяти дальше не растёт.
         guard !limit.isExhausted else { return }
-        guard let converter = converter,
-              let result = AudioService.convertOnce(
-                  input: buffer,
-                  inputFormat: buffer.format,
-                  converter: converter,
-                  targetFormat: targetFormat
-              ),
-              let channel = result.converted.floatChannelData?[0] else {
+        guard let converter = converter else {
+            logDroppedBuffer(reason: "converter is nil (stopped?)", frames: buffer.frameLength)
+            return
+        }
+        guard let result = AudioService.convertOnce(
+            input: buffer,
+            inputFormat: buffer.format,
+            converter: converter,
+            targetFormat: targetFormat
+        ) else {
+            logDroppedBuffer(reason: "convertOnce -> nil (empty output or error)", frames: buffer.frameLength)
+            return
+        }
+        guard let channel = result.converted.floatChannelData?[0] else {
+            logDroppedBuffer(reason: "converted buffer has no float channel", frames: buffer.frameLength)
             return
         }
         let converted = result.converted
@@ -244,6 +278,20 @@ public final class AudioService {
         // История RMS по буферам — для сводных метрик уровня в конце записи.
         // 60 c при буфере 4096 фреймов и 48 кГц ≈ 700 значений — памятью не жертвуем.
         rmsHistory.append(rms)
+
+        // Первый буфер сеанса — доказательство, что звук реально пошёл в движок
+        // (длительность куска и его энергия; при сломанном микрофоне rms ≈ 0).
+        if !didLogFirstBuffer {
+            didLogFirstBuffer = true
+            if logLevel.lowercased() == "debug" {
+                Logger.log(String(
+                    format: "record first buffer: inFrames=%d (%.3f s @ %.0f Hz), outFrames=%d, rms=%.4f (%.1f dBFS)",
+                    buffer.frameLength, Double(buffer.frameLength) / buffer.format.sampleRate,
+                    buffer.format.sampleRate, frameLength, rms,
+                    AudioMetrics.dbfs(rms)
+                ), level: "debug")
+            }
+        }
 
         // Ограничение памяти: добавляем не больше, чем укладывается в лимит
         // (960 000 сэмплов на 60 с). Буфер никогда не превышает этот предел.
@@ -270,6 +318,13 @@ public final class AudioService {
         }
     }
 
+    /// Диагностика молчаливого отбрасывания входного буфера в `process`
+    /// (debug-only, поведение не меняет): причина + размер куска.
+    private func logDroppedBuffer(reason: String, frames: AVAudioFrameCount) {
+        guard logLevel.lowercased() == "debug" else { return }
+        Logger.log("record drop buffer: \(reason) frames=\(frames)", level: "debug")
+    }
+
     /// Планирует принудительную остановку ровно один раз. Сэмплы снимаются здесь
     /// (на аудиопотоке) синхронно, чтобы клиент получил законченный буфер.
     private func scheduleLimitStop() {
@@ -294,6 +349,9 @@ public final class AudioService {
         guard isRecording else { return }
         let duration = CFAbsoluteTimeGetCurrent() - recordStartTime
         isRecording = false
+        if logLevel.lowercased() == "debug" {
+            Logger.log("record limit stop: tearing engine down (samples=\(samples.count))", level: "debug")
+        }
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         converter = nil
