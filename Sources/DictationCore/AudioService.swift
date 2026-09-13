@@ -1,5 +1,45 @@
 import Foundation
 import AVFoundation
+import AudioEngineGuard
+
+// MARK: - Протоколы движка (инъекция в тестах)
+
+/// Минимальный интерфейс входного узла AVAudioEngine, используемый
+/// AudioService. Реальный класс AVAudioInputNode conforms через extension;
+/// тесты подставляют фейк и имитируют отказы старта без аудио-железа.
+public protocol AudioInputNodeLike: AnyObject {
+    func outputFormat(forBus bus: AVAudioNodeBus) -> AVAudioFormat
+    func installTap(
+        onBus bus: AVAudioNodeBus,
+        bufferSize: AVAudioFrameCount,
+        format: AVAudioFormat?,
+        block tapBlock: @escaping AVAudioNodeTapBlock
+    )
+    func removeTap(onBus bus: AVAudioNodeBus)
+}
+
+/// Минимальный интерфейс AVAudioEngine, используемый AudioService.
+public protocol AudioEngineLike: AnyObject {
+    func makeInputNode() -> AudioInputNodeLike
+    func prepare()
+    func start() throws
+    func stop()
+}
+
+extension AVAudioInputNode: AudioInputNodeLike {}
+extension AVAudioEngine: AudioEngineLike {
+    public func makeInputNode() -> AudioInputNodeLike {
+        return inputNode
+    }
+}
+
+// MARK: - ObjC-шлюз для NSException AVFAudio
+
+/// Тач-функции модуля AudioEngineGuard (см. AudioEngineExceptionGuard.h/m):
+/// DictationRunAudioEngineBlockGuarded выполняет блок под ObjC @try/@catch и
+/// возвращает NSError вместо NSException, которое AVFAudio умеет поднимать
+/// внутри installTap/prepare/start (SetOutputFormat) и которое в Swift не
+/// ловится через try — падает SIGABRT.
 
 /// Делегат для получения уровня звука (RMS) для анимации.
 public protocol AudioLevelDelegate: AnyObject {
@@ -50,6 +90,16 @@ public struct RecordingLimit {
 /// и `connect(input, to:format:)` с чужим sample rate кидает исключение
 /// (`format.sampleRate == hwFormat.sampleRate`). Поэтому tap ставится на
 /// аппаратном формате, а пересэмплинг в 16 кГц/моно делает AVAudioConverter.
+///
+/// Три гарантии жизни/смерти движка (регрессия крашей и «зависаний»):
+/// 1. Все операции движка (installTap/prepare/start/stop/removeTap) — ТОЛЬКО
+///    на `engineQueue` и под ObjC-шлюзом `guardedEngineCall`: NSException
+///    AVFAudio (SetOutputFormat) превращается в Error, а не в SIGABRT.
+/// 2. Любая ошибка старта ВСЕГДА снимает tap и останавливает движок
+///    (teardownOnEngineQueue) — повторный старт на том же экземпляре не
+///    падает на «tap уже установлен».
+/// 3. Старт асинхронный (completion на главном): подъём движка не блокирует
+///    главный поток (наблюдали заморозку UI на ~11 с при смене устройства).
 public final class AudioService {
     public weak var levelDelegate: AudioLevelDelegate?
 
@@ -64,11 +114,12 @@ public final class AudioService {
     /// подписался, запись всё равно останавливается, а сэмплы отбрасываются.
     public var onRecordingLimitReached: (([Int16]) -> Void)?
 
-    private let engine = AVAudioEngine()
+    private let engine: AudioEngineLike
     private let targetFormat: AVAudioFormat
     private var converter: AVAudioConverter?
     private var collectedSamples: [Int16] = []
     private var isRecording = false
+    private var tapInstalled = false
     /// Жёсткий лимит: 60.0 c, 960 000 сэмплов. Ни при каких условиях запись не
     /// может превысить эти значения (см. `process` и `scheduleLimitStop`).
     private var limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
@@ -83,8 +134,17 @@ public final class AudioService {
     /// показывают, пошёл ли реально звук в движок после старта.
     private var didLogFirstBuffer = false
 
-    public init(logLevel: String = "info") {
+    /// Серийная очередь ВСЕХ операций движка: installTap/removeTap/prepare/start/
+    /// stop. Вне очереди их вызывать нельзя — это и есть гарантия отсутствия
+    /// гонок teardown↔start и блокировок главного потока.
+    private let engineQueue = DispatchQueue(label: "dictation.audio.engine", qos: .userInitiated)
+    /// Фоновая очередь движка или главная — определяется движком, не потоком
+    /// вызова. Используется только для диагностики.
+    private var isDebug: Bool { logLevel.lowercased() == "debug" }
+
+    public init(logLevel: String = "info", engine: AudioEngineLike? = nil) {
         self.logLevel = logLevel
+        self.engine = engine ?? AVAudioEngine()
         // Формат, в который пересэмплируем всё аудио: 16 кГц, моно, Float32.
         // Данный init гарантированно валиден на macOS 12+.
         // swiftlint:disable:next force_unwrapping
@@ -96,22 +156,48 @@ public final class AudioService {
         )!
     }
 
-    /// Начинает запись. Бросает ошибку при недоступности микрофона.
-    public func start() throws {
+    // MARK: - Старт
+
+    /// Начинает запись. Асинхронно: подъём движка идёт на фоновой очереди
+    /// (`engineQueue`), completion вызывается на главном потоке. При недоступности
+    /// микрофона или сбое движка — `.failure` (движок при этом разобран и готов
+    /// к повторному старту, см. `startOnEngineQueue`).
+    public func start(completion: @escaping (Result<Void, Error>) -> Void) {
+        engineQueue.async { [weak self] in
+            guard let self = self else {
+                DispatchQueue.main.async { completion(.failure(AudioServiceError.engineGone)) }
+                return
+            }
+            let result = self.startOnEngineQueue()
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
+    /// Весь подъём движка — строго на engineQueue.
+    private func startOnEngineQueue() -> Result<Void, Error> {
+        // Новый сеанс: чистые буферы, чистый лимит (после принудительной
+        // остановки или аварийной ветки).
         collectedSamples = []
         rmsHistory = []
         didLogFirstBuffer = false
-        // Новый сеанс — чистый лимит (после предыдущей принудительной остановки).
         limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
         recordStartTime = CFAbsoluteTimeGetCurrent()
         lock.lock()
         limitStopScheduled = false
         lock.unlock()
-        let input = engine.inputNode
+
+        // Безопасный старт с нуля: если предыдущая сессия оставила движок с
+        // установленным tap (аварийная ветка), снимаем его ДО installTap —
+        // повторный installTap на тот же bus поднимает NSException (краш).
+        if isTapInstalled {
+            teardownOnEngineQueue()
+        }
+
+        let input = engine.makeInputNode()
         let hwFormat = input.outputFormat(forBus: 0)
         guard let converter = AVAudioConverter(from: hwFormat, to: targetFormat) else {
             Logger.log("record engine: AVAudioConverter init failed (hw=\(Int(hwFormat.sampleRate)) Hz -> target=\(Int(targetFormat.sampleRate)) Hz)", level: "error")
-            throw AudioServiceError.unsupportedFormat
+            return .failure(AudioServiceError.unsupportedFormat)
         }
         self.converter = converter
 
@@ -123,9 +209,8 @@ public final class AudioService {
         Logger.log("record start: sampleRate=\(Int(targetFormat.sampleRate)) Hz, channels=\(targetFormat.channelCount), hwFormat=\(Int(hwFormat.sampleRate)) Hz", level: "info")
 
         // Хлебные крошки перед каждым шагом старта движка: если следующий вызов
-        // AVFoundation крэшнет (известный класс — SetOutputFormat внутри
-        // installTap/prepare/start), последняя строка лога укажет точное место.
-        if logLevel.lowercased() == "debug" {
+        // AVFoundation крэшнет, последняя строка лога укажет точное место.
+        if isDebug {
             let inFmt = input.outputFormat(forBus: 0)
             Logger.log(String(
                 format: "record engine: inputNode format=%.0f Hz, %d ch, commonFormat=%@, interleaved=%@; target=%.0f Hz, %d ch",
@@ -137,52 +222,97 @@ public final class AudioService {
         }
 
         // Tap вешается на аппаратный формат; конвертация выполняется в блоке.
-        input.installTap(
-            onBus: 0,
-            bufferSize: 4096,
-            format: hwFormat
-        ) { [weak self] buffer, _ in
-            self?.process(buffer)
+        var failure = guardedEngineCall {
+            input.installTap(
+                onBus: 0,
+                bufferSize: 4096,
+                format: hwFormat
+            ) { [weak self] buffer, _ in
+                self?.process(buffer)
+            }
         }
-        if logLevel.lowercased() == "debug" { Logger.log("record engine: tap installed, engine.prepare()…", level: "debug") }
-        engine.prepare()
-        if logLevel.lowercased() == "debug" { Logger.log("record engine: prepared, engine.start()…", level: "debug") }
-        try engine.start()
-        isRecording = true
-        if logLevel.lowercased() == "debug" { Logger.log("record engine: started OK", level: "debug") }
+        if failure == nil {
+            setTapInstalled(true)
+        }
+        if failure == nil, isDebug {
+            Logger.log("record engine: tap installed, engine.prepare()…", level: "debug")
+        }
+        if failure == nil {
+            failure = guardedEngineCall {
+                self.engine.prepare()
+            }
+        }
+        if failure == nil, isDebug {
+            Logger.log("record engine: prepared, engine.start()…", level: "debug")
+        }
+        // isRecording включается ДО engine.start(): первый буфер, пришедший
+        // сразу после старта аудио-потока, не должен быть отброшен.
+        if failure == nil {
+            setRecording(true)
+            failure = guardedEngineCall {
+                try self.engine.start()
+            }
+        }
+        if let failure = failure {
+            // Терминальная ветка: движок обязан быть разобран (tap снят, движок
+            // остановлен, буферы очищены) — иначе следующий Alt+Alt упадёт на
+            // повторном installTap на занятом bus.
+            setRecording(false)
+            teardownOnEngineQueue()
+            Logger.log("record engine: start failed: \(failure.localizedDescription)", level: "error")
+            return .failure(failure)
+        }
+        if isDebug {
+            Logger.log("record engine: started OK", level: "debug")
+        }
+        return .success(())
     }
 
+    // MARK: - Стоп / отмена
+
     /// Останавливает запись и возвращает собранные сэмплы (Int16, 16кГц).
+    /// Снимок сэмплов — синхронный (как и раньше); teardown движка уходит на
+    /// engineQueue, чтобы не блокировать главный поток.
     public func stop() -> [Int16] {
-        guard isRecording else { return [] }
+        lock.lock()
+        guard isRecording else {
+            lock.unlock()
+            return []
+        }
         let duration = CFAbsoluteTimeGetCurrent() - recordStartTime
         isRecording = false
-        // Хлебная крошка перед teardown движка (removeTap/engine.stop могут
-        // крэшнуть при гонке с аудиопотоком — последний лог укажет, что стоп пошёл).
-        if logLevel.lowercased() == "debug" {
-            Logger.log("record stop: tearing engine down (collected=\(collectedSamples.count) samples, duration=\(String(format: "%.2f", duration)) s)", level: "debug")
-        }
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-        converter = nil
         let samples = collectedSamples
-        logRecordingFinale(samples: samples, duration: duration)
+        collectedSamples = []
+        let rms = rmsHistory
+        rmsHistory = []
+        lock.unlock()
+
+        engineQueue.async { [weak self] in
+            self?.teardownOnEngineQueue()
+        }
+        logRecordingFinale(samples: samples, duration: duration, rmsHistory: rms)
         return samples
     }
 
     /// Отменяет запись, отбрасывая данные.
     public func cancel() {
-        guard isRecording else { return }
+        lock.lock()
+        guard isRecording else {
+            lock.unlock()
+            return
+        }
         let duration = CFAbsoluteTimeGetCurrent() - recordStartTime
         let frames = collectedSamples.count
         isRecording = false
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-        converter = nil
         collectedSamples = []
+        lock.unlock()
+
+        engineQueue.async { [weak self] in
+            self?.teardownOnEngineQueue()
+        }
         // Отмена тоже завершает запись — без отправки в STT; длительность и
         // объём помогают отличать «пустую» отмену от отмены после реальной речи.
-        if logLevel.lowercased() == "debug" {
+        if isDebug {
             Logger.log(String(
                 format: "record cancel: duration=%.2f s, frames=%d, bytes=%d",
                 duration, frames, frames * 2
@@ -191,6 +321,69 @@ public final class AudioService {
     }
 
     // MARK: - Private
+
+    /// Выполняет блок операций движка под ObjC-шлюзом: NSException AVFAudio
+    /// превращается в NSError, Swift-ошибка (engine.start() throws) пробрасывается
+    /// как есть. nil — операция прошла без ошибок.
+    internal func guardedEngineCall(_ body: @escaping () throws -> Void) -> Error? {
+        final class ErrorBox {
+            var captured: Error?
+        }
+        let box = ErrorBox()
+        let nsError = DictationRunAudioEngineBlockGuarded {
+            do {
+                try body()
+            } catch {
+                box.captured = error
+            }
+        }
+        return nsError ?? box.captured
+    }
+
+    /// Разборка движка — строго на engineQueue. Идемпотентна: снять не
+    /// установленный tap / остановить не запущенный движок безопасно (все
+    /// вызовы под шлюзом NSException).
+    private func teardownOnEngineQueue() {
+        if isTapInstalled {
+            let _ = guardedEngineCall {
+                self.engine.makeInputNode().removeTap(onBus: 0)
+            }
+            setTapInstalled(false)
+        }
+        let _ = guardedEngineCall {
+            self.engine.stop()
+        }
+        setRecording(false)
+        converter = nil
+        lock.lock()
+        collectedSamples = []
+        rmsHistory = []
+        lock.unlock()
+    }
+
+    private func setRecording(_ value: Bool) {
+        lock.lock()
+        isRecording = value
+        lock.unlock()
+    }
+
+    private var isRecordingLocked: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return isRecording
+    }
+
+    private func setTapInstalled(_ value: Bool) {
+        lock.lock()
+        tapInstalled = value
+        lock.unlock()
+    }
+
+    private var isTapInstalled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return tapInstalled
+    }
 
     /// Реальный объём выхода при ресемплинге пропорционален частотам:
     /// `inputFrames × outputRate / inputRate` + запас (¼), чтобы конвертер
@@ -275,6 +468,15 @@ public final class AudioService {
         }
         let rms = frameLength > 0 ? sqrt(sum / Float(frameLength)) : 0
         levelDelegate?.audioLevelChanged(rms: rms)
+
+        // Вся общая память (isRecording, collectedSamples, rmsHistory, лимит) —
+        // под блокировкой: stop()/cancel() снимают снимок на главном потоке
+        // синхронно с накоплением здесь.
+        lock.lock()
+        guard isRecording else {
+            lock.unlock()
+            return
+        }
         // История RMS по буферам — для сводных метрик уровня в конце записи.
         // 60 c при буфере 4096 фреймов и 48 кГц ≈ 700 значений — памятью не жертвуем.
         rmsHistory.append(rms)
@@ -283,7 +485,7 @@ public final class AudioService {
         // (длительность куска и его энергия; при сломанном микрофоне rms ≈ 0).
         if !didLogFirstBuffer {
             didLogFirstBuffer = true
-            if logLevel.lowercased() == "debug" {
+            if isDebug {
                 Logger.log(String(
                     format: "record first buffer: inFrames=%d (%.3f s @ %.0f Hz), outFrames=%d, rms=%.4f (%.1f dBFS)",
                     buffer.frameLength, Double(buffer.frameLength) / buffer.format.sampleRate,
@@ -313,7 +515,9 @@ public final class AudioService {
         // Жёсткий лимит по времени (60 c) и/или по объёму буфера — принудительный
         // стоп тем же путём, которым запись останавливается пользователем.
         let elapsed = CFAbsoluteTimeGetCurrent() - recordStartTime
-        if limit.shouldStop(elapsed: elapsed, totalSamples: collectedSamples.count) {
+        let shouldStop = limit.shouldStop(elapsed: elapsed, totalSamples: collectedSamples.count)
+        lock.unlock()
+        if shouldStop {
             scheduleLimitStop()
         }
     }
@@ -321,7 +525,7 @@ public final class AudioService {
     /// Диагностика молчаливого отбрасывания входного буфера в `process`
     /// (debug-only, поведение не меняет): причина + размер куска.
     private func logDroppedBuffer(reason: String, frames: AVAudioFrameCount) {
-        guard logLevel.lowercased() == "debug" else { return }
+        guard isDebug else { return }
         Logger.log("record drop buffer: \(reason) frames=\(frames)", level: "debug")
     }
 
@@ -336,7 +540,8 @@ public final class AudioService {
 
         let samples = collectedSamples
         // removeTap/engine.stop нельзя вызывать из колбэка tap (риск дедлока
-        // и повторного входа) — переносим на главную очередь, как обычный stop().
+        // и повторного входа) — переносим на главную очередь, откуда teardown
+        // уйдёт на engineQueue, как обычный stop().
         DispatchQueue.main.async { [weak self] in
             self?.performLimitStop(samples: samples)
         }
@@ -345,18 +550,25 @@ public final class AudioService {
     /// Тех же путь, что и `stop()`: снятие tap, остановка движка, «drain»
     /// конвертера, доставка собранных сэмплов через колбэк финализации.
     private func performLimitStop(samples: [Int16]) {
+        lock.lock()
         // Пользователь уже остановил запись — не дублируем финализацию.
-        guard isRecording else { return }
+        guard isRecording else {
+            lock.unlock()
+            return
+        }
         let duration = CFAbsoluteTimeGetCurrent() - recordStartTime
         isRecording = false
-        if logLevel.lowercased() == "debug" {
+        let rms = rmsHistory
+        rmsHistory = []
+        lock.unlock()
+
+        if isDebug {
             Logger.log("record limit stop: tearing engine down (samples=\(samples.count))", level: "debug")
         }
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-        converter = nil
-        collectedSamples = []
-        logRecordingFinale(samples: samples, duration: duration)
+        engineQueue.async { [weak self] in
+            self?.teardownOnEngineQueue()
+        }
+        logRecordingFinale(samples: samples, duration: duration, rmsHistory: rms)
         onRecordingLimitReached?(samples)
     }
 
@@ -364,13 +576,13 @@ public final class AudioService {
     /// лимиту: lifecycle (всегда, `info`) + метрологию уровня (только при
     /// `logLevel == "debug"`). Ошибок не бросает: логирование не должно ронять
     /// запись.
-    private func logRecordingFinale(samples: [Int16], duration: TimeInterval) {
+    private func logRecordingFinale(samples: [Int16], duration: TimeInterval, rmsHistory: [Float]) {
         Logger.log(String(
             format: "record stop: duration=%.2f s, sampleRate=%d, channels=%d, frames=%d, bytes=%d",
             duration, 16000, 1, samples.count, samples.count * 2
         ), level: "info")
 
-        guard logLevel.lowercased() == "debug" else { return }
+        guard isDebug else { return }
         let m = AudioMetrics.summarize(rmsValues: rmsHistory)
         Logger.log(String(
             format: "record metering: rms min=%.4f (%.1f dBFS), avg=%.4f (%.1f dBFS), max=%.4f (%.1f dBFS), nearSilence=%@",
@@ -384,9 +596,12 @@ public final class AudioService {
 
 public enum AudioServiceError: Error, LocalizedError {
     case unsupportedFormat
+    /// Экземпляр AudioService уничтожен до завершения старта (в проде недостижимо).
+    case engineGone
     public var errorDescription: String? {
         switch self {
         case .unsupportedFormat: return "Неподдерживаемый аудиоформат"
+        case .engineGone: return "Аудио-сервис недоступен"
         }
     }
 }

@@ -12,9 +12,15 @@ let package = Package(
         .executable(name: "dictatorctl", targets: ["dictatorctl"])
     ],
     targets: [
+        // ObjC-шлюз NSException AVFAudio: SPM 5.7 не допускает подмешивание
+        // ObjC в Swift-таргеты, поэтому шлюз живёт отдельным clang-таргетом.
+        .target(
+            name: "AudioEngineGuard",
+            publicHeadersPath: "include"
+        ),
         .target(
             name: "DictationCore",
-            dependencies: []
+            dependencies: ["AudioEngineGuard"]
         ),
         .executableTarget(
             name: "DictatorAgent",
@@ -30,7 +36,7 @@ let package = Package(
         // кодом при первом упавшем тесте: `swift run DictationTests`.
         .executableTarget(
             name: "DictationCoreTests",
-            dependencies: ["DictationCore"],
+            dependencies: ["DictationCore", "AudioEngineGuard"],
             path: "Tests/DictationCoreTests"
         )
     ]

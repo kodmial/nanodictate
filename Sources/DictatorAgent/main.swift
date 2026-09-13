@@ -34,6 +34,29 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     /// токенов и не мешает новому циклу.
     private var processingSession = 0
 
+    /// Старт записи «в полёте» (движок поднимается асинхронно на фоновой
+    /// очереди AudioService): повторный Alt+Alt в это окно игнорируется, а не
+    /// дублирует подъём движка.
+    private var isStarting = false
+    /// Сессионный токен старта: инкрементируется при каждом новом старте и при
+    /// срабатывании сторожа подъёма — аннулирует устаревшие completion-колбэки.
+    private var startSession = 0
+    /// Сессионный токен запроса доступа к микрофону (TCC-диалог).
+    private var micRequestSession = 0
+    /// Системный диалог TCC уже висит — повторный Alt+Alt не открывает второй.
+    private var micPermissionRequestInFlight = false
+
+    /// Жёсткий сторож подъёма аудиодвижка: `engine.start()` умеет блокироваться
+    /// (смена устройства, инициализация после TCC-гранта). Старт идёт на фоновой
+    /// очереди AudioService — главный поток не замирает, но без сторожа зависшая
+    /// очередь оставила бы оверлей «Записываю…» навсегда. По таймауту — терминальная
+    /// ошибка (оверлей гаснет, следующий Alt+Alt работает).
+    private static let recordStartTimeout: TimeInterval = 10
+    /// Сторож системного запроса доступа к микрофону: у фонового агента без
+    /// бандла окно TCC может не отобразиться, и колбэк `requestAccess` не придёт —
+    /// сторож даёт терминальную ошибку вместо вечного ожидания.
+    private static let micRequestTimeout: TimeInterval = 10
+
     /// Retain-свойство для таймера автоподхвата права Accessibility
     /// (Timer.scheduledTimer с repeats:true не должен попадать под ARC/GC).
     private var accessibilityPollTimer: Timer?
@@ -165,6 +188,14 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     /// Не запрашиваем доступ принудительно из-под launchd (окно запроса может
     /// не отобразиться): только проверяем статус, а для .notDetermined пробуем
     /// запросить — и при granted начинаем запись.
+    /// Три защиты от «просит разрешение → вылетает сообщение → зависает»:
+    /// 1) повторный Alt+Alt, пока системный диалог TCC уже висит, не открывает
+    ///    второй запрос (micPermissionRequestInFlight);
+    /// 2) сторож micRequestTimeout: если колбэк requestAccess не пришёл (окно
+    ///    у фонового агента без бандла могло не отобразиться) — терминальная
+    ///    ошибка в оверлее вместо вечного ожидания; следующий Alt+Alt снова
+    ///    попробует запросить доступ;
+    /// 3) ветки .denied/.restricted дают понятное сообщение и НЕ трогают движок.
     private func requestMicrophoneAndStart() {
         let status = AVCaptureDevice.authorizationStatus(for: .audio)
         // Каждый запрос доступа к микрофону фиксируется в логе: сам факт проверки,
@@ -174,49 +205,102 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         case .authorized:
             startRecording()
         case .denied, .restricted:
-            showMicrophoneError()
+            showMicrophoneError("Разрешите доступ к микрофону: System Settings → Конфиденциальность")
         case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .audio) { granted in
+            guard !micPermissionRequestInFlight else {
+                Logger.log("mic permission request already in flight — ignoring Alt+Alt", level: "info")
+                return
+            }
+            micPermissionRequestInFlight = true
+            micRequestSession += 1
+            let session = micRequestSession
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.micRequestTimeout) { [weak self] in
+                guard let self = self, self.micRequestSession == session else { return }
+                Logger.log("mic permission request timed out after \(Int(Self.micRequestTimeout)) s", level: "error")
+                self.micPermissionRequestInFlight = false
+                self.showMicrophoneError("Запрос доступа к микрофону не обработан: System Settings → Конфиденциальность")
+            }
+            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
                 DispatchQueue.main.async {
+                    guard let self = self, self.micRequestSession == session else { return }
+                    self.micPermissionRequestInFlight = false
                     Logger.log("mic permission request result: \(granted ? "granted" : "denied")", level: "info")
-                    granted ? self.startRecording() : self.showMicrophoneError()
+                    granted ? self.startRecording()
+                        : self.showMicrophoneError("Разрешите доступ к микрофону: System Settings → Конфиденциальность")
                 }
             }
         @unknown default:
-            showMicrophoneError()
+            showMicrophoneError("Разрешите доступ к микрофону: System Settings → Конфиденциальность")
         }
     }
 
     /// Логика старта записи: двигает агента в состояние .recording.
     /// Панель показывается здесь и держится ВЕСЬ цикл записи/распознавания;
     /// hide() вызывается только из терминальных точек (стоп/ошибка/вставка).
+    /// Подъём движка асинхронный (AudioService.start(completion:) на фоновой
+    /// очереди, completion на главном) + сторож recordStartTimeout: зависший
+    /// движок даёт терминальную ошибку, а не вечно висящий оверлей.
     private func startRecording() {
+        guard !isStarting else {
+            Logger.log("record start ignored: already starting", level: "info")
+            return
+        }
         sounds.playStart()
         overlay.show()
         // Фаза «запись»: микрофон + таймер, время старта фиксируется здесь.
         overlay.setRecordingPhase()
         overlay.setStatus("Записываю…")
         Logger.log("record start")
-        if isDebug {
-            Logger.log("record start: calling audio.start()", level: "debug")
+
+        isStarting = true
+        startSession += 1
+        let session = startSession
+
+        // Сторож подъёма движка: если за recordStartTimeout движок не стартовал
+        // — терминальная ошибка (оверлей гаснет, следующий Alt+Alt работает).
+        // startSession инкрементируется здесь же: отложенный completion старта
+        // (если движок всё же поднялся позже) увидит расхождение токенов и
+        // снимет движок через audio.cancel() — «глухой» записи не остаётся.
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.recordStartTimeout) { [weak self] in
+            guard let self = self, self.startSession == session, self.isStarting else { return }
+            Logger.log("record start timed out after \(Int(Self.recordStartTimeout)) s", level: "error")
+            self.startSession += 1
+            self.isStarting = false
+            self.audio.cancel()
+            self.showMicrophoneError("Микрофон не отвечает")
         }
 
-        do {
-            try audio.start()
-            state = .recording
-            if isDebug {
-                Logger.log("record started: state = .recording", level: "debug")
+        audio.start { [weak self] result in
+            guard let self = self else { return }
+            guard self.startSession == session else {
+                // Старт завершился позже сторожа (или начался новый цикл).
+                // Если движок успели поднять — не оставляем запись висеть.
+                if case .success = result {
+                    self.audio.cancel()
+                }
+                return
             }
-        } catch {
-            showMicrophoneError()
-            Logger.log("microphone unavailable: \(error.localizedDescription)", level: "error")
+            self.isStarting = false
+            switch result {
+            case .success:
+                self.state = .recording
+                if self.isDebug {
+                    Logger.log("record started: state = .recording", level: "debug")
+                }
+            case .failure(let error):
+                Logger.log("microphone unavailable: \(error.localizedDescription)", level: "error")
+                self.showMicrophoneError("Не удалось включить микрофон")
+            }
         }
     }
 
-    private func showMicrophoneError() {
-        overlay.setStatus("Нет доступа к микрофону (Настройки → Конфиденциальность)")
-        sounds.playCancel()
-        hideAfter(2.0, reason: "mic denied")
+    /// Терминальная ошибка микрофона: понятное сообщение в оверлее + звук
+    /// ошибки (Basso). Одна точка hide — оверлей гаснет, state уже .idle,
+    /// следующий Alt+Alt начинает новый цикл.
+    private func showMicrophoneError(_ message: String) {
+        overlay.setStatus(message)
+        sounds.playError()
+        hideAfter(2.0, reason: "mic failed")
     }
 
     private func sendRecording() {
