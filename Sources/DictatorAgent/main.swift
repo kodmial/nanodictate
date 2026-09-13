@@ -180,6 +180,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     private func startRecording() {
         sounds.playStart()
         overlay.show()
+        // Фаза «запись»: микрофон + таймер, время старта фиксируется здесь.
+        overlay.setRecordingPhase()
         overlay.setStatus("Записываю…")
         Logger.log("record start")
 
@@ -208,6 +210,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     /// по лимиту длительности (см. `onRecordingLimitReached`).
     private func processSamples(_ samples: [Int16]) {
         state = .transcribing
+        // Фаза «обработка»: вместо иконки — анимация точек, пока идёт STT.
+        overlay.setProcessingPhase()
         overlay.setStatus("Распознаю…")
         sounds.playEnd()
         // Длительность по фактически собранным сэмплам (16 кГц моно) —
@@ -258,6 +262,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
 
     private func completeInsertion(_ text: String) {
         Inserter.insert(text: text)
+        overlay.resetPhase()
         overlay.setStatus("Завершаю…")
         hideAfter(0.8, reason: "insert done")
         state = .idle
@@ -274,6 +279,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     private func handleCancel() {
         guard state == .recording else { return }
         audio.cancel()
+        overlay.resetPhase()
         overlay.setStatus("Отменено")
         sounds.playCancel()
         hideAfter(0.8, reason: "cancelled")

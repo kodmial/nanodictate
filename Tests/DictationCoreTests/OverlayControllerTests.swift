@@ -192,4 +192,70 @@ final class OverlayControllerTests: XCTestCase {
         state.updateLevel(0.42)
         XCTAssertEqual(state.level, 0.42, accuracy: 0.001)
     }
+
+    // MARK: - Таймер записи (форматирование + фазы)
+
+    @objc func testTimeFormat_PadsSecondsAndMinutes() {
+        // Требование: «0:00» / «0:07» — минуты без паддинга, секунды с ведущим нулём.
+        XCTAssertEqual(OverlayTimeFormat.format(0), "0:00")
+        XCTAssertEqual(OverlayTimeFormat.format(7), "0:07")
+        XCTAssertEqual(OverlayTimeFormat.format(65), "1:05")
+        XCTAssertEqual(OverlayTimeFormat.format(599), "9:59")
+        // Дробные секунды обрезаются вниз, как тикает таймер.
+        XCTAssertEqual(OverlayTimeFormat.format(7.4), "0:07")
+        XCTAssertEqual(OverlayTimeFormat.format(7.9), "0:07")
+    }
+
+    @objc func testTimeFormat_ClampsNegative() {
+        XCTAssertEqual(OverlayTimeFormat.format(-3), "0:00")
+    }
+
+    @objc func testSetRecordingPhase_StoresStartAndSetsRecording() {
+        let controller = OverlayController()
+        // Старт-тайм передаётся извне (вью считает секунды именно от него —
+        // не от локального «когда успели»).
+        let start = Date().addingTimeInterval(-65)
+        controller.setRecordingPhase(startedAt: start)
+        XCTAssertEqual(controller.testState?.phase, .recording)
+        XCTAssertEqual(controller.testState?.recordingStart, start)
+    }
+
+    @objc func testSetProcessingPhase_SwitchesFromRecording() {
+        let controller = OverlayController()
+        controller.setRecordingPhase()
+        controller.setProcessingPhase()
+        XCTAssertEqual(controller.testState?.phase, .processing)
+    }
+
+    @objc func testResetPhase_ClearsRecordingState() {
+        let controller = OverlayController()
+        controller.setRecordingPhase()
+        XCTAssertEqual(controller.testState?.phase, .recording)
+        controller.resetPhase()
+        XCTAssertEqual(controller.testState?.phase, .idle)
+        XCTAssertNil(controller.testState?.recordingStart)
+    }
+
+    @objc func testHide_ResetsPhase() {
+        let controller = OverlayController()
+        controller.show(at: CGPoint(x: 400, y: 400))
+        controller.setRecordingPhase()
+        XCTAssertEqual(controller.testState?.phase, .recording)
+        controller.hide()
+        XCTAssertEqual(controller.testState?.phase, .idle, "Скрытие сбрасывает фазу — таймер не живёт за кадром")
+        XCTAssertNil(controller.testState?.recordingStart)
+    }
+
+    @objc func testRecordingPhase_MakesPanelTaller() {
+        let controller = OverlayController()
+        controller.show(at: CGPoint(x: 700, y: 500))
+        let idleHeight = controller.testPanelFrame?.height ?? 0
+        controller.setRecordingPhase()
+        let recordingHeight = controller.testPanelFrame?.height ?? 0
+        XCTAssertTrue(
+            recordingHeight > idleHeight,
+            "При записи панель выше: под иконкой живёт таймер «0:07» (было \(idleHeight), стало \(recordingHeight))"
+        )
+        controller.hide()
+    }
 }
