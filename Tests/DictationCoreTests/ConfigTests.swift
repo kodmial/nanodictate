@@ -191,6 +191,42 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.baseURL, "https://x")
     }
 
+    // MARK: - Chunked flag (пошаговая диктовка)
+
+    @objc func testParseChunkedTrue() throws {
+        let content = """
+        base_url = "https://x"
+        chunked = true
+        language = "ru"
+        """
+        let config = try AppConfig.parse(content)
+        XCTAssertTrue(config.chunked)
+    }
+
+    @objc func testParseChunkedFalse() throws {
+        let content = """
+        base_url = "https://x"
+        chunked = false
+        """
+        let config = try AppConfig.parse(content)
+        XCTAssertFalse(config.chunked)
+    }
+
+    @objc func testParseChunkedDefaultsToFalse() throws {
+        let content = """
+        base_url = "https://x"
+        """
+        let config = try AppConfig.parse(content)
+        XCTAssertFalse(config.chunked)
+    }
+
+    @objc func testParseChunkedInvalidThrows() {
+        let content = """
+        chunked = "yes"
+        """
+        XCTAssertThrowsError(try AppConfig.parse(content)) { _ in }
+    }
+
     // MARK: - Defaults are correct
 
     @objc func testDefaults() {
@@ -204,6 +240,7 @@ final class ConfigTests: XCTestCase {
         XCTAssertTrue(d.soundsEnabled)
         XCTAssertEqual(d.logLevel, "info")
         XCTAssertEqual(d.language, "ru")
+        XCTAssertFalse(d.chunked)
     }
 
     // MARK: - Новые UX-ключи: providers / auto_failover / insert_method / review_before_insert

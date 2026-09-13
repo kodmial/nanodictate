@@ -25,13 +25,19 @@ public struct AppConfig: Equatable {
     public var logLevel: String
     public var language: String
 
-    // MARK: Быстрые UX-победы
+// MARK: Быстрые UX-победы
 
     /// Окно undo последней вставки (сек): двойной Alt в пределах этого окна
     /// после успешной вставки стирает вставленный текст (ключ `undo_max_interval`).
     public var undoMaxInterval: Double
     /// Играть ли звук отката вставки (ключ `undo_sound_enabled`).
     public var undoSoundEnabled: Bool
+
+    // MARK: Пошаговая (чанковая) диктовка
+
+    /// Пошаговая (чанковая) диктовка: сегменты → инкрементальная вставка →
+    /// финальный проход по всему WAV. OFF по умолчанию — ровно текущее поведение.
+    public var chunked: Bool
 
     // MARK: Провайдеры STT
 
@@ -96,8 +102,9 @@ public struct AppConfig: Equatable {
         soundsEnabled: true,
         logLevel: "info",
         language: "ru",
-        undoMaxInterval: 2.0,
+undoMaxInterval: 2.0,
         undoSoundEnabled: true,
+        chunked: false,
         activeProvider: "",
         providers: [],
         providersOrder: [],
@@ -231,8 +238,9 @@ public struct AppConfig: Equatable {
         var soundsEnabled: Bool = defaults.soundsEnabled
         var logLevel: String = defaults.logLevel
         var language: String = defaults.language
-        var undoMaxInterval: Double = defaults.undoMaxInterval
+var undoMaxInterval: Double = defaults.undoMaxInterval
         var undoSoundEnabled: Bool = defaults.undoSoundEnabled
+        var chunked: Bool = defaults.chunked
 
         var activeProvider: String = ""
         var providers: [Provider] = []
@@ -355,7 +363,7 @@ public struct AppConfig: Equatable {
                 logLevel = try parseString(valuePart, line: index + 1, rawLine: rawLine)
             case "language":
                 language = try parseString(valuePart, line: index + 1, rawLine: rawLine)
-            case "undo_max_interval":
+case "undo_max_interval":
                 undoMaxInterval = try parseDouble(valuePart, line: index + 1, rawLine: rawLine)
             case "undo_sound_enabled":
                 undoSoundEnabled = try parseBool(valuePart, line: index + 1, rawLine: rawLine)
@@ -375,6 +383,8 @@ public struct AppConfig: Equatable {
                 }
             case "review_before_insert":
                 reviewBeforeInsert = try parseBool(valuePart, line: index + 1, rawLine: rawLine)
+            case "chunked":
+                chunked = try parseBool(valuePart, line: index + 1, rawLine: rawLine)
             default:
                 // Unknown key — ignore
                 break
@@ -392,8 +402,9 @@ public struct AppConfig: Equatable {
             soundsEnabled: soundsEnabled,
             logLevel: logLevel,
             language: language,
-            undoMaxInterval: undoMaxInterval,
+undoMaxInterval: undoMaxInterval,
             undoSoundEnabled: undoSoundEnabled,
+            chunked: chunked,
             activeProvider: activeProvider,
             providers: providers,
             providersOrder: providersOrder,

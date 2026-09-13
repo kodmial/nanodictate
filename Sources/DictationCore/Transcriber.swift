@@ -195,7 +195,10 @@ public final class Transcriber {
     /// Transcribe WAV audio via a multipart/form-data POST to the transcription endpoint.
     /// On network failure, retries once (2 attempts total). HTTP and invalid-response
     /// errors are not retried.
-    public func transcribe(wav: Data, filename: String = "audio.wav") async throws -> TranscriptionResult {
+    /// - Parameter prompt: необязательный контекст для Whisper-совместимых API
+    ///   (поле `prompt` form-data): текст уже распознанных сегментов при пошаговой
+    ///   диктовке. По умолчанию nil — старый путь (одного запроса) не меняется.
+    public func transcribe(wav: Data, filename: String = "audio.wav", prompt: String? = nil) async throws -> TranscriptionResult {
         if logLevel.lowercased() == "debug" {
             // URL/модель/размер — без api_key/proxy_key и заголовков.
             Logger.log(String(
@@ -209,7 +212,7 @@ public final class Transcriber {
         }
 
         let boundary = "Boundary-\(UUID().uuidString)"
-        let body = Self.makeMultipartBody(wav: wav, filename: filename, model: model, language: language, boundary: boundary)
+        let body = Self.makeMultipartBody(wav: wav, filename: filename, model: model, language: language, prompt: prompt, boundary: boundary)
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -229,7 +232,7 @@ public final class Transcriber {
         // мгновенная («Нет интернета»), вместо зависшего оверлея на 120 с.
         if !(await networkChecker()) {
             Logger.log("STT not sent: no internet (preflight)", level: "error")
-            debugDump(request: request, wavByteCount: wav.count, filename: filename, recording: recording, response: nil)
+            debugDump(request: request, wavByteCount: wav.count, filename: filename, prompt: prompt, recording: recording, response: nil)
             throw TranscribeError.network(Self.noInternetMessage)
         }
 
@@ -242,7 +245,7 @@ public final class Transcriber {
                 let started = CFAbsoluteTimeGetCurrent()
                 let response = try await send(request: request)
                 let elapsed = CFAbsoluteTimeGetCurrent() - started
-                debugDump(request: request, wavByteCount: wav.count, filename: filename, recording: recording, response: response)
+                debugDump(request: request, wavByteCount: wav.count, filename: filename, prompt: prompt, recording: recording, response: response)
                 if logLevel.lowercased() == "debug" {
                     Logger.log(String(format: "STT response: HTTP %d in %.2f s, bodyBytes=%d", response.status, elapsed, response.body.count), level: "debug")
                 }
@@ -282,7 +285,7 @@ public final class Transcriber {
         // Все попытки упали на транспортном уровне — ответа так и нет.
         // В debug-дампе фиксируем и сам факт запроса (метод/URL/заголовки/поля),
         // чтобы было видно, что до HTTP дело не дошло; ошибки дампа не роняют.
-        debugDump(request: request, wavByteCount: wav.count, filename: filename, recording: recording, response: nil)
+        debugDump(request: request, wavByteCount: wav.count, filename: filename, prompt: prompt, recording: recording, response: nil)
         if let lastError = lastError {
             Logger.log("STT failed after 2 attempts: \(Self.describe(lastError))", level: "error")
             throw lastError
@@ -339,7 +342,7 @@ public final class Transcriber {
     /// (все попытки упали на транспортном уровне до HTTP), в секции ответа
     /// пишется `(no response — transport error)`. Поведение запроса/ответа не
     /// меняет; ошибок не бросает.
-    private func debugDump(request: URLRequest, wavByteCount: Int, filename: String, recording: DebugDump.RecordingInfo?, response: (status: Int, body: Data)?) {
+    private func debugDump(request: URLRequest, wavByteCount: Int, filename: String, prompt: String?, recording: DebugDump.RecordingInfo?, response: (status: Int, body: Data)?) {
         guard logLevel.lowercased() == "debug" else { return }
 
         var headers: [(name: String, value: String)] = []
@@ -350,6 +353,9 @@ public final class Transcriber {
         var fields: [(name: String, value: String)] = [(name: "model", value: model)]
         if !language.isEmpty {
             fields.append((name: "language", value: language))
+        }
+        if let prompt = prompt, !prompt.isEmpty {
+            fields.append((name: "prompt", value: String(prompt.prefix(80)) + (prompt.count > 80 ? "…" : "")))
         }
 
         let filePart = DebugDump.FilePart(
@@ -397,7 +403,7 @@ public final class Transcriber {
 
     // MARK: - Multipart body
 
-    private static func makeMultipartBody(wav: Data, filename: String, model: String, language: String, boundary: String) -> Data {
+    private static func makeMultipartBody(wav: Data, filename: String, model: String, language: String, prompt: String?, boundary: String) -> Data {
         var body = Data()
 
         func append(_ string: String) {
@@ -425,6 +431,15 @@ public final class Transcriber {
             append("Content-Disposition: form-data; name=\"language\"\r\n")
             append("\r\n")
             append(language)
+            append("\r\n")
+        }
+
+        // Field: prompt — контекст уже распознанных сегментов (пошаговая диктовка)
+        if let prompt = prompt, !prompt.isEmpty {
+            append("--\(boundary)\r\n")
+            append("Content-Disposition: form-data; name=\"prompt\"\r\n")
+            append("\r\n")
+            append(prompt)
             append("\r\n")
         }
 
