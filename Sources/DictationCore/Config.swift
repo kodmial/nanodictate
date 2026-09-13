@@ -1,5 +1,15 @@
 import Foundation
 
+// MARK: - InsertMethod
+
+/// Способ вставки распознанного текста (ключ конфига `insert_method`).
+public enum InsertMethod: String, Equatable {
+    /// Прямая эмуляция клавиатуры CGEvent (поведение по умолчанию).
+    case cgevent = "cgevent"
+    /// Через буфер обмена + Cmd+V (прежний буфер восстанавливается).
+    case clipboard = "clipboard"
+}
+
 // MARK: - AppConfig
 
 public struct AppConfig: Equatable {
@@ -34,6 +44,45 @@ public struct AppConfig: Equatable {
     /// Имена секций провайдеров (id) в порядке появления.
     public var providerNames: [String] { providers.map { $0.id } }
 
+    // MARK: UX-опции (средние улучшения)
+
+    /// Явный список провайдеров в порядке failover (топ-уровневый ключ
+    /// `providers = ["groq", "gigaam"]`). Пусто — порядок секций `[providers.X]`.
+    public var providersOrder: [String]
+
+    /// Автоматический failover на следующий провайдер при сетевой/серверной
+    /// ошибке основного (ключ `auto_failover`; дефолт false — прод-поведение).
+    public var autoFailover: Bool
+
+    /// Способ вставки распознанного текста (ключ `insert_method`; дефолт cgevent).
+    public var insertMethod: InsertMethod
+
+    /// Ревью перед вставкой: показать текст в stdout и ждать Enter/Esc
+    /// (ключ `review_before_insert`; дефолт false — прод-поведение).
+    public var reviewBeforeInsert: Bool
+
+    // MARK: Failover-порядок
+
+    /// Имена провайдеров в порядке failover: явный список `providers` из конфига,
+    /// либо порядок появления секций `[providers.X]`.
+    public var failoverOrderNames: [String] {
+        providersOrder.isEmpty ? providerNames : providersOrder
+    }
+
+    /// Провайдеры для failover в порядке очереди, без уже вызванного (`failedID`).
+    /// Дубли в списке схлопываются, неизвестные имена пропускаются.
+    public func failoverProviders(excluding failedID: String?) -> [Provider] {
+        var seen = Set<String>()
+        var result: [Provider] = []
+        for name in failoverOrderNames {
+            guard let provider = providers.first(where: { $0.id == name }),
+                  seen.insert(provider.id).inserted else { continue }
+            if provider.id == failedID { continue }
+            result.append(provider)
+        }
+        return result
+    }
+
     // MARK: Defaults
 
     public static let defaults = AppConfig(
@@ -50,7 +99,11 @@ public struct AppConfig: Equatable {
         undoMaxInterval: 2.0,
         undoSoundEnabled: true,
         activeProvider: "",
-        providers: []
+        providers: [],
+        providersOrder: [],
+        autoFailover: false,
+        insertMethod: .cgevent,
+        reviewBeforeInsert: false
     )
 
     // MARK: Public API
@@ -109,6 +162,7 @@ public struct AppConfig: Equatable {
 
     public enum AppConfigError: Error, CustomStringConvertible {
         case invalidLine(Int, String)
+        case invalidValue(String, String, Int)
         case cannotReadKeyFile(String, Error?)
         /// Две секции с одним именем: `[providers.groq]` дважды.
         case duplicateProvider(String)
@@ -122,6 +176,8 @@ public struct AppConfig: Equatable {
             switch self {
             case .invalidLine(let line, let text):
                 return "Invalid config at line \(line): \(text)"
+            case .invalidValue(let key, let value, let line):
+                return "Invalid value for key '\(key)' at line \(line): '\(value)'"
             case .cannotReadKeyFile(let path, let underlying):
                 let msg = underlying?.localizedDescription ?? "unknown error"
                 return "Cannot read API key file '\(path)': \(msg)"
@@ -180,6 +236,13 @@ public struct AppConfig: Equatable {
 
         var activeProvider: String = ""
         var providers: [Provider] = []
+
+        // Новые UX-опции (средние улучшения): дефолт = прод-поведение.
+        var providersOrder: [String] = defaults.providersOrder
+        var autoFailover: Bool = defaults.autoFailover
+        var insertMethod: InsertMethod = defaults.insertMethod
+        var reviewBeforeInsert: Bool = defaults.reviewBeforeInsert
+
         // true, если на верхнем уровне встречен хотя бы один legacy-ключ STT
         // (base_url/model/api_key/api_key_file/proxy_key) — для детекта неоднозначности.
         var legacySTTKeysSeen = false
@@ -296,6 +359,22 @@ public struct AppConfig: Equatable {
                 undoMaxInterval = try parseDouble(valuePart, line: index + 1, rawLine: rawLine)
             case "undo_sound_enabled":
                 undoSoundEnabled = try parseBool(valuePart, line: index + 1, rawLine: rawLine)
+            case "providers":
+                providersOrder = try parseStringArray(valuePart, line: index + 1, rawLine: rawLine)
+            case "auto_failover":
+                autoFailover = try parseBool(valuePart, line: index + 1, rawLine: rawLine)
+            case "insert_method":
+                let method = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+                switch method {
+                case InsertMethod.cgevent.rawValue:
+                    insertMethod = .cgevent
+                case InsertMethod.clipboard.rawValue:
+                    insertMethod = .clipboard
+                default:
+                    throw AppConfigError.invalidValue(key, valuePart, index + 1)
+                }
+            case "review_before_insert":
+                reviewBeforeInsert = try parseBool(valuePart, line: index + 1, rawLine: rawLine)
             default:
                 // Unknown key — ignore
                 break
@@ -316,7 +395,11 @@ public struct AppConfig: Equatable {
             undoMaxInterval: undoMaxInterval,
             undoSoundEnabled: undoSoundEnabled,
             activeProvider: activeProvider,
-            providers: providers
+            providers: providers,
+            providersOrder: providersOrder,
+            autoFailover: autoFailover,
+            insertMethod: insertMethod,
+            reviewBeforeInsert: reviewBeforeInsert
         )
 
         if resolveProvider {
@@ -394,6 +477,25 @@ public struct AppConfig: Equatable {
         throw AppConfigError.invalidLine(line, rawLine)
     }
 
+    /// Разбор массива строк: `providers = ["groq", "gigaam"]`.
+    /// Допускает пробелы между элементами и после запятых.
+    private static func parseStringArray(_ raw: String, line: Int, rawLine: String) throws -> [String] {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("["), trimmed.hasSuffix("]") else {
+            throw AppConfigError.invalidLine(line, rawLine)
+        }
+        let inner = trimmed.dropFirst().dropLast()
+        let result = inner
+            .components(separatedBy: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        var values: [String] = []
+        for item in result {
+            values.append(try parseString(item, line: line, rawLine: rawLine))
+        }
+        return values
+    }
+
     // MARK: Key file reader
 
     private static func readAPIKey(from path: String) -> String {
@@ -423,41 +525,43 @@ public struct AppConfig: Equatable {
         return ""
     }
 
-    // MARK: Запись active_provider
+    // MARK: Запись ключей конфига (точечная правка, byte-preserving)
 
-    /// Точечная правка строки `active_provider = "…"` в конфиг-файле (путь по умолчанию).
-    /// Не сериализует весь файл — иначе потеряются комментарии. После атомарной
-    /// записи возвращает права 0600 (atomic-запись сбрасывает их на umask).
-    public static func writeActiveProvider(name: String) throws {
-        try writeActiveProvider(name: name, to: defaultPath())
-    }
-
-    public static func writeActiveProvider(name: String, to path: String) throws {
+    /// Точечная правка строки `key = value` в конфиг-файле.
+    /// Не сериализует весь файл — иначе потеряются комментарии. Строка ищется
+    /// на верхнем уровне (вне секций), значение в кавычках заменяется точечно
+    /// (хвостовой комментарий сохраняется), без кавычек — заменяется всё после
+    /// `=`. Если ключа нет — добавляется в конец. После атомарной записи
+    /// возвращает права 0600 (atomic-запись сбрасывает их на umask).
+    ///
+    /// `value` — готовая литеральная форма значения: `"gigaam"` для строк,
+    /// `true`/`false` для bool, `2` для чисел.
+    public static func writeKeyValue(key: String, value: String, to path: String) throws {
         let fm = FileManager.default
         var content = ""
         if fm.fileExists(atPath: path), let existing = try? String(contentsOfFile: path, encoding: .utf8) {
             content = existing
         }
 
-        let newValue = "\"\(name)\""
         var replaced = false
         let lines = content.components(separatedBy: "\n").map { line -> String in
             guard !replaced else { return line }
             let stripped = line.drop(while: { $0 == " " || $0 == "\t" })
             guard let eqIndex = stripped.firstIndex(of: "=") else { return line }
-            let key = stripped[stripped.startIndex..<eqIndex].trimmingCharacters(in: .whitespaces)
-            guard key == "active_provider" else { return line }
+            let lineKey = stripped[stripped.startIndex..<eqIndex].trimmingCharacters(in: .whitespaces)
+            guard lineKey == key else { return line }
             let valueStart = stripped.index(after: eqIndex)
             let newLine: String
             if let open = line[valueStart...].firstIndex(of: "\""),
                let close = line[line.index(after: open)...].firstIndex(of: "\"") {
-                // Точечная замена значения; хвост строки (например, комментарий) сохраняем.
+                // Точечная замена значения в кавычках; хвост строки (комментарий) сохраняем.
                 let prefix = String(line[..<open])
                 let suffix = String(line[line.index(after: close)...])
-                newLine = prefix + newValue + suffix
+                newLine = prefix + value + suffix
             } else {
+                // Значение без кавычек (bool/число): заменяем всё после "=".
                 let leading = String(line[..<valueStart])
-                newLine = leading.trimmingCharacters(in: .whitespaces) + " " + newValue
+                newLine = leading.trimmingCharacters(in: .whitespaces) + " " + value
             }
             replaced = true
             return newLine
@@ -469,7 +573,7 @@ public struct AppConfig: Equatable {
             if !result.isEmpty && !result.hasSuffix("\n") {
                 result += "\n"
             }
-            result += "active_provider = \(newValue)\n"
+            result += "\(key) = \(value)\n"
         }
 
         do {
@@ -478,5 +582,19 @@ public struct AppConfig: Equatable {
         } catch {
             throw AppConfigError.cannotWriteConfig(path, error)
         }
+    }
+
+    /// Точечная правка строки `active_provider = "…"` в конфиг-файле (путь по умолчанию).
+    public static func writeActiveProvider(name: String) throws {
+        try writeActiveProvider(name: name, to: defaultPath())
+    }
+
+    public static func writeActiveProvider(name: String, to path: String) throws {
+        try writeKeyValue(key: "active_provider", value: "\"\(name)\"", to: path)
+    }
+
+    /// Точечная правка `review_before_insert = true|false`.
+    public static func writeReviewBeforeInsert(value: Bool, to path: String? = nil) throws {
+        try writeKeyValue(key: "review_before_insert", value: value ? "true" : "false", to: path ?? defaultPath())
     }
 }

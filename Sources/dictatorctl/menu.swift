@@ -126,6 +126,7 @@ private func readMenuKey() -> MenuKey {
 private enum MenuAction {
     case quit, back, refresh, showProviders, showLogs, toggleAgent
     case switchProvider(String)
+    case showLastResult, retryTranscribe, toggleReview
 }
 
 private struct MenuEntry {
@@ -210,6 +211,9 @@ private func statusEntries(agentRunning: Bool) -> [MenuEntry] {
         case "1": key = .number(1); action = .showProviders
         case "2": key = .number(2); action = .showLogs
         case "3": key = .number(3); action = .toggleAgent
+        case "4": key = .number(4); action = .showLastResult
+        case "5": key = .number(5); action = .retryTranscribe
+        case "6": key = .number(6); action = .toggleReview
         default:  key = .quit;      action = .quit
         }
         return MenuEntry(key: key, label: item.label, action: action)
@@ -348,6 +352,42 @@ private func execute(_ action: MenuAction, _ view: inout MenuView) -> Bool {
         view.page = .providers
         view.cursor = 0
         view.providers = (try? ProviderStore.loadProviders()) ?? []
+    case .showLastResult:
+        view.notice = runSelfCommand("last")
+    case .retryTranscribe:
+        guard !view.providers.isEmpty else {
+            view.notice = "Нет провайдеров для retry (legacy-конфиг)"
+            break
+        }
+        let prompt = ansiBold + "Повторить распознавание последней записи провайдером:" + ansiReset
+            + "\n" + view.providers.enumerated()
+                .map { "  \($0.offset + 1)) \(AgentScreen.providerItemLine($0.element))" }
+                .joined(separator: "\n")
+            + "\n  (номер — выбор · другая клавиша — отмена)"
+        render(prompt)
+        guard case .number(let n) = readMenuKey(),
+              n >= 1, n <= view.providers.count else {
+            view.notice = "Отменено"
+            break
+        }
+        view.notice = runSelfCommand("retry \(view.providers[n - 1].id)")
+    case .toggleReview:
+        let current = (try? AppConfig.load(from: nil))?.reviewBeforeInsert ?? false
+        let newValue = !current
+        do {
+            try AppConfig.writeReviewBeforeInsert(value: newValue, to: AppConfig.defaultPath())
+            let kick = runProcess("/bin/launchctl", ["kickstart", "-k", "\(guiDomain)/com.dima.altdictation"])
+            let restart = kick.status == 0 ? "агент перезапущен" : "агент не перезапущен (запустите `dictatorctl start`)"
+            if newValue {
+                // Под launchd у агента нет терминала: гейт ревью пропускается
+                // (см. hasInteractiveStdin в main.swift) — предупреждаем заранее.
+                view.notice = "Ревью: вкл · \(restart) — ВНИМАНИЕ: под launchd без терминала ревью пропускается, текст вставляется сразу"
+            } else {
+                view.notice = "Ревью перед вставкой: выкл · \(restart)"
+            }
+        } catch {
+            view.notice = "Ошибка записи конфига: \(error)"
+        }
     }
     return false
 }
@@ -411,7 +451,7 @@ func runMenu() -> Int32 {
                 let maxTop = max(0, view.logLines.count - 20)
                 view.cursor = min(maxTop, view.cursor + 1)
             case .status:
-                if view.cursor < 3 { view.cursor += 1 }
+                if view.cursor < entries.count - 1 { view.cursor += 1 }
             case .providers:
                 if view.cursor < view.providers.count - 1 { view.cursor += 1 }
             }

@@ -73,16 +73,18 @@ final class OverlayLifecycleTests: XCTestCase {
         }
 
         // Прямые терминальные точки: каждая планирует hide ровно один раз.
-        let directTerminals = [
-            "showMicrophoneError",     // mic denied
-            "completeInsertion",       // insert done
-            "failTranscription",       // transcription failed
-            "handleCancel",            // cancelled
+        // completeInsertion — 2 точки вызова: ветка отмены ревью (review cancelled)
+        // и штатная (insert done); по-настоящему срабатывает ровно одна из них.
+        let directTerminals: [String: Int] = [
+            "showMicrophoneError": 1,   // mic denied
+            "completeInsertion": 2,     // insert done / review cancelled
+            "failTranscription": 1,     // transcription failed
+            "handleCancel": 1,          // cancelled
         ]
-        for name in directTerminals {
+        for (name, expected) in directTerminals {
             let body = Self.functionBody(named: name, in: source)
             let occurrences = body.components(separatedBy: "hideAfter(").count - 1
-            XCTAssertEqual(occurrences, 1, "Терминальная точка \(name) должна планировать hide ровно один раз")
+            XCTAssertEqual(occurrences, expected, "Терминальная точка \(name) должна планировать hide ровно \(expected) раз")
         }
 
         // Лимит: сам hide не планирует, а маршрутизируется в processSamples,

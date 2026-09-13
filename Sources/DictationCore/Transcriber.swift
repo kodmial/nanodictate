@@ -15,7 +15,7 @@ public struct TranscriptionResult {
 
 // MARK: - TranscribeError
 
-public enum TranscribeError: Error {
+public enum TranscribeError: Error, Equatable {
     case network(String)
     case http(Int, String) // HTTP code + body text (truncated to ~500 characters)
     case invalidResponse(String) // not JSON or missing "text" field

@@ -166,6 +166,9 @@ public enum AgentScreen {
             MenuItem(key: "1", label: "Провайдеры"),
             MenuItem(key: "2", label: "Логи"),
             MenuItem(key: "3", label: agentRunning ? "Остановить агента" : "Запустить агента"),
+            MenuItem(key: "4", label: "Показать последний текст распознавания"),
+            MenuItem(key: "5", label: "Повторить распознавание другим провайдером"),
+            MenuItem(key: "6", label: "Ревью перед вставкой (вкл/выкл)"),
             MenuItem(key: "q", label: "Выход"),
         ]
     }

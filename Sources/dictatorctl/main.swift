@@ -450,6 +450,71 @@ func cmdLogs() -> Int32 {
     return 0
 }
 
+// MARK: - Последний текст и retry другим провайдером
+
+/// `dictatorctl last`: последний распознанный текст из маркера LAST_TEXT в логе
+/// агента (пишется при каждой успешной вставке, включая retry).
+func cmdLast() -> Int32 {
+    let logURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/Dictation/agent.log")
+    guard let content = try? String(contentsOf: logURL, encoding: .utf8) else {
+        print("Лог агента не найден")
+        return 1
+    }
+    let marker = "LAST_TEXT: "
+    let matches = content.components(separatedBy: .newlines)
+        .compactMap { line -> String? in
+            guard let range = line.range(of: marker) else { return nil }
+            return String(line[range.upperBound...])
+        }
+    guard let last = matches.last, !last.isEmpty else {
+        print("Пока нет распознанного текста (маркер LAST_TEXT не найден в логе)")
+        return 1
+    }
+    print(last)
+    return 0
+}
+
+/// `dictatorctl retry <provider>`: просит агента повторить распознавание
+/// последнего WAV (он у агента в памяти) указанным провайдером. Через
+/// DistributedNotificationCenter — вставку выполняет САМ агент (у него уже
+/// есть право «Доступность» и знакомый путь вставки/ревью).
+func cmdRetry(_ name: String) -> Int32 {
+    let providers: [AppConfig.Provider]
+    do {
+        providers = try AppConfig.loadProvidersOnly(from: nil).providers
+    } catch {
+        eprint("ОШИБКА: \(error)")
+        return 1
+    }
+    guard let provider = providers.first(where: { $0.id == name }) else {
+        let available = providers.map { $0.id }
+        eprint("ОШИБКА: провайдер '\(name)' не найден. Доступные: \(available.joined(separator: ", "))")
+        return 2
+    }
+    let target = "\(guiDomain)/com.dima.altdictation"
+    let running = runProcess("/bin/launchctl", ["print", target]).status == 0
+    guard running else {
+        eprint("ОШИБКА: агент не запущен — последний WAV хранится в памяти агента. Запустите агент (`dictatorctl start`) и повторите.")
+        return 1
+    }
+    DistributedNotificationCenter.default().postNotificationName(
+        Notification.Name("com.dima.altdictation.retryRequest"),
+        object: nil,
+        userInfo: ["provider": name],
+        deliverImmediately: true
+    )
+    let display = provider.name.isEmpty ? provider.id : provider.name
+    print("Retry отправлен агенту: повторное распознавание последней записи провайдером '\(display) [\(provider.id)]'")
+    return 0
+}
+
+/// Список id провайдеров одной строкой (подсказка для usage retry).
+func providerNamesText() -> String {
+    let ids = (try? AppConfig.loadProvidersOnly(from: nil).providers.map { $0.id }) ?? []
+    return ids.isEmpty ? "(нет секций [providers.X] в конфиге)" : ids.joined(separator: ", ")
+}
+
 // MARK: - Usage
 
 let usage = """
@@ -472,6 +537,10 @@ let usage = """
   transcribe ФАЙЛ [--json]         Разовая расшифровка аудиофайла
                                    (не-WAV конвертируется через afconvert; с --json
                                    сырой ответ сохраняется в transcription_raw.json рядом с ФАЙЛ)
+  retry ИМЯ                        Повторить распознавание последней записи другим
+                                   провайдером (агент хранит последний WAV в памяти;
+                                   вставку выполняет сам агент)
+  last                             Показать последний распознанный текст (маркер LAST_TEXT)
   logs                             Последние 50 строк лога агента
   help                             Показать эту справку
 """
@@ -502,6 +571,15 @@ case "provider":
     exit(cmdProvider(Array(args.dropFirst())))
 case "transcribe":
     exit(cmdTranscribe(Array(args.dropFirst())))
+case "retry":
+    guard let name = args.dropFirst().first else {
+        eprint("Использование: dictatorctl retry ИМЯ")
+        eprint("Доступные провайдеры: \(providerNamesText())")
+        exit(1)
+    }
+    exit(cmdRetry(name))
+case "last":
+    exit(cmdLast())
 case "logs":
     exit(cmdLogs())
 case "help", "-h", "--help":
