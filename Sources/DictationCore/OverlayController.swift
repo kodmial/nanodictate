@@ -313,9 +313,16 @@ public final class OverlayController: NSObject {
     /// при смене фазы (высота панели зависит от фазы: таймер/точки).
     private var anchorPoint: CGPoint?
 
+    /// Уровень логирования: при `"debug"` в agent.log уходят флаги окна
+    /// (isKeyWindow/isMainWindow/level/styleMask) при показе/скрытии.
+    private let logLevel: String
+
+    public init(logLevel: String = "info") {
+        self.logLevel = logLevel
         super.init()
     }
 
+    private var isDebug: Bool { logLevel.lowercased() == "debug" }
     deinit {
         hide()
     }
@@ -383,6 +390,20 @@ public final class OverlayController: NSObject {
         panel.makeKeyAndOrderFront(nil)
         panel.orderFrontRegardless()
 
+        if isDebug {
+            let flags = [
+                "isVisible=\(panel.isVisible)",
+                "isKeyWindow=\(panel.isKeyWindow)",
+                "isMainWindow=\(panel.isMainWindow)",
+                "isFloatingPanel=\(panel.isFloatingPanel)",
+                "worksWhenModal=\(panel.worksWhenModal)",
+                "level=\(panel.level.rawValue)",
+                "styleMask=\(panel.styleMask.rawValue)",
+                "occlusion=\(panel.occlusionState.contains(.visible) ? "visible" : "occluded")",
+            ].joined(separator: " ")
+            Logger.log("overlay show flags: \(flags)", level: "debug")
+        }
+
         Logger.log(
             "overlay show at (\(point.x), \(point.y)) frame=\(NSStringFromRect(frame)) screen=\(NSStringFromRect(screen)) visible=\(panel.isVisible)",
             level: "info"
@@ -397,6 +418,11 @@ public final class OverlayController: NSObject {
         // Логируем только если панель реально была видна: ветка «mic denied»
         // доходит до hide, не показывая панель вовсе, и логировать hide как
         // событие/ошибку там не нужно (микрофонный шум в логе).
+        let wasVisible = panel?.isVisible == true
+        if isDebug {
+            Logger.log("overlay hide" + (reason.map { " reason=\($0)" } ?? "") + " wasVisible=\(wasVisible)", level: "debug")
+        }
+        if wasVisible {
             Logger.log("overlay hide" + (reason.map { " reason=\($0)" } ?? ""), level: "info")
         }
         // Скрытый оверлей не должен держать таймер или точки: сброс фазы
@@ -486,6 +512,9 @@ public final class OverlayController: NSObject {
         panel.contentView?.addSubview(hostingView)
 
         self.panel = panel
+        if isDebug {
+            Logger.log("overlay panel created styleMask=\(panel.styleMask.rawValue) level=\(panel.level.rawValue)", level: "debug")
+        }
     }
 
     // MARK: - Accessibility Positioning

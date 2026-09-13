@@ -224,6 +224,25 @@ final class TranscriberTests: XCTestCase {
         }
     }
 
+    // MARK: - NEW: describe() маскирует секреты в теле HTTP-ошибки
+
+    @objc func testDescribeHTTPErrorMasksSecretsInBody() {
+        let body = #"{"error":"auth failed","api_key":"provider-secret-123"}"#
+        let desc = Transcriber.describe(TranscribeError.http(401, body))
+
+        XCTAssertTrue(desc.hasPrefix("HTTP 401: "))
+        XCTAssertTrue(desc.contains("\"api_key\": \"***\""), "api_key должен маскироваться")
+        XCTAssertFalse(desc.contains("provider-secret-123"), "секрет провайдера не должен попасть в лог")
+    }
+
+    @objc func testDescribeHTTPErrorTruncatesLongBody() {
+        let long = String(repeating: "a", count: 300)
+        let desc = Transcriber.describe(TranscribeError.http(500, long))
+
+        XCTAssertTrue(desc.contains(String(repeating: "a", count: 120)), "тело должно сокращаться до ~120 символов")
+        XCTAssertFalse(desc.contains(String(repeating: "a", count: 121)), "хвост длинного тела не должен попадать в лог")
+    }
+
     // MARK: - NEW: Invalid JSON → .invalidResponse
 
     @objc func testInvalidJSONReturnsInvalidResponse() {

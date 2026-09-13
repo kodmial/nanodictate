@@ -36,9 +36,12 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     init(config: AppConfig) {
         self.logLevel = config.logLevel
         self.sounds = SysSounds(enabled: config.soundsEnabled)
-        self.overlay = OverlayController()
+        self.overlay = OverlayController(logLevel: config.logLevel)
         self.audio = AudioService(logLevel: config.logLevel)
-        self.hotkeys = HotkeyService(doubleTapMaxInterval: config.doubleAltMaxInterval)
+        self.hotkeys = HotkeyService(
+            doubleTapMaxInterval: config.doubleAltMaxInterval,
+            logLevel: config.logLevel
+        )
         self.transcriber = Transcriber(
             baseURL: config.baseURL,
             model: config.model,
@@ -134,7 +137,12 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
 
     // MARK: - Handlers
 
+    private var isDebug: Bool { logLevel.lowercased() == "debug" }
+
     private func handleAltDoubleTap() {
+        if isDebug {
+            Logger.log("Alt+Alt handled: state=\(String(describing: state))", level: "debug")
+        }
         switch state {
         case .idle:
             requestMicrophoneAndStart()
@@ -184,10 +192,16 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         overlay.setRecordingPhase()
         overlay.setStatus("Записываю…")
         Logger.log("record start")
+        if isDebug {
+            Logger.log("record start: calling audio.start()", level: "debug")
+        }
 
         do {
             try audio.start()
             state = .recording
+            if isDebug {
+                Logger.log("record started: state = .recording", level: "debug")
+            }
         } catch {
             showMicrophoneError()
             Logger.log("microphone unavailable: \(error.localizedDescription)", level: "error")
@@ -202,6 +216,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
 
     private func sendRecording() {
         let samples = audio.stop()
+        if isDebug {
+            Logger.log("record stopped by user: \(samples.count) samples collected", level: "debug")
+        }
         processSamples(samples)
     }
 
@@ -297,6 +314,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     /// к моменту срабатывания запись уже начата заново (state != .idle) —
     /// оверлей остаётся виден весь новый цикл.
     private func hideAfter(_ seconds: TimeInterval, reason: String) {
+        if isDebug {
+            Logger.log("overlay hide scheduled after \(seconds) s, reason=\(reason)", level: "debug")
+        }
         OverlayLifecycle.scheduleHide(
             after: seconds,
             stateProvider: { [weak self] in self?.state ?? .idle }

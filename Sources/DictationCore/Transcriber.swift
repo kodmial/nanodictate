@@ -65,6 +65,13 @@ public final class Transcriber {
     /// On network failure, retries once (2 attempts total). HTTP and invalid-response
     /// errors are not retried.
     public func transcribe(wav: Data, filename: String = "audio.wav") async throws -> TranscriptionResult {
+        if logLevel.lowercased() == "debug" {
+            // URL/модель/размер — без api_key/proxy_key и заголовков.
+            Logger.log(String(
+                format: "STT send: url=%@ model=%@ language=%@ wavBytes=%d",
+                baseURL, model, language.isEmpty ? "-" : language, wav.count
+            ), level: "debug")
+        }
         guard let url = URL(string: baseURL) else {
             throw TranscribeError.network("Invalid base URL")
         }
@@ -90,9 +97,20 @@ public final class Transcriber {
         var lastError: TranscribeError?
         for _ in 0..<2 {
             do {
+                let started = CFAbsoluteTimeGetCurrent()
                 let response = try await send(request: request)
+                let elapsed = CFAbsoluteTimeGetCurrent() - started
                 debugDump(request: request, wavByteCount: wav.count, filename: filename, recording: recording, response: response)
-                return try Self.parseResponse(response)
+                if logLevel.lowercased() == "debug" {
+                    Logger.log(String(format: "STT response: HTTP %d in %.2f s, bodyBytes=%d", response.status, elapsed, response.body.count), level: "debug")
+                }
+                let result = try Self.parseResponse(response)
+                if logLevel.lowercased() == "debug" {
+                    let text = result.text
+                    let head = text.count > 80 ? String(text.prefix(80)) + "…" : text
+                    Logger.log("STT text: \"\(head)\" (\(text.count) chars)", level: "debug")
+                }
+                return result
             } catch let error as TranscribeError {
                 // http / invalidResponse — do not retry.
                 throw error
@@ -110,7 +128,28 @@ public final class Transcriber {
         // В debug-дампе фиксируем и сам факт запроса (метод/URL/заголовки/поля),
         // чтобы было видно, что до HTTP дело не дошло; ошибки дампа не роняют.
         debugDump(request: request, wavByteCount: wav.count, filename: filename, recording: recording, response: nil)
-        throw lastError ?? TranscribeError.network("Unknown transport error")
+        if let lastError = lastError {
+            Logger.log("STT failed after 2 attempts: \(Self.describe(lastError))", level: "error")
+            throw lastError
+        }
+        throw TranscribeError.network("Unknown transport error")
+    }
+
+    /// Человекочитаемое описание ошибки для лога. Тело HTTP-ответа маскируется
+    /// через `DebugDump.maskedResponseBody` (секреты затираются по ПОЛНОМУ телу),
+    /// затем отсекается до ~120 символов, чтобы api_key/proxy_key провайдера
+    /// не попали в лог.
+    static func describe(_ error: TranscribeError) -> String {
+        switch error {
+        case .network(let message):
+            return "network: \(message)"
+        case .http(let code, let body):
+            // Маскируем ПОЛНОЕ тело (секрет может пересечь границу обрезки),
+            // потом отсекаем до ~120 символов.
+            return "HTTP \(code): \(String(DebugDump.maskedResponseBody(Data(body.utf8)).prefix(120)))"
+        case .invalidResponse(let message):
+            return "invalid response: \(message)"
+        }
     }
 
     // MARK: - Send
