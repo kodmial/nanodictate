@@ -10,14 +10,13 @@ public enum DictationFlow {
     // MARK: Пустой результат STT
 
     /// «Пустой» результат STT — нечего вставлять и нечему радоваться.
-    /// Пустой/пробельный текст, а также результат короче ДВУХ слов (одиночные
-    /// «да» / «нет», случайный тап в микрофон) считаем пустым: мусор в текст
-    /// не вставляем, звук успеха не играем.
+    /// Пустой/пробельный текст, а также текст БЕЗ единой буквы или цифры
+    /// (только пунктуация: «.», «—», «…») считаем пустым: мусор в текст
+    /// не вставляем, звук успеха не играем. Любой текст с хотя бы одной
+    /// буквой/цифрой — валидный результат, одиночные «да» / «нет» вставляются.
     public static func isEmptyResult(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return true }
-        let words = trimmed.split(whereSeparator: { $0.isWhitespace })
-        return words.count < 2
+        return trimmed.isEmpty || !trimmed.contains(where: { $0.isLetter || $0.isNumber })
     }
 
     /// Чем завершается цикл распознавания: вставкой текста или «пусто».

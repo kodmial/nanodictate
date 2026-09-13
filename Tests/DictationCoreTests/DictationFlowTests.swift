@@ -15,11 +15,13 @@ final class DictationFlowTests: XCTestCase {
         XCTAssertTrue(DictationFlow.isEmptyResult(" \t "))
     }
 
-    /// Меньше двух слов — «пустой» результат (данные / случайный тап).
-    @objc func testEmptyResultSingleWord() {
-        XCTAssertTrue(DictationFlow.isEmptyResult("да"))
-        XCTAssertTrue(DictationFlow.isEmptyResult("Привет."))
-        XCTAssertTrue(DictationFlow.isEmptyResult("нет"))
+    /// Одиночное слово — валидный результат диктовки: «да» / «нет» /
+    /// «Привет» вставляются как раньше (регрессия «<2 слов = пусто»).
+    @objc func testSingleWordIsNotEmpty() {
+        XCTAssertFalse(DictationFlow.isEmptyResult("да"))
+        XCTAssertFalse(DictationFlow.isEmptyResult("нет"))
+        XCTAssertFalse(DictationFlow.isEmptyResult("Привет"))
+        XCTAssertFalse(DictationFlow.isEmptyResult("Привет."))
     }
 
     /// Два и более слова — нормальный результат диктовки.
@@ -30,13 +32,34 @@ final class DictationFlowTests: XCTestCase {
         XCTAssertFalse(DictationFlow.isEmptyResult("сегодня хорошая погода"))
     }
 
+    /// Только пунктуация — «пустой» результат: ни одной буквы/цифры.
+    @objc func testOnlyPunctuationIsEmpty() {
+        XCTAssertTrue(DictationFlow.isEmptyResult("."))
+        XCTAssertTrue(DictationFlow.isEmptyResult("—"))
+        XCTAssertTrue(DictationFlow.isEmptyResult("…"))
+        XCTAssertTrue(DictationFlow.isEmptyResult(" - "))
+        XCTAssertTrue(DictationFlow.isEmptyResult("!?!"))
+    }
+
+    /// Любая цифра (даже одиночное число) — не пустой результат.
+    @objc func testDigitsOnlyAreNotEmpty() {
+        XCTAssertFalse(DictationFlow.isEmptyResult("5"))
+        XCTAssertFalse(DictationFlow.isEmptyResult("123"))
+    }
+
     @objc func testOutcomeInsertForDictation() {
         XCTAssertEqual(DictationFlow.outcome(for: "привет мир"), .insert("привет мир"))
     }
 
-    @objc func testOutcomeEmptyForShortResult() {
-        XCTAssertEqual(DictationFlow.outcome(for: "да"), .empty)
+    @objc func testOutcomeEmptyForWhitespaceOrPunctuation() {
         XCTAssertEqual(DictationFlow.outcome(for: "   "), .empty)
+        XCTAssertEqual(DictationFlow.outcome(for: "."), .empty)
+    }
+
+    /// Одиночное слово идёт путём полной вставки (outcome = .insert).
+    @objc func testOutcomeInsertForSingleWord() {
+        XCTAssertEqual(DictationFlow.outcome(for: "да"), .insert("да"))
+        XCTAssertEqual(DictationFlow.outcome(for: "Привет"), .insert("Привет"))
     }
 
     // MARK: Доставка результата STT (отмена по Esc)
