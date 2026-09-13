@@ -97,8 +97,9 @@ final class ChunkedPipelineTests: XCTestCase {
         // Инкрементальные вставки + финальная замена хвоста.
         XCTAssertEqual(steps.count, 3)
         XCTAssertEqual(steps[0], .appendSegment(index: 0, text: "Один два."))
-        XCTAssertEqual(steps[1], .appendSegment(index: 1, text: "Три четыре."))
-        let change = WordDiff.change(old: "Один два.Три четыре.", new: "Один два три четыре.")!
+        // F2: промежуточная вставка НЕ склеивает слова — разделительный пробел.
+        XCTAssertEqual(steps[1], .appendSegment(index: 1, text: " Три четыре."))
+        let change = WordDiff.change(old: "Один два. Три четыре.", new: "Один два три четыре.")!
         XCTAssertEqual(steps[2], .replaceTail(old: change.tailOld, new: change.tailNew))
 
         XCTAssertEqual(outcome.segmentCount, 2)
@@ -111,17 +112,18 @@ final class ChunkedPipelineTests: XCTestCase {
     }
 
     @objc func testFinalIdenticalNoReplace() throws {
-        let mockSTT = MockSTT(results: ["Один два.", "Три четыре.", "Один два.Три четыре."])
+        // Финальный текст совпадает с инкрементальным (включая разделительный
+        // пробел F2) — замены нет.
+        let mockSTT = MockSTT(results: ["Один два.", "Три четыре.", "Один два. Три четыре."])
         let (outcome, steps, _) = try runAsync {
             try await self.runPipeline(samples: self.twoSegmentSamples(), mockSTT: mockSTT)
         }
 
-        // Финальный текст совпал с инкрементальным — замены нет.
         XCTAssertEqual(steps, [
             .appendSegment(index: 0, text: "Один два."),
-            .appendSegment(index: 1, text: "Три четыре.")
+            .appendSegment(index: 1, text: " Три четыре.")
         ])
-        XCTAssertEqual(outcome.insertedText, "Один два.Три четыре.")
+        XCTAssertEqual(outcome.insertedText, "Один два. Три четыре.")
         XCTAssertTrue(outcome.finalized)
         XCTAssertFalse(outcome.finalChanged)
     }
@@ -173,6 +175,49 @@ final class ChunkedPipelineTests: XCTestCase {
         XCTAssertFalse(outcome.finalChanged)
         XCTAssertTrue(steps.isEmpty)
         XCTAssertTrue(mockSTT.calls.isEmpty)
+    }
+
+    // MARK: - E: production-путь (overlap 1.0) — финальный проход счищает дубликаты
+
+    @objc func testDefaultOverlapDedupeOnFinalPass() throws {
+        // Два длинных речевых блока (4 c >= minSegment 3 c с дефолтным
+        // конфигом): 4 с речи, тишина 1.5 с, 4 с речи. ChunkedPipeline() по
+        // умолчанию приклеивает к началу 2-го сегмента последнюю секунду тела
+        // 1-го — STT транскрибирует стыковое слово дважды («два» в чанке 1 и в
+        // оверлэпе чанка 2). Финальный проход по ВСЕМУ WAV по-словным diff
+        // счищает дубликат.
+        let samples = makeSamples([
+            (amplitude: 0.1, seconds: 4.0),
+            (amplitude: 0.0, seconds: 1.5),
+            (amplitude: 0.1, seconds: 4.0)
+        ])
+        let mockSTT = MockSTT(results: ["Один два.", "Два три четыре.", "Один два три четыре."])
+        let pipeline = ChunkedPipeline() // production-конфиг: overlap 1.0
+        var steps: [RecordedOperation] = []
+        let outcome = try runAsync {
+            try await pipeline.run(
+                samples: samples,
+                stt: { wav, filename, prompt in try await mockSTT.call(wav, filename, prompt) },
+                insert: { op in
+                    switch op {
+                    case .appendSegment(let index, let text): steps.append(.appendSegment(index: index, text: text))
+                    case .replaceTail(let old, let new): steps.append(.replaceTail(old: old, new: new))
+                    }
+                }
+            )
+        }
+
+        XCTAssertEqual(steps.count, 3)
+        XCTAssertEqual(steps[0], .appendSegment(index: 0, text: "Один два."))
+        XCTAssertEqual(steps[1], .appendSegment(index: 1, text: " Два три четыре."))
+        // Шов «два» из оверлэпа ушёл по-словным diff финального прохода.
+        let change = WordDiff.change(old: "Один два. Два три четыре.", new: "Один два три четыре.")!
+        XCTAssertEqual(steps[2], .replaceTail(old: change.tailOld, new: change.tailNew))
+        XCTAssertTrue(outcome.finalized)
+        XCTAssertTrue(outcome.finalChanged)
+        XCTAssertEqual(outcome.insertedText, "Один два три четыре.")
+        XCTAssertEqual(outcome.segmentCount, 2)
+        XCTAssertEqual(mockSTT.calls.count, 3)
     }
 
     // MARK: - Вставка/фаза вызываются синхронно в контексте вызывающего

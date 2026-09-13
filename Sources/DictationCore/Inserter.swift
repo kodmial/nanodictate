@@ -101,7 +101,10 @@ public enum Inserter {
         }
 
         let source = CGEventSource(stateID: .hidSystemState)
-        let backspaceCount = Array(old.utf16).count
+        // Backspace удаляет один графемный кластер за нажатие, а WordDiff
+        // отдаёт `old` целиком по границам графем — считаем Characters, не
+        // UTF-16 единиц (иначе эмодзи удалялись бы в два раза дольше).
+        let backspaceCount = old.count
 
         // Backspace: клавиша 51 (delete). Несколько нажатий — несколько раз.
         for _ in 0..<backspaceCount {

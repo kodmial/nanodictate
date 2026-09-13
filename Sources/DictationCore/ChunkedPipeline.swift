@@ -94,8 +94,15 @@ public struct ChunkedPipeline {
             let prompt = promptParts.isEmpty ? nil : promptParts.joined(separator: " ")
             let raw = try await stt(bytes, "segment-\(index + 1).wav", prompt)
             let text = TextRefinement.finalize(raw)
-            insert(.appendSegment(index: index, text: text))
-            insertedText += text
+            var insertText = text
+            // F2: между сегментами — разделительный пробел, иначе слова соседних
+            // чанков слипаются при инкрементальной вставке.
+            if index > 0, !insertedText.isEmpty, !insertedText.hasSuffix(" ") {
+                insertText = " " + text
+            }
+            insert(.appendSegment(index: index, text: insertText))
+            insertedText += insertText
+            // В prompt уходит чистый текст без ведущего пробела.
             promptParts.append(text)
         }
 

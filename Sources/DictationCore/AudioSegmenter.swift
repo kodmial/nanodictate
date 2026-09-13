@@ -7,8 +7,9 @@ import Foundation
 // (внутреннее представление AudioService.rmsHistory) либо с Int16 PCM-сэмплами.
 // Параметры: пауза ≥ 0.8–1.5 c (default 1.0) — граница; minSegment ~3 c
 // (короткие обрывки не отрезаем); maxSegment 45 c (жёсткая граница); overlap
-// 1 c — к началу следующего сегмента приклеивается последняя секунда
-// предыдущего, чтобы слова на стыке получали контекст.
+// 1 c — к началу следующего сегмента приклеивается последняя секунда ТЕЛА
+// предыдущего речевого сегмента (а не тишина паузы: пауза длиннее оверлэпа и
+// целиком выпадает из обоих сегментов), чтобы слова на стыке получали контекст.
 
 public struct AudioSegmenterConfig: Equatable {
     /// Длительность непрерывной паузы (RMS ниже порога), после которой режем.
@@ -89,7 +90,9 @@ public enum AudioSegmenter {
             // Жёсткий потолок: режем по достижении максимальной длины.
             let segmentDuration = TimeInterval(i - segStart + 1) * windowDuration
             if segmentDuration >= config.maxSegment {
-                segments.append(segStart..<(i + 1))
+                if (rms[segStart..<(i + 1)].max() ?? 0) >= config.silenceRMS {
+                    segments.append(segStart..<(i + 1))
+                }
                 segStart = i + 1
                 silenceStart = nil
                 continue
@@ -118,7 +121,17 @@ public enum AudioSegmenter {
         // Полностью тихий хвост (и вся запись без голоса) в сегменты не входит —
         // иначе молчание порождало бы «пустой» сегмент и лишний STT-запрос.
         if segStart < rms.count, (rms[segStart..<rms.count].max() ?? 0) >= config.silenceRMS {
-            segments.append(segStart..<rms.count)
+            let trail = segStart..<rms.count
+            let trailSeconds = TimeInterval(trail.count) * windowDuration
+            // F3: если хвост короче minSegment, приклеиваем его к предыдущему
+            // сегменту, если суммарная длина не превысит maxSegment.
+            if trailSeconds < config.minSegment,
+               let last = segments.last,
+               TimeInterval(last.count) * windowDuration + trailSeconds <= config.maxSegment {
+                segments[segments.count - 1] = last.lowerBound..<rms.count
+            } else {
+                segments.append(trail)
+            }
         }
         return segments
     }
@@ -156,8 +169,11 @@ public enum AudioSegmenter {
 
             var segSamples = body
             if index > 0 {
-                let overlapFrom = max(0, bodyStart - overlapCount)
-                segSamples = Array(samples[overlapFrom..<bodyStart]) + body
+                // Оверлэп берётся из ХВОСТА ТЕЛА предыдущего сегмента (речь),
+                // а не из region вблизи bodyStart (там может быть тишина паузы).
+                let prevEnd = min(ranges[index - 1].upperBound * windowSize, samples.count)
+                let overlapFrom = max(0, prevEnd - overlapCount)
+                segSamples = Array(samples[overlapFrom..<prevEnd]) + body
             }
 
             result.append(AudioSegment(

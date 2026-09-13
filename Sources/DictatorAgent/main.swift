@@ -456,6 +456,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
                     },
                     insert: { operation in
                         DispatchQueue.main.async {
+                            // Тот же сессионный страж, что в single-пути: если
+                            // сессия «обработки» сменилась или цикл завершён
+                            // терминальным событием — вставка/статус no-op.
+                            guard self.processingSession == session,
+                                  self.state == .transcribing else { return }
                             switch operation {
                             case .appendSegment(let index, let text):
                                 Inserter.append(text)
@@ -468,6 +473,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
                     },
                     onPhase: { phase in
                         DispatchQueue.main.async {
+                            // Страж от старого цикла, перезаписывающего статус
+                            // новой диктовки или терминальное сообщение.
+                            guard self.processingSession == session,
+                                  self.state == .transcribing else { return }
                             switch phase {
                             case .segment(let index):
                                 self.overlay.setStatus("Распознаю… (часть \(index + 1))")

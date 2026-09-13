@@ -115,15 +115,31 @@ final class AudioSegmenterTests: XCTestCase {
         let bodyStart = Int((second.start * 16000).rounded())
         let bodyEnd = Int((second.end * 16000).rounded())
         XCTAssertEqual(second.samples.count, bodyEnd - bodyStart + 16000) // тело + 1 c оверлэпа
+        // Оверлэп — хвост ТЕЛА предыдущего сегмента (речь), а не тишина паузы:
         XCTAssertEqual(
             Array(second.samples[0..<16000]),
-            Array(samples[(bodyStart - 16000)..<bodyStart])
+            Array(samples[(firstEnd - 16000)..<firstEnd])
         )
+        // Дополнительно: в оверлэпе должна быть речь (ненулевая амплитуда).
+        XCTAssertTrue(second.samples[0..<16000].contains { abs($0) > 0 })
     }
 
     @objc func testSamplesNoSegmentsWhenAllSilent() {
         let samples = makeSamples([(amplitude: 0.0, seconds: 3.0)])
         let segments = AudioSegmenter.segments(samples: samples, sampleRate: 16000)
         XCTAssertTrue(segments.isEmpty)
+    }
+
+    // MARK: - F4: запись обрывается посреди паузы
+
+    @objc func testRecordingCutsMidPause() {
+        // Речь 2 с → тишина 0.7 с (< minSegment для паузовой границы, которую
+        // addBreak может установить), запись обрывается. Ожидаем один сегмент.
+        let rms: [Float] = [speech, speech, silence]
+        let ranges = AudioSegmenter.splitRanges(
+            rms: rms, windowDuration: 1.0, config: cfg(pause: 1.0, min: 1.0)
+        )
+        XCTAssertEqual(ranges.count, 1)
+        XCTAssertEqual(ranges[0], 0..<3)
     }
 }
