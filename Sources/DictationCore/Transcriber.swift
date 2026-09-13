@@ -36,6 +36,7 @@ public final class Transcriber {
     private let model: String
     private let apiKey: String
     private let proxyKey: String
+    private let language: String
     private let timeout: TimeInterval
     private let transport: HTTPTransport?
 
@@ -44,6 +45,7 @@ public final class Transcriber {
         model: String,
         apiKey: String,
         proxyKey: String = "",
+        language: String = "ru",
         timeout: TimeInterval = 120,
         transport: HTTPTransport? = nil
     ) {
@@ -51,6 +53,7 @@ public final class Transcriber {
         self.model = model
         self.apiKey = apiKey
         self.proxyKey = proxyKey
+        self.language = language
         self.timeout = timeout
         self.transport = transport
     }
@@ -64,7 +67,7 @@ public final class Transcriber {
         }
 
         let boundary = "Boundary-\(UUID().uuidString)"
-        let body = Self.makeMultipartBody(wav: wav, filename: filename, model: model, boundary: boundary)
+        let body = Self.makeMultipartBody(wav: wav, filename: filename, model: model, language: language, boundary: boundary)
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -136,7 +139,7 @@ public final class Transcriber {
 
     // MARK: - Multipart body
 
-    private static func makeMultipartBody(wav: Data, filename: String, model: String, boundary: String) -> Data {
+    private static func makeMultipartBody(wav: Data, filename: String, model: String, language: String, boundary: String) -> Data {
         var body = Data()
 
         func append(_ string: String) {
@@ -157,6 +160,15 @@ public final class Transcriber {
         append("\r\n")
         append(model)
         append("\r\n")
+
+        // Field: language (only when non-empty — tells Whisper the spoken language)
+        if !language.isEmpty {
+            append("--\(boundary)\r\n")
+            append("Content-Disposition: form-data; name=\"language\"\r\n")
+            append("\r\n")
+            append(language)
+            append("\r\n")
+        }
 
         // Closing boundary
         append("--\(boundary)--\r\n")

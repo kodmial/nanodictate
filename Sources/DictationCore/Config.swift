@@ -13,6 +13,7 @@ public struct AppConfig: Equatable {
     public var doubleAltMaxInterval: Double
     public var soundsEnabled: Bool
     public var logLevel: String
+    public var language: String
 
     // MARK: Defaults
 
@@ -25,7 +26,8 @@ public struct AppConfig: Equatable {
         timeoutSeconds: 120,
         doubleAltMaxInterval: 0.4,
         soundsEnabled: true,
-        logLevel: "info"
+        logLevel: "info",
+        language: "ru"
     )
 
     // MARK: Public API
@@ -82,6 +84,7 @@ public struct AppConfig: Equatable {
         var doubleAltMaxInterval: Double = defaults.doubleAltMaxInterval
         var soundsEnabled: Bool = defaults.soundsEnabled
         var logLevel: String = defaults.logLevel
+        var language: String = defaults.language
 
         let lines = content.components(separatedBy: .newlines)
         for (index, rawLine) in lines.enumerated() {
@@ -117,6 +120,8 @@ public struct AppConfig: Equatable {
                 soundsEnabled = try parseBool(valuePart, line: index + 1, rawLine: rawLine)
             case "log_level":
                 logLevel = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+            case "language":
+                language = try parseString(valuePart, line: index + 1, rawLine: rawLine)
             default:
                 // Unknown key — ignore
                 break
@@ -132,7 +137,8 @@ public struct AppConfig: Equatable {
             timeoutSeconds: timeoutSeconds,
             doubleAltMaxInterval: doubleAltMaxInterval,
             soundsEnabled: soundsEnabled,
-            logLevel: logLevel
+            logLevel: logLevel,
+            language: language
         )
     }
 

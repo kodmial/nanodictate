@@ -12,14 +12,6 @@ import AppKit
 import ApplicationServices
 import DictationCore
 
-// MARK: - Состояния
-
-enum DictationState {
-    case idle
-    case recording
-    case transcribing
-}
-
 // MARK: - Agent
 
 final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
@@ -47,6 +39,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             model: config.model,
             apiKey: config.apiKey,
             proxyKey: config.proxyKey,
+            language: config.language,
             timeout: config.timeoutSeconds
         )
         super.init()
@@ -265,14 +258,19 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
 
     // MARK: - Helpers
 
-    /// Единственная точка вызова hide() — терминальные события цикла.
-    /// Задержка оставляет на экране финальный статус («Завершаю…»/«Отменено»).
-    /// Панель НЕ прячется, если к моменту срабатывания запись уже начата заново
-    /// (state != .idle) — оверлей остаётся виден весь новый цикл.
+    /// Единственная точка вызова hide() — терминальные события цикла
+    /// (mic denied, insert done, transcription failed, cancelled; лимит идёт
+    /// тем же путём через processSamples). Задержка оставляет на экране
+    /// финальный статус («Завершаю…»/«Отменено»). Решение о скрытии — чистая
+    /// логика OverlayLifecycle в DictationCore: панель НЕ прячется, если
+    /// к моменту срабатывания запись уже начата заново (state != .idle) —
+    /// оверлей остаётся виден весь новый цикл.
     private func hideAfter(_ seconds: TimeInterval, reason: String) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
-            guard let self = self, self.state == .idle else { return }
-            self.overlay.hide(reason: reason)
+        OverlayLifecycle.scheduleHide(
+            after: seconds,
+            stateProvider: { [weak self] in self?.state ?? .idle }
+        ) { [weak self] in
+            self?.overlay.hide(reason: reason)
         }
     }
 

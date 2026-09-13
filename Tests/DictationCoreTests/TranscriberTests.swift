@@ -403,4 +403,45 @@ final class TranscriberTests: XCTestCase {
             XCTAssertTrue(text.contains("gigaam-v3"))
         }
     }
+
+    // MARK: - NEW: language=ru form field in multipart body (default)
+
+    @objc func testRequestContainsLanguageField() {
+        let transport = MockTransport(status: 200, body: Data(#"{"text":"x"}"#.utf8))
+        // Default Transcriber has language = "ru"
+        let transcriber = makeTranscriber(transport: transport)
+
+        runAsync("testLanguageField") {
+            _ = try await transcriber.transcribe(wav: self.wavData, filename: "audio.wav")
+            guard let body = transport.lastRequest?.httpBody,
+                  let text = String(data: body, encoding: .utf8) else {
+                XCTFail("No HTTP body")
+                return
+            }
+            XCTAssertTrue(text.contains("Content-Disposition: form-data; name=\"language\"\r\n"),
+                          "multipart должен содержать поле language")
+            XCTAssertTrue(text.contains("\r\nru\r\n"), "поля language должно иметь значение ru")
+        }
+    }
+
+    // MARK: - NEW: language omitted from multipart body when empty
+
+    @objc func testLanguageFieldAbsentWhenEmpty() {
+        let transport = MockTransport(status: 200, body: Data(#"{"text":"x"}"#.utf8))
+        let transcriber = Transcriber(baseURL: "https://test.api/endpoint",
+                                      model: "m",
+                                      apiKey: "k",
+                                      language: "",
+                                      transport: transport)
+
+        runAsync("testLanguageEmpty") {
+            _ = try await transcriber.transcribe(wav: self.wavData, filename: "audio.wav")
+            guard let body = transport.lastRequest?.httpBody,
+                  let text = String(data: body, encoding: .utf8) else {
+                XCTFail("No HTTP body")
+                return
+            }
+            XCTAssertFalse(text.contains("name=\"language\""), "при пустом language поле должно отсутствовать")
+        }
+    }
 }

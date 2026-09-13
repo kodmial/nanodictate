@@ -70,6 +70,55 @@ final class OverlayControllerTests: XCTestCase {
         XCTAssertTrue(screen.height > 0)
     }
 
+    // MARK: - resolvePoint (чистая цепочка фоллбэков позиционирования)
+
+    @objc func testResolvePoint_UsesCaret_WhenValid() {
+        // Валидная каретка → берётся именно её точка.
+        let caret = CGPoint(x: 100, y: 200)
+        let mouse = CGPoint(x: 300, y: 400)
+        let center = CGPoint(x: 720, y: 450)
+        let point = OverlayLayout.resolvePoint(
+            caret: caret,
+            mouse: mouse,
+            screenCenter: center
+        ) { $0.x > 0 && $0.y > 0 }
+        XCTAssertEqual(point, caret)
+    }
+
+    @objc func testResolvePoint_FallsBackToMouse_WhenCaretNilOrOffScreen() {
+        // Каретка nil или вне экрана → позиция мыши.
+        let mouse = CGPoint(x: 300, y: 400)
+        let center = CGPoint(x: 720, y: 450)
+        let isValid = { (p: CGPoint) -> Bool in
+            p.x > 0 && p.x < 2000 && p.y > 0 && p.y < 2000
+        }
+
+        let fromNil = OverlayLayout.resolvePoint(
+            caret: nil, mouse: mouse, screenCenter: center, isValid: isValid
+        )
+        XCTAssertEqual(fromNil, mouse)
+
+        let offScreenCaret = CGPoint(x: -5000, y: -5000)
+        let fromOffScreen = OverlayLayout.resolvePoint(
+            caret: offScreenCaret, mouse: mouse, screenCenter: center, isValid: isValid
+        )
+        XCTAssertEqual(fromOffScreen, mouse)
+    }
+
+    @objc func testResolvePoint_FallsBackToCenter_WhenMouseOffScreen() {
+        // Мышь вне экрана (и каретка отсутствует) → центр главного экрана.
+        let mouse = CGPoint(x: -9999, y: -9999)
+        let center = CGPoint(x: 720, y: 450)
+        let isValid = { (p: CGPoint) -> Bool in
+            if p == mouse { return false }
+            return p.x > 0 && p.y > 0
+        }
+        let point = OverlayLayout.resolvePoint(
+            caret: nil, mouse: mouse, screenCenter: center, isValid: isValid
+        )
+        XCTAssertEqual(point, center)
+    }
+
     // MARK: - Реальный вывод (панель)
 
     @objc func testShowMakesPanelVisible_WithCorrectFrame() {

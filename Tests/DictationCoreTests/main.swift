@@ -19,6 +19,7 @@ let suites: [XCTestCase.Type] = [
     RecordingLimitTests.self,
     TranscriberTests.self,
     OverlayControllerTests.self,
+    OverlayLifecycleTests.self,
 ]
 
 var passed = 0

@@ -150,6 +150,30 @@ public enum OverlayLayout {
         }
         return NSScreen.main?.frame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
     }
+
+    /// Чистая цепочка фоллбэков выбора точки показа панели:
+    /// (а) каретка, если она передана и валидна (обычно — AX-каретка внутри
+    ///     экрана; проверка инъецируется через `isValid`);
+    /// (б) иначе позиция мыши, если валидна;
+    /// (в) иначе центр экрана.
+    ///
+    /// Вынесена из OverlayController.positionedPoint(), чтобы решающая логика
+    /// тестировалась без AX/NSEvent — три точки и замыкание валидности
+    /// подаются снаружи.
+    public static func resolvePoint(
+        caret: CGPoint?,
+        mouse: CGPoint,
+        screenCenter: CGPoint,
+        isValid: (CGPoint) -> Bool
+    ) -> CGPoint {
+        if let caret = caret, isValid(caret) {
+            return caret
+        }
+        if isValid(mouse) {
+            return mouse
+        }
+        return screenCenter
+    }
 }
 
 public final class OverlayController: NSObject {
@@ -184,8 +208,7 @@ public final class OverlayController: NSObject {
 
     public func show() {
         // Цепочка фоллбэков: AX-каретка → мышь → центр главного экрана.
-        guard let point = positionedPoint() else { return }
-        show(at: point)
+        show(at: positionedPoint())
     }
 
     public func show(at point: CGPoint) {
@@ -233,7 +256,10 @@ public final class OverlayController: NSObject {
     }
 
     public func hide(reason: String? = nil) {
-        if reason != nil || panel?.isVisible == true {
+        // Логируем только если панель реально была видна: ветка «mic denied»
+        // доходит до hide, не показывая панель вовсе, и логировать hide как
+        // событие/ошибку там не нужно (микрофонный шум в логе).
+        if panel?.isVisible == true {
             Logger.log("overlay hide" + (reason.map { " reason=\($0)" } ?? ""), level: "info")
         }
         panel?.orderOut(nil)
@@ -326,25 +352,29 @@ public final class OverlayController: NSObject {
         return NSScreen.screens.contains { $0.frame.insetBy(dx: -1, dy: -1).contains(point) }
     }
 
-    /// Цепочка фоллбэков для точки показа панели:
-    /// (а) AX-каретка переднего приложения, если валидна и внутри экрана;
-    /// (б) иначе позиция мыши (NSEvent.mouseLocation — AppKit-координаты,
-    ///     совпадают с пространством NSScreen.frame);
-    /// (в) иначе центр главного экрана.
-    /// Выбранная точка логируется — видно, какой фоллбэк сработал.
-    private func positionedPoint() -> CGPoint? {
-        if let caret = caretPosition(), isValidScreenPoint(caret) {
-            Logger.log("overlay point source: AX caret (\(caret.x), \(caret.y))", level: "info")
-            return caret
-        }
+    /// Цепочка фоллбэков для точки показа панели: собирает реальные точки
+    /// (AX-каретка переднего приложения, позиция мыши в AppKit-координатах,
+    /// центр главного экрана) и делегирует решающую логику чистой функции
+    /// OverlayLayout.resolvePoint. Выбранный источник логируется — видно,
+    /// какой фоллбэк сработал.
+    private func positionedPoint() -> CGPoint {
+        let caret = caretPosition()
         let mouse = NSEvent.mouseLocation
-        if isValidScreenPoint(mouse) {
-            Logger.log("overlay point source: mouse (\(mouse.x), \(mouse.y))", level: "info")
-            return mouse
-        }
         let center = screenCenter()
-        Logger.log("overlay point source: screen center (\(center.x), \(center.y))", level: "info")
-        return center
+        let point = OverlayLayout.resolvePoint(
+            caret: caret,
+            mouse: mouse,
+            screenCenter: center,
+            isValid: isValidScreenPoint
+        )
+        if let caret = caret, point == caret {
+            Logger.log("overlay point source: AX caret (\(caret.x), \(caret.y))", level: "info")
+        } else if point == mouse {
+            Logger.log("overlay point source: mouse (\(mouse.x), \(mouse.y))", level: "info")
+        } else {
+            Logger.log("overlay point source: screen center (\(point.x), \(point.y))", level: "info")
+        }
+        return point
     }
 
     // MARK: - Проверка рендера (CGWindowList)
@@ -359,6 +389,10 @@ public final class OverlayController: NSObject {
     }
 
     private func logRenderCheck() {
+        // Быстрый стоп/отмена прячет панель легально раньше, чем придёт проверка —
+        // в этом случае окна нет по делу, и логировать «NO DictatorAgent window»
+        // как ошибку не нужно.
+        guard isVisible else { return }
         guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
             Logger.log("overlay render check: CGWindowListCopyWindowInfo unavailable", level: "error")
             return

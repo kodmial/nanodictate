@@ -197,6 +197,7 @@ func cmdConfig(_ args: [String]) -> Int32 {
     print("sounds_enabled: \(config.soundsEnabled)")
     print("double_alt_max_interval: \(config.doubleAltMaxInterval)")
     print("log_level: \(config.logLevel)")
+    print("language: \(config.language)")
     print("api_key: ***")
     print("proxy_key: ***")
     return 0
@@ -251,6 +252,7 @@ func cmdTranscribe(_ args: [String]) -> Int32 {
         model: config.model,
         apiKey: config.apiKey,
         proxyKey: config.proxyKey,
+        language: config.language,
         timeout: config.timeoutSeconds
     )
     // Данные всегда WAV (не-WAV конвертируется выше); сервер строг к расширению,

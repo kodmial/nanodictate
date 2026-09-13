@@ -39,6 +39,7 @@ final class ConfigTests: XCTestCase {
         double_alt_max_interval = 0.8
         sounds_enabled = false
         log_level = "debug"
+        language = "ru"
 
         [api]
         """.trimmingCharacters(in: .newlines) + "\n"
@@ -54,6 +55,7 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.doubleAltMaxInterval, 0.8)
         XCTAssertFalse(config.soundsEnabled)
         XCTAssertEqual(config.logLevel, "debug")
+        XCTAssertEqual(config.language, "ru")
     }
 
     // MARK: - proxy_key
@@ -201,5 +203,6 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(d.doubleAltMaxInterval, 0.4)
         XCTAssertTrue(d.soundsEnabled)
         XCTAssertEqual(d.logLevel, "info")
+        XCTAssertEqual(d.language, "ru")
     }
 }
