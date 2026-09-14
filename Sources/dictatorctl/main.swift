@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import DictationCore
 
@@ -29,22 +30,41 @@ func runProcess(_ launchPath: String, _ args: [String]) -> (status: Int32, stdou
 /// User GUI domain for launchctl, e.g. "gui/501".
 let guiDomain = "gui/\(getuid())"
 
-func findPlistPath() -> URL? {
-    let name = "com.dima.altdictation.plist"
-    // 1) Explicit override via environment.
-    if let env = ProcessInfo.processInfo.environment["ALTDICTATION_PLIST"] {
+/// Имя сервиса LaunchAgent (Label plist, target launchctl print/bootstrap/bootout).
+let agentServiceName = "com.dictation.agent"
+
+/// Абсолютный путь к бинарю агента (брат CLI-бинаря в .build/debug).
+/// Env DICTATION_AGENT_BIN позволяет переопределить (например, установленный
+/// в /usr/local/bin вариант). Промах тут не фатален — launchctl покажет ошибку.
+func findAgentBinaryPath() -> String? {
+    if let env = ProcessInfo.processInfo.environment["DICTATION_AGENT_BIN"], !env.isEmpty {
+        return env
+    }
+    let exe = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])
+    let sibling = exe.deletingLastPathComponent().appendingPathComponent("DictatorAgent")
+    if FileManager.default.fileExists(atPath: sibling.path) { return sibling.path }
+    return exe.path
+}
+
+/// Поиск шаблона LaunchAgent-plist (Resources/dictation-agent.plist.template):
+/// 1) явный env DICTATION_PLIST_TEMPLATE; 2) директория Resources рядом с
+/// бинарём; 3) исходники проекта (компиляция из дерева); 4) cwd/Resources.
+func findPlistTemplate() -> URL? {
+    let name = "dictation-agent.plist.template"
+    if let env = ProcessInfo.processInfo.environment["DICTATION_PLIST_TEMPLATE"] {
         let url = URL(fileURLWithPath: env)
         if FileManager.default.fileExists(atPath: url.path) { return url }
     }
-    // 2) Project Resources directory (compile-time source path and hard-coded path).
+    let exeDir = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0]))
+        .deletingLastPathComponent()
     let fromSourceDir = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()          // Sources/dictatorctl
         .deletingLastPathComponent()          // Sources
         .deletingLastPathComponent()          // project root
         .appendingPathComponent("Resources/\(name)")
     let candidates: [URL] = [
+        exeDir.appendingPathComponent("Resources/\(name)"),
         fromSourceDir,
-        URL(fileURLWithPath: "/Users/dima/projects/dictation/Resources/\(name)"),
         URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("Resources/\(name)"),
     ]
@@ -70,22 +90,35 @@ func cmdStart() -> Int32 {
         return 1
     }
 
-    guard let source = findPlistPath() else {
-        eprint("Не найден com.dima.altdictation.plist (ожидается в Resources проекта или укажите ALTDICTATION_PLIST)")
+    guard let template = findPlistTemplate() else {
+        eprint("Не найден шаблон dictation-agent.plist.template (Resources рядом с бинарём или в проекте; либо укажите DICTATION_PLIST_TEMPLATE)")
         return 1
     }
+    guard let binaryPath = findAgentBinaryPath() else {
+        eprint("Не удалось определить путь к DictatorAgent")
+        return 1
+    }
+    guard let templateText = try? String(contentsOf: template, encoding: .utf8) else {
+        eprint("Не удалось прочитать шаблон plist: \(template.path)")
+        return 1
+    }
+    // Шаблон генерируется в plist с РЕАЛЬНЫМ путём бинаря агента и лог-файлом
+    // в домашней директории пользователя (launchd ~ не раскрывает сам).
+    let logPath = logsDir.appendingPathComponent("agent.log").path
+    let plistText = templateText
+        .replacingOccurrences(of: "{{BINARY_PATH}}", with: binaryPath)
+        .replacingOccurrences(of: "{{LOG_PATH}}", with: logPath)
 
-    let dest = launchAgentsDir.appendingPathComponent("com.dima.altdictation.plist")
+    let dest = launchAgentsDir.appendingPathComponent("\(agentServiceName).plist")
     do {
-        if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
-        try fm.copyItem(at: source, to: dest)
+        try plistText.data(using: .utf8)!.write(to: dest, options: .atomic)
     } catch {
-        eprint("Не удалось установить plist: \(error)")
+        eprint("Не удалось записать plist: \(error)")
         return 1
     }
 
     // Идемпотентность: если агент уже загружен — выйти, не вызывая bootstrap/load повторно.
-    let alreadyLoaded = runProcess("/bin/launchctl", ["print", "\(guiDomain)/com.dima.altdictation"])
+    let alreadyLoaded = runProcess("/bin/launchctl", ["print", "\(guiDomain)/\(agentServiceName)"])
     if alreadyLoaded.status == 0 {
         print("Dictation agent already running")
         return 0
@@ -109,7 +142,7 @@ func cmdStart() -> Int32 {
 }
 
 func cmdStop() -> Int32 {
-    let target = "\(guiDomain)/com.dima.altdictation"
+    let target = "\(guiDomain)/\(agentServiceName)"
     let bootout = runProcess("/bin/launchctl", ["bootout", target])
     if bootout.status == 0 {
         print("Dictation agent stopped")
@@ -128,7 +161,7 @@ func cmdStop() -> Int32 {
 }
 
 func cmdStatus() -> Int32 {
-    let printResult = runProcess("/bin/launchctl", ["print", "\(guiDomain)/com.dima.altdictation"])
+    let printResult = runProcess("/bin/launchctl", ["print", "\(guiDomain)/\(agentServiceName)"])
     let running = printResult.status == 0
     print(running ? "running" : "not running")
 
@@ -153,16 +186,30 @@ func cmdStatus() -> Int32 {
         print("provider: (ошибка: \(error))")
     }
 
+    if !FileManager.default.fileExists(atPath: AppConfig.defaultPath()) {
+        print("hint: конфиг не найден — создайте шаблон командой `dictatorctl config init`")
+    }
+
     return running ? 0 : 1
 }
 
-func maskAPIKey(in content: String) -> String {
+/// Маскировка секретов в сыром тексте конфиг-файла: api_key / proxy_key /
+/// api_secret — значения в кавычках заменяются на maskSecret (первые 4 + "***" +
+/// последние 4). Пустые значения остаются пустыми.
+func maskFileSecrets(in content: String) -> String {
     var lines: [String] = []
     for line in content.components(separatedBy: .newlines) {
-        let keyPart = line.split(separator: "=", maxSplits: 1).first
+        let key = line.split(separator: "=", maxSplits: 1).first
             .map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
-        if keyPart == "api_key" || keyPart == "proxy_key" {
-            lines.append("\(keyPart) = \"***\"")
+        if key == "api_key" || key == "proxy_key" || key == "api_secret",
+           let eqIndex = line.firstIndex(of: "="),
+           let open = line[line.index(after: eqIndex)...].firstIndex(of: "\""),
+           let close = line[line.index(after: open)...].firstIndex(of: "\"") {
+            let prefix = String(line[..<open])
+            let value = String(line[line.index(after: open)..<close])
+            let suffix = String(line[close...])
+            let masked = value.isEmpty ? "" : AppConfig.maskSecret(value)
+            lines.append("\(prefix)\"\(masked)\"\(suffix)")
         } else {
             lines.append(line)
         }
@@ -170,51 +217,160 @@ func maskAPIKey(in content: String) -> String {
     return lines.joined(separator: "\n")
 }
 
+/// "(пусто)" для пустых секретов, иначе — первые 4 + "***" + последние 4 символа.
+func secretDisplay(_ secret: String) -> String {
+    secret.isEmpty ? "(пусто)" : AppConfig.maskSecret(secret)
+}
+
+/// Спросить в TTY, перезаписывать ли существующий конфиг. В пайпе — false.
+func configOverwriteConfirmed(_ path: String) -> Bool {
+    guard isTTY(), stdinIsTTY() else { return false }
+    eprint("Конфиг \(path) уже существует. Перезаписать? (y/N)")
+    let answer = readLine()?.trimmingCharacters(in: .whitespaces).lowercased() ?? ""
+    return answer == "y" || answer == "yes"
+}
+
+/// Записать шаблон конфига (создаёт директорию при необходимости) с правами 0600.
+func writeConfigTemplate(path: String) -> Int32 {
+    let fm = FileManager.default
+    let dir = (path as NSString).deletingLastPathComponent
+    do {
+        try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try AppConfig.initTemplate().data(using: .utf8)!
+            .write(to: URL(fileURLWithPath: path), options: .atomic)
+        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+    } catch {
+        eprint("ОШИБКА: не удалось записать \(path): \(error)")
+        return 1
+    }
+    print("Шаблон конфига создан: \(path) (chmod 600)")
+    print("Заполните секреты: `dictatorctl config set-key <провайдер>` или отредактируйте файл.")
+    return 0
+}
+
+/// `config set-key <провайдер> [ключ] [--stdin]` — api_key точечной правкой
+/// секции `[providers.<id>]`. Ключ не передан: читается из stdin (при --stdin
+/// или пайпе), иначе — ввод с клавиатуры. Предупреждает, если активна
+/// env-переменная DICTATION_API_KEY (она приоритетнее файла).
+func cmdConfigSetKey(path: String, args: [String]) -> Int32 {
+    guard let providerID = args.first else {
+        eprint("Использование: dictatorctl config set-key <провайдер-id> [ключ] [--stdin]")
+        return 1
+    }
+    let rest = Array(args.dropFirst())
+    let useStdin = rest.contains("--stdin")
+    let keyArg = rest.first(where: { !$0.hasPrefix("--") })
+
+    let value: String
+    if let keyArg = keyArg {
+        value = keyArg
+    } else if useStdin || !stdinIsTTY() {
+        let data = FileHandle.standardInput.readDataToEndOfFile()
+        value = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    } else {
+        eprint("Введите значение api_key для '\(providerID)' (Enter — подтвердить):")
+        guard let line = readLine() else {
+            eprint("Отменено")
+            return 1
+        }
+        value = line.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    guard !value.isEmpty else {
+        eprint("Значение пусто — ключ не записан (передайте аргументом или через stdin)")
+        return 1
+    }
+    guard !value.contains("\""), !value.contains("\\"), !value.contains("\n") else {
+        eprint("ОШИБКА: значение содержит недопустимые символы (\", \\, перевод строки)")
+        return 1
+    }
+
+    if let envKey = ProcessInfo.processInfo.environment["DICTATION_API_KEY"], !envKey.isEmpty {
+        eprint("ВНИМАНИЕ: активна env-переменная DICTATION_API_KEY — приоритетнее api_key из файла;")
+        eprint("пока она задана, записанный ключ использоваться не будет (см. `dictatorctl config show`).")
+    }
+
+    do {
+        // writeProviderKeyValue ждёт значение в формате строки конфига (с кавычками),
+        // как writeKeyValue для строк (ср. writeActiveProvider).
+        try AppConfig.writeProviderKeyValue(providerID: providerID, key: "api_key", value: "\"\(value)\"", to: path)
+    } catch {
+        eprint("ОШИБКА: \(error)")
+        return 1
+    }
+    print("api_key провайдера '\(providerID)' обновлён: \(path) (chmod 600)")
+    return 0
+}
+
+/// Терминальный ли stdin (для ввода ключа с клавиатуры vs пайп).
+func stdinIsTTY() -> Bool {
+    isatty(STDIN_FILENO) == 1
+}
+
 func cmdConfig(_ args: [String]) -> Int32 {
     let path = AppConfig.defaultPath()
     let fm = FileManager.default
     let exists = fm.fileExists(atPath: path)
 
-    if args.contains("--path") {
+    // `config path` — алиас `config --path`.
+    if args.first?.lowercased() == "path" || args.contains("--path") {
         print(path)
         return 0
     }
 
-    var config: AppConfig
+    // `config init [--force]` — создать шаблон (без подтверждения не перезаписывает).
+    if args.first?.lowercased() == "init" {
+        guard !exists || args.contains("--force") || configOverwriteConfirmed(path) else {
+            eprint("Конфиг уже существует: \(path)")
+            eprint("Для перезаписи используйте `dictatorctl config init --force`.")
+            return 1
+        }
+        return writeConfigTemplate(path: path)
+    }
+
+    // `config set-key <провайдер> [ключ]` — точечная правка api_key в секции.
+    if args.first?.lowercased() == "set-key" {
+        return cmdConfigSetKey(path: path, args: Array(args.dropFirst()))
+    }
+
     do {
-        config = try AppConfig.load(from: nil)
+        let config = try AppConfig.load(from: nil)
+
+        if args.contains("--show-file") {
+            if exists {
+                guard let content = try? String(contentsOfFile: path, encoding: .utf8) else {
+                    eprint("Не удалось прочитать конфиг: \(path)")
+                    return 1
+                }
+                print(maskFileSecrets(in: content))
+            } else {
+                print("Конфиг не найден: создайте шаблон командой `dictatorctl config init` (\(path))")
+            }
+            return 0
+        }
+
+        print("path: \(path)")
+        if !exists {
+            print("Конфиг не найден: создайте шаблон командой `dictatorctl config init` (\(path))")
+        }
+        print("active_provider: \(ProviderStore.activeProvider?.id ?? "(не выбран)")")
+        print("base_url: \(config.baseURL)")
+        print("model: \(config.model)")
+        print("timeout_seconds: \(config.timeoutSeconds)")
+        print("sounds_enabled: \(config.soundsEnabled)")
+        print("double_alt_max_interval: \(config.doubleAltMaxInterval)")
+        print("log_level: \(config.logLevel)")
+        print("language: \(config.language)")
+        print("api_key: \(secretDisplay(config.apiKey))")
+        print("proxy_key: \(secretDisplay(config.proxyKey))")
+        if !config.apiSecret.isEmpty {
+            print("api_secret: \(secretDisplay(config.apiSecret))")
+        }
+        return 0
     } catch {
         eprint("ОШИБКА: \(error)")
         return 1
     }
-
-    if args.contains("--show-file") {
-        if exists {
-            guard let content = try? String(contentsOfFile: path, encoding: .utf8) else {
-                eprint("Не удалось прочитать конфиг: \(path)")
-                return 1
-            }
-            print(maskAPIKey(in: content))
-        } else {
-            print("Конфиг не найден, используется defaults (\(path))")
-        }
-        return 0
-    }
-
-    print("path: \(path)")
-    if !exists {
-        print("Конфиг не найден, используется defaults (\(path))")
-    }
-    print("base_url: \(config.baseURL)")
-    print("model: \(config.model)")
-    print("timeout_seconds: \(config.timeoutSeconds)")
-    print("sounds_enabled: \(config.soundsEnabled)")
-    print("double_alt_max_interval: \(config.doubleAltMaxInterval)")
-    print("log_level: \(config.logLevel)")
-    print("language: \(config.language)")
-    print("api_key: ***")
-    print("proxy_key: ***")
-    return 0
 }
 
 // MARK: - Providers (несколько STT-провайдеров)
@@ -232,11 +388,14 @@ func providerList() -> Int32 {
             print("\(marker) \(display) [\(p.id)]")
             print("    base_url: \(p.baseURL)")
             print("    model: \(p.model)")
-            print("    api_key: \(p.apiKey.isEmpty ? "(пусто)" : "***")")
+            print("    api_key: \(secretDisplay(p.apiKey))")
             if let keyFile = p.apiKeyFile {
                 print("    api_key_file: \(keyFile)")
             }
-            print("    proxy_key: \(p.proxyKey.isEmpty ? "(пусто)" : "***")")
+            print("    proxy_key: \(secretDisplay(p.proxyKey))")
+            if !p.apiSecret.isEmpty {
+                print("    api_secret: \(secretDisplay(p.apiSecret))")
+            }
         }
         print("(* — активный провайдер)")
         return 0
@@ -260,7 +419,7 @@ func providerUse(_ name: String, _ args: [String]) -> Int32 {
     if args.contains("--no-restart") {
         print("Агент не перезапущен (--no-restart)")
     } else {
-        let target = "\(guiDomain)/com.dima.altdictation"
+        let target = "\(guiDomain)/\(agentServiceName)"
         let kick = runProcess("/bin/launchctl", ["kickstart", "-k", target])
         if kick.status == 0 {
             print("Агент перезапущен")
@@ -273,7 +432,7 @@ func providerUse(_ name: String, _ args: [String]) -> Int32 {
 }
 
 func providerStatus() -> Int32 {
-    let printResult = runProcess("/bin/launchctl", ["print", "\(guiDomain)/com.dima.altdictation"])
+    let printResult = runProcess("/bin/launchctl", ["print", "\(guiDomain)/\(agentServiceName)"])
     let running = printResult.status == 0
     do {
         let providers = try ProviderStore.loadProviders()
@@ -311,7 +470,7 @@ func providerShow(_ name: String) -> Int32 {
             print("api_key: (пусто)")
             print("! api_key: ВНИМАНИЕ — секрет не задан")
         } else {
-            print("api_key: ***")
+            print("api_key: \(secretDisplay(p.apiKey))")
         }
         if let keyFile = p.apiKeyFile {
             let expanded = (keyFile as NSString).expandingTildeInPath
@@ -323,7 +482,12 @@ func providerShow(_ name: String) -> Int32 {
         if p.proxyKey.isEmpty {
             print("proxy_key: (пусто)")
         } else {
-            print("proxy_key: ***")
+            print("proxy_key: \(secretDisplay(p.proxyKey))")
+        }
+        if p.apiSecret.isEmpty {
+            print("api_secret: (пусто)")
+        } else {
+            print("api_secret: \(secretDisplay(p.apiSecret))")
         }
         return 0
     } catch {
@@ -336,7 +500,7 @@ func cmdProvider(_ args: [String]) -> Int32 {
     switch args.first?.lowercased() {
     case "list":
         return providerList()
-    case "use":
+    case "use", "set":
         guard let name = args.dropFirst().first else {
             eprint("Использование: dictatorctl provider use <имя> [--no-restart]")
             return 1
@@ -400,6 +564,11 @@ func cmdTranscribe(_ args: [String]) -> Int32 {
         return 1
     }
 
+    // Активный провайдер = адаптер запроса (как в DictatorAgent): при пустом
+    // active_provider — первый провайдер по порядку, иначе его id.
+    let activeAdapterID: String? = config.activeProvider.isEmpty
+        ? config.providers.first?.id
+        : config.activeProvider
     let transcriber = Transcriber(
         baseURL: config.baseURL,
         model: config.model,
@@ -407,7 +576,12 @@ func cmdTranscribe(_ args: [String]) -> Int32 {
         proxyKey: config.proxyKey,
         language: config.language,
         timeout: config.timeoutSeconds,
-        logLevel: config.logLevel
+        logLevel: config.logLevel,
+        byetCookieProvider: config.transport == "relay" || config.transport == "infinityfree"
+            ? ByetCookieProvider.makeForInfinityFree(baseURL: config.baseURL)
+            : nil,
+        apiSecret: config.apiSecret,
+        adapterID: activeAdapterID
     )
     // Данные всегда WAV (не-WAV конвертируется выше); сервер строг к расширению,
     // поэтому в multipart-поле файла всегда слать "audio.wav", а не исходное имя.
@@ -492,14 +666,14 @@ func cmdRetry(_ name: String) -> Int32 {
         eprint("ОШИБКА: провайдер '\(name)' не найден. Доступные: \(available.joined(separator: ", "))")
         return 2
     }
-    let target = "\(guiDomain)/com.dima.altdictation"
+    let target = "\(guiDomain)/\(agentServiceName)"
     let running = runProcess("/bin/launchctl", ["print", target]).status == 0
     guard running else {
         eprint("ОШИБКА: агент не запущен — последний WAV хранится в памяти агента. Запустите агент (`dictatorctl start`) и повторите.")
         return 1
     }
     DistributedNotificationCenter.default().postNotificationName(
-        Notification.Name("com.dima.altdictation.retryRequest"),
+        Notification.Name("com.dictation.agent.retryRequest"),
         object: nil,
         userInfo: ["provider": name],
         deliverImmediately: true
@@ -524,11 +698,20 @@ let usage = """
   start                            Установить и запустить LaunchAgent
   stop                             Остановить LaunchAgent
   status                           Статус агента (launchctl + pgrep — pid процесса)
-  config                           Показать конфиг (api_key маскируется как ***)
-    config --path                  Только путь к конфиг-файлу
-    config --show-file             Содержимое конфиг-файла с маскировкой api_key
+  config                           Показать конфиг (секреты маскируются: abcd***wxyz)
+    config init [--force]          Создать шаблон config.toml (chmod 600; существующий
+                                   файл без --force перезаписывается только после
+                                   подтверждения в терминале)
+    config set-key ПРОВАЙДЕР [КЛЮЧ] [--stdin]
+                                   Записать api_key в секцию [providers.ПРОВАЙДЕР]
+                                   (chmod 600; КЛЮЧ не указан — ввод с клавиатуры или
+                                   stdin при --stdin/пайпе; предупреждение, если задан
+                                   DICTATION_API_KEY)
+    config path                    Путь к конфиг-файлу (алиас config --path)
+    config --show-file             Содержимое конфиг-файла с маскировкой секретов
   provider list                    Список STT-провайдеров из config.toml (* — активный)
     provider use ИМЯ [--no-restart]
+    provider set ИМЯ [--no-restart] (алиас use)
                                    Сделать ИМЯ активным провайдером: правка
                                    active_provider в config.toml, chmod 600 и
                                    перезапуск агента (--no-restart без перезапуска)

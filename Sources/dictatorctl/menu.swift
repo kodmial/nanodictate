@@ -229,7 +229,7 @@ private func providerEntries(_ providers: [STTProvider]) -> [MenuEntry] {
 // MARK: - Сбор данных статуса
 
 private func agentIsRunning() -> Bool {
-    runProcess("/bin/launchctl", ["print", "\(guiDomain)/com.dima.altdictation"]).status == 0
+    runProcess("/bin/launchctl", ["print", "\(guiDomain)/com.dictation.agent"]).status == 0
 }
 
 private func logFileURL() -> URL {
@@ -312,7 +312,7 @@ private func confirmAndSwitchProvider(_ provider: STTProvider, _ view: inout Men
     } catch {
         return "Ошибка переключения: \(error)"
     }
-    let kick = runProcess("/bin/launchctl", ["kickstart", "-k", "\(guiDomain)/com.dima.altdictation"])
+    let kick = runProcess("/bin/launchctl", ["kickstart", "-k", "\(guiDomain)/com.dictation.agent"])
     let restart = kick.status == 0 ? "агент перезапущен" : "агент не перезапущен (запустите `dictatorctl start`)"
     return "Провайдер '\(display)' теперь активен · \(restart)"
 }
@@ -376,7 +376,7 @@ private func execute(_ action: MenuAction, _ view: inout MenuView) -> Bool {
         let newValue = !current
         do {
             try AppConfig.writeReviewBeforeInsert(value: newValue, to: AppConfig.defaultPath())
-            let kick = runProcess("/bin/launchctl", ["kickstart", "-k", "\(guiDomain)/com.dima.altdictation"])
+            let kick = runProcess("/bin/launchctl", ["kickstart", "-k", "\(guiDomain)/com.dictation.agent"])
             let restart = kick.status == 0 ? "агент перезапущен" : "агент не перезапущен (запустите `dictatorctl start`)"
             if newValue {
                 // Под launchd у агента нет терминала: гейт ревью пропускается

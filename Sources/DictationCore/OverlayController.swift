@@ -33,6 +33,10 @@ final class OverlayState: ObservableObject {
     /// контроллера в момент старта; вью только тикает раз в секунду и считает
     /// разницу от него (не накапливает «если успели»).
     @Published var recordingStart: Date?
+    /// Ярлык «через что идёт распознавание» («groq · whisper-large-v3»).
+    /// Приходит от агента в момент старта диктовки — оверлей сам конфиг
+    /// не читает и сам ярлык не строит.
+    @Published var sttLabel: String = ""
 
     func updateLevel(_ value: Float) {
         level = min(max(value, 0), 1)
@@ -40,6 +44,10 @@ final class OverlayState: ObservableObject {
 
     func setStatus(_ text: String) {
         status = text
+    }
+
+    func setSTTLabel(_ text: String) {
+        sttLabel = text
     }
 
     func setRecordingPhase(startedAt: Date = Date()) {
@@ -54,6 +62,13 @@ final class OverlayState: ObservableObject {
     func resetPhase() {
         phase = .idle
         recordingStart = nil
+        // Ярлык живёт только в течение цикла записи/распознавания: сброс при
+        // возврате к базовой фазе (и в hide() через этот же метод) не даёт
+        // метке ПРОШЛОЙ сессии остаться на панели статуса — прежде всего на
+        // «Отмена вставки» (undo-путь повторно вызывает show()+resetPhase() без
+        // setSTTLabel). В начале нового цикла агент всегда заново зовёт
+        // setSTTLabel сразу после show(), так что свежая метка не затирается.
+        sttLabel = ""
     }
 }
 
@@ -62,83 +77,165 @@ final class OverlayState: ObservableObject {
 struct OverlayContentView: View {
     @ObservedObject var state: OverlayState
 
-    @State private var displayedLevel: Float = 0
+    /// Сглаженный метр (dB-ремап + envelope-баллистика) — крутит кольцо-дугу.
+    @State private var meter: Float = 0
+    /// Целевой метр из последнего пришедшего RMS (envelope догоняет его).
+    @State private var meterTarget: Float = 0
+    /// Следящий пик метра — пик-точка кольца.
+    @State private var peak: Float = 0
+    @State private var peakTracker = OverlayPeak()
+    /// Тик-луп баллистики (attack/release) — идёт, пока есть что сглаживать.
+    @State private var meterTimer: Timer?
+
     @State private var displayedStatus: String = ""
-    @State private var decayTimer: Timer?
 
     /// Текст таймера записи («0:00» / «1:07») — обновляется раз в секунду
     /// пересчётом от state.recordingStart, а не накоплением тиков.
     @State private var elapsedText: String = "0:00"
     @State private var clockTimer: Timer?
 
+    /// Шаг тик-лупа баллистики: 20 Гц ловят и быстрый attack (70 мс), и
+    /// заметный release без лишней нагрузки на SwiftUI (изменения < 0.0015
+    /// не перерисовываются).
+    private let meterTick: TimeInterval = 0.05
+
+    /// Шапка рендерится из ДВУХ значений — провайдер и модель отдельно
+    /// (иерархия «кто распознаёт»), а не из одной склеенной строки.
+    /// Значение приходит от агента одной строкой (setSTTLabel) — раскладываем
+    /// её чистой функцией RecognitionLabel.parts(fromLabel:).
+    private var headerParts: RecognitionLabel.RecognitionLabelParts {
+        RecognitionLabel.parts(fromLabel: state.sttLabel)
+    }
+
     var body: some View {
         VStack(spacing: 8) {
+            // Шапка: «провайдер / модель» вертикально — две строки, а не
+            // «провайдер · модель» по горизонтали: модель уходит на 2-ю
+            // строку и НЕ расширяет панель. Кегли .caption — компактнее
+            // текущего; провайдер — secondary, модель — tertiary (иерархия
+            // «кто распознаёт»). Hairline-разделитель под шапкой УБРАН:
+            // у macOS-панелей внутренних разделителей нет. При обработке
+            // шапка притухает — статус-точки ниже говорят сами за себя.
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    // Фикс-слот под REC-точку (видна только при записи): пустой
+                    // слот держит ширину и в остальных фазах, чтобы провайдер
+                    // не прыгал при idle→recording→processing.
+                    ZStack {
+                        if state.phase == .recording {
+                            RECDot()
+                        }
+                    }
+                    .frame(width: 10, height: 10)
+                    Text(headerParts.provider)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 0)
+                }
+                if !headerParts.model.isEmpty {
+                    Text(headerParts.model)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary) // иерархия: модель ступенью ниже
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                }
+            }
+            .opacity(state.phase == .processing ? 0.3 : 1)
+
             ZStack {
                 if state.phase == .processing {
                     // Обработка: STT-запрос ушёл — вместо иконки анимация
                     // «три точки» (пульс opacity/scale, каскадная задержка).
                     ProcessingDots()
                 } else {
-                    // Outer pulsing rings (3 layers)
-                    // opacity per spec: 0.6 - value*0.4, slightly staggered per layer
-                    ForEach(0..<3, id: \.self) { i in
-                        let stagger = Float(i) * 0.12
-                        Circle()
-                            .fill(Color.white)
-                            .frame(width: 64, height: 64)
-                            .scaleEffect(1.0 + CGFloat(displayedLevel) * 0.5 + CGFloat(i) * 0.15)
-                            .opacity(Double(max(0, 0.6 - displayedLevel * 0.4 - stagger)))
-                    }
-
-                    // Main circle background
+                    // База индикатора — статичный фон-кольцо под дугой (как у
+                    // нативных level-индикаторов macOS): 12% системного
+                    // secondary, без пульсаций.
                     Circle()
-                        .fill(Color.white.opacity(0.15 + Double(displayedLevel) * 0.25))
-                        .frame(width: 64, height: 64)
-                        .scaleEffect(1.0 + CGFloat(displayedLevel) * 0.3)
+                        .fill(Color.secondary.opacity(0.12))
+                        .frame(width: 68, height: 68)
 
-                    // Microphone icon
+                    // Кольцо-дуга вокруг микрофона: trim 0…метр (старт снизу,
+                    // угол −90°), штрих растёт 3→9. Вне записи дуга гаснет —
+                    // фидбек живёт только в VU-фазе. Цвет — системный
+                    // accentColor (controlAccentColor): БЕЗ градиентов и
+                    // цветовых зон — статус-текст ниже несёт семантику (HIG:
+                    // не полагаться только на цвет).
+                    ZStack {
+                        Circle()
+                            .trim(from: 0, to: CGFloat(min(max(meter, 0), 1)))
+                            .stroke(
+                                Color.accentColor,
+                                style: StrokeStyle(
+                                    lineWidth: OverlayLevel.strokeWidth(forMeter: meter),
+                                    lineCap: .round
+                                )
+                            )
+                            .frame(width: 68, height: 68)
+                        // Пик-точка на радиусе кольца: держит максимум ~0.8 с,
+                        // потом плавно опадает. Угол — в трим-пространстве дуги.
+                        Circle()
+                            .fill(Color.accentColor)
+                            .frame(width: 5, height: 5)
+                            .offset(x: 34)
+                            .rotationEffect(.degrees(Double(min(max(peak, 0), 1)) * 360))
+                    }
+                    .rotationEffect(.degrees(-90))
+                    .opacity(state.phase == .recording ? 1.0 : 0.25)
+
+                    // Микрофон (SF Symbol "mic.fill") — статичный, secondary:
+                    // уровень показывает дуга, а не иконка.
                     Image(systemName: "mic.fill")
                         .font(.system(size: 24, weight: .medium))
-                        .foregroundColor(.white)
-                        .scaleEffect(1.0 + CGFloat(displayedLevel) * 0.15)
+                        .foregroundStyle(.secondary)
                 }
             }
-            .frame(width: 64, height: 64)
-            .animation(.linear(duration: 0.1), value: displayedLevel)
+            .frame(width: 68, height: 68)
 
             // Таймер записи: «0:07» под иконкой, пока идёт запись.
             if state.phase == .recording {
                 Text(elapsedText)
-                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                    .foregroundColor(.white.opacity(0.9))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill(Color.white.opacity(0.12)))
+                    .font(.headline)
+                    .monospacedDigit()
+                    .foregroundStyle(.primary)
             }
 
-            // Status text
+            // Status text: перенос на 2 строки (длинные статус-строки
+            // обрезаются, а не расширяют панель своим minWidth).
             Text(displayedStatus)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(.white.opacity(0.8))
-                .lineLimit(1)
-                .frame(minWidth: 100)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
         }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 16)
-        .background(
-            RoundedRectangle(cornerRadius: 20)
-                .fill(Color.black.opacity(0.8))
-                .shadow(color: .black.opacity(0.4), radius: 12, x: 0, y: 4)
-        )
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        // HUD-канон: материал панели — .regularMaterial (HIG: standard
+        // overlays; .ultraThickMaterial читается плашкой), радиус 10pt
+        // обрезается через shaped-background (как card macOS 12); собственная
+        // тень РИСУЕТСЯ САМИ вью (прозрачному borderless-окну WindowServer
+        // системную тень почти не рендерит, hasShadow не гарантирует
+        // видимость) — применяется ПОСЛЕ clipShape, чтобы halo не был
+        // обрезан маской: визуально это и есть слой тени под материалом.
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .shadow(color: .black.opacity(0.22), radius: 24, x: 0, y: 8)
         .onAppear {
-            displayedLevel = state.level
             displayedStatus = state.status
             if state.phase == .recording {
                 startClock()
             }
+            // Новый сеанс: атакующий догон до текущего уровня (при записи).
+            meterTarget = state.phase == .recording
+                ? OverlayLevel.meter(fromRMS: state.level)
+                : 0
+            ensureMeterLoopRunning()
         }
         .onDisappear {
             stopClock()
+            stopMeterLoop()
         }
         .onChange(of: state.level) { newValue in
             handleLevelChange(newValue)
@@ -155,12 +252,81 @@ struct OverlayContentView: View {
                 startClock()
             } else {
                 stopClock()
+                // Вне записи уровень не приходит — гасим цель, envelope
+                // домогает спад и луп останавливается сам.
+                meterTarget = 0
             }
+            ensureMeterLoopRunning()
         }
         .onChange(of: state.recordingStart) { _ in
             // Новый сеанс записи — таймер отсчитывается от свежего старта.
             startClock()
+            ensureMeterLoopRunning()
         }
+    }
+
+    // MARK: - VU-баллистика (dB-ремап + envelope + пик)
+
+    /// Reduce Motion (System Settings → Accessibility): при включённом —
+    /// никакой плавной баллистики/пульсаций, метр и пик следуют за целью
+    /// напрямую. Доступно с macOS 10.15 — под macOS 12 это штатная API.
+    private var reduceMotion: Bool {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    /// Новый RMS из аудиопотока → целевой метр (dB-ремап). Лупу баллистики
+    /// при этом гарантированно запускаем (или она уже идёт).
+    private func handleLevelChange(_ newRMS: Float) {
+        let newTarget = OverlayLevel.meter(fromRMS: newRMS)
+        if abs(newTarget - meterTarget) > 0.0001 {
+            meterTarget = newTarget
+            ensureMeterLoopRunning()
+        }
+    }
+
+    /// Луп баллистики живёт, пока есть что сглаживать: фаза записи, целевой
+    /// метр или остывающий метр. Когда всё улеглось — останавливается и
+    /// сбрасывается (пик тоже), чтобы следующая сессия стартовала с нуля.
+    private func ensureMeterLoopRunning() {
+        let needsLoop = state.phase == .recording || meterTarget > 0.001 || meter > 0.001
+        if needsLoop {
+            if meterTimer == nil {
+                meterTimer = Timer.scheduledTimer(withTimeInterval: meterTick, repeats: true) { _ in
+                    self.tickMeter()
+                }
+            }
+        } else {
+            stopMeterLoop()
+        }
+    }
+
+    private func stopMeterLoop() {
+        meterTimer?.invalidate()
+        meterTimer = nil
+        meter = 0
+        meterTarget = 0
+        peak = 0
+        peakTracker.reset()
+    }
+
+    private func tickMeter() {
+        guard !reduceMotion else {
+            // Reduce Motion: без envelope — метр и пик идут за целью напрямую.
+            let fresh = min(max(meterTarget, 0), 1)
+            meter = fresh
+            peak = fresh
+            ensureMeterLoopRunning()
+            return
+        }
+        let newMeter = OverlayLevel.enveloped(current: meter, target: meterTarget, dt: meterTick)
+        if abs(newMeter - meter) > 0.0015 {
+            meter = newMeter
+        }
+        let newPeak = peakTracker.update(level: newMeter, dt: meterTick)
+        if abs(newPeak - peak) > 0.0015 {
+            peak = newPeak
+        }
+        ensureMeterLoopRunning()
     }
 
     // MARK: - Таймер записи
@@ -188,31 +354,32 @@ struct OverlayContentView: View {
         }
         elapsedText = OverlayTimeFormat.format(Date().timeIntervalSince(start))
     }
+}
 
-    private func handleLevelChange(_ newLevel: Float) {
-        decayTimer?.invalidate()
+/// REC-точка шапки: видна только при записи. Пульс — HIG «breathe»: мягкое
+/// плавное «дыхание» scale/opacity 0.6→1.0 за ~1.6 с (reverses), резкое
+/// мигание ЗАПРЕЩЕНО (Accessibility: flashing — антипаттерн). При Reduce
+/// Motion — статичная точка без анимации.
+private struct RECDot: View {
+    @State private var pulse = false
 
-        if newLevel > 0 {
-            withAnimation(.linear(duration: 0.1)) {
-                displayedLevel = newLevel
+    private var reduceMotion: Bool {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    var body: some View {
+        Circle()
+            .fill(Color.red)
+            .frame(width: 8, height: 8)
+            .scaleEffect(pulse ? 1.0 : 0.6)
+            .opacity(pulse ? 1.0 : 0.6)
+            .animation(
+                reduceMotion ? nil : Animation.easeInOut(duration: 1.6).repeatForever(autoreverses: true),
+                value: pulse
+            )
+            .onAppear {
+                pulse = true
             }
-        } else {
-            // Soft decay when level drops to 0
-            var decay: Float = displayedLevel
-            decayTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { timer in
-                decay *= 0.85
-                if decay < 0.01 {
-                    withAnimation(.linear(duration: 0.15)) {
-                        self.displayedLevel = 0
-                    }
-                    timer.invalidate()
-                } else {
-                    withAnimation(.linear(duration: 0.05)) {
-                        self.displayedLevel = decay
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -226,7 +393,7 @@ private struct ProcessingDots: View {
         HStack(spacing: 7) {
             ForEach(0..<3, id: \.self) { i in
                 Circle()
-                    .fill(Color.white)
+                    .fill(Color.primary)
                     .frame(width: 10, height: 10)
                     .scaleEffect(animate ? 1.0 : 0.35)
                     .opacity(animate ? 1.0 : 0.35)
@@ -280,6 +447,19 @@ public enum OverlayErrorText {
 /// «панель всегда видна, над кареткой, не вылезает за экран» покрывалось
 /// юнит-тестами без создания реального окна.
 public enum OverlayLayout {
+
+    /// Мин/макс ширина компактной плашки: автоширина из fittingSize контента
+    /// клампится в эти границы — плашка поверх текста не «съёживается» до
+    /// голой иконки и не разъезжается на весь экран при длинной шапке.
+    static let minPanelWidth: CGFloat = 180
+    static let maxPanelWidth: CGFloat = 240
+
+    /// Автоширина плашки из собственного размера контента (hostingView's
+    /// fittingSize): кламп [180, 240]. Чистое преобразование — тестируется
+    /// без создания окна.
+    public static func clampedPanelWidth(from fittingWidth: CGFloat) -> CGFloat {
+        min(max(fittingWidth, minPanelWidth), maxPanelWidth)
+    }
 
     /// Возвращает frame панели размером `panelSize` рядом с точкой `point`
     /// внутри экрана `screen`. Панель встаёт НАД точкой (с отступом 12pt);
@@ -345,6 +525,9 @@ public final class OverlayController: NSObject {
     public static let processingMaxDuration: TimeInterval = Transcriber.networkRequestTimeout + 5
 
     private var panel: NSPanel?
+    /// SwiftUI-хост контента панели: его fittingSize задаёт автоматическую
+    /// ширину плашки (кламп [180, 240], см. clampedPanelWidth).
+    private var hostingView: NSHostingView<OverlayContentView>?
     private let state = OverlayState()
     /// Точка показа из последнего show(at:) — на неё пересчитывается frame
     /// при смене фазы (высота панели зависит от фазы: таймер/точки).
@@ -401,7 +584,9 @@ public final class OverlayController: NSObject {
             return
         }
 
-        let panelWidth: CGFloat = 260
+        // Автоширина плашки из собственного размера контента (fittingSize),
+        // кламп min 180 / max 240 — компактная плашка, а не фикс 280.
+        let panelWidth = OverlayLayout.clampedPanelWidth(from: hostingView?.fittingSize.width ?? 0)
         let panelHeight = desiredPanelHeight()
 
         let screen = OverlayLayout.screenContaining(point)
@@ -432,6 +617,11 @@ public final class OverlayController: NSObject {
             panel.orderFrontRegardless()
             panel.makeKeyAndOrderFront(nil)
             panel.orderFrontRegardless()
+
+            // Прозрачному borderless-окну WindowServer рисует тень не сразу и
+            // не всегда — после вывода на экран просим пересчитать системную
+            // тень (hasShadow=true без этого может не отрендериться вовсе).
+            panel.invalidateShadow()
 
             // Отложенная проверка того, что окно РЕАЛЬНО попало на экран
             // (CGWindowList видит только окна, показанные WindowServer'ом).
@@ -483,6 +673,14 @@ public final class OverlayController: NSObject {
         state.setStatus(text)
     }
 
+    /// Метка «через что идёт распознавание» («gigaam · gigaam-v3») — самый верх
+    /// панели. Значение приходит от агента в момент старта диктовки
+    /// (вычислено из того же resolved-провайдера, которым собран распознаватель
+    /// сессии); оверлей сам конфиг не читает и ярлык не строит.
+    public func setSTTLabel(_ text: String) {
+        state.setSTTLabel(text)
+    }
+
     // MARK: - Фазы оверлея
 
     /// Фаза «запись»: микрофон + бегущий таймер. Момент старта фиксируется
@@ -508,16 +706,23 @@ public final class OverlayController: NSObject {
     // MARK: - Размер панели под фазу
 
     /// Высота панели зависит от фазы: при записи под иконкой живёт таймер
-    /// («0:07»), панель чуть выше; в остальных фазах — компактная.
+    /// («0:07»), панель выше; в остальных фазах — компактная плашка.
+    ///
+    /// idle ~150 (компактная плашка без шапки-стринг и таймера), recording
+    /// ~178 (таймер под иконкой). Ширина при смене фазы НЕ меняется — только
+    /// высота (см. resizePanelForCurrentPhase). Высота НЕ зависит от наличия
+    /// шапки в момент показа — setSTTLabel приходит после show() и resize не
+    /// триггерит; при пустой метке появляется лишь пара лишних pt воздуха
+    /// сверху, layout не скачет между сеансами.
     private func desiredPanelHeight() -> CGFloat {
         switch state.phase {
-        case .recording: return 168
-        case .idle, .processing: return 120
+        case .recording: return 178
+        case .idle, .processing: return 150
         }
     }
 
     /// Пересчитывает frame панели после смены фазы: высота меняется (таймер
-    /// добавляет ~50pt), а панель остаётся привязана к той же точке показа.
+    /// добавляет ~28pt), а панель остаётся привязана к той же точке показа.
     private func resizePanelForCurrentPhase() {
         guard let panel = panel, let point = anchorPoint else { return }
         let screen = OverlayLayout.screenContaining(point)
@@ -527,6 +732,9 @@ public final class OverlayController: NSObject {
             panelSize: CGSize(width: panel.frame.width, height: desiredPanelHeight())
         )
         panel.setFrame(frame, display: true)
+        // Тень после ресайза тоже пересчитывается только по явному запросу —
+        // иначе ловим рваный/застывший halo вокруг изменившейся плашки.
+        panel.invalidateShadow()
     }
 
     // MARK: - Panel Setup
@@ -535,7 +743,10 @@ public final class OverlayController: NSObject {
         guard panel == nil else { return }
 
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 260, height: 120),
+            // Стартовый размер несуществен: show() сразу ставит реальный frame
+            // из автоширины контента (кламп [180,240]) и высоты фазы. 200×150 —
+            // середина клампа × компактная высота (idle).
+            contentRect: NSRect(x: 0, y: 0, width: 200, height: 150),
             styleMask: [.nonactivatingPanel, .borderless],
             backing: .buffered,
             defer: false
@@ -543,6 +754,12 @@ public final class OverlayController: NSObject {
         panel.level = .statusBar
         panel.isOpaque = false
         panel.backgroundColor = .clear
+        // HUD-канон: системная тень остаётся включённой (hasShadow=true), но
+        // у прозрачного borderless-окна WindowServer может её не отрисовать —
+        // гарантированную тень рисует само SwiftUI-вью (.shadow в
+        // OverlayContentView), а invalidateShadow() просит пересчитать и
+        // системную после show/ресайза.
+        panel.hasShadow = true
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.isMovableByWindowBackground = true
@@ -555,6 +772,7 @@ public final class OverlayController: NSObject {
         hostingView.autoresizingMask = [.width, .height]
         panel.contentView?.addSubview(hostingView)
 
+        self.hostingView = hostingView
         self.panel = panel
         if isDebug {
             Logger.log("overlay panel created styleMask=\(panel.styleMask.rawValue) level=\(panel.level.rawValue)", level: "debug")

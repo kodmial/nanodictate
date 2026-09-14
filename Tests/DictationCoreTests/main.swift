@@ -21,9 +21,11 @@ let suites: [XCTestCase.Type] = [
     AudioMetricsTests.self,
     AudioCaptureTests.self,
     AudioServiceLifecycleTests.self,
+    AudioServiceVADTests.self,
     LoggerTests.self,
     ConfigTests.self,
     ProviderTests.self,
+    RecognitionLabelTests.self,
     RetryProviderTests.self,
     ClipboardInsertTests.self,
     ReviewGateTests.self,
@@ -35,13 +37,18 @@ let suites: [XCTestCase.Type] = [
     WAVEncoderTests.self,
     RecordingLimitTests.self,
     TranscriberTests.self,
+    STTAdapterTests.self,
+    ByetCookieProviderTests.self,
     DebugDumpTests.self,
     OverlayControllerTests.self,
     OverlayLifecycleTests.self,
-DictationFlowTests.self,
+    DictationFlowTests.self,
     AudioSegmenterTests.self,
     WordDiffTests.self,
     ChunkedPipelineTests.self,
+    LiveSegmentFailureTests.self,
+    LiveOrchestrationBranchTests.self,
+    OverlayLevelTests.self,
 ]
 
 var passed = 0
@@ -70,6 +77,9 @@ for cls in suites {
     for selector in testSelectors {
         XCTestCase.currentFailures = []
         let instance = cls.init()
+
+        print("  TEST: \(suiteName).\(selector)")
+        fflush(stdout)
 
         _ = instance.perform(Selector(("setUp")))
         _ = instance.perform(selector)

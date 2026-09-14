@@ -650,4 +650,185 @@ final class TranscriberTests: XCTestCase {
         XCTAssertTrue(NetworkReachability.isReachable(status: .satisfied, possibleExternalRoute: true))
         XCTAssertFalse(NetworkReachability.isReachable(status: .satisfied, possibleExternalRoute: false))
     }
+
+    // MARK: - Byet-cookie-слой (transport == "infinityfree")
+
+    private let byetChallengeHTML = """
+    <html><body><script type="text/javascript" src="/aes.js" ></script><script>function toNumbers(d){var e=[];d.replace(/(..)/g,function(d){e.push(parseInt(d,16))});return e}function toHex(){for(var d=[],d=1==arguments.length&&arguments[0].constructor==Array?arguments[0]:arguments,e="",f=0;f<d.length;f++)e+=(16>d[f]?"0":"")+d[f].toString(16);return e.toLowerCase()}var a=toNumbers("f655ba9d09a112d4968c63579db590b4"),b=toNumbers("98344c2eee86c3994890592585b49f80"),c=toNumbers("3e512bc3e42f39a757e79f4739c74138");document.cookie="__test="+toHex(slowAES.decrypt(c,2,a,b))+"; max-age=21600; expires=Thu, 31-Dec-37 23:55:55 GMT; path=/"; location.href="https://kodmai.xo.je/?i=1";</script><noscript>This site requires Javascript to work, please enable Javascript in your browser or use a browser with Javascript support</noscript></body></html>
+    """
+
+    private func makeByetTranscriber(
+        sttTransport: ByetMockTransport,
+        byetTransport: ByetMockTransport?
+    ) -> Transcriber {
+        let byet = byetTransport.map { ByetCookieProvider(origin: "https://kodmai.xo.je", transport: $0) }
+        return Transcriber(baseURL: "https://kodmai.xo.je/go/https://api.example/v1/audio/transcriptions",
+                           model: "gigaam-v3",
+                           apiKey: "test-key",
+                           transport: sttTransport,
+                           networkChecker: { true },
+                           byetCookieProvider: byet)
+    }
+
+    @objc func testByetTransportSetsCookieAndChromeUA() {
+        let stt = ByetMockTransport(challengeBody: byetChallengeHTML)
+        let byetTransport = ByetMockTransport(challengeBody: byetChallengeHTML)
+        let byet = ByetCookieProvider(origin: "https://kodmai.xo.je", transport: byetTransport)
+
+        runAsync("testByetHeaders") {
+            // Прогрев токена — первый запрос уходит уже с кукой (тот же
+            // ByetCookieProvider, что в Transcriber: токен живёт в памяти).
+            _ = await byet.refreshBlocking()
+
+            let transcriber = Transcriber(baseURL: "https://kodmai.xo.je/go/https://api.example/v1/audio/transcriptions",
+                                          model: "gigaam-v3",
+                                          apiKey: "test-key",
+                                          transport: stt,
+                                          networkChecker: { true },
+                                          byetCookieProvider: byet)
+            let result = try await transcriber.transcribe(wav: self.wavData)
+            XCTAssertEqual(result.text, "ok")
+            guard let req = stt.lastRequest else {
+                XCTFail("No STT request captured")
+                return
+            }
+            XCTAssertEqual(req.value(forHTTPHeaderField: "Cookie"), "__test=d74696de7d49fcda5f03f4d247e07cf4")
+            XCTAssertEqual(req.value(forHTTPHeaderField: "User-Agent"), ByetCookieProvider.chromeUA)
+            XCTAssertEqual(stt.requestCount, 1, "cookie был свежий — челленджа и ретрая нет")
+        }
+    }
+
+    @objc func testNoByetNoCookieNoUA() {
+        let transport = MockTransport(status: 200, body: Data(#"{"text":"x"}"#.utf8))
+        let transcriber = makeTranscriber(transport: transport)
+
+        runAsync("testNoByetHeaders") {
+            _ = try await transcriber.transcribe(wav: self.wavData)
+            guard let req = transport.lastRequest else {
+                XCTFail("No request")
+                return
+            }
+            XCTAssertNil(req.value(forHTTPHeaderField: "Cookie"),
+                         "без Byet cookie-логики быть не должно")
+            XCTAssertNil(req.value(forHTTPHeaderField: "User-Agent"),
+                         "без Byet фиксированный UA не подставляется (как раньше)")
+        }
+    }
+
+    @objc func testChallengeTriggersSingleRetryWithFreshCookie() {
+        let stt = ByetMockTransport(challengeBody: byetChallengeHTML, rejectPostCount: 1)
+        let byetTransport = ByetMockTransport(challengeBody: byetChallengeHTML)
+        let transcriber = makeByetTranscriber(sttTransport: stt, byetTransport: byetTransport)
+
+        runAsync("testChallengeRetry") {
+            let result = try await transcriber.transcribe(wav: self.wavData)
+            XCTAssertEqual(result.text, "ok")
+            XCTAssertEqual(stt.postCount, 2, "STT-попыток ровно 2 (мёртвая кука НЕ сжигает попытку)")
+            XCTAssertEqual(byetTransport.requestCount, 2, "refresh = GET челленджа + probe GET")
+            guard let retry = stt.requests.first(where: { $0.httpMethod == "POST" && $0.value(forHTTPHeaderField: "Cookie") != nil }) else {
+                XCTFail("Ретрай должен идти со свежей кукой")
+                return
+            }
+            XCTAssertEqual(retry.value(forHTTPHeaderField: "Cookie"), "__test=d74696de7d49fcda5f03f4d247e07cf4")
+            XCTAssertEqual(retry.value(forHTTPHeaderField: "User-Agent"), ByetCookieProvider.chromeUA)
+        }
+    }
+
+    @objc func testAlwaysChallengeRetriesOnceThenInvalidResponse() {
+        // Оба STT-POST получают челлендж даже со свежей кукой: refresh прошёл
+        // (probe GET принял cookie), но STT-эндпоинт всё равно отвечает челленджем.
+        let stt = ByetMockTransport(challengeBody: byetChallengeHTML, rejectPostCount: 2)
+        let byetTransport = ByetMockTransport(challengeBody: byetChallengeHTML)
+        let transcriber = makeByetTranscriber(sttTransport: stt, byetTransport: byetTransport)
+
+        runAsync("testAlwaysChallenge") {
+            do {
+                _ = try await transcriber.transcribe(wav: self.wavData)
+                XCTFail("Expected TranscribeError.invalidResponse")
+            } catch let error as TranscribeError {
+                if case .invalidResponse(let msg) = error {
+                    XCTAssertFalse(msg.isEmpty)
+                } else {
+                    XCTFail("Expected .invalidResponse, got \(error)")
+                }
+            }
+            XCTAssertEqual(stt.postCount, 2, "ровно 2 STT-POST: исходный + один ретрай со свежей кукой")
+            XCTAssertEqual(byetTransport.requestCount, 2, "cookie пересчитан один раз")
+        }
+    }
+
+    @objc func testChallengeRefreshFailureThrowsInvalidResponse() {
+        // Probe не принимает свежую куку (honorCookie=false) → refresh не дал
+        // токена → ретрая нет, ошибка с признаком челленджа.
+        let stt = ByetMockTransport(challengeBody: byetChallengeHTML, rejectPostCount: 1)
+        let byetTransport = ByetMockTransport(challengeBody: byetChallengeHTML, honorCookie: false)
+        let transcriber = makeByetTranscriber(sttTransport: stt, byetTransport: byetTransport)
+
+        runAsync("testChallengeRefreshFails") {
+            do {
+                _ = try await transcriber.transcribe(wav: self.wavData)
+                XCTFail("Expected TranscribeError.invalidResponse")
+            } catch let error as TranscribeError {
+                if case .invalidResponse(let msg) = error {
+                    XCTAssertTrue(msg.contains("challenge"))
+                } else {
+                    XCTFail("Expected .invalidResponse, got \(error)")
+                }
+            }
+            XCTAssertEqual(stt.postCount, 1, "без свежего токена ретрая нет")
+            XCTAssertEqual(byetTransport.requestCount, 2, "refresh всё же сходил за токеном")
+        }
+    }
+
+    // MARK: - Адаптерный путь (adapterID)
+
+    @objc func testAdapterOpenAIResolvesDefaultsAndSendsMultipart() {
+        // Пустые baseURL/model + adapterID "openai" → дефолты адаптера резолвятся
+        // внутри plan(): запрос уходит на api.openai.com с whisper-1 и multipart.
+        let transport = MockTransport(status: 200, body: Data(#"{"text":"привет"}"#.utf8))
+        let transcriber = Transcriber(
+            baseURL: "", model: "", apiKey: "sk-openai",
+            language: "ru", transport: transport, networkChecker: { true },
+            adapterID: "openai"
+        )
+
+        runAsync("testAdapterOpenAI") {
+            let result = try await transcriber.transcribe(wav: self.wavData)
+            XCTAssertEqual(result.text, "привет")
+        }
+        XCTAssertEqual(transport.requestCount, 1)
+        XCTAssertEqual(transport.lastRequest?.url?.absoluteString, "https://api.openai.com/v1/audio/transcriptions")
+        XCTAssertEqual(transport.lastRequest?.value(forHTTPHeaderField: "Authorization"), "Bearer sk-openai")
+        XCTAssertTrue((transport.lastRequest?.value(forHTTPHeaderField: "Content-Type") ?? "")
+            .hasPrefix("multipart/form-data; boundary=Boundary-"), "multipart контент-тип")
+        let bodyText = String(data: transport.lastRequest?.httpBody ?? Data(), encoding: .utf8) ?? ""
+        XCTAssertTrue(bodyText.contains("name=\"file\"; filename=\"audio.wav\""))
+        XCTAssertTrue(bodyText.contains("whisper-1"))
+        XCTAssertTrue(bodyText.contains("name=\"language\""))
+    }
+
+    @objc func testAdapterDeepgramRawAudioAndTranscriptPath() {
+        // deepgram: сырое аудио, заголовок Token, дефолты nova-3/endpoint,
+        // текст извлекается по transcriptPath из ответа.
+        let deepgramJSON = #"{"results":{"channels":[{"alternatives":[{"transcript":"привет тайге"}]}]}}"#
+        let transport = MockTransport(status: 200, body: Data(deepgramJSON.utf8))
+        let transcriber = Transcriber(
+            baseURL: "", model: "", apiKey: "dg-key",
+            language: "ru", transport: transport, networkChecker: { true },
+            adapterID: "deepgram"
+        )
+
+        runAsync("testAdapterDeepgram") {
+            let result = try await transcriber.transcribe(wav: self.wavData)
+            XCTAssertEqual(result.text, "привет тайге")
+        }
+        XCTAssertEqual(transport.requestCount, 1)
+        XCTAssertEqual(transport.lastRequest?.url?.host, "api.deepgram.com")
+        XCTAssertEqual(transport.lastRequest?.url?.path, "/v1/listen")
+        XCTAssertTrue(transport.lastRequest?.url?.query?.contains("model=nova-3") ?? false)
+        XCTAssertTrue(transport.lastRequest?.url?.query?.contains("language=ru") ?? false)
+        XCTAssertEqual(transport.lastRequest?.value(forHTTPHeaderField: "Authorization"), "Token dg-key")
+        XCTAssertEqual(transport.lastRequest?.value(forHTTPHeaderField: "Content-Type"), "audio/wav")
+        XCTAssertEqual(transport.lastRequest?.httpBody, wavData, "тело = сырое аудио, не multipart")
+    }
 }

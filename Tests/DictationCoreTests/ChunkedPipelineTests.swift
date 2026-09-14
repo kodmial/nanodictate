@@ -256,11 +256,110 @@ final class ChunkedPipelineTests: XCTestCase {
         XCTAssertTrue(labels.allSatisfy { $0 == labels.first }, "got \(labels)")
     }
 
+    // MARK: - Статические шаги конвейера (общие с live-диктовкой)
+
+    /// recognizeSegment: распознаёт ОДИН сегмент, финализирует текст, отдаёт
+    /// чистый prompt-текст; разделительный пробел добавляется только между
+    /// сегментами (index > 0 и уже вставленный текст не заканчивается пробелом).
+    @objc func testRecognizeSegmentSeparatorAndPrompt() throws {
+        let mockSTT = MockSTT(results: [" Один два. ", "Три четыре.", "Три четыре."])
+
+        // Сегмент 0: без контекста и без разделителя.
+        let first = try runAsync {
+            try await ChunkedPipeline.recognizeSegment(
+                samples: self.singleSegmentSamples(),
+                index: 0,
+                insertedText: "",
+                prompt: nil,
+                stt: { wav, filename, prompt in try await mockSTT.call(wav, filename, prompt) },
+                filename: "live-segment-1.wav"
+            )
+        }
+        XCTAssertEqual(first.insertText, "Один два.", "первый сегмент вставляется без ведущего пробела")
+        XCTAssertEqual(first.promptText, "Один два.")
+        XCTAssertEqual(mockSTT.calls.count, 1)
+        XCTAssertEqual(mockSTT.calls[0].filename, "live-segment-1.wav")
+        XCTAssertNil(mockSTT.calls[0].prompt, "первый сегмент не несёт контекста")
+
+        // Сегмент 1: разделительный пробел + prompt со всего распознанного.
+        let second = try runAsync {
+            try await ChunkedPipeline.recognizeSegment(
+                samples: self.singleSegmentSamples(),
+                index: 1,
+                insertedText: "Один два.",
+                prompt: "Один два.",
+                stt: { wav, filename, prompt in try await mockSTT.call(wav, filename, prompt) },
+                filename: "live-segment-2.wav"
+            )
+        }
+        XCTAssertEqual(second.insertText, " Три четыре.", "F2: между сегментами — разделительный пробел")
+        XCTAssertEqual(second.promptText, "Три четыре.", "в prompt-контекст уходит чистый текст")
+        XCTAssertEqual(mockSTT.calls[1].prompt, "Один два.")
+
+        // Пробел НЕ дублируется, если вставленный текст уже заканчивается пробелом.
+        let third = try runAsync {
+            try await ChunkedPipeline.recognizeSegment(
+                samples: self.singleSegmentSamples(),
+                index: 1,
+                insertedText: "Один два. ",
+                prompt: nil,
+                stt: { wav, filename, prompt in try await mockSTT.call(wav, filename, prompt) }
+            )
+        }
+        XCTAssertEqual(third.insertText, "Три четыре.", "текст уже оканчивается пробелом — лишний не добавляется")
+    }
+
+    /// finalize: финальный проход по ВСЕМУ WAV — по-словный diff с уже-вставленным
+    /// текстом; заменяет хвост одним действием. При совпадении — ничего не делает.
+    @objc func testFinalizeChangeAndNoop() throws {
+        let changedBox = RecordedOperationBox()
+
+        // Финальный текст меняет хвост: "Один два." → "Один два три."
+        let changeMock = MockSTT(results: ["Один два три."])
+        let (finalText, changed) = try runAsync {
+            try await ChunkedPipeline.finalize(
+                samples: self.singleSegmentSamples(),
+                insertedText: "Один два.",
+                stt: { wav, filename, prompt in try await changeMock.call(wav, filename, prompt) },
+                insert: { op in changedBox.add(op) },
+                onFinalizing: {}
+            )
+        }
+        XCTAssertTrue(changed, "diff есть — финальный текст отличается")
+        XCTAssertEqual(finalText, "Один два три.")
+        let expected = WordDiff.change(old: "Один два.", new: "Один два три.")!
+        XCTAssertEqual(changedBox.operations.count, 1)
+        XCTAssertEqual(changedBox.operations[0], .replaceTail(old: expected.tailOld, new: expected.tailNew))
+
+        // Совпадение финального и вставленного — вставка не производится.
+        let noopBox = RecordedOperationBox()
+        let noopMock = MockSTT(results: ["Один два."])
+        let (finalText2, changed2) = try runAsync {
+            try await ChunkedPipeline.finalize(
+                samples: self.singleSegmentSamples(),
+                insertedText: "Один два.",
+                stt: { wav, filename, prompt in try await noopMock.call(wav, filename, prompt) },
+                insert: { op in noopBox.add(op) }
+            )
+        }
+        XCTAssertFalse(changed2, "текст совпал — замены нет")
+        XCTAssertEqual(finalText2, "Один два.")
+        XCTAssertTrue(noopBox.operations.isEmpty, "совпавший финальный проход ничего не вставляет")
+        XCTAssertEqual(changeMock.calls.map { $0.filename } + noopMock.calls.map { $0.filename },
+                       ["final.wav", "final.wav"], "финальный WAV называется final.wav")
+    }
+
     /// Модифицируемый из Task: мутация ссылочного типа не триггерит
     /// concurrency-проверку Swift 5.7.
     private final class StringListBox {
         private(set) var values: [String] = []
         func append(_ value: String) { values.append(value) }
+    }
+
+    /// Собирает операции вставки из асинхронного контекста (finalize).
+    private final class RecordedOperationBox {
+        private(set) var operations: [ChunkedPipeline.Operation] = []
+        func add(_ operation: ChunkedPipeline.Operation) { operations.append(operation) }
     }
 
     // MARK: - runAsync helper

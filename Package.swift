@@ -33,7 +33,7 @@ let package = Package(
         // Компактный раннер тестов: на этой машине нет Xcode / XCTest.framework,
         // поэтому `swift test` физически не работает ("XCTest not available").
         // Исполняемый таргет прогоняет те же проверки и завершается с ненулевым
-        // кодом при первом упавшем тесте: `swift run DictationTests`.
+        // кодом при первом упавшем тесте: `swift run DictationCoreTests`.
         .executableTarget(
             name: "DictationCoreTests",
             dependencies: ["DictationCore", "AudioEngineGuard"],

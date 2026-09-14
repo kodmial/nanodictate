@@ -246,4 +246,46 @@ final class RetryProviderTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - resolveAPIKey: env > api_key > api_key_file
+
+    @objc func testResolveAPIKeyEnvWinsOverInlineAndFile() {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("resolve_api_key_env_\(UUID().uuidString).txt")
+        try? "file-key".data(using: .utf8)?.write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let provider = AppConfig.Provider(id: "a", name: "A", baseURL: "", model: "", apiKey: "inline", apiKeyFile: file.path, proxyKey: "")
+
+        setenv("DICTATION_API_KEY", "env-key", 1)
+        defer { unsetenv("DICTATION_API_KEY") }
+        XCTAssertEqual(RetryProvider.resolveAPIKey(for: provider), "env-key",
+                       "env-ключ приоритетнее inline-ключа и файла")
+    }
+
+    @objc func testResolveAPIKeyInlineBeatsFile() {
+        unsetenv("DICTATION_API_KEY")
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("resolve_api_key_inline_\(UUID().uuidString).txt")
+        try? "file-key".data(using: .utf8)?.write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let provider = AppConfig.Provider(id: "a", name: "A", baseURL: "", model: "", apiKey: "inline", apiKeyFile: file.path, proxyKey: "")
+        XCTAssertEqual(RetryProvider.resolveAPIKey(for: provider), "inline")
+    }
+
+    @objc func testResolveAPIKeyFileReadsQuotedContent() {
+        unsetenv("DICTATION_API_KEY")
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("resolve_api_key_file_\(UUID().uuidString).txt")
+        try? "# комментарий\n\"file-key\"\n".data(using: .utf8)?.write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let provider = AppConfig.Provider(id: "a", name: "A", baseURL: "", model: "", apiKey: "", apiKeyFile: file.path, proxyKey: "")
+        XCTAssertEqual(RetryProvider.resolveAPIKey(for: provider), "file-key",
+                       "из файла берётся строка без кавычек (комментарии пропускаются)")
+    }
+
+    @objc func testResolveAPIKeyMissingReturnsEmpty() {
+        unsetenv("DICTATION_API_KEY")
+        let provider = AppConfig.Provider(id: "a", name: "A", baseURL: "", model: "", apiKey: "", apiKeyFile: nil, proxyKey: "")
+        XCTAssertEqual(RetryProvider.resolveAPIKey(for: provider), "")
+    }
 }

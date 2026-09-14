@@ -19,11 +19,19 @@ public struct AppConfig: Equatable {
     public var apiKey: String
     public var apiKeyFile: String?
     public var proxyKey: String
+    /// Дополнительный секрет провайдера (для giga-chat — client_secret в OAuth).
+    /// Парсится только внутри `[providers.X]` и копируется из активной секции.
+    public var apiSecret: String = ""
     public var timeoutSeconds: Double
     public var doubleAltMaxInterval: Double
     public var soundsEnabled: Bool
     public var logLevel: String
     public var language: String
+
+    /// Транспорт STT (ключ `transport`, корневой или в секции активного
+    /// провайдера). Пусто — транспорт не задан, агент ходит как раньше.
+    /// `"infinityfree"` — Byet-прокси с вычисляемой `__test`-кукой в памяти.
+    public var transport: String = ""
 
 // MARK: Быстрые UX-победы
 
@@ -92,17 +100,22 @@ public struct AppConfig: Equatable {
     // MARK: Defaults
 
     public static let defaults = AppConfig(
-        baseURL: "https://gpt.mwsapis.ru/projects/project-ko-dmi-al/openai/v1/audio/transcriptions",
-        model: "gigaam-v3",
+        // Личных endpoint/model по умолчанию больше нет: пустые значения,
+        // адаптер известного провайдера (openai/groq/local/…) подставит свои
+        // дефолтные baseURL/model, неизвестный id — остаётся на ручной настройке.
+        baseURL: "",
+        model: "",
         apiKey: "",
         apiKeyFile: nil,
         proxyKey: "",
+        apiSecret: "",
         timeoutSeconds: 120,
         doubleAltMaxInterval: 0.4,
         soundsEnabled: true,
         logLevel: "info",
         language: "ru",
-undoMaxInterval: 2.0,
+        transport: "",
+        undoMaxInterval: 2.0,
         undoSoundEnabled: true,
         chunked: false,
         activeProvider: "",
@@ -124,10 +137,13 @@ undoMaxInterval: 2.0,
     /// - If `path` is nil, uses `defaultPath()`.
     /// - If the file does not exist, returns default config (no error).
     /// - If the file exists but cannot be parsed, throws `AppConfigError`.
+    ///
+    /// Приоритет ключа: `DICTATION_API_KEY` (env) > `api_key` из файла >
+    /// `api_key_file` из файла. Env-ключ НИКОГДА не записывается в конфиг-файл.
     public static func load(from path: String?) throws -> AppConfig {
         let resolvedPath = path ?? defaultPath()
         guard FileManager.default.fileExists(atPath: resolvedPath) else {
-            return defaults
+            return applyEnvAPIKey(to: defaults)
         }
         let content = try String(contentsOfFile: resolvedPath, encoding: .utf8)
         var config = try parse(content)
@@ -135,7 +151,23 @@ undoMaxInterval: 2.0,
         if config.apiKey.isEmpty, let keyFile = config.apiKeyFile {
             config.apiKey = Self.readAPIKey(from: keyFile)
         }
-        return config
+        return applyEnvAPIKey(to: config)
+    }
+
+    /// Приоритет env-ключа DICTATION_API_KEY над ключами из файла. Применяется
+    /// и к effective-полю, и ко всем секциям провайдеров — единый ключ для всех
+    /// (в т.ч. failover-кандидатов); никогда не записывается в файл.
+    private static func applyEnvAPIKey(to config: AppConfig) -> AppConfig {
+        guard let envKey = ProcessInfo.processInfo.environment["DICTATION_API_KEY"],
+              !envKey.isEmpty else { return config }
+        var result = config
+        result.apiKey = envKey
+        if !result.providers.isEmpty {
+            for i in result.providers.indices {
+                result.providers[i].apiKey = envKey
+            }
+        }
+        return result
     }
 
     // MARK: Провайдер
@@ -151,6 +183,12 @@ undoMaxInterval: 2.0,
         public var apiKey: String
         public var apiKeyFile: String?
         public var proxyKey: String
+        /// Дополнительный секрет провайдера (ключ `api_secret` в секции;
+        /// для giga-chat — client_secret в OAuth).
+        public var apiSecret: String = ""
+        /// Транспорт этой секции (ключ `transport` внутри `[providers.X]`).
+        /// Пусто — берётся корневой `transport` (поведение как раньше).
+        public var transport: String = ""
 
         public static func withDefaults(id: String) -> Provider {
             Provider(
@@ -160,7 +198,9 @@ undoMaxInterval: 2.0,
                 model: AppConfig.defaults.model,
                 apiKey: "",
                 apiKeyFile: nil,
-                proxyKey: ""
+                proxyKey: "",
+                apiSecret: "",
+                transport: ""
             )
         }
     }
@@ -233,12 +273,14 @@ undoMaxInterval: 2.0,
         var apiKey: String = defaults.apiKey
         var apiKeyFile: String? = defaults.apiKeyFile
         var proxyKey: String = defaults.proxyKey
+        let apiSecret: String = defaults.apiSecret
         var timeoutSeconds: Double = defaults.timeoutSeconds
         var doubleAltMaxInterval: Double = defaults.doubleAltMaxInterval
         var soundsEnabled: Bool = defaults.soundsEnabled
         var logLevel: String = defaults.logLevel
         var language: String = defaults.language
-var undoMaxInterval: Double = defaults.undoMaxInterval
+        var transport: String = defaults.transport
+        var undoMaxInterval: Double = defaults.undoMaxInterval
         var undoSoundEnabled: Bool = defaults.undoSoundEnabled
         var chunked: Bool = defaults.chunked
 
@@ -326,8 +368,12 @@ var undoMaxInterval: Double = defaults.undoMaxInterval
                     providers[providerIndex].apiKey = try parseString(valuePart, line: index + 1, rawLine: rawLine)
                 case "api_key_file":
                     providers[providerIndex].apiKeyFile = try parseStringOptional(valuePart, line: index + 1, rawLine: rawLine)
+                case "api_secret":
+                    providers[providerIndex].apiSecret = try parseString(valuePart, line: index + 1, rawLine: rawLine)
                 case "proxy_key":
                     providers[providerIndex].proxyKey = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+                case "transport":
+                    providers[providerIndex].transport = try parseString(valuePart, line: index + 1, rawLine: rawLine)
                 default:
                     // Неизвестный ключ внутри секции — игнорируем
                     break
@@ -351,6 +397,8 @@ var undoMaxInterval: Double = defaults.undoMaxInterval
             case "proxy_key":
                 proxyKey = try parseString(valuePart, line: index + 1, rawLine: rawLine)
                 legacySTTKeysSeen = true
+            case "transport":
+                transport = try parseString(valuePart, line: index + 1, rawLine: rawLine)
             case "active_provider":
                 activeProvider = try parseString(valuePart, line: index + 1, rawLine: rawLine)
             case "timeout_seconds":
@@ -363,7 +411,7 @@ var undoMaxInterval: Double = defaults.undoMaxInterval
                 logLevel = try parseString(valuePart, line: index + 1, rawLine: rawLine)
             case "language":
                 language = try parseString(valuePart, line: index + 1, rawLine: rawLine)
-case "undo_max_interval":
+            case "undo_max_interval":
                 undoMaxInterval = try parseDouble(valuePart, line: index + 1, rawLine: rawLine)
             case "undo_sound_enabled":
                 undoSoundEnabled = try parseBool(valuePart, line: index + 1, rawLine: rawLine)
@@ -397,12 +445,14 @@ case "undo_max_interval":
             apiKey: apiKey,
             apiKeyFile: apiKeyFile,
             proxyKey: proxyKey,
+            apiSecret: apiSecret,
             timeoutSeconds: timeoutSeconds,
             doubleAltMaxInterval: doubleAltMaxInterval,
             soundsEnabled: soundsEnabled,
             logLevel: logLevel,
             language: language,
-undoMaxInterval: undoMaxInterval,
+            transport: transport,
+            undoMaxInterval: undoMaxInterval,
             undoSoundEnabled: undoSoundEnabled,
             chunked: chunked,
             activeProvider: activeProvider,
@@ -449,6 +499,17 @@ undoMaxInterval: undoMaxInterval,
         config.apiKey = provider.apiKey
         config.apiKeyFile = provider.apiKeyFile
         config.proxyKey = provider.proxyKey
+        config.apiSecret = provider.apiSecret
+        // Транспорт секции имеет приоритет над корневым. ВАЖНО: явный
+        // transport = "" в секции корневой transport = "relay" НЕ отменяет —
+        // пустое значение трактуется как «наследовать корневой», а не
+        // «выключить». «Выключить» cookie-слой можно только не-special
+        // значением (например transport = "direct"): агент распознаёт строго
+        // "relay" (и legacy-алиас "infinityfree") — для любого другого значения
+        // cookie-логику не поднимает.
+        if !provider.transport.isEmpty {
+            config.transport = provider.transport
+        }
     }
 
     // MARK: Value parsers
@@ -595,6 +656,92 @@ undoMaxInterval: undoMaxInterval,
         }
     }
 
+    /// Точечная правка ключа ВНУТРИ секции `[providers.<id>]`, byte-preserving:
+    /// комментарии и не-секционные строки не трогаются. Если ключ в секции не
+    /// найден — строка добавляется в конец секции; если секции нет вовсе —
+    /// дописывается целиком (`[providers.<id>]\n<key> = <value>`). Атомарная
+    /// запись + права 0600. Используется командой `dictatorctl config set-key`.
+    public static func writeProviderKeyValue(
+        providerID: String,
+        key: String,
+        value: String,
+        to path: String
+    ) throws {
+        let fm = FileManager.default
+        var content = ""
+        if fm.fileExists(atPath: path), let existing = try? String(contentsOfFile: path, encoding: .utf8) {
+            content = existing
+        }
+
+        let sectionHeader = "[providers.\(providerID)]"
+        var lines = content.components(separatedBy: "\n")
+        var headerIndex: Int?
+        var inSection = false
+        var replaced = false
+        // Индекс первой строки ПОСЛЕ последней строки секции (место вставки).
+        var sectionEnd = lines.count
+
+        for (idx, line) in lines.enumerated() {
+            let stripped = line.drop(while: { $0 == " " || $0 == "\t" })
+            // Заголовок секции, как в парсере: допускаем хвостовой комментарий.
+            var headerText = String(stripped)
+            if let hashIndex = headerText.firstIndex(of: "#") {
+                headerText = String(headerText[..<hashIndex]).trimmingCharacters(in: .whitespaces)
+            }
+            if headerText.hasPrefix("["), headerText.hasSuffix("]") {
+                if headerText == sectionHeader {
+                    inSection = true
+                    headerIndex = idx
+                    sectionEnd = idx + 1
+                } else if inSection {
+                    // Секция кончилась — следующая секция.
+                    inSection = false
+                }
+                continue
+            }
+            if inSection {
+                sectionEnd = idx + 1
+                guard !replaced, let eqIndex = stripped.firstIndex(of: "=") else { continue }
+                let lineKey = stripped[stripped.startIndex..<eqIndex].trimmingCharacters(in: .whitespaces)
+                guard lineKey == key else { continue }
+                let valueStart = stripped.index(after: eqIndex)
+                let newLine: String
+                if let open = line[valueStart...].firstIndex(of: "\""),
+                   let close = line[line.index(after: open)...].firstIndex(of: "\"") {
+                    // Точечная замена значения в кавычках; хвостовой комментарий сохраняем.
+                    let prefix = String(line[..<open])
+                    let suffix = String(line[line.index(after: close)...])
+                    newLine = prefix + value + suffix
+                } else {
+                    let leading = String(line[..<valueStart])
+                    newLine = leading.trimmingCharacters(in: .whitespaces) + " " + value
+                }
+                lines[idx] = newLine
+                replaced = true
+            }
+        }
+
+        if !replaced {
+            if headerIndex != nil {
+                lines.insert("\(key) = \(value)", at: sectionEnd)
+            } else {
+                if !lines.isEmpty, !(lines.last ?? "").isEmpty {
+                    lines.append("")
+                }
+                lines.append(sectionHeader)
+                lines.append("\(key) = \(value)")
+            }
+        }
+
+        let result = lines.joined(separator: "\n")
+        do {
+            try result.data(using: .utf8)!.write(to: URL(fileURLWithPath: path), options: .atomic)
+            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+        } catch {
+            throw AppConfigError.cannotWriteConfig(path, error)
+        }
+    }
+
     /// Точечная правка строки `active_provider = "…"` в конфиг-файле (путь по умолчанию).
     public static func writeActiveProvider(name: String) throws {
         try writeActiveProvider(name: name, to: defaultPath())
@@ -607,5 +754,81 @@ undoMaxInterval: undoMaxInterval,
     /// Точечная правка `review_before_insert = true|false`.
     public static func writeReviewBeforeInsert(value: Bool, to path: String? = nil) throws {
         try writeKeyValue(key: "review_before_insert", value: value ? "true" : "false", to: path ?? defaultPath())
+    }
+
+    // MARK: Маскировка и шаблон конфига (CLI: config show / config init)
+
+    /// Маскировка секрета для показа в CLI: первые 4 + "***" + последние 4
+    /// символа. «abcd***wxyz». Короткие/пустые ключи — просто "***".
+    public static func maskSecret(_ secret: String) -> String {
+        let trimmed = secret.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > 8 else { return "***" }
+        let head = trimmed.prefix(4)
+        let tail = trimmed.suffix(4)
+        return "\(head)***\(tail)"
+    }
+
+    /// Шаблон конфига для `dictatorctl config init` (затем `config set-key`).
+    /// Пустые base_url/model — агент подставляет дефолты адаптера; секрет —
+    /// api_key/api_key_file или env DICTATION_API_KEY (в файл никогда не пишется).
+    /// Файл шаблона обязан парситься существующим парсером (все ключи известны).
+    public static func initTemplate() -> String {
+        """
+        # Диктовка — конфиг STT-провайдера (создан `dictatorctl config init`)
+        #
+        # Секреты:
+        #   - api_key / api_key_file в секции провайдера,
+        #   - либо env-переменная DICTATION_API_KEY (приоритет над файлом,
+        #     в конфиг никогда не пишется).
+        #
+        # Пустые base_url/model в секциях — агент подставит дефолты адаптера
+        # (например OpenAI → https://api.openai.com/v1/audio/transcriptions,
+        # whisper-1; Groq → whisper-large-v3; Deepgram → nova-3). Для секций
+        # relay и открытого OpenAI-совместимого провайдера base_url обязателен.
+
+        language = "ru"
+        sounds_enabled = true
+        timeout_seconds = 120
+        log_level = "info"
+        active_provider = "openai"
+
+        [providers.openai]
+        name = "OpenAI"
+        base_url = ""
+        model = ""
+        api_key = ""
+
+        [providers.groq]
+        name = "Groq"
+        base_url = ""
+        model = ""
+        api_key = ""
+
+        [providers.local]
+        name = "Local"
+        base_url = ""
+        model = ""
+        api_key = ""
+
+        [providers.deepgram]
+        name = "Deepgram"
+        base_url = ""
+        model = ""
+        api_key = ""
+
+        [providers.giga-chat]
+        name = "GigaChat"
+        base_url = ""
+        model = ""
+        api_key = ""
+        api_secret = ""
+
+        [providers.relay]
+        name = "Relay"
+        base_url = ""
+        model = ""
+        api_key = ""
+        transport = "relay"
+        """
     }
 }

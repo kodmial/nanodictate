@@ -26,7 +26,7 @@ final class ProviderTests: XCTestCase {
         api_key = "gsk_123"
         proxy_key = "px-1"
         [providers.gigaam]
-        name = "GigaAM (mwsapis)"
+        name = "GigaAM"
         base_url = "https://gigaam.test/v1"
         model = "gigaam-v3"
         api_key_file = "~/.config/dictation/keys/gigaam.key"
@@ -53,7 +53,7 @@ final class ProviderTests: XCTestCase {
 
         let gigaam = config.providers[1]
         XCTAssertEqual(gigaam.id, "gigaam")
-        XCTAssertEqual(gigaam.name, "GigaAM (mwsapis)")
+        XCTAssertEqual(gigaam.name, "GigaAM")
         XCTAssertEqual(gigaam.apiKeyFile, "~/.config/dictation/keys/gigaam.key")
         XCTAssertEqual(gigaam.apiKey, "")
     }
@@ -86,7 +86,7 @@ final class ProviderTests: XCTestCase {
     /// legacy-only без секций → ровно прежнее поведение.
     @objc func testLegacyOnlyKeepsPreviousBehavior() throws {
         let content = """
-        base_url = "https://mwsapis.test/v1"
+        base_url = "https://gigaam.test/v1"
         model = "gigaam-v3"
         api_key = "legacy-key"
         proxy_key = "legacy-proxy"
@@ -94,7 +94,7 @@ final class ProviderTests: XCTestCase {
         """
         let config = try AppConfig.parse(content)
 
-        XCTAssertEqual(config.baseURL, "https://mwsapis.test/v1")
+        XCTAssertEqual(config.baseURL, "https://gigaam.test/v1")
         XCTAssertEqual(config.model, "gigaam-v3")
         XCTAssertEqual(config.apiKey, "legacy-key")
         XCTAssertEqual(config.proxyKey, "legacy-proxy")

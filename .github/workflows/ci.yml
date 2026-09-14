@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build & Test (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Swift
+        uses: swift-actions/setup-swift@v2
+        with:
+          # Package manifest is swift-tools-version:5.7 and the code is Swift 5
+          # throughout. Pin a recent 5.x toolchain: any 5.9+ handles current
+          # runner SDKs while keeping the Swift 5 language mode.
+          swift-version: "5.10.1"
+
+      - name: Build
+        run: swift build
+
+      # The tests are a plain executable product (no .xctest bundle): without
+      # Xcode, `swift test` is unavailable, so `swift run` executes the custom
+      # runner (Tests/DictationCoreTests/main.swift), which exits non-zero if
+      # any test fails.
+      - name: Run tests
+        run: swift run DictationCoreTests

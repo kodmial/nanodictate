@@ -278,6 +278,55 @@ final class OverlayControllerTests: XCTestCase {
         controller.hide()
     }
 
+    @objc func testPanelHeights_FollowPhases() {
+        // Высоты зависят от фазы: idle ~150 (компактная плашка), recording
+        // ~178 (под иконкой таймер «0:07»); при смене фазы панель пересчитывает
+        // frame, оставаясь привязанной к точке показа.
+        let controller = OverlayController()
+        controller.show(at: CGPoint(x: 700, y: 500))
+        XCTAssertEqual(controller.testPanelFrame?.height ?? 0, 150,
+                       accuracy: 0.001, "idle: компактная высота плашки")
+        controller.setRecordingPhase()
+        XCTAssertEqual(controller.testPanelFrame?.height ?? 0, 178,
+                       accuracy: 0.001, "recording: таймер делает панель выше")
+        controller.setProcessingPhase()
+        XCTAssertEqual(controller.testPanelFrame?.height ?? 0, 150,
+                       accuracy: 0.001, "processing: снова компактная")
+        controller.resetPhase()
+        XCTAssertEqual(controller.testPanelFrame?.height ?? 0, 150,
+                       accuracy: 0.001, "resetPhase: базовая компактная")
+        controller.hide()
+    }
+
+    @objc func testPanelWidth_AutofitsWithinClamp() {
+        // Ширина больше не жёсткая 280: считается из fittingSize контента и
+        // клампится в [180, 240] — компактная плашка, а не фикс под «шапку».
+        let controller = OverlayController()
+        controller.show(at: CGPoint(x: 700, y: 500))
+        let width = controller.testPanelFrame?.width ?? 0
+        XCTAssertGreaterThanOrEqual(width, 180, "автоширина не уже мин-клампа 180")
+        XCTAssertLessThanOrEqual(width, 240, "автоширина не шире макс-клампа 240")
+
+        // Смена фазы меняет только высоту — ширина остаётся той же.
+        controller.setRecordingPhase()
+        XCTAssertEqual(controller.testPanelFrame?.width ?? 0, width,
+                       accuracy: 0.001, "recording не меняет ширину")
+        controller.setProcessingPhase()
+        XCTAssertEqual(controller.testPanelFrame?.width ?? 0, width,
+                       accuracy: 0.001, "processing не меняет ширину")
+        controller.hide()
+    }
+
+    @objc func testClampedPanelWidth_BoundsAutofit() {
+        // Чистый кламп автоширины: min 180 / max 240.
+        XCTAssertEqual(OverlayLayout.clampedPanelWidth(from: -50), 180)
+        XCTAssertEqual(OverlayLayout.clampedPanelWidth(from: 0), 180)
+        XCTAssertEqual(OverlayLayout.clampedPanelWidth(from: 100), 180)
+        XCTAssertEqual(OverlayLayout.clampedPanelWidth(from: 200), 200)
+        XCTAssertEqual(OverlayLayout.clampedPanelWidth(from: 240), 240)
+        XCTAssertEqual(OverlayLayout.clampedPanelWidth(from: 500), 240)
+    }
+
     // MARK: - Маппинг сетевых ошибок на текст оверлея (OverlayErrorText)
 
     @objc func testOverlayErrorText_NoInternet() {

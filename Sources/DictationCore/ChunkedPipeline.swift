@@ -66,6 +66,57 @@ public struct ChunkedPipeline {
         self.segmenterConfig = segmenterConfig
     }
 
+    // MARK: - Отдельные шаги конвейера (reuse live-диктовкой)
+
+    /// Распознаёт ОДИН речевой сегмент: WAV → STT (с prompt-контекстом уже
+    /// распознанного текста) → финализация. Возвращает текст ДЛЯ ВСТАВКИ
+    /// (с разделительным пробелом для сегмента i>0, F2) и чистый текст для
+    /// накопления в prompt.
+    public static func recognizeSegment(
+        samples: [Int16],
+        index: Int,
+        sampleRate: Int = 16000,
+        insertedText: String,
+        prompt: String?,
+        stt: STTHandler,
+        filename: String = "segment.wav"
+    ) async throws -> (insertText: String, promptText: String) {
+        let bytes = WAVEncoder.encode(samples: samples, sampleRate: sampleRate)
+        let raw = try await stt(bytes, filename, prompt)
+        let text = TextRefinement.finalize(raw)
+        var insertText = text
+        // F2: между сегментами — разделительный пробел, иначе слова соседних
+        // чанков слипаются при инкрементальной вставке.
+        if index > 0, !insertedText.isEmpty, !insertedText.hasSuffix(" ") {
+            insertText = " " + text
+        }
+        return (insertText, text)
+    }
+
+    /// Финальный проход по ВСЕМУ WAV: один STT-запрос (prompt не нужен),
+    /// по-словный diff с уже-вставленным текстом → замена изменившегося
+    /// диапазона ОДНИМ действием. `changed == false` — финальный текст совпал
+    /// с уже-вставленным, правки нет.
+    public static func finalize(
+        samples: [Int16],
+        sampleRate: Int = 16000,
+        insertedText: String,
+        stt: STTHandler,
+        insert: InsertHandler,
+        onFinalizing: (() -> Void)? = nil
+    ) async throws -> (finalText: String, changed: Bool) {
+        onFinalizing?()
+        let finalWAV = WAVEncoder.encode(samples: samples, sampleRate: sampleRate)
+        let finalRaw = try await stt(finalWAV, "final.wav", nil)
+        let finalText = TextRefinement.finalize(finalRaw)
+
+        guard let change = WordDiff.change(old: insertedText, new: finalText) else {
+            return (finalText, false)
+        }
+        insert(.replaceTail(old: change.tailOld, new: change.tailNew))
+        return (finalText, true)
+    }
+
     // MARK: - Прогон
 
     public func run(
@@ -90,20 +141,19 @@ public struct ChunkedPipeline {
         // По-сегментная транскрибация + инкрементальная вставка.
         for (index, segment) in segments.enumerated() {
             onPhase?(.segment(index))
-            let bytes = WAVEncoder.encode(samples: segment.samples, sampleRate: sampleRate)
-            let prompt = promptParts.isEmpty ? nil : promptParts.joined(separator: " ")
-            let raw = try await stt(bytes, "segment-\(index + 1).wav", prompt)
-            let text = TextRefinement.finalize(raw)
-            var insertText = text
-            // F2: между сегментами — разделительный пробел, иначе слова соседних
-            // чанков слипаются при инкрементальной вставке.
-            if index > 0, !insertedText.isEmpty, !insertedText.hasSuffix(" ") {
-                insertText = " " + text
-            }
-            insert(.appendSegment(index: index, text: insertText))
-            insertedText += insertText
+            let result = try await Self.recognizeSegment(
+                samples: segment.samples,
+                index: index,
+                sampleRate: sampleRate,
+                insertedText: insertedText,
+                prompt: promptParts.isEmpty ? nil : promptParts.joined(separator: " "),
+                stt: stt,
+                filename: "segment-\(index + 1).wav"
+            )
+            insert(.appendSegment(index: index, text: result.insertText))
+            insertedText += result.insertText
             // В prompt уходит чистый текст без ведущего пробела.
-            promptParts.append(text)
+            promptParts.append(result.promptText)
         }
 
         // Один сегмент — это и есть вся запись целиком: финальный проход не
@@ -115,20 +165,21 @@ public struct ChunkedPipeline {
         // Финальный проход: весь WAV одним запросом (полный контекст), затем
         // по-словный diff с уже-вставленным текстом → замена изменившегося
         // диапазона ОДНИМ действием (backspace хвоста + печать хвоста).
-        onPhase?(.finalizing)
-        let finalWAV = WAVEncoder.encode(samples: samples, sampleRate: sampleRate)
-        let finalRaw = try await stt(finalWAV, "final.wav", nil)
-        let finalText = TextRefinement.finalize(finalRaw)
-
-        guard let change = WordDiff.change(old: insertedText, new: finalText) else {
+        let result = try await Self.finalize(
+            samples: samples,
+            sampleRate: sampleRate,
+            insertedText: insertedText,
+            stt: stt,
+            insert: insert,
+            onFinalizing: { onPhase?(.finalizing) }
+        )
+        guard result.changed else {
             // Финальный текст совпал с уже-вставленным — ничего не трогаем.
             return Outcome(segmentCount: segments.count, insertedText: insertedText, finalized: true, finalChanged: false)
         }
-
-        insert(.replaceTail(old: change.tailOld, new: change.tailNew))
         return Outcome(
             segmentCount: segments.count,
-            insertedText: finalText,
+            insertedText: result.finalText,
             finalized: true,
             finalChanged: true
         )

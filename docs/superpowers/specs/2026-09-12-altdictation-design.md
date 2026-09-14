@@ -11,7 +11,7 @@
    текстового поля анимированное окно с микрофоном (амплитуда = уровень звука).
 3. Записывает звук с микрофона, по **повторному двойному Alt** отправляет
    всё аудио **одним запросом** в Speech-to-Text API (OpenAI-совместимый
-   `/v1/audio/transcriptions`, модель `gigaam-v3`, провайдер gpt.mwsapis.ru).
+   `/v1/audio/transcriptions`, модель `gigaam-v3`, провайдер — OpenAI-совместимый gateway).
 4. Результат вставляет в поле, где была вызвана диктовка.
 5. Enter/Esc — отмена диктовки без отправки.
 6. Конфигурация подключения к API — в конфигурационном файле.
@@ -24,9 +24,9 @@
 - Полного Xcode нет → сборка только через **SwiftPM** (`swift build`),
   приложение не упаковывается в .app-бандл; агент — обычный исполняемый
   файл, запускаемый LaunchAgent'ом.
-- API транскрипции: `https://gpt.mwsapis.ru/projects/project-ko-dmi-al/openai/v1/audio/transcriptions`.
+- API транскрипции: `https://your-gateway/audio/transcriptions`.
   - Метод: POST multipart/form-data, поля `file` (WAV/16кГц/моно) и `model` (=`gigaam-v3`).
-  - Заголовок `Authorization: Bearer <ключ>` (ключ из msw.rtf, читается в конфиге).
+  - Заголовок `Authorization: Bearer <ключ>` (ключ из локального файла секретов, читается в конфиге).
   - **m4a НЕ принимается** (`FILE_TYPE_NOT_ALLOWED`) → обязательно WAV.
   - Ответ: `{"text": "...", ...}`.
 
@@ -102,7 +102,7 @@ SwiftPM-мультитаргет: библиотека `DictationCore` + 2 ис�
   сохранить сырой ответ.
 
 ### 10. LaunchAgent
-- plist в `~/Library/LaunchAgents/com.dima.altdictation.plist`
+- plist в `~/Library/LaunchAgents/com.dictation.agent.plist`
   (Write via `launchctl bootstrap`), `RunAtLoad = true`, `KeepAlive`.
 - Логи в `~/Library/Logs/Dictation/agent.log` (и stderr/stdout туда).
 

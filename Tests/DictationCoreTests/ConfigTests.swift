@@ -231,16 +231,77 @@ final class ConfigTests: XCTestCase {
 
     @objc func testDefaults() {
         let d = AppConfig.defaults
-        XCTAssertTrue(d.baseURL.contains("gpt.mwsapis.ru"))
-        XCTAssertEqual(d.model, "gigaam-v3")
+        // Личных endpoint/model нет: пусто, известные адаптеры подставляют свои.
+        XCTAssertEqual(d.baseURL, "")
+        XCTAssertEqual(d.model, "")
         XCTAssertEqual(d.apiKey, "")
         XCTAssertNil(d.apiKeyFile)
+        XCTAssertEqual(d.apiSecret, "")
         XCTAssertEqual(d.timeoutSeconds, 120)
         XCTAssertEqual(d.doubleAltMaxInterval, 0.4)
         XCTAssertTrue(d.soundsEnabled)
         XCTAssertEqual(d.logLevel, "info")
         XCTAssertEqual(d.language, "ru")
         XCTAssertFalse(d.chunked)
+    }
+
+    // MARK: - api_secret в секции провайдера
+
+    @objc func testParseProviderApiSecret() throws {
+        let content = """
+        [providers.giga-chat]
+        name = "GigaChat"
+        api_key = "client-id"
+        api_secret = "client-secret"
+        model = ""
+        """
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.providers.count, 1)
+        XCTAssertEqual(config.providers.first?.apiSecret, "client-secret")
+        XCTAssertEqual(config.providers.first?.apiKey, "client-id")
+    }
+
+    // MARK: - DICTATION_API_KEY env — приоритет над ключами из файла
+
+    @objc func testLoadEnvAPIKeyOverrides() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dictation-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let path = dir.appendingPathComponent("config.toml").path
+        let content = """
+        [providers.openai]
+        base_url = "https://api.openai.com/v1/audio/transcriptions"
+        model = "whisper-1"
+        api_key = "file-key"
+
+        active_provider = "openai"
+        """
+        try content.write(toFile: path, atomically: true, encoding: .utf8)
+        setenv("DICTATION_API_KEY", "env-key", 1)
+        defer { unsetenv("DICTATION_API_KEY") }
+        let config = try AppConfig.load(from: path)
+        XCTAssertEqual(config.apiKey, "env-key", "env-ключ приоритетнее api_key из файла")
+        XCTAssertEqual(config.providers.first?.apiKey, "env-key")
+    }
+
+    @objc func testLoadWithoutEnvKeepsFileKey() throws {
+        unsetenv("DICTATION_API_KEY")
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dictation-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let path = dir.appendingPathComponent("config.toml").path
+        let content = """
+        [providers.openai]
+        api_key = "file-key"
+        model = "whisper-1"
+
+        active_provider = "openai"
+        """
+        try content.write(toFile: path, atomically: true, encoding: .utf8)
+        let config = try AppConfig.load(from: path)
+        XCTAssertEqual(config.apiKey, "file-key")
     }
 
     // MARK: - Новые UX-ключи: providers / auto_failover / insert_method / review_before_insert
@@ -364,5 +425,244 @@ final class ConfigTests: XCTestCase {
 
         let config = try AppConfig.load(from: path.path)
         XCTAssertTrue(config.reviewBeforeInsert)
+    }
+
+    // MARK: - transport (Byet-слой STT)
+
+    @objc func testParseTransportRoot() throws {
+        let content = """
+        base_url = "https://x"
+        transport = "infinityfree"
+        """
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.transport, "infinityfree")
+    }
+
+    @objc func testTransportDefaultEmpty() throws {
+        // Без transport в конфиге — поведение ровно как раньше (без cookie-логики).
+        let content = """
+        base_url = "https://x"
+        model = "m"
+        """
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.transport, "")
+    }
+
+    @objc func testParseTransportInProviderSectionApplies() throws {
+        let content = """
+        active_provider = "groq"
+
+        [providers.groq]
+        base_url = "https://g"
+        model = "m"
+        api_key = "k"
+        transport = "infinityfree"
+        """
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.providers.first?.transport, "infinityfree")
+        XCTAssertEqual(config.transport, "infinityfree",
+                       "transport активной секции попадает в effective-конфиг")
+    }
+
+    @objc func testProviderTransportOverridesRoot() throws {
+        let content = """
+        transport = "openrouter"
+        active_provider = "groq"
+
+        [providers.groq]
+        base_url = "https://g"
+        model = "m"
+        api_key = "k"
+        transport = "infinityfree"
+        """
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.transport, "infinityfree",
+                       "transport секции имеет приоритет над корневым")
+    }
+
+    @objc func testRootTransportPreservedWhenProviderOmits() throws {
+        let content = """
+        transport = "infinityfree"
+        active_provider = "groq"
+
+        [providers.groq]
+        base_url = "https://g"
+        model = "m"
+        api_key = "k"
+        """
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.providers.first?.transport, "")
+        XCTAssertEqual(config.transport, "infinityfree",
+                       "без transport в секции корневой transport остаётся в силе")
+    }
+
+    @objc func testTransportKeyDoesNotTriggerLegacyAmbiguity() throws {
+        // Ключ transport НЕ legacy-STT: его наличие вместе с секциями не должно
+        // давать ошибки «неоднозначно» при отсутствии active_provider.
+        let content = """
+        transport = "infinityfree"
+
+        [providers.groq]
+        base_url = "https://g"
+        model = "m"
+        api_key = "k"
+        """
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.activeProvider, "")
+        XCTAssertEqual(config.transport, "infinityfree")
+        XCTAssertEqual(config.baseURL, "https://g", "первый провайдер применён как active")
+    }
+
+    // MARK: - maskSecret (первые 4 + "***" + последние 4)
+
+    @objc func testMaskSecretLongKey() {
+        XCTAssertEqual(AppConfig.maskSecret("abcd1234wxyz"), "abcd***wxyz")
+        XCTAssertEqual(AppConfig.maskSecret("0123456789abcdef"), "0123***cdef")
+    }
+
+    @objc func testMaskSecretShortOrEmpty() {
+        XCTAssertEqual(AppConfig.maskSecret("short"), "***")
+        XCTAssertEqual(AppConfig.maskSecret(""), "***")
+        XCTAssertEqual(AppConfig.maskSecret("   "), "***")
+    }
+
+    @objc func testMaskSecretTrimsWhitespace() {
+        XCTAssertEqual(AppConfig.maskSecret("  abcdefghijkl  "), "abcd***ijkl")
+    }
+
+    // MARK: - initTemplate
+
+    @objc func testInitTemplateParses() throws {
+        let content = AppConfig.initTemplate()
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.activeProvider, "openai")
+        XCTAssertEqual(config.language, "ru")
+        XCTAssertTrue(config.soundsEnabled)
+        // Шесть секций: openai, groq, local, deepgram, giga-chat, relay.
+        XCTAssertEqual(config.providerNames, ["openai", "groq", "local", "deepgram", "giga-chat", "relay"])
+        for provider in config.providers {
+            XCTAssertEqual(provider.apiKey, "", "шаблон не содержит секретов")
+        }
+        XCTAssertEqual(config.providers.first { $0.id == "relay" }?.transport, "relay")
+        XCTAssertEqual(config.providers.first { $0.id == "giga-chat" }?.apiSecret, "")
+    }
+
+    @objc func testInitTemplateRoundTripViaFile() throws {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_init_template_\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try AppConfig.initTemplate().data(using: .utf8)!.write(to: file)
+        let config = try AppConfig.load(from: file.path)
+        XCTAssertEqual(config.activeProvider, "openai")
+        XCTAssertEqual(config.providerNames.count, 6)
+    }
+
+    // MARK: - writeProviderKeyValue (config set-key)
+
+    @objc func testWriteProviderKeyValueReplacesInExistingSection() throws {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_set_key_\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let content = """
+        language = "ru"
+        active_provider = "groq"
+
+        [providers.groq]
+        name = "Groq"
+        base_url = ""
+        api_key = "old-key" # коммент сохраняется
+        """
+        try content.data(using: .utf8)!.write(to: file)
+
+        // Значение передаётся в формате строки конфига (с кавычками), как
+        // writeKeyValue для строк (ср. writeActiveProvider).
+        try AppConfig.writeProviderKeyValue(providerID: "groq", key: "api_key", value: "\"new-value\"", to: file.path)
+        let text = try String(contentsOf: file, encoding: .utf8)
+        XCTAssertTrue(text.contains("api_key = \"new-value\" # коммент сохраняется"))
+        XCTAssertFalse(text.contains("old-key"))
+        // Остальные строки не тронуты.
+        XCTAssertTrue(text.contains("language = \"ru\""))
+        XCTAssertTrue(text.contains("[providers.groq]"))
+    }
+
+    @objc func testWriteProviderKeyValueCreatesMissingSection() throws {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_set_key_new_\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try "language = \"ru\"\n".data(using: .utf8)!.write(to: file)
+
+        try AppConfig.writeProviderKeyValue(providerID: "deepgram", key: "api_key", value: "\"dg-123\"", to: file.path)
+        let config = try AppConfig.parse(String(contentsOf: file, encoding: .utf8))
+        XCTAssertEqual(config.providers.first { $0.id == "deepgram" }?.apiKey, "dg-123")
+    }
+
+    @objc func testWriteProviderKeyValueAddsKeyToNewFile() throws {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_set_key_fresh_\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: file) }
+
+        try AppConfig.writeProviderKeyValue(providerID: "openai", key: "api_key", value: "\"sk-x\"", to: file.path)
+        let config = try AppConfig.parse(String(contentsOf: file, encoding: .utf8))
+        XCTAssertEqual(config.providers.first { $0.id == "openai" }?.apiKey, "sk-x")
+    }
+
+    @objc func testWriteProviderKeyValueSets0600Permissions() throws {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_set_key_perm_\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: file) }
+
+        try AppConfig.writeProviderKeyValue(providerID: "openai", key: "api_key", value: "\"sk-x\"", to: file.path)
+        let attrs = try FileManager.default.attributesOfItem(atPath: file.path)
+        let perms = (attrs[.posixPermissions] as? NSNumber)?.intValue ?? 0
+        XCTAssertEqual(perms & 0o777, 0o600, "файл с секретом обязан быть 0600")
+    }
+
+    @objc func testWriteProviderKeyValueAppendsInsideExistingSectionAfterKeys() throws {
+        // Ключа ещё нет — добавляется в конец секции, а не после неё.
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_set_key_append_\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try """
+        [providers.local]
+        base_url = ""
+        model = ""
+
+        [providers.groq]
+        base_url = ""
+        """.data(using: .utf8)!.write(to: file)
+
+        try AppConfig.writeProviderKeyValue(providerID: "local", key: "api_key", value: "\"k\"", to: file.path)
+        let config = try AppConfig.parse(String(contentsOf: file, encoding: .utf8))
+        XCTAssertEqual(config.providers.first { $0.id == "local" }?.apiKey, "k")
+        XCTAssertEqual(config.providers.first { $0.id == "groq" }?.apiKey, "",
+                       "ключ попал в секцию local, не в groq")
+    }
+
+    @objc func testWriteProviderKeyValueRecognizesSectionWithTrailingComment() {
+        // Заголовок секции с хвостовым комментарием: ключ правятся в секции,
+        // дубликат `[providers.groq]` НЕ создаётся (парсер не упадёт).
+        // Метод без `throws`: мини-XCTest вызывает тесты через perform, и
+        // реально брошенная ошибка роняет процесс.
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_set_key_comment_\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: file) }
+        do {
+            try """
+            # провайдеры
+            [providers.groq] # основной
+
+            api_key = "old"
+            """.data(using: .utf8)!.write(to: file)
+
+            try AppConfig.writeProviderKeyValue(providerID: "groq", key: "api_key", value: "\"new\"", to: file.path)
+            let content = try String(contentsOf: file, encoding: .utf8)
+            XCTAssertEqual(content.components(separatedBy: "[providers.groq]").count - 1, 1,
+                           "секция не продублирована")
+            let config = try AppConfig.parse(content)
+            XCTAssertEqual(config.providers.first { $0.id == "groq" }?.apiKey, "new")
+            XCTAssertTrue(content.contains("# основной"), "заголовочный комментарий сохранён")
+        } catch {
+            XCTFail("Неожиданная ошибка: \(error)")
+        }
     }
 }

@@ -40,6 +40,14 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     /// Имя активного провайдера (nil — legacy-конфиг без секций).
     private let activeProviderID: String?
 
+    /// РАЗРЕШЁННЫЙ конфиг сессии — единый источник истины для реального
+    /// запросного пути: из него в init собран Transcriber и Byet-слой
+    /// (baseURL/model/apiKey/transport), из него же на старте сессии
+    /// вычисляется метка оверлея «через что идёт распознавание»
+    /// (RecognitionLabel.forSession). Конфиг в момент показа оверлея не
+    /// перечитывается — ярлык жёстко связан с провайдером распознавателя.
+    private let resolvedConfig: AppConfig
+
     /// Наблюдатель DistributedNotificationCenter для ручного retry из CLI.
     private var retryObserver: NSObjectProtocol?
 
@@ -51,6 +59,70 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     /// инкрементальная вставка → финальный проход по всему WAV. OFF — ровно
     /// текущее поведение (один запрос).
     private let chunked: Bool
+
+    // MARK: Live-диктовка (chunked = true)
+
+    /// Серийный исполнитель живого цикла: уттеренсы распознаются СТРОГО по
+    /// очереди — «хвост» останова встаёт перед финальным проходом, а каждый
+    /// следующий сегмент получает prompt с текстом всех предыдущих. submit не
+    /// блокирует вызывающего (main), каждый блок серийной очереди дожидается
+    /// своего Task (паттерн ChunkedPipelineTests.testInsertAndPhaseAreSynchronous).
+    private let liveExecutor = SerialAsyncExecutor()
+    /// Токен живого цикла: новый старт записи / Esc аннулируют обработку
+    /// сегментов старого цикла (страж вставки раньше времени). Читается и
+    /// пишется на main; каждый цикл создаёт колбэк с захватом своего токена.
+    private var liveSession = 0
+    /// Накопление живого цикла (сегменты, prompt, флаги). Пишется ТОЛЬКО на
+    /// liveExecutor (серийно); создаётся на main при каждом старте записи.
+    private var liveRunState: LiveRunState?
+
+    /// Накопление одного живого цикла диктовки. Поля инкрементально растут на
+    /// liveExecutor; main читает их только для стражей (сессионные токены).
+    private final class LiveRunState {
+        let session: Int
+        /// Сколько сегментов распознано и поставлено в очередь на вставку.
+        var segmentCount = 0
+        /// Текст, уже заявленный на вставку (с разделительными пробелами) —
+        /// база для финального word-diff и prompt-аккумуляции.
+        var insertedText = ""
+        /// Части предыдущих сегментов для prompt следующего (чистый текст,
+        /// без ведущих пробелов).
+        var promptParts: [String] = []
+        /// «Хвост» (незакрытый уттеренс при останове) доставлен: при одном
+        /// сегменте он покрывает запись до конца — финальный проход не нужен.
+        var tailDelivered = false
+        /// Хотя бы один сегмент не распознался — финальный проход обязателен
+        /// (он «докрутит» пропущенную фразу по всему WAV).
+        var anySegmentFailed = false
+        /// Текст последнего сбоя сегмента: при ПОЛНОМ сбое всех сегментов
+        /// (segmentCount == 0) финал показывает явное сообщение об ошибке STT,
+        /// а не сбивающий с толку «Пустой результат» (ревью #112).
+        var lastErrorText: String?
+
+        init(session: Int) {
+            self.session = session
+        }
+    }
+
+    /// Серийный исполнитель async-задач: каждая задача выполняется строго после
+    /// предыдущей (пока та не завершилась), submit не блокирует вызывающего.
+    /// Глубинная причина серийности: порядок вставок и доставка «хвоста» перед
+    /// финальным проходом — DIFF финализации считает текст уже-вставленных
+    /// сегментов, значит они обязаны быть обработаны раньше.
+    private final class SerialAsyncExecutor {
+        private let queue = DispatchQueue(label: "dictation.live.serial", qos: .userInitiated)
+
+        func submit(_ body: @escaping () async -> Void) {
+            queue.async {
+                let sema = DispatchSemaphore(value: 0)
+                Task {
+                    await body()
+                    sema.signal()
+                }
+                sema.wait()
+            }
+        }
+    }
 
     private var state: DictationState = .idle
 
@@ -115,7 +187,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
 
     init(config: AppConfig) {
         self.logLevel = config.logLevel
-self.undoMaxInterval = config.undoMaxInterval
+        // Тот же resolved-конфиг, из которого ниже собран Transcriber, —
+        // источник истины метки оверлея (RecognitionLabel.forSession).
+        self.resolvedConfig = config
+        self.undoMaxInterval = config.undoMaxInterval
         self.undoSoundEnabled = config.undoSoundEnabled
         self.chunked = config.chunked
         self.sounds = SysSounds(enabled: config.soundsEnabled)
@@ -125,22 +200,42 @@ self.undoMaxInterval = config.undoMaxInterval
             doubleTapMaxInterval: config.doubleAltMaxInterval,
             logLevel: config.logLevel
         )
-        self.transcriber = Transcriber(
-            baseURL: config.baseURL,
-            model: config.model,
-            apiKey: config.apiKey,
-            proxyKey: config.proxyKey,
-            language: config.language,
-            timeout: config.timeoutSeconds,
-            logLevel: config.logLevel
-        )
-        self.insertMethod = config.insertMethod
-        self.autoFailover = config.autoFailover
-        self.reviewBeforeInsert = config.reviewBeforeInsert
+        // Byet-cookie-слой включается только при relay-транспорте ("relay" —
+        // канонический id, "infinityfree" — legacy-алиас старого конфига;
+        // корневой key или секция активного провайдера: resolveActiveProvider
+        // уже скопировал его в effective-конфиг). nil — поведение как раньше.
+        let isRelayTransport = { (transport: String) -> Bool in
+            transport == "relay" || transport == "infinityfree"
+        }
+        let byetCookieProvider = isRelayTransport(config.transport)
+            ? ByetCookieProvider.makeForInfinityFree(baseURL: config.baseURL)
+            : nil
+        // Единый реестр Byet-провайдеров по baseURL (кука выпускается на origin
+        // прокси; одинаковый baseURL → тот же origin → тот же инстанс). Важно:
+        // реестр строится ОДИН раз в init и в замыкании только читается —
+        // гонок нет, а failover/retry переиспользуют ТОТ ЖЕ инстанс, что
+        // основной путь, вместе с его разогретым токеном (иначе первый retry-
+        // запрос ушёл бы без куки на лишний челлендж-раундтрип).
+        var byetByURL: [String: ByetCookieProvider] = [:]
+        if let byetCookieProvider = byetCookieProvider {
+            byetByURL[config.baseURL] = byetCookieProvider
+        }
+        for retryCandidate in config.providers {
+            let t = retryCandidate.transport.isEmpty ? config.transport : retryCandidate.transport
+            guard isRelayTransport(t), byetByURL[retryCandidate.baseURL] == nil,
+                  let made = ByetCookieProvider.makeForInfinityFree(baseURL: retryCandidate.baseURL) else { continue }
+            byetByURL[retryCandidate.baseURL] = made
+        }
+        let retryTransport = { (provider: AppConfig.Provider) -> ByetCookieProvider? in
+            let t = provider.transport.isEmpty ? config.transport : provider.transport
+            guard isRelayTransport(t) else { return nil }
+            return byetByURL[provider.baseURL]
+        }
         // Активный провайдер: явный active_provider, либо (по документированному
         // сценарию «только секции [providers.X], без active_provider») — первый
-        // провайдер по порядку. От него зависит, КОГО исключать из failover-очереди:
-        // повторять падение основного провайдера при автоfailover нельзя.
+        // провайдер по порядку. От него зависит, КОГО исключать из failover-
+        // очереди и какой адаптер запроса использует основной путь: повторять
+        // падение основного провайдера при автоfailover нельзя.
         self.activeProviderID = config.activeProvider.isEmpty
             ? config.providers.first?.id
             : config.activeProvider
@@ -148,10 +243,28 @@ self.undoMaxInterval = config.undoMaxInterval
         var byID: [String: AppConfig.Provider] = [:]
         for provider in config.providers { byID[provider.id] = provider }
         self.providersByID = byID
+        self.transcriber = Transcriber(
+            baseURL: config.baseURL,
+            model: config.model,
+            apiKey: config.apiKey,
+            proxyKey: config.proxyKey,
+            language: config.language,
+            timeout: config.timeoutSeconds,
+            logLevel: config.logLevel,
+            byetCookieProvider: byetCookieProvider,
+            apiSecret: config.apiSecret,
+            adapterID: self.activeProviderID
+        )
+        self.insertMethod = config.insertMethod
+        self.autoFailover = config.autoFailover
+        self.reviewBeforeInsert = config.reviewBeforeInsert
         // Функция распознавания retry/failover собирает Transcriber из полей
         // провайдера и ОБЩИХ настроек конфига (language/timeout/log_level), чтобы
         // повторы вели себя как основной путь: тот же язык, таймаут и уровень лога
-        // (иначе debug-конвейер и language молчат на failover-запросах).
+        // (иначе debug-конвейер и language молчат на failover-запросах). id
+        // провайдера уходит в adapterID — известный провайдер получает свой
+        // формат запроса (deepgram/giga-chat/…), неизвестный — OpenAI-
+        // совместимый с собственными base_url/model из секции.
         self.retryProvider = RetryProvider(transcribeFunction: { wav, provider in
             let transcriber = Transcriber(
                 baseURL: provider.baseURL,
@@ -160,11 +273,20 @@ self.undoMaxInterval = config.undoMaxInterval
                 proxyKey: provider.proxyKey,
                 language: config.language,
                 timeout: config.timeoutSeconds,
-                logLevel: config.logLevel
+                logLevel: config.logLevel,
+                byetCookieProvider: retryTransport(provider),
+                apiSecret: provider.apiSecret,
+                adapterID: provider.id
             )
             return try await transcriber.transcribe(wav: wav)
         })
         super.init()
+
+        // Прогрев Byet-токена: первый Alt+Alt не должен уходить с протухшей/пустой
+        // кукой — фоновая заготовка токена стартует сразу (неблокирующе для ввода).
+        if let byetCookieProvider = byetCookieProvider {
+            Task { _ = await byetCookieProvider.refreshBlocking() }
+        }
 
         self.audio.levelDelegate = self
         self.hotkeys.delegate = self
@@ -181,7 +303,7 @@ self.undoMaxInterval = config.undoMaxInterval
         // CLI ставит distributed-нотификацию — агент распознаёт свой lastWAV из
         // памяти (доступность и вставка — как в обычном цикле).
         retryObserver = DistributedNotificationCenter.default().addObserver(
-            forName: Notification.Name("com.dima.altdictation.retryRequest"),
+            forName: Notification.Name("com.dictation.agent.retryRequest"),
             object: nil,
             queue: .main
         ) { [weak self] notification in
@@ -290,7 +412,13 @@ self.undoMaxInterval = config.undoMaxInterval
                 requestMicrophoneAndStart()
             }
         case .recording:
-            sendRecording()
+            if chunked {
+                // Живая диктовка: останов (отдаст «хвост» в liveExecutor) +
+                // финальный проход по всему WAV (тот же путь, что processChunked).
+                liveFinalize()
+            } else {
+                sendRecording()
+            }
         case .transcribing:
             // Заняты отправкой — игнорируем.
             break
@@ -362,6 +490,10 @@ self.undoMaxInterval = config.undoMaxInterval
         }
         sounds.playStart()
         overlay.show()
+        // Метка «через что идёт распознавание» («<провайдер> · <модель>») — из ТОГО
+        // ЖЕ resolved-провайдера, которым в init собран распознаватель сессии
+        // (resolvedConfig): единый источник истины, конфиг здесь не перечитывается.
+        overlay.setSTTLabel(RecognitionLabel.forSession(resolvedConfig))
         // Фаза «запись»: микрофон + таймер, время старта фиксируется здесь.
         overlay.setRecordingPhase()
         overlay.setStatus("Записываю…")
@@ -399,6 +531,12 @@ self.undoMaxInterval = config.undoMaxInterval
             switch result {
             case .success:
                 self.state = .recording
+                if self.chunked {
+                    // Живая диктовка: каждый уттеренс (пауза ≥ pauseDuration)
+                    // распознаётся и вставляется на лету, к моменту Alt+Alt текст
+                    // уже частично в поле ввода.
+                    self.subscribeLiveDictation()
+                }
                 if self.isDebug {
                     Logger.log("record started: state = .recording", level: "debug")
                 }
@@ -685,7 +823,288 @@ self.undoMaxInterval = config.undoMaxInterval
     private func handleRecordingLimitReached(samples: [Int16]) {
         guard state == .recording else { return }
         Logger.log("record limit reached (\(samples.count) samples)", level: "info")
-        processSamples(samples)
+        if chunked {
+            // Живая диктовка: «хвост» уже отдан колбэком onSpeechSegment ДО
+            // этого вызова (performLimitStop: tail → onRecordingLimitReached) и
+            // стоит в liveExecutor первым; здесь — только страж и финальный
+            // проход по переданным сэмплам (без audio.stop()).
+            liveFinalizeFromSamples(samples)
+        } else {
+            processSamples(samples)
+        }
+    }
+
+    // MARK: - Живая диктовка (chunked = true)
+
+    /// Ставит live-подписку на речевые сегменты. Логика «кто сегодня отвечает
+    /// за сегменты» фиксируется В МОМЕНТ ДОСТАВКИ: колбэк заменяется на новый
+    /// при каждом старте, каждый захватывает свой токен сессии, и устаревший
+    /// цикл не может обслужить сегменты нового (liveSession сменился, страж в
+    /// handleLiveSegment отбрасывает).
+    private func subscribeLiveDictation() {
+        liveSession += 1
+        let runState = LiveRunState(session: liveSession)
+        liveRunState = runState
+        audio.onSpeechSegment = { [weak self] segment, isTail in
+            guard let self = self else { return }
+            // Страж сессии: цикл отменён Esc / начат заново (liveSession
+            // сменился) — сегмент старого цикла не обрабатываем.
+            guard self.liveSession == runState.session else { return }
+            self.liveExecutor.submit {
+                await self.handleLiveSegment(segment, isTail: isTail, runState: runState)
+            }
+        }
+    }
+
+    /// Обработка одного доставленного сегмента (live-VAD или «хвост»). Всегда
+    /// на liveExecutor — сегменты распознаются строго по очереди, накопленный
+    /// prompt каждого следующего включает все предыдущие, «хвост» останова
+    /// гарантированно обработан ДО финального прохода.
+    private func handleLiveSegment(
+        _ segmentSamples: [Int16],
+        isTail: Bool,
+        runState: LiveRunState
+    ) async {
+        let index = runState.segmentCount
+
+        // Оверлей: «Распознаю… (часть N)» на время STT сегмента; фаза записи
+        // остаётся (пользователь ещё говорит) — меняем только статус.
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self,
+                  self.liveSession == runState.session,
+                  self.state == .recording || self.state == .transcribing else { return }
+            self.overlay.setStatus("Распознаю… (часть \(index + 1))")
+        }
+
+        do {
+            // Тот же per-segment путь, что и в offline-чанкинге (ChunkedPipeline.
+            // recognizeSegment): WAV → STT с prompt-контекстом → финализация.
+            // Failover здесь не нужен — финальный проход по всему WAV «докрутит»
+            // ошибку (как в processChunked).
+            let result = try await ChunkedPipeline.recognizeSegment(
+                samples: segmentSamples,
+                index: index,
+                insertedText: runState.insertedText,
+                prompt: runState.promptParts.isEmpty ? nil : runState.promptParts.joined(separator: " "),
+                stt: { wav, filename, prompt in
+                    let r = try await self.transcriber.transcribe(wav: wav, filename: filename, prompt: prompt)
+                    return r.text
+                },
+                filename: "live-segment-\(index + 1).wav"
+            )
+
+            // Накопление — на liveExecutor ПОСЛЕ успешного STT: только
+            // распознанный текст попадает в prompt следующего сегмента и в
+            // базу финального diff.
+            runState.insertedText += result.insertText
+            runState.promptParts.append(result.promptText)
+            runState.segmentCount += 1
+            if isTail {
+                runState.tailDelivered = true
+            }
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self,
+                      self.liveSession == runState.session,
+                      self.state == .recording || self.state == .transcribing else { return }
+                // Инкрементальная вставка в поле ввода: «появляется постепенно».
+                Inserter.append(result.insertText)
+                Logger.log("live append segment \(index + 1) (\(result.insertText.count) chars)", level: "info")
+                // Статус возвращается к фазе записи — кроме «хвоста» (идёт
+                // фиксация: «Распознаю…» покажет страж/финальный проход).
+                if self.state == .recording {
+                    self.overlay.setStatus("Записываю…")
+                }
+            }
+        } catch {
+            let networkText = OverlayErrorText.text(for: error)
+            let message = networkText ?? Self.message(for: error)
+            Logger.log(
+                "live segment \(index + 1) failed: \(message) — фраза «докрутится» финальным проходом",
+                level: "error"
+            )
+            // Сбой сегмента не прерывает диктовку: фраза целиком (или её часть)
+            // будет распознана финальным проходом по ВСЕМУ WAV при фиксации.
+            runState.anySegmentFailed = true
+            // Запоминаем текст последней ошибки: если упадут ВСЕ сегменты
+            // (segmentCount == 0, STT недоступен), финальный проход завершится
+            // явной failTranscription с этим текстом, а не «Пустым результатом».
+            runState.lastErrorText = message
+        }
+    }
+
+    /// Фиксация живой диктовки (2-й Alt): останов → «хвост» незакрытого
+    /// уттеренса уходит в liveExecutor (встаёт после незавершённых сегментов)
+    /// → финальный проход по всему WAV → общий терминальный путь
+    /// completeChunkedInsertion.
+    private func liveFinalize() {
+        guard state == .recording else { return }
+        guard let runState = liveRunState else {
+            // Логически недостижимо (подписка ставится при успешном старте
+            // вместе с state = .recording) — страховочный путь в offline-чанкинг.
+            sendRecording()
+            return
+        }
+
+        // Фаза «обработка» — как в processChunked: страж на весь цикл, звук
+        // завершения, статус распознавания.
+        state = .transcribing
+        cancelRecognition = false
+        overlay.setProcessingPhase()
+        overlay.setStatus("Распознаю…")
+        sounds.playEnd()
+
+        // Синхронный останов: незакрытый уттеренс отдаётся колбэком ДО возврата
+        // stop() и уже стоит в liveExecutor первым в очереди финализации.
+        let samples = audio.stop()
+        let duration = Double(samples.count) / 16000.0
+        Logger.log(String(format: "live finalize (\(samples.count) samples, %.2f s)", duration), level: "info")
+
+        // Страж фазы «обработка»: незавершённые сегменты + «хвост» + финальный
+        // проход — каждый запрос до networkRequestTimeout (запас на все).
+        let requestCount = max(2, runState.segmentCount + 2)
+        let liveMaxDuration = Double(requestCount) * Transcriber.networkRequestTimeout + 5
+        processingSession += 1
+        let session = processingSession
+        DispatchQueue.main.asyncAfter(deadline: .now() + liveMaxDuration) { [weak self] in
+            guard let self = self,
+                  self.processingSession == session,
+                  self.state == .transcribing else { return }
+            self.failTranscription(Transcriber.sttTimeoutMessage, isNetworkFailure: true)
+        }
+
+        liveExecutor.submit { [weak self] in
+            guard let self = self else { return }
+            await self.finishLiveRun(samples: samples, session: session, runState: runState)
+        }
+    }
+
+    /// Финализация живого цикла по принудительному стопу лимита (максимальная
+    /// длительность записи). «Хвост» уже доставлен onSpeechSegment ДО этого
+    /// вызова (порядок в performLimitStop: tail → onRecordingLimitReached) и
+    /// стоит в liveExecutor первым; здесь — только страж и финальный проход
+    /// по переданным сэмплам (без audio.stop()).
+    private func liveFinalizeFromSamples(_ samples: [Int16]) {
+        guard let runState = liveRunState else {
+            processChunked(samples)
+            return
+        }
+        state = .transcribing
+        cancelRecognition = false
+        overlay.setProcessingPhase()
+        overlay.setStatus("Распознаю…")
+        sounds.playEnd()
+        let duration = Double(samples.count) / 16000.0
+        Logger.log(String(format: "live limit finalize (\(samples.count) samples, %.2f s)", duration), level: "info")
+
+        let requestCount = max(2, runState.segmentCount + 2)
+        let liveMaxDuration = Double(requestCount) * Transcriber.networkRequestTimeout + 5
+        processingSession += 1
+        let session = processingSession
+        DispatchQueue.main.asyncAfter(deadline: .now() + liveMaxDuration) { [weak self] in
+            guard let self = self,
+                  self.processingSession == session,
+                  self.state == .transcribing else { return }
+            self.failTranscription(Transcriber.sttTimeoutMessage, isNetworkFailure: true)
+        }
+
+        liveExecutor.submit { [weak self] in
+            guard let self = self else { return }
+            await self.finishLiveRun(samples: samples, session: session, runState: runState)
+        }
+    }
+
+    /// Финальный проход живого цикла (всегда на liveExecutor, ПОСЛЕ «хвоста»
+    /// и всех сегментов — серийная очередь гарантирует порядок). «Один сегмент
+    /// без пауз» — единственный сегмент это «хвост» (покрывает запись до
+    /// конца) и ни один сегмент не сбоил: двойной STT-запрос не нужен (нечем
+    /// «полировать»). Иначе — статический helper ChunkedPipeline.finalize (тот
+    /// же путь, что и в offline-чанкинге): word-diff → замена одного диапазона.
+    private func finishLiveRun(samples: [Int16], session: Int, runState: LiveRunState) async {
+        // Пустая запись — без лишнего STT-запроса (недостижимо иначе, чем
+        // процесс, но симметрично offline-чанкингу).
+        if runState.segmentCount == 0 {
+            // Полный сбой всех сегментов (STT недоступен: отключённая сеть /
+            // провайдер): пользователь реально говорил, но ни один сегмент не
+            // распознан. Это ошибка STT, а НЕ «пустая диктовка» — явная
+            // failTranscription с текстом последней ошибки (как согласовано
+            // с offline-чанкингом, ревью #112), а не маскирующий сбой «Пустой
+            // результат» (звук Funk).
+            if runState.anySegmentFailed {
+                // Текст запоминается в catch handleLiveSegment; страховка на
+                // недостижимый случай — стандартное сообщение таймаута.
+                let message = runState.lastErrorText ?? Transcriber.sttTimeoutMessage
+                DispatchQueue.main.async {
+                    guard self.processingSession == session, self.state == .transcribing else { return }
+                    self.failTranscription(message, isNetworkFailure: true)
+                }
+                return
+            }
+            let outcome = ChunkedPipeline.Outcome(
+                segmentCount: 0, insertedText: "", finalized: false, finalChanged: false
+            )
+            DispatchQueue.main.async {
+                guard self.processingSession == session, self.state == .transcribing else { return }
+                self.completeChunkedInsertion(outcome: outcome)
+            }
+            return
+        }
+
+        // Единственный сегмент + «хвост» покрывает запись до конца + не было
+        // сбоев — пропускаем финальный проход.
+        if runState.segmentCount == 1 && runState.tailDelivered && !runState.anySegmentFailed {
+            let outcome = ChunkedPipeline.Outcome(
+                segmentCount: 1, insertedText: runState.insertedText, finalized: false, finalChanged: false
+            )
+            DispatchQueue.main.async {
+                guard self.processingSession == session, self.state == .transcribing else { return }
+                self.completeChunkedInsertion(outcome: outcome)
+            }
+            return
+        }
+
+        do {
+            let result = try await ChunkedPipeline.finalize(
+                samples: samples,
+                insertedText: runState.insertedText,
+                stt: { wav, filename, prompt in
+                    let r = try await self.transcriber.transcribe(wav: wav, filename: filename, prompt: prompt)
+                    return r.text
+                },
+                insert: { operation in
+                    DispatchQueue.main.async {
+                        guard self.processingSession == session, self.state == .transcribing else { return }
+                        if case .replaceTail(let old, let new) = operation {
+                            Inserter.replaceRange(old: old, new: new)
+                            Logger.log("live final replace: backspace \(old.count) chars, type \(new.count) chars", level: "info")
+                        }
+                    }
+                },
+                onFinalizing: {
+                    DispatchQueue.main.async {
+                        guard self.processingSession == session, self.state == .transcribing else { return }
+                        self.overlay.setStatus("Финальная обработка…")
+                    }
+                }
+            )
+            let outcome = ChunkedPipeline.Outcome(
+                segmentCount: runState.segmentCount,
+                insertedText: result.changed ? result.finalText : runState.insertedText,
+                finalized: true,
+                finalChanged: result.changed
+            )
+            DispatchQueue.main.async {
+                guard self.processingSession == session, self.state == .transcribing else { return }
+                self.completeChunkedInsertion(outcome: outcome)
+            }
+        } catch {
+            let networkText = OverlayErrorText.text(for: error)
+            let message = networkText ?? Self.message(for: error)
+            DispatchQueue.main.async {
+                guard self.processingSession == session, self.state == .transcribing else { return }
+                self.failTranscription(message, isNetworkFailure: networkText != nil)
+            }
+        }
     }
 
     /// Вставка результата STT в активное приложение.
@@ -916,6 +1335,10 @@ self.undoMaxInterval = config.undoMaxInterval
         switch state {
         case .recording:
             audio.cancel()
+            // Аннулируем живой цикл: сегмент, распознаваемый в моменте на
+            // liveExecutor, не вставится (страж liveSession в handleLiveSegment).
+            liveSession += 1
+            liveRunState = nil
             Logger.log("record cancelled")
         case .transcribing:
             cancelRecognition = true

@@ -159,6 +159,7 @@ public final class Transcriber {
     private let baseURL: String
     private let model: String
     private let apiKey: String
+    private let apiSecret: String
     private let proxyKey: String
     private let language: String
     /// Таймаут из конфига (`timeout_seconds`); фактический таймаут запроса —
@@ -169,6 +170,14 @@ public final class Transcriber {
     /// Preflight сети перед отправкой: true — сеть доступна. По умолчанию
     /// реальный замер через NetworkReachability; тесты инъецируют мок.
     private let networkChecker: () async -> Bool
+    /// Byet-cookie-слой (transport == "relay"/legacy "infinityfree"): вычисляемая
+    /// `__test`-кука в памяти + единый Chrome UA. nil — cookie-логики нет,
+    /// поведение как раньше.
+    private let byetCookieProvider: ByetCookieProvider?
+    /// ID адаптера запроса («openai», «groq», «deepgram», «giga-chat», …).
+    /// nil — legacy-путь: OpenAI-совместимый мультипарт ровно как раньше
+    /// (byte-identical запросы, тесты не меняются).
+    private let adapterID: String?
 
     public init(
         baseURL: String,
@@ -179,17 +188,32 @@ public final class Transcriber {
         timeout: TimeInterval = 120,
         logLevel: String = "info",
         transport: HTTPTransport? = nil,
-        networkChecker: (() async -> Bool)? = nil
+        networkChecker: (() async -> Bool)? = nil,
+        byetCookieProvider: ByetCookieProvider? = nil,
+        apiSecret: String = "",
+        adapterID: String? = nil
     ) {
-        self.baseURL = baseURL
-        self.model = model
+        if let adapterID = adapterID, !adapterID.isEmpty {
+            // Адаптер известного провайдера: пустые baseURL/model из конфига
+            // (шаблон `config init`) разрешаются в дефолты адаптера.
+            let resolvedBaseURL = ProviderRequestBuilder.resolveBaseURL(baseURL, for: adapterID)
+            let resolvedModel = ProviderRequestBuilder.resolveModel(model, for: adapterID)
+            self.baseURL = resolvedBaseURL
+            self.model = resolvedModel
+        } else {
+            self.baseURL = baseURL
+            self.model = model
+        }
         self.apiKey = apiKey
+        self.apiSecret = apiSecret
         self.proxyKey = proxyKey
         self.language = language
         self.timeout = timeout
         self.logLevel = logLevel
         self.transport = transport
         self.networkChecker = networkChecker ?? { await NetworkReachability.isInternetReachable() }
+        self.byetCookieProvider = byetCookieProvider
+        self.adapterID = adapterID
     }
 
     /// Transcribe WAV audio via a multipart/form-data POST to the transcription endpoint.
@@ -206,13 +230,22 @@ public final class Transcriber {
                 baseURL, model, language.isEmpty ? "-" : language, wav.count
             ), level: "debug")
         }
+
+        // Адаптерный путь (известный провайдер): спецификацию запроса строит
+        // ProviderRequestBuilder, OAuth (giga-chat) исполняется до основного запроса.
+        if let adapterID = adapterID, !adapterID.isEmpty {
+            return try await transcribeViaAdapter(adapterID: adapterID, wav: wav, filename: filename, prompt: prompt)
+        }
+
+        // Legacy-путь (adapterID == nil): byte-identical поведение, что было
+        // всегда — мультипарт, Bearer, Byet-UA/кука, таймаут, ретраи.
         guard let url = URL(string: baseURL) else {
             Logger.log("STT error: invalid base URL", level: "error")
             throw TranscribeError.network("Invalid base URL")
         }
 
         let boundary = "Boundary-\(UUID().uuidString)"
-        let body = Self.makeMultipartBody(wav: wav, filename: filename, model: model, language: language, prompt: prompt, boundary: boundary)
+        let body = ProviderRequestBuilder.multipartBody(wav: wav, filename: filename, model: model, language: language, prompt: prompt, boundary: boundary)
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -222,7 +255,142 @@ public final class Transcriber {
         if !proxyKey.isEmpty {
             request.setValue(proxyKey, forHTTPHeaderField: "X-Proxy-Key")
         }
+        await applyByetHeaders(to: &request)
         request.timeoutInterval = min(timeout, Self.networkRequestTimeout)
+
+        return try await sendWithRetry(
+            request: request,
+            transcriptPath: nil,
+            wav: wav,
+            filename: filename,
+            prompt: prompt,
+            skipPreflight: false
+        )
+    }
+
+    // MARK: - Адаптерный путь
+
+    private func transcribeViaAdapter(adapterID: String, wav: Data, filename: String, prompt: String?) async throws -> TranscriptionResult {
+        // Preflight ДО OAuth: без сети не тратим запрос на заведомо мёртвый OAuth.
+        if !(await networkChecker()) {
+            Logger.log("STT not sent: no internet (preflight)", level: "error")
+            throw TranscribeError.network(Self.noInternetMessage)
+        }
+
+        let spec = ProviderRequestBuilder.plan(
+            adapterID: adapterID,
+            baseURL: baseURL,
+            model: model,
+            apiKey: apiKey,
+            apiSecret: apiSecret,
+            language: language,
+            wav: wav,
+            filename: filename,
+            prompt: prompt
+        )
+        guard let url = spec.url else {
+            Logger.log("STT error: invalid base URL", level: "error")
+            throw TranscribeError.network("Invalid base URL")
+        }
+
+        var headers = spec.headers
+        if let oauth = spec.oauth {
+            guard !apiSecret.isEmpty else {
+                Logger.log("STT error: giga-chat требует api_secret (client_secret)", level: "error")
+                throw TranscribeError.network("giga-chat: не задан api_secret (client_secret провайдера)")
+            }
+            headers.append(("Authorization", try await performOAuth(oauth)))
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = spec.bodyData
+        request.setValue(spec.contentType, forHTTPHeaderField: "Content-Type")
+        for (name, value) in headers {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+        if !proxyKey.isEmpty {
+            request.setValue(proxyKey, forHTTPHeaderField: "X-Proxy-Key")
+        }
+        await applyByetHeaders(to: &request)
+        request.timeoutInterval = min(timeout, Self.networkRequestTimeout)
+
+        return try await sendWithRetry(
+            request: request,
+            transcriptPath: spec.transcriptPath,
+            wav: wav,
+            filename: filename,
+            prompt: prompt,
+            skipPreflight: true
+        )
+    }
+
+    /// OAuth-шаг (giga-chat): POST на oauth.url c заголовками из спецификации,
+    /// извлекает токен по `tokenJSONKey`. Токен вставляется в основной запрос
+    /// заголовком `Authorization: Bearer <токен>` (вызывающий код).
+    private func performOAuth(_ oauth: STTOAuthStep) async throws -> String {
+        var request = URLRequest(url: oauth.url)
+        request.httpMethod = "POST"
+        request.httpBody = Data(oauth.body.utf8)
+        for (name, value) in oauth.headers {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+        request.timeoutInterval = min(timeout, Self.networkRequestTimeout)
+
+        let response: (status: Int, body: Data)
+        do {
+            response = try await send(request: request)
+        } catch is CancellationError {
+            throw TranscribeError.network("Request cancelled")
+        } catch let error as URLError where error.code == .cancelled {
+            throw TranscribeError.network("Request cancelled")
+        } catch {
+            // OAuth вне retry-цикла: транспортный сбой здесь ≈ «нет интернета»
+            // (preflight уже прошёл, но сеть могла отвалиться за миллисекунды).
+            Logger.log("STT OAuth network error: \(error.localizedDescription)", level: "error")
+            throw TranscribeError.network(Self.noInternetMessage)
+        }
+        guard (200...299).contains(response.status) else {
+            let text = String(data: response.body, encoding: .utf8) ?? ""
+            throw TranscribeError.http(response.status, String(text.prefix(500)))
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: response.body) as? [String: Any],
+              let token = json[oauth.tokenJSONKey] as? String, !token.isEmpty else {
+            throw TranscribeError.invalidResponse("OAuth: отсутствует '\(oauth.tokenJSONKey)' в ответе")
+        }
+        return token
+    }
+
+    // MARK: - Общий цикл отправки (legacy и адаптерный пути)
+
+    /// Byet-cookie-слой (transport == "relay"/legacy "infinityfree"): единый
+    /// браузерный UA + cookie-заголовок. `ensureFresh()` неблокирующий: свежий
+    /// токен (< 120 с) возвращается мгновенно, без сети; протухший обновляется
+    /// ФОНОМ, запрос уходит с текущим токеном. На челлендж отвечает ретрай
+    /// в `sendWithRetry` (refreshBlocking до результата).
+    private func applyByetHeaders(to request: inout URLRequest) async {
+        guard let byet = byetCookieProvider else { return }
+        request.setValue(ByetCookieProvider.chromeUA, forHTTPHeaderField: "User-Agent")
+        if let cookie = await byet.ensureFresh() {
+            request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        }
+    }
+
+    /// Общий цикл «отправить + (по необходимости) повторить» для обоих путей.
+    /// - 2 попытки суммарно: первичный + 1 ретрай (только сетевые ошибки);
+    /// - Byet-челлендж ретраится один раз со свежей кукой (attempt не сжигается);
+    /// - `transcriptPath == nil` — плоский ключ "text"; иначе извлекается по
+    ///   JSON-пути адаптера (deepgram).
+    /// - `skipPreflight: true` — адаптерный путь уже сделал preflight до OAuth.
+    private func sendWithRetry(
+        request inputRequest: URLRequest,
+        transcriptPath: [String]?,
+        wav: Data,
+        filename: String,
+        prompt: String?,
+        skipPreflight: Bool
+    ) async throws -> TranscriptionResult {
+        var request = inputRequest
 
         // При log_level == "debug" сохраняем саму аудиозапись (WAV) на диск
         // один раз, до отправки; информация о файле уходит в debug-дамп.
@@ -230,15 +398,17 @@ public final class Transcriber {
 
         // Preflight сети: сети нет — HTTP-запрос не отправляем вовсе, ошибка
         // мгновенная («Нет интернета»), вместо зависшего оверлея на 120 с.
-        if !(await networkChecker()) {
+        if !skipPreflight, !(await networkChecker()) {
             Logger.log("STT not sent: no internet (preflight)", level: "error")
-            debugDump(request: request, wavByteCount: wav.count, filename: filename, prompt: prompt, recording: recording, response: nil)
+            debugDump(request: request, wavByteCount: wav.count, filename: filename, prompt: prompt, recording: nil, response: nil)
             throw TranscribeError.network(Self.noInternetMessage)
         }
 
         // 2 attempts total: initial + 1 retry (network errors only).
         var lastError: TranscribeError?
         var attempt = 0
+        // Byet-челлендж ретраится не больше одного раза (свежей кукой).
+        var challengeRetried = false
         for _ in 0..<2 {
             attempt += 1
             do {
@@ -249,7 +419,24 @@ public final class Transcriber {
                 if logLevel.lowercased() == "debug" {
                     Logger.log(String(format: "STT response: HTTP %d in %.2f s, bodyBytes=%d", response.status, elapsed, response.body.count), level: "debug")
                 }
-                let result = try Self.parseResponse(response)
+                // Byet-челлендж (transport == "relay"/"infinityfree"): сервер вместо
+                // контента прислал JS-заглушку. Единственный ретрай — со свежей
+                // кукой (refreshBlocking до результата); attempt не сжигается.
+                // Повторный челлендж после свежего токена — серьёзная ошибка.
+                if let byet = byetCookieProvider,
+                   !challengeRetried,
+                   ByetCookieProvider.looksLikeChallenge(response.body) {
+                    if let freshCookie = await byet.refreshBlocking() {
+                        challengeRetried = true
+                        request.setValue(freshCookie, forHTTPHeaderField: "Cookie")
+                        attempt -= 1
+                        Logger.log("STT Byet challenge: cookie обновлён, повтор с новым __test", level: "info")
+                        continue
+                    }
+                    Logger.log("STT Byet challenge: свежий cookie не получен", level: "error")
+                    throw TranscribeError.invalidResponse("Byet challenge page received; cookie refresh failed")
+                }
+                let result = try Self.parseResponse(response, transcriptPath: transcriptPath)
                 if logLevel.lowercased() == "debug" {
                     let text = result.text
                     let head = text.count > 80 ? String(text.prefix(80)) + "…" : text
@@ -380,7 +567,11 @@ public final class Transcriber {
 
     // MARK: - Response parsing
 
-    private static func parseResponse(_ response: (status: Int, body: Data)) throws -> TranscriptionResult {
+    /// Разбор HTTP-ответа в результат распознавания.
+    /// - `transcriptPath == nil` — OpenAI-совместимый плоский `{"text": "…"}`;
+    /// - иначе текст извлекается по JSON-пути адаптера (deepgram).
+    /// Ошибки и их строки — ровно те же, что были в legacy-пути (см. тесты).
+    private static func parseResponse(_ response: (status: Int, body: Data), transcriptPath: [String]? = nil) throws -> TranscriptionResult {
         let status = response.status
         let body = response.body
         guard (200...299).contains(status) else {
@@ -390,62 +581,13 @@ public final class Transcriber {
             }
             throw TranscribeError.http(status, String(text.prefix(500)))
         }
-
-        guard body.count > 0,
-              let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
-            throw TranscribeError.invalidResponse("Response is not a JSON object")
-        }
-        guard let text = json["text"] as? String else {
-            throw TranscribeError.invalidResponse("Missing 'text' field")
-        }
+        let text = try ProviderRequestBuilder.extractText(from: body, path: transcriptPath)
         return TranscriptionResult(text: text, rawData: body)
     }
 
     // MARK: - Multipart body
 
-    private static func makeMultipartBody(wav: Data, filename: String, model: String, language: String, prompt: String?, boundary: String) -> Data {
-        var body = Data()
-
-        func append(_ string: String) {
-            body.append(Data(string.utf8))
-        }
-
-        // Field: file
-        append("--\(boundary)\r\n")
-        append("Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n")
-        append("Content-Type: audio/wav\r\n")
-        append("\r\n")
-        body.append(wav)
-        append("\r\n")
-
-        // Field: model
-        append("--\(boundary)\r\n")
-        append("Content-Disposition: form-data; name=\"model\"\r\n")
-        append("\r\n")
-        append(model)
-        append("\r\n")
-
-        // Field: language (only when non-empty — tells Whisper the spoken language)
-        if !language.isEmpty {
-            append("--\(boundary)\r\n")
-            append("Content-Disposition: form-data; name=\"language\"\r\n")
-            append("\r\n")
-            append(language)
-            append("\r\n")
-        }
-
-        // Field: prompt — контекст уже распознанных сегментов (пошаговая диктовка)
-        if let prompt = prompt, !prompt.isEmpty {
-            append("--\(boundary)\r\n")
-            append("Content-Disposition: form-data; name=\"prompt\"\r\n")
-            append("\r\n")
-            append(prompt)
-            append("\r\n")
-        }
-
-        // Closing boundary
-        append("--\(boundary)--\r\n")
-
-        return body
-    }
+    // Единый источник правды о multipart-формате — ProviderRequestBuilder
+    // (STTAdapter.swift): legacy-путь и все OpenAI-совместимые адаптеры дают
+    // байт-в-байт одинаковое тело (см. ProviderRequestBuilder.multipartBody).
 }
