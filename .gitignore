@@ -1,0 +1,31 @@
+/.build/
+.DS_Store
+msw.rtf
+transcription_raw.json
+transcription_raw.json.claude/
+example/
+.claude/
+.playwright-mcp/
+
+# Agent logs
+agent.log
+
+# Local configs holding API keys (never commit secrets)
+config.local.toml
+*.local.toml
+
+# Copies of the LaunchAgent plist (original lives in Resources/)
+com.dima.altdictation.plist
+com.dictation.agent.plist
+Resources/dictation-agent.plist
+
+# Local secrets / temp credentials (never commit)
+*.keys
+.env
+*.env
+.token
+*.token
+/*.plist
+
+# Temporary files
+*.tmp
