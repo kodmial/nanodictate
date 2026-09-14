@@ -158,9 +158,10 @@ Top-level options:
 **Secrets.** Put API keys either inline (`api_key = "…"`) or in a separate
 file referenced by `api_key_file` (the first non-empty line is used; the
 directory is created with the file, keep it at `chmod 600`). The agent reads
-keys from the config file only — stored explicitly, or referenced by path
-inside `config.toml`. (Environment variables such as `DICTATION_API_KEY`
-are *not* read by the agent.)
+keys from the config file — stored explicitly, or referenced by path
+inside `config.toml`. The environment variable `DICTATION_API_KEY` is also
+read and takes priority over both `api_key` and `api_key_file`; it is never
+written to the config file.
 
 ## Providers
 
