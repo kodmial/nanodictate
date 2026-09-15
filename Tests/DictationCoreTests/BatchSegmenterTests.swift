@@ -96,4 +96,55 @@ final class BatchSegmenterTests: XCTestCase {
         let chunks = BatchSegmenter.segments(samples: samples, sampleRate: 16000, maxSegment: 30, overlap: 2.5)
         XCTAssertEqual(chunks.map(\.index), [0, 1, 2])
     }
+
+    // MARK: plan() — cutAtPauses
+
+    @objc func testPlanCutAtPausesShiftsBoundaryToSilenceStart() throws {
+        let sr = 1000
+        // speech(6s loud), silence(1.2s), speech(6s), silence(1.2s), speech(6s)
+        var samples = tone(6, value: 500, sampleRate: sr)
+        samples += tone(1.2, value: 0, sampleRate: sr)
+        samples += tone(6, value: 500, sampleRate: sr)
+        samples += tone(1.2, value: 0, sampleRate: sr)
+        samples += tone(6, value: 500, sampleRate: sr)
+        XCTAssertEqual(samples.count, 20_400)
+
+        let content = ArrayPCMBatchContent(samples: samples, sampleRate: sr)
+        let specs = try BatchSegmenter.plan(
+            content: content,
+            maxSegment: 10,
+            overlap: 1.0,
+            cutAtPauses: true,
+            pauseDuration: 1.0,
+            maxDrift: 5.0
+        )
+
+        XCTAssertEqual(specs.count, 2, "два чанка: [0, ~13.2s) и [~13.2s, 20.4s)")
+
+        // Chunk 0: boundary сдвинут к началу ВТОРОЙ паузы (13200) — с точностью
+        // до окна RMS-сканирования (windowSize = 0.085s * sr = 85 сэмплов):
+        // первое полностью тихое окно начинается в 13245 (13.245s).
+        XCTAssertEqual(specs[0].bodyStart, 0, accuracy: 0.001)
+        XCTAssertGreaterThanOrEqual(specs[0].bodyEnd, 13.2,
+                                    "граница не раньше начала паузы (13200 = 13.2s)")
+        XCTAssertLessThanOrEqual(specs[0].bodyEnd, 13.2 + 0.1,
+                                 "граница не дальше одного окна RMS от начала паузы")
+        XCTAssertEqual(specs[0].bodyRange.lowerBound, 0)
+        XCTAssertTrue(specs[0].bodyRange.upperBound >= 13_200
+                        && specs[0].bodyRange.upperBound <= 13_200 + 85,
+                      "тело чанка 0 заканчивается на паузе (13200±окно), было: \(specs[0].bodyRange)")
+        XCTAssertNil(specs[0].overlapRange, "первый чанк без оверлэпа")
+
+        // Chunk 1: последний чанк — без обрезания (bodyEnd = totalSamples).
+        XCTAssertEqual(specs[1].bodyEnd, 20.4, accuracy: 0.001)
+        XCTAssertEqual(specs[1].bodyRange.upperBound, 20_400)
+
+        // Bodies andдут подряд: граница чанка 1 = граница чанка 0.
+        XCTAssertEqual(specs[1].bodyStart, specs[0].bodyEnd, accuracy: 0.001,
+                       "тела чанков идут подряд — общая граница = граница паузы")
+        XCTAssertEqual(specs[1].bodyRange.lowerBound, specs[0].bodyRange.upperBound,
+                       "read-окна тел смежны")
+        XCTAssertEqual(specs[1].overlapRange?.upperBound, specs[0].bodyRange.upperBound,
+                       "оверлэп чанка 1 = хвост тела чанка 0")
+    }
 }

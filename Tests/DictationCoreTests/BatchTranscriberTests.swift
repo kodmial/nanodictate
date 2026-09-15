@@ -441,6 +441,46 @@ final class BatchTranscriberTests: XCTestCase {
                       "мультипарт остаётся, уходит только пустая авторизация")
     }
 
+    @objc func testMakeRequestSetsProxyHeaderForNonEmptyProxyKey() throws {
+        guard let prepared = BatchRequestBuilder.makeRequest(
+            provider: makeBatchProvider(),
+            apiKey: "secret-token-123",
+            language: "ru",
+            timeout: 60,
+            wav: Data("RIFFWAVEfmt data".utf8),
+            chunkIndex: 1,
+            proxyKey: "proxy-token-456",
+            proxyKeyHeader: "X-Api-Key"
+        ) else {
+            XCTFail("запрос с валидным base_url должен собраться")
+            return
+        }
+        XCTAssertEqual(prepared.request.value(forHTTPHeaderField: "X-Api-Key"), "proxy-token-456",
+                       "непустой proxyKey → заголовок X-Api-Key со значением ключа")
+        XCTAssertEqual(prepared.request.value(forHTTPHeaderField: "Authorization"), "Bearer secret-token-123",
+                       "прокси-заголовок не отменяет Authorization")
+    }
+
+    @objc func testMakeRequestOmitsProxyHeaderForEmptyProxyKey() throws {
+        guard let prepared = BatchRequestBuilder.makeRequest(
+            provider: makeBatchProvider(),
+            apiKey: "secret-token-123",
+            language: "ru",
+            timeout: 60,
+            wav: Data("RIFFWAVEfmt data".utf8),
+            chunkIndex: 1,
+            proxyKey: "",
+            proxyKeyHeader: "X-Api-Key"
+        ) else {
+            XCTFail("запрос с валидным base_url должен собраться")
+            return
+        }
+        XCTAssertNil(prepared.request.value(forHTTPHeaderField: "X-Api-Key"),
+                     "пустой proxyKey — прокси-заголовок не отправляется вовсе")
+        XCTAssertEqual(prepared.request.value(forHTTPHeaderField: "Authorization"), "Bearer secret-token-123",
+                       "пустой proxyKey не влияет на Authorization")
+    }
+
     @objc func testMakeRequestNilForBrokenBaseURL() throws {
         let prepared = BatchRequestBuilder.makeRequest(
             provider: makeBatchProvider(baseURL: "ht tp://bad url"),
@@ -473,6 +513,199 @@ final class BatchTranscriberTests: XCTestCase {
         XCTAssertTrue(body.contains("name=\"language\"\r\n\r\nru"),
                       "language попадает в мультипарт")
     }
+
+    // MARK: Parallel mode (maxConcurrent > 1)
+
+    @objc func testRunParallelDefaultIsSequential() throws {
+        // maxConcurrent default = 1 → order always [0,1,2,3] even if chunk 0 has delay
+        let samples = tone(8, sampleRate: 1000)
+        let order = OrderRecorder()
+        let outcome = try runAsync {
+            try await BatchTranscriber.run(
+                samples: samples, sampleRate: 1000, maxSegment: 2, overlap: 0.5,
+                providerID: "gigaam", sourceFile: "x.wav",
+                sendOne: { _, _, index in
+                    if index == 0 { try await Task.sleep(nanoseconds: 30_000_000) }
+                    order.record(index)
+                    return "text \(index)"
+                },
+                delay: { _ in try await self.instantDelay(0) }
+            )
+        }
+        XCTAssertEqual(outcome.okCount, 4)
+        XCTAssertEqual(order.snapshot(), [0, 1, 2, 3],
+                       "sequential: chunk 0 sleeps 30ms but order is still 0,1,2,3")
+    }
+
+    @objc func testRunParallelResultsIdenticalToSequential() throws {
+        let samples = tone(8, sampleRate: 1000)
+        let send: BatchTranscriber.SendOne = { _, _, index in "текст \(index)" }
+
+        let seq = try runAsync {
+            try await BatchTranscriber.run(
+                samples: samples, sampleRate: 1000, maxSegment: 2, overlap: 0.5,
+                providerID: "gigaam", sourceFile: "x.wav",
+                sendOne: send,
+                delay: { _ in try await self.instantDelay(0) }, maxConcurrent: 1
+            )
+        }
+        let par = try runAsync {
+            try await BatchTranscriber.run(
+                samples: samples, sampleRate: 1000, maxSegment: 2, overlap: 0.5,
+                providerID: "gigaam", sourceFile: "x.wav",
+                sendOne: send,
+                delay: { _ in try await self.instantDelay(0) }, maxConcurrent: 2
+            )
+        }
+        XCTAssertEqual(seq.text, par.text, "parallel и sequential дают одинаковый текст")
+        XCTAssertEqual(seq.okCount, par.okCount)
+    }
+
+    @objc func testRunParallelCheckpointResume() throws {
+        let samples = tone(8, sampleRate: 1000)
+        let path = tempCheckpointPath("par-resume")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        // First run: parallel (maxConcurrent=2), writes checkpoint.
+        let first = try runAsync {
+            try await BatchTranscriber.run(
+                samples: samples, sampleRate: 1000, maxSegment: 2, overlap: 0.5,
+                providerID: "gigaam", sourceFile: "x.wav",
+                checkpointPath: path, sendOne: { _, _, index in "p \(index)" },
+                delay: { _ in try await self.instantDelay(0) }, maxConcurrent: 2
+            )
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path))
+        XCTAssertEqual(first.text, "p 0 p 1 p 2 p 3")
+
+        // Resume: maxConcurrent=2, sendOne NOT called.
+        var resumedCalls = 0
+        let second = try runAsync {
+            try await BatchTranscriber.run(
+                samples: samples, sampleRate: 1000, maxSegment: 2, overlap: 0.5,
+                providerID: "gigaam", sourceFile: "x.wav",
+                checkpointPath: path, resume: true,
+                sendOne: { _, _, index in resumedCalls += 1; return "FAIL \(index)" },
+                delay: { _ in try await self.instantDelay(0) }, maxConcurrent: 2
+            )
+        }
+        XCTAssertEqual(resumedCalls, 0, "resume с parallel — sendOne не вызывается")
+        XCTAssertEqual(second.text, first.text)
+    }
+
+    @objc func testRunParallelResumePartialCheckpoint() throws {
+        // Чекпоинт с ЧАСТИЧНЫМ префиксом (3 из 4 разрешены): resume в parallel
+        // идёт не по раннему выходу (completedCount == total), а по
+        // seeded-слотам с остатком работы — воркер распознаёт только
+        // недостающий чанк и дописывает префикс до конца.
+        let path = tempCheckpointPath("par-resume-partial")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let seeded: [BatchSegmentRecord] = (0..<3).map {
+            BatchSegmentRecord(index: $0, bodyStart: Double($0), bodyEnd: Double($0) + 1,
+                               status: BatchSegmentRecord.statusOK, text: "p \($0)")
+        }
+        let partial = BatchCheckpoint(
+            version: BatchCheckpoint.currentVersion,
+            providerID: "gigaam", sourceFile: "x.wav",
+            totalSegments: 4, segments: seeded
+        )
+        try BatchTranscriber.saveCheckpoint(partial, to: path)
+
+        let samples = tone(8, sampleRate: 1000)
+        var resumedCalls: [Int] = []
+        let lock = NSLock()
+        let outcome = try runAsync {
+            try await BatchTranscriber.run(
+                samples: samples, sampleRate: 1000, maxSegment: 2, overlap: 0.5,
+                providerID: "gigaam", sourceFile: "x.wav",
+                checkpointPath: path, resume: true,
+                sendOne: { _, _, index in
+                    lock.lock(); resumedCalls.append(index); lock.unlock()
+                    return "p \(index)"
+                },
+                delay: { _ in try await self.instantDelay(0) }, maxConcurrent: 2
+            )
+        }
+        XCTAssertEqual(outcome.okCount, 4)
+        XCTAssertEqual(resumedCalls, [3],
+                       "resume частичного чекпоинта — дослышается только недостающий чанк 3")
+        XCTAssertEqual(outcome.text, "p 0 p 1 p 2 p 3")
+
+        // После досылки чекпоинт дописан до полного префикса.
+        let full = try BatchTranscriber.loadCheckpoint(from: path)
+        XCTAssertEqual(full?.segments.count, 4, "чекпоинт дописан до полного префикса")
+        XCTAssertEqual(full?.segments.map { $0.index }, [0, 1, 2, 3])
+    }
+
+    @objc func testCheckpointWriterGuardsStalePrefix() throws {
+        // Сердце фикса: надежда на то, что МЕНЬШИЙ префикс не перезапишет
+        // уже сохранённый БОЛЬШИЙ (это и ломалось гонкой rename'ов).
+        // Тест детерминирован — без параллелизма, напрямую на классе.
+        let path = tempCheckpointPath("par-ck-writer")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let writer = CheckpointWriter()
+        let save: (BatchCheckpoint, String) throws -> Void = { cp, p in
+            try BatchTranscriber.saveCheckpoint(cp, to: p)
+        }
+        let make: (Int) -> BatchCheckpoint = { end in
+            BatchCheckpoint(
+                version: BatchCheckpoint.currentVersion,
+                providerID: "gigaam", sourceFile: "x.wav",
+                totalSegments: 4,
+                segments: (0..<end).map {
+                    BatchSegmentRecord(index: $0, bodyStart: Double($0), bodyEnd: Double($0) + 1,
+                                       status: BatchSegmentRecord.statusOK, text: "t \($0)")
+                }
+            )
+        }
+
+        writer.saveIfLonger(end: 3, path: path, saveCheckpoint: save, makeCheckpoint: make)
+        var cp = try BatchTranscriber.loadCheckpoint(from: path)
+        XCTAssertEqual(cp?.segments.count, 3, "первый префикс сохраняется")
+
+        // Устаревший (меньший) префикс приходит позже — должен быть пропущен.
+        writer.saveIfLonger(end: 2, path: path, saveCheckpoint: save, makeCheckpoint: make)
+        cp = try BatchTranscriber.loadCheckpoint(from: path)
+        XCTAssertEqual(cp?.segments.count, 3,
+                       "устаревший меньший префикс не должен перезаписывать больший")
+
+        // Равный префикс — тоже не нужна перезапись (можно: guard end > savedEnd).
+        writer.saveIfLonger(end: 3, path: path, saveCheckpoint: save, makeCheckpoint: make)
+        cp = try BatchTranscriber.loadCheckpoint(from: path)
+        XCTAssertEqual(cp?.segments.count, 3)
+
+        // Новый бОльший префикс — сохраняется и растёт файл.
+        writer.saveIfLonger(end: 4, path: path, saveCheckpoint: save, makeCheckpoint: make)
+        cp = try BatchTranscriber.loadCheckpoint(from: path)
+        XCTAssertEqual(cp?.segments.count, 4, "бОльший префикс дописывает файл")
+        XCTAssertEqual(cp?.segments.map { $0.index }, [0, 1, 2, 3])
+    }
+
+    @objc func testRunFileURLStreaming() throws {
+        let sr = 1000
+        let samples = tone(4, sampleRate: sr, value: 42)
+        let wavData = WAVEncoder.encode(samples: samples, sampleRate: sr)
+
+        let tmpURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dct-test-stream-\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: tmpURL) }
+        try wavData.write(to: tmpURL)
+
+        let outcome = try runAsync {
+            try await BatchTranscriber.run(
+                fileURL: tmpURL,
+                maxSegment: 2,
+                overlap: 0.5,
+                providerID: "gigaam",
+                sourceFile: "input.wav",
+                sendOne: { _, _, index in "chunk \(index)" },
+                delay: { _ in try await self.instantDelay(0) }
+            )
+        }
+        XCTAssertEqual(outcome.okCount, 2, "4s файл / 2s чанки = 2 чанка")
+        XCTAssertEqual(outcome.text, "chunk 0 chunk 1")
+    }
 }
 
 /// Коробка для передачи результата async в синхронный тест.
@@ -485,4 +718,20 @@ final class ResultBox<T> {
 /// из `Task { }` запрещена компилятором как гонка).
 final class AttemptBox {
     var value = 0
+}
+
+/// Thread-safe recorder of chunk indices (для проверки порядка в parallel).
+final class OrderRecorder {
+    private var items: [Int] = []
+    private let lock = NSLock()
+    func record(_ index: Int) {
+        lock.lock()
+        items.append(index)
+        lock.unlock()
+    }
+    func snapshot() -> [Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        return items
+    }
 }

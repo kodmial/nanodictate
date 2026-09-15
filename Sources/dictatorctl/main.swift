@@ -670,8 +670,15 @@ func cmdTranscribe(_ args: [String]) -> Int32 {
             batch.overlap = v; i += 2; batchRequested = true
         case "--no-progress":
             batch.showProgress = false; i += 1; batchRequested = true
+        case "--cut-at-pauses":
+            batch.cutAtPauses = true; i += 1; batchRequested = true
         case "--resume":
             batch.resume = true; i += 1; batchRequested = true
+        case "--parallel":
+            guard i + 1 < args.count, let v = Int(args[i + 1]), v >= 1 else {
+                eprint("ОШИБКА: --parallel требует целое число >= 1 (число воркеров)"); return 1
+            }
+            batch.maxConcurrent = v; i += 2; batchRequested = true
         case "--json":
             batch.json = true; i += 1
         case "--help", "-h":
@@ -703,7 +710,9 @@ struct BatchTranscribeOptions {
     var outPath: String?
     var maxSegment: TimeInterval = 30
     var overlap: TimeInterval = 2.5
+    var maxConcurrent = 1
     var showProgress = true
+    var cutAtPauses = false
     var resume = false
     var json = false
 }
@@ -716,7 +725,14 @@ let usageTranscribeBatch = """
                      чекпоинт рядом: <path>.checkpoint.json
     --max-segment <s> Длина чанка в секундах (по умолчанию 30)
     --overlap <s>    Перекрытие чанков в секундах (по умолчанию 2.5)
+    --parallel <N>   Число параллельных запросов (по умолчанию 1 = последовательно).
+                     >1 включает пул воркеров: чанки отправляются параллельно,
+                     порядок результата и чекпоинт/resume не меняются.
+                     Параметр для самохоста (sherpa-onnx / GigaAM): обратная
+                     связь сервера НЕ ссылается на порядок чанков.
     --no-progress    Не печатать прогресс в stderr
+    --cut-at-pauses  Резать чанки ПАУЗАМИ речи (граница ≈ конец речи, меньше
+                     галлюцинаций на кромке; вместо фиксированной длины)
     --resume         Продолжить из чекпоинта (Ctrl+C + тот же запуск)
   Пример: dictatorctl transcribe lecture.m4a --provider selfhosted --out result.txt
 """
@@ -734,6 +750,63 @@ func stableCheckpointStamp(_ s: String) -> String {
         hash = (hash &* 33) &+ UInt64(byte)
     }
     return String(hash, radix: 16)
+}
+
+/// Одна строка прогресса пакетного режима в stderr, перезаписываемая \r
+/// (без \n до завершения). Один общий экземпляр на прогон — атомарные
+/// перерисовки под NSLock. Формат:
+///   [12/84] ████████████░░░░░░░░░░ 33% · ~4 мин осталось · средн. 7.2с/чанк
+/// finish() ставит перевод строки (перед итогами/ошибками); повторный
+/// finish() — no-op. Выключен (--no-progress) — не пишет ничего.
+final class BatchProgressBar {
+    private let lock = NSLock()
+    private let enabled: Bool
+    private let width: Int
+    private var finished = false
+
+    init(enabled: Bool, width: Int = 24) {
+        self.enabled = enabled
+        self.width = width
+    }
+
+    /// Перерисовать строку. `completed` — число готовых чанков (N из [N/M]),
+    /// `elapsed` — секунд с начала прогона.
+    func update(completed: Int, total: Int, elapsed: TimeInterval) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard enabled, !finished else { return }
+        let pct = total <= 0 ? 1.0 : min(1.0, max(0, Double(completed) / Double(total)))
+        let filled = Int((pct * Double(width)).rounded())
+        let bar = String(repeating: "█", count: filled) + String(repeating: "░", count: width - filled)
+        let avg = completed > 0 ? elapsed / Double(completed) : 0
+        let eta = avg * Double(max(0, total - completed))
+        let percent = Int((pct * 100).rounded())
+        let line = String(format: "\u{1B}[2K\r[%d/%d] %@ %3d%% · %@ · средн. %.1fс/чанк",
+                          completed, total, bar, percent, BatchProgressBar.etaText(eta), avg)
+        FileHandle.standardError.write(Data(line.utf8))
+    }
+
+    /// Закрыть строку переводом строки (до итога/ошибки). Идемпотентна.
+    func finish() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard enabled, !finished else { return }
+        finished = true
+        FileHandle.standardError.write(Data("\u{1B}[2K\r\n".utf8))
+    }
+
+    /// «~45 сек» / «~4 мин» / «~1 ч 12 мин» (округление вверх — не обещаем
+    /// лишнего времени).
+    private static func etaText(_ seconds: TimeInterval) -> String {
+        let s = Int(seconds.rounded(.up))
+        if s < 60 { return "~\(s) сек осталось" }
+        let m = s / 60
+        if m < 60 { return "~\(m) мин осталось" }
+        let h = m / 60
+        let mm = m % 60
+        if mm == 0 { return "~\(h) ч осталось" }
+        return "~\(h) ч \(mm) мин осталось"
+    }
 }
 
 func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int32 {
@@ -770,13 +843,42 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
         return 1
     }
 
-    // 2. Приведение к 16 кГц моно 16-бит WAV (afconvert, если нужно).
+    // 2. Приведение к 16 кГц моно PCM16 WAV, СТРИМИНГ без загрузки в RAM.
+    // Пробуем открыть вход напрямую (read-окна по требованию из файла):
+    // если это не PCM16 WAV или не 16 кГц моно — afconvert во временный файл
+    // (временный живёт до конца прогона — run(fileURL:) читает из него окна).
     let inputURL = URL(fileURLWithPath: file)
     var wavURL = inputURL
     var tempWavURL: URL?
-    let alreadyOK = (try? Data(contentsOf: inputURL)).flatMap({ WAVDecoder.decodePCM16($0) })
-        .map { $0.sampleRate == 16000 && $0.channels == 1 } ?? false
-    if !alreadyOK {
+    var wavSampleCount = 0
+    var wavSampleRate = 0
+    do {
+        let probe = try WAVFilePCMBatchContent(wavURL: wavURL)
+        guard probe.sampleRate == 16000 && probe.channels == 1 else {
+            throw WAVFilePCMBatchContent.WAVFileError.invalidWAV
+        }
+        // Пробник нужен ТОЛЬКО для сводки (sampleCount/sampleRate): берём
+        // значения и отпускаем объект — его FileHandle закрывается в deinit,
+        // а run(fileURL:) открывает файл заново собственными read-окнами.
+        wavSampleCount = probe.sampleCount
+        wavSampleRate = probe.sampleRate
+    } catch {
+        // Причина отказа пробника:
+        // fileNotFound/ioError — файл физически недоступен, конвертация
+        // afconvert не поможет — показываем исходную ошибку и выходим.
+        if let probeError = error as? WAVFilePCMBatchContent.WAVFileError,
+           case .fileNotFound = probeError {
+            eprint("ОШИБКА: файл не найден: \(file)")
+            return 1
+        }
+        if let probeError = error as? WAVFilePCMBatchContent.WAVFileError,
+           case .ioError(let message) = probeError {
+            eprint("ОШИБКА: не удалось прочитать \(file): \(message)")
+            return 1
+        }
+        // invalidWAV (не PCM16 WAV / не 16 кГц моно) — штатный случай:
+        // afconvert во временный файл (временный живёт до конца прогона —
+        // run(fileURL:) читает из него окна).
         let converted = fm.temporaryDirectory.appendingPathComponent("dictatorctl-batch-\(UUID().uuidString).wav")
         let conv = runProcess("/usr/bin/afconvert",
                               ["-f", "WAVE", "-d", "LEI16@16000", "-c", "1", file, converted.path])
@@ -787,14 +889,22 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
         }
         tempWavURL = converted
         wavURL = converted
+        guard let content = try? WAVFilePCMBatchContent(wavURL: converted) else {
+            eprint("ОШИБКА: не удалось открыть сконвертированный WAV (\(converted.path))")
+            try? fm.removeItem(at: converted)
+            return 1
+        }
+        wavSampleCount = content.sampleCount
+        wavSampleRate = content.sampleRate
     }
-    guard let wavData = try? Data(contentsOf: wavURL),
-          let info = WAVDecoder.decodePCM16(wavData) else {
-        eprint("ОШИБКА: не удалось декодировать WAV (нужен PCM16 16 кГц моно) из \(file)")
-        if let t = tempWavURL { try? fm.removeItem(at: t) }
-        return 1
-    }
-    if let t = tempWavURL { try? fm.removeItem(at: t) } // сэмплы уже в памяти
+
+    // Неизменяемые копии для захвата в Task (var нельзя захватывать в
+    // @Sendable-замыкание): после этого блока ни wavURL, ни tempWavURL,
+    // ни счётчики сводки уже не меняются.
+    let batchWavURL = wavURL
+    let tempWavForCleanup = tempWavURL
+    let batchSampleCount = wavSampleCount
+    let batchSampleRate = wavSampleRate
 
     // 3. Чекпоинт: рядом с --out, иначе стабильный путь во временной папке.
     // Ключ временного чекпоинта учитывает ОТПЕЧАТОК ПОЛНОГО ПУТИ файла
@@ -804,8 +914,12 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
     if let out = options.outPath {
         checkpointPath = out + ".checkpoint.json"
     } else {
+        // Нарезка зависит от нарезочных параметров; --cut-at-pauses задаёт
+        // другие границы — отдельный ключ чекпоинта, иначе resume подхватил
+        // бы чанки несовместимой нарезки.
+        let pauseFactor = options.cutAtPauses ? "-pause" : ""
         checkpointPath = fm.temporaryDirectory
-            .appendingPathComponent("dictation-batch-\(stableCheckpointStamp(inputURL.path))-\(provider.id)-\(Int(options.maxSegment))-\(Int(options.overlap)).checkpoint.json")
+            .appendingPathComponent("dictation-batch-\(stableCheckpointStamp(inputURL.path))-\(provider.id)-\(Int(options.maxSegment))-\(Int(options.overlap))\(pauseFactor).checkpoint.json")
             .path
     }
     if options.resume && !fm.fileExists(atPath: checkpointPath) {
@@ -829,7 +943,9 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
             language: language,
             timeout: config.timeoutSeconds,
             wav: wav,
-            chunkIndex: chunkIndex
+            chunkIndex: chunkIndex,
+            proxyKey: provider.proxyKey,
+            proxyKeyHeader: provider.proxyKeyHeader.isEmpty ? config.proxyKeyHeader : provider.proxyKeyHeader
         ) else {
             throw BatchHTTPError.invalidResponse("Не удалось собрать запрос: битый base_url у '\(provider.id)'")
         }
@@ -850,11 +966,14 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
         }
     }
 
+    // 4b. Один общий прогресс-бар на прогон (атомарные перерисовки).
+    let progressBar = BatchProgressBar(enabled: options.showProgress)
+
     Task {
+        defer { progressBar.finish() }   // перевести строку при любом исходе
         do {
             let outcome = try await BatchTranscriber.run(
-                samples: info.samples,
-                sampleRate: 16000,
+                fileURL: batchWavURL,
                 maxSegment: options.maxSegment,
                 overlap: options.overlap,
                 providerID: provider.id,
@@ -867,10 +986,11 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
                         try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
                     }
                 },
-                onProgress: options.showProgress ? { i, n, start, end, elapsed, status in
-                    let tag = status == BatchSegmentRecord.statusOK ? "done" : "skip"
-                    eprint(String(format: "[%d/%d] %@—%@, %.1fs, %@", i, n, formatClock(start), formatClock(end), elapsed, tag))
-                } : nil
+                maxConcurrent: options.maxConcurrent,
+                cutAtPauses: options.cutAtPauses,
+                onProgress: { i, n, _, _, elapsed, _ in
+                    progressBar.update(completed: i, total: n, elapsed: elapsed)
+                }
             )
 
             // 5. Текст: в --out (атомарно) или в stdout. В файл — с завершающим
@@ -881,14 +1001,17 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
                     try content.write(to: URL(fileURLWithPath: out), atomically: true, encoding: .utf8)
                 } catch {
                     eprint("ОШИБКА: не удалось записать \(out): \(error)")
+                    if let t = tempWavForCleanup { try? fm.removeItem(at: t) }
                     exit(1)
                 }
             } else {
                 print(outcome.text)
             }
 
+            if let t = tempWavForCleanup { try? fm.removeItem(at: t) } // read-окна отработали
+
             // 6. Итог в stderr.
-            let duration = Double(info.samples.count) / 16000.0
+            let duration = Double(batchSampleCount) / Double(batchSampleRate)
             var summary = "Готово: длительность \(formatClock(duration)), сегментов \(outcome.totalSegments), "
                 + "распознано \(outcome.okCount), пропущено \(outcome.skippedCount), время обработки \(Int(outcome.elapsed)) с"
             if !outcome.skippedIndexes.isEmpty {
