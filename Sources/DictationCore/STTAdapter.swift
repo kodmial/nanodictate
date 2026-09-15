@@ -13,6 +13,10 @@ public enum STTAdapterID: String, Equatable {
     case deepgram
     case gigaChat = "giga-chat"
     case relay
+    /// Cloudflare Workers AI Whisper: сырые WAV-байты + `Authorization: Bearer` +
+    /// `Content-Type: audio/wav` (multipart эта сторона отвергает: 400 code 8001).
+    /// base_url обязателен (модель зашита в URL), дефолтов нет.
+    case cloudflare
     /// Неизвестный id: OpenAI-совместимый запрос с собственными base_url/model,
     /// дефолты НЕ подставляются (никакого личного endpoint у нас больше нет).
     case openAICompatible = "openai-compatible"
@@ -30,8 +34,8 @@ public enum STTAdapterID: String, Equatable {
         case .local:    return "http://127.0.0.1:8080/v1/audio/transcriptions"
         case .deepgram: return "https://api.deepgram.com/v1/listen"
         case .gigaChat: return "https://gigachat.devices.sberbank.ru/api/v1/audio/transcriptions"
-        // relay — личный транспорт, openAICompatible — ручной: base_url обязателен.
-        case .relay, .openAICompatible: return ""
+        // relay — личный транспорт, cloudflare/openAICompatible — ручные: base_url обязателен.
+        case .relay, .cloudflare, .openAICompatible: return ""
         }
     }
 
@@ -44,8 +48,9 @@ public enum STTAdapterID: String, Equatable {
         case .deepgram: return "nova-3"
         // GigaChat-модель задаётся в конфиге (GigaAM и т.п.) — устойчивого
         // публичного дефолта нет, пустое значение убирает поле model из запроса.
+        // Cloudflare: модель в URL Workers AI, отдельной дефолтной нет.
         case .gigaChat: return ""
-        case .relay, .openAICompatible: return ""
+        case .relay, .cloudflare, .openAICompatible: return ""
         }
     }
 }
@@ -140,7 +145,7 @@ public enum ProviderRequestBuilder {
 
     /// Имена известных адаптеров в каноническом порядке (справочник CLI).
     public static let knownProviderIDs: [String] =
-        ["openai", "groq", "local", "deepgram", "giga-chat", "relay"]
+        ["openai", "groq", "local", "deepgram", "giga-chat", "cloudflare", "relay"]
 
     /// «Human name» провайдера для подписи оверлея/логов; неизвестный id —
     /// сам id.
@@ -151,6 +156,7 @@ public enum ProviderRequestBuilder {
         case .local:    return "Local"
         case .deepgram: return "Deepgram"
         case .gigaChat: return "GigaChat"
+        case .cloudflare: return "Cloudflare"
         case .relay:    return "Relay"
         case .openAICompatible: return id
         }
@@ -187,6 +193,8 @@ public enum ProviderRequestBuilder {
             return planDeepgram(baseURL: resolvedBaseURL, model: resolvedModel, apiKey: apiKey, language: language, wav: wav)
         case .gigaChat:
             return planGigaChat(baseURL: resolvedBaseURL, model: resolvedModel, apiKey: apiKey, apiSecret: apiSecret, language: language, wav: wav, filename: filename, prompt: prompt)
+        case .cloudflare:
+            return planCloudflare(baseURL: resolvedBaseURL, apiKey: apiKey, wav: wav)
         case .openai, .groq, .local, .relay, .openAICompatible:
             return planOpenAICompatible(adapterID: adapterID, baseURL: resolvedBaseURL, model: resolvedModel, apiKey: apiKey, language: language, wav: wav, filename: filename, prompt: prompt)
         }
@@ -374,9 +382,10 @@ public enum ProviderRequestBuilder {
         let boundary = "Boundary-\(UUID().uuidString)"
         // Word-таймстампы (verbose_json) — только где поддержка гарантирована.
         let timestamps = supportsWordTimestamps(adapterID)
+        let verbose = supportsVerboseJSON(adapterID)
         let multipart = multipartBody(
             wav: wav, filename: filename, model: model, language: language, prompt: prompt, boundary: boundary,
-            responseFormat: timestamps ? "verbose_json" : nil,
+            responseFormat: verbose ? "verbose_json" : nil,
             timestampGranularities: timestamps ? ["word"] : []
         )
         return STTRequestSpec(
@@ -393,8 +402,18 @@ public enum ProviderRequestBuilder {
     /// query-параметром `words=true` (см. planDeepgram).
     private static func supportsWordTimestamps(_ adapterID: String) -> Bool {
         switch STTAdapterID.from(adapterID) {
+        case .openai, .openAICompatible: return true
+        case .groq, .local, .deepgram, .gigaChat, .cloudflare, .relay: return false
+        }
+    }
+
+    /// Провайдеры, где просим verbose_json. Groq формально поддерживает
+    /// verbose_json (word-таймстампы в ответе), но отвергает параметр
+    /// timestamp_granularities[] — HTTP 400. Поэтому granularities отдельно.
+    private static func supportsVerboseJSON(_ adapterID: String) -> Bool {
+        switch STTAdapterID.from(adapterID) {
         case .openai, .groq, .openAICompatible: return true
-        case .local, .deepgram, .gigaChat, .relay: return false
+        case .local, .deepgram, .gigaChat, .cloudflare, .relay: return false
         }
     }
 
@@ -428,6 +447,26 @@ public enum ProviderRequestBuilder {
             ],
             body: .rawAudio(data: wav, contentType: "audio/wav"),
             transcriptPath: ["results", "channels", "0", "alternatives", "0", "transcript"]
+        )
+    }
+
+    /// Cloudflare Workers AI Whisper: тело — сырые WAV-байты (мультипарт эта
+    /// сторона отвергает: 400 code 8001), `Authorization: Bearer <key>`,
+    /// `Content-Type: audio/wav`. Модель зашита в base_url
+    /// (`/@cf/openai/whisper-large-v3-turbo`). Текст ответа — `result.text`.
+    private static func planCloudflare(
+        baseURL: String,
+        apiKey: String,
+        wav: Data
+    ) -> STTRequestSpec {
+        STTRequestSpec(
+            url: URL(string: baseURL),
+            headers: [
+                ("Authorization", "Bearer \(apiKey)"),
+                ("Content-Type", "audio/wav"),
+            ],
+            body: .rawAudio(data: wav, contentType: "audio/wav"),
+            transcriptPath: ["result", "text"]
         )
     }
 

@@ -20,6 +20,7 @@ final class STTAdapterTests: XCTestCase {
         XCTAssertTrue(known.contains("local"))
         XCTAssertTrue(known.contains("deepgram"))
         XCTAssertTrue(known.contains("giga-chat"))
+        XCTAssertTrue(known.contains("cloudflare"))
         XCTAssertTrue(known.contains("relay"))
         XCTAssertFalse(known.contains("custom"))
     }
@@ -30,6 +31,7 @@ final class STTAdapterTests: XCTestCase {
         XCTAssertEqual(STTAdapterID.from("local"), .local)
         XCTAssertEqual(STTAdapterID.from("deepgram"), .deepgram)
         XCTAssertEqual(STTAdapterID.from("giga-chat"), .gigaChat)
+        XCTAssertEqual(STTAdapterID.from("cloudflare"), .cloudflare)
         XCTAssertEqual(STTAdapterID.from("relay"), .relay)
         XCTAssertEqual(STTAdapterID.from("whatever"), .openAICompatible)
     }
@@ -39,6 +41,7 @@ final class STTAdapterTests: XCTestCase {
         XCTAssertEqual(ProviderRequestBuilder.displayName(for: "groq"), "Groq")
         XCTAssertEqual(ProviderRequestBuilder.displayName(for: "deepgram"), "Deepgram")
         XCTAssertEqual(ProviderRequestBuilder.displayName(for: "giga-chat"), "GigaChat")
+        XCTAssertEqual(ProviderRequestBuilder.displayName(for: "cloudflare"), "Cloudflare")
         XCTAssertEqual(ProviderRequestBuilder.displayName(for: "custom"), "custom")
     }
 
@@ -49,10 +52,12 @@ final class STTAdapterTests: XCTestCase {
         XCTAssertEqual(STTAdapterID.deepgram.defaultBaseURL, "https://api.deepgram.com/v1/listen")
         XCTAssertEqual(STTAdapterID.gigaChat.defaultBaseURL, "https://gigachat.devices.sberbank.ru/api/v1/audio/transcriptions")
         XCTAssertEqual(STTAdapterID.relay.defaultBaseURL, "")
+        XCTAssertEqual(STTAdapterID.cloudflare.defaultBaseURL, "")
         XCTAssertEqual(STTAdapterID.openai.defaultModel, "whisper-1")
         XCTAssertEqual(STTAdapterID.groq.defaultModel, "whisper-large-v3")
         XCTAssertEqual(STTAdapterID.deepgram.defaultModel, "nova-3")
         XCTAssertEqual(STTAdapterID.local.defaultModel, "whisper-1")
+        XCTAssertEqual(STTAdapterID.cloudflare.defaultModel, "")
     }
 
     @objc func testResolveBaseURLAndModel() {
@@ -93,6 +98,16 @@ final class STTAdapterTests: XCTestCase {
             language: "", wav: wav)
         XCTAssertEqual(spec.url?.absoluteString, "https://api.groq.com/openai/v1/audio/transcriptions")
         XCTAssertEqual(spec.headers.first(where: { $0.0 == "Authorization" })?.1, "Bearer sk-groq")
+        guard case .multipart(let data, _) = spec.body else {
+            XCTFail("groq — multipart")
+            return
+        }
+        let text = String(data: data, encoding: .utf8)!
+        // Фикс HTTP 400: Groq просит verbose_json, но БЕЗ timestamp_granularities[].
+        XCTAssertTrue(text.contains("name=\"response_format\"\r\n\r\nverbose_json\r\n"),
+                      "verbose_json запрашивается (Groq поддерживает)")
+        XCTAssertFalse(text.contains("timestamp_granularities"),
+                       "Groq отвергает timestamp_granularities[] (HTTP 400) — не шлём")
     }
 
     @objc func testLocalPlanWithoutKey() {
@@ -153,6 +168,35 @@ final class STTAdapterTests: XCTestCase {
         case .multipart:
             XCTFail("deepgram — сырое аудио, не multipart")
         }
+    }
+
+    @objc func testCloudflarePlan() {
+        let url = "https://api.cloudflare.com/client/v4/accounts/acct/ai/run/@cf/openai/whisper-large-v3-turbo"
+        let spec = ProviderRequestBuilder.plan(
+            adapterID: "cloudflare", baseURL: url, model: "", apiKey: "cf-key",
+            language: "ru", wav: wav)
+        XCTAssertEqual(spec.url?.absoluteString, url)
+        XCTAssertEqual(spec.transcriptPath ?? [], ["result", "text"],
+                       "Cloudflare Workers AI отвечает {\"result\":{\"text\":…}}")
+        XCTAssertNil(spec.oauth)
+        XCTAssertEqual(spec.headers.first(where: { $0.0 == "Authorization" })?.1, "Bearer cf-key")
+        XCTAssertEqual(spec.headers.first(where: { $0.0 == "Content-Type" })?.1, "audio/wav")
+        switch spec.body {
+        case .rawAudio(let data, let contentType):
+            XCTAssertEqual(data, wav, "тело — сырые WAV-байты как есть")
+            XCTAssertEqual(contentType, "audio/wav")
+        case .multipart:
+            XCTFail("cloudflare — сырые байты + audio/wav, не multipart (multipart → 400 code 8001)")
+        }
+    }
+
+    @objc func testCloudflareRequiresExplicitBaseURL() {
+        // Дефолтного base_url нет: пустой → url nil (модель зашита в URL,
+        // провайдер обязан задать личный endpoint).
+        let spec = ProviderRequestBuilder.plan(
+            adapterID: "cloudflare", baseURL: "", model: "", apiKey: "k",
+            language: "ru", wav: wav)
+        XCTAssertNil(spec.url)
     }
 
     @objc func testDeepgramQueryBareModelStillGoesThrough() {
