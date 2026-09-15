@@ -68,6 +68,49 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.proxyKey, "test-proxy-123")
     }
 
+    // MARK: - proxy_key_header
+
+    @objc func testParseProxyKeyHeader() throws {
+        let content = """
+        proxy_key_header = "X-Api-Key"
+        """
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.proxyKeyHeader, "X-Api-Key")
+    }
+
+    @objc func testDefaultProxyKeyHeaderIsXProxyKey() throws {
+        let content = """
+        proxy_key = "test-proxy-123"
+        """
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.proxyKeyHeader, "X-Proxy-Key",
+                       "по умолчанию передаётся старый заголовок (обратная совместимость)")
+    }
+
+    // MARK: - proxy_key_header в секции провайдера (приоритет над корневым)
+
+    @objc func testParseProxyKeyHeaderInProviderSection() throws {
+        let content = """
+        active_provider = "groq"
+        proxy_key_header = "X-Proxy-Key"
+
+        [providers.groq]
+        base_url = "https://kodmai.alwaysdata.net/go/https://api.groq.com/openai/v1/audio/transcriptions"
+        model = "whisper-large-v3"
+        api_key = "gsk-test"
+        proxy_key = "secret-1"
+        proxy_key_header = "X-Api-Key"
+        """
+        let config = try AppConfig.parse(content)
+        guard let provider = config.providers.first else {
+            XCTFail("Нет секции провайдера в конфиге")
+            return
+        }
+        XCTAssertEqual(provider.proxyKeyHeader, "X-Api-Key")
+        XCTAssertEqual(config.proxyKeyHeader, "X-Api-Key",
+                       "заголовок секции попадает в effective-конфиг")
+    }
+
     // MARK: - Comments and empty lines
 
     @objc func testParseIgnoresCommentsAndEmptyLines() throws {
@@ -496,6 +539,36 @@ final class ConfigTests: XCTestCase {
                        "без transport в секции корневой transport остаётся в силе")
     }
 
+    // MARK: - Секция Cloudflare (JSON-base64 транспорт)
+
+    @objc func testParseCloudflareProviderSection() throws {
+        let content = """
+        active_provider = "cloudflare"
+
+        [providers.cloudflare]
+        name = "Cloudflare Workers AI"
+        base_url = "https://api.cloudflare.com/client/v4/accounts/ACCT/ai/run/@cf/openai/whisper-large-v3-turbo"
+        model = "@cf/openai/whisper-large-v3-turbo"
+        api_key = "cfut-token"
+        transport = "cloudflare"
+        """
+        let config = try AppConfig.parse(content)
+        guard let provider = config.providers.first else {
+            XCTFail("Нет секции [providers.cloudflare] в конфиге")
+            return
+        }
+        XCTAssertEqual(provider.id, "cloudflare")
+        XCTAssertEqual(provider.name, "Cloudflare Workers AI")
+        XCTAssertEqual(provider.baseURL,
+                       "https://api.cloudflare.com/client/v4/accounts/ACCT/ai/run/@cf/openai/whisper-large-v3-turbo")
+        XCTAssertEqual(provider.model, "@cf/openai/whisper-large-v3-turbo")
+        XCTAssertEqual(provider.apiKey, "cfut-token")
+        XCTAssertEqual(provider.transport, "cloudflare")
+        XCTAssertEqual(config.transport, "cloudflare",
+                       "transport секции попадает в effective-конфиг (как infinityfree/relay)")
+        XCTAssertEqual(config.activeProvider, "cloudflare")
+    }
+
     @objc func testTransportKeyDoesNotTriggerLegacyAmbiguity() throws {
         // Ключ transport НЕ legacy-STT: его наличие вместе с секциями не должно
         // давать ошибки «неоднозначно» при отсутствии active_provider.
@@ -538,13 +611,18 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.activeProvider, "openai")
         XCTAssertEqual(config.language, "ru")
         XCTAssertTrue(config.soundsEnabled)
-        // Шесть секций: openai, groq, local, deepgram, giga-chat, relay.
-        XCTAssertEqual(config.providerNames, ["openai", "groq", "local", "deepgram", "giga-chat", "relay"])
+        // Семь секций: openai, groq, local, deepgram, giga-chat, relay, cloudflare.
+        XCTAssertEqual(config.providerNames, ["openai", "groq", "local", "deepgram", "giga-chat", "relay", "cloudflare"])
         for provider in config.providers {
             XCTAssertEqual(provider.apiKey, "", "шаблон не содержит секретов")
         }
         XCTAssertEqual(config.providers.first { $0.id == "relay" }?.transport, "relay")
+        XCTAssertEqual(config.providers.first { $0.id == "cloudflare" }?.transport, "cloudflare")
         XCTAssertEqual(config.providers.first { $0.id == "giga-chat" }?.apiSecret, "")
+        XCTAssertTrue(
+            content.contains("auto_failover"),
+            "шаблон предупреждает о поведении ролей при auto_failover"
+        )
     }
 
     @objc func testInitTemplateRoundTripViaFile() throws {
@@ -554,7 +632,7 @@ final class ConfigTests: XCTestCase {
         try AppConfig.initTemplate().data(using: .utf8)!.write(to: file)
         let config = try AppConfig.load(from: file.path)
         XCTAssertEqual(config.activeProvider, "openai")
-        XCTAssertEqual(config.providerNames.count, 6)
+        XCTAssertEqual(config.providerNames.count, 7)
     }
 
     // MARK: - writeProviderKeyValue (config set-key)
@@ -664,5 +742,193 @@ final class ConfigTests: XCTestCase {
         } catch {
             XCTFail("Неожиданная ошибка: \(error)")
         }
+    }
+
+    // MARK: - Маршрутизация STT по ролям ([routing])
+
+    @objc func testParseRoutingSection() throws {
+        let content = """
+        active_provider = "groq"
+
+        [providers.groq]
+        name = "Groq"
+
+        [providers.cloudflare]
+        name = "Cloudflare"
+
+        [routing]
+        segment_provider = "cloudflare"
+        final_provider = "groq"
+        unknown_routing_key = "ignored"
+        [providers.deepgram]
+        name = "Deepgram"
+        """
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.routing.segmentProvider, "cloudflare")
+        XCTAssertEqual(config.routing.finalProvider, "groq")
+        XCTAssertEqual(config.segmentProviderID(), "cloudflare")
+        XCTAssertEqual(config.finalProviderID(), "groq")
+        // Неизвестный ключ внутри [routing] игнорируется, секция кончилась —
+        // следующая [providers.X] читается как обычно.
+        XCTAssertEqual(config.providers.map { $0.id }, ["groq", "cloudflare", "deepgram"])
+    }
+
+    @objc func testRoutingKeysOutsideSectionDoNotLeak() throws {
+        let content = """
+        active_provider = "groq"
+        segment_provider = "cloudflare"
+
+        [providers.groq]
+        name = "Groq"
+        """
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.routing.segmentProvider, "",
+                       "роль читается только внутри секции [routing]")
+        XCTAssertEqual(config.segmentProviderID(), "groq")
+    }
+
+    @objc func testRoutingResolversFallBackToActiveWhenUnset() throws {
+        let content = """
+        active_provider = "groq"
+
+        [providers.groq]
+        name = "Groq"
+
+        [providers.cloudflare]
+        name = "Cloudflare"
+        """
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.routing.segmentProvider, "")
+        XCTAssertEqual(config.routing.finalProvider, "")
+        XCTAssertEqual(config.segmentProviderID(), "groq", "роль не задана — активный")
+        XCTAssertEqual(config.finalProviderID(), "groq", "роль не задана — активный")
+    }
+
+    @objc func testRoutingResolversUseRoleOrFallbackOnUnknownID() throws {
+        let content = """
+        active_provider = "groq"
+
+        [providers.groq]
+        name = "Groq"
+
+        [providers.cloudflare]
+        name = "Cloudflare"
+
+        [routing]
+        segment_provider = "cloudflare"
+        final_provider = "nonexistent"
+        """
+        // Неизвестный id роли НЕ роняет парсинг (толерантный резолвер).
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.segmentProviderID(), "cloudflare")
+        XCTAssertEqual(config.finalProviderID(), "groq", "неизвестный id роли — фолбэк на активного")
+    }
+
+    @objc func testRoutingResolversLegacyConfigReturnEmpty() throws {
+        // Legacy-конфиг (секций нет): active_provider пуст — роли тоже пусты,
+        // агент работает как раньше (новые резолверы не бросают).
+        let content = "base_url = \"https://x\"\nmodel = \"m\"\napi_key = \"k\"\n"
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.activeProvider, "")
+        XCTAssertEqual(config.segmentProviderID(), "")
+        XCTAssertEqual(config.finalProviderID(), "")
+    }
+
+    @objc func testWriteRoutingKeyValueCreatesSectionAndLoads() throws {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_routing_new_\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try """
+        active_provider = "groq"
+
+        [providers.groq]
+        name = "Groq"
+
+        [providers.cloudflare]
+        name = "Cloudflare"
+        """.data(using: .utf8)!.write(to: file)
+
+        try AppConfig.writeRoutingKeyValue(key: "segment_provider", value: "\"cloudflare\"", to: file.path)
+        let config = try AppConfig.load(from: file.path)
+        XCTAssertEqual(config.routing.segmentProvider, "cloudflare")
+        XCTAssertEqual(config.segmentProviderID(), "cloudflare")
+        // Файл с ролью — как и все точечные правки конфига — 0600.
+        let attrs = try FileManager.default.attributesOfItem(atPath: file.path)
+        let perms = (attrs[.posixPermissions] as? NSNumber)?.intValue ?? 0
+        XCTAssertEqual(perms & 0o777, 0o600, "правка конфига обязана быть 0600")
+    }
+
+    @objc func testWriteRoutingKeyValueReplacesInExistingSection() throws {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_routing_replace_\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try """
+        active_provider = "groq"
+
+        [providers.groq]
+        name = "Groq"
+
+        [providers.cloudflare]
+        name = "Cloudflare"
+
+        [routing]
+        segment_provider = "relay" # коммент сохраняется
+        """.data(using: .utf8)!.write(to: file)
+
+        try AppConfig.writeRoutingKeyValue(key: "segment_provider", value: "\"cloudflare\"", to: file.path)
+        let text = try String(contentsOf: file, encoding: .utf8)
+        XCTAssertTrue(text.contains("segment_provider = \"cloudflare\" # коммент сохраняется"))
+        XCTAssertFalse(text.contains("relay"))
+        // Остальные строки не тронуты.
+        XCTAssertTrue(text.contains("active_provider = \"groq\""))
+        XCTAssertTrue(text.contains("[routing]"))
+    }
+
+    @objc func testWriteRoutingKeyValueAppendsInsideExistingSection() throws {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_routing_append_\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try """
+        active_provider = "groq"
+
+        [providers.groq]
+        name = "Groq"
+
+        [providers.cloudflare]
+        name = "Cloudflare"
+
+        [routing]
+        segment_provider = "cloudflare"
+        """.data(using: .utf8)!.write(to: file)
+
+        // Ключа final_provider ещё нет — дописывается в конец секции [routing].
+        try AppConfig.writeRoutingKeyValue(key: "final_provider", value: "\"groq\"", to: file.path)
+        let content = try String(contentsOf: file, encoding: .utf8)
+        XCTAssertEqual(content.components(separatedBy: "[routing]").count - 1, 1, "секция не продублирована")
+        let config = try AppConfig.load(from: file.path)
+        XCTAssertEqual(config.routing.segmentProvider, "cloudflare")
+        XCTAssertEqual(config.routing.finalProvider, "groq")
+    }
+
+    @objc func testWriteRoutingKeyValueUnsetFallsBackToActive() throws {
+        // Очистка роли = пустое значение: файл остаётся парсируемым, резолвер
+        // фолбэчит на активного провайдера.
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_routing_unset_\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try """
+        active_provider = "groq"
+
+        [providers.groq]
+        name = "Groq"
+
+        [routing]
+        segment_provider = "cloudflare"
+        """.data(using: .utf8)!.write(to: file)
+
+        try AppConfig.writeRoutingKeyValue(key: "segment_provider", value: "\"\"", to: file.path)
+        let config = try AppConfig.load(from: file.path)
+        XCTAssertEqual(config.routing.segmentProvider, "")
+        XCTAssertEqual(config.segmentProviderID(), "groq", "очищенная роль — фолбэк на активного")
     }
 }

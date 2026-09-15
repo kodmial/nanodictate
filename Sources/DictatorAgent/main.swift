@@ -40,6 +40,22 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     /// Имя активного провайдера (nil — legacy-конфиг без секций).
     private let activeProviderID: String?
 
+    // MARK: Маршрутизация STT по ролям ([routing])
+
+    /// id провайдера сегментов пошаговой диктовки (роль `segment` из
+    /// `[routing]`); nil — роль не задана/фолбэк на активного. Решается в init
+    /// ТОЛЬКО из конфига (резолверы не бросают), активное участие роли —
+    /// в `roleTranscriber(_:)`.
+    private let segmentRoleProviderID: String?
+    /// id провайдера финального прохода по всей записи (роль `final` из
+    /// `[routing]`); nil — роль не задана/фолбэк на активного.
+    private let finalRoleProviderID: String?
+    /// Единый построитель Transcriber из секции провайдера И ОБЩИХ настроек
+    /// конфига (language/timeout/log_level/корневой proxyKeyHeader): через него
+    /// идут активный путь, failover/retry и роли маршрутизации — повторы ведут
+    /// себя как основной путь (тот же язык, таймаут и уровень лога).
+    private let makeTranscriber: (AppConfig.Provider) -> Transcriber
+
     /// РАЗРЕШЁННЫЙ конфиг сессии — единый источник истины для реального
     /// запросного пути: из него в init собран Transcriber и Byet-слой
     /// (baseURL/model/apiKey/transport), из него же на старте сессии
@@ -243,34 +259,20 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         var byID: [String: AppConfig.Provider] = [:]
         for provider in config.providers { byID[provider.id] = provider }
         self.providersByID = byID
-        self.transcriber = Transcriber(
-            baseURL: config.baseURL,
-            model: config.model,
-            apiKey: config.apiKey,
-            proxyKey: config.proxyKey,
-            language: config.language,
-            timeout: config.timeoutSeconds,
-            logLevel: config.logLevel,
-            byetCookieProvider: byetCookieProvider,
-            apiSecret: config.apiSecret,
-            adapterID: self.activeProviderID
-        )
-        self.insertMethod = config.insertMethod
-        self.autoFailover = config.autoFailover
-        self.reviewBeforeInsert = config.reviewBeforeInsert
-        // Функция распознавания retry/failover собирает Transcriber из полей
-        // провайдера и ОБЩИХ настроек конфига (language/timeout/log_level), чтобы
-        // повторы вели себя как основной путь: тот же язык, таймаут и уровень лога
-        // (иначе debug-конвейер и language молчат на failover-запросах). id
-        // провайдера уходит в adapterID — известный провайдер получает свой
-        // формат запроса (deepgram/giga-chat/…), неизвестный — OpenAI-
-        // совместимый с собственными base_url/model из секции.
-        self.retryProvider = RetryProvider(transcribeFunction: { wav, provider in
-            let transcriber = Transcriber(
+        // Единый построитель Transcriber из полей секции провайдера + ОБЩИХ
+        // настроек конфига (language/timeout/log_level/корневой proxyKeyHeader):
+        // активный путь, failover/retry и роли маршрутизации ходят через него —
+        // повторы и роли ведут себя как основной путь (тот же язык, таймаут и
+        // уровень лога). id провайдера уходит в adapterID — известный провайдер
+        // получает свой формат запроса (deepgram/giga-chat/…), неизвестный —
+        // OpenAI-совместимый с собственными base_url/model из секции.
+        let makeTranscriber = { (provider: AppConfig.Provider) -> Transcriber in
+            Transcriber(
                 baseURL: provider.baseURL,
                 model: provider.model,
                 apiKey: RetryProvider.resolveAPIKey(for: provider),
                 proxyKey: provider.proxyKey,
+                proxyKeyHeader: provider.proxyKeyHeader.isEmpty ? config.proxyKeyHeader : provider.proxyKeyHeader,
                 language: config.language,
                 timeout: config.timeoutSeconds,
                 logLevel: config.logLevel,
@@ -278,6 +280,42 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
                 apiSecret: provider.apiSecret,
                 adapterID: provider.id
             )
+        }
+        self.makeTranscriber = makeTranscriber
+        // Активный транскрайбер — секцией активного провайдера через тот же
+        // построитель (единая логика с failover/retry/ролями). Legacy-конфиг
+        // (без секций) — ровно прежнее построение из effective-полей.
+        if let activeID = self.activeProviderID, let activeProvider = byID[activeID] {
+            self.transcriber = makeTranscriber(activeProvider)
+        } else {
+            self.transcriber = Transcriber(
+                baseURL: config.baseURL,
+                model: config.model,
+                apiKey: config.apiKey,
+                proxyKey: config.proxyKey,
+                proxyKeyHeader: config.proxyKeyHeader,
+                language: config.language,
+                timeout: config.timeoutSeconds,
+                logLevel: config.logLevel,
+                byetCookieProvider: byetCookieProvider,
+                apiSecret: config.apiSecret,
+                adapterID: self.activeProviderID
+            )
+        }
+        // Роли маршрутизации из [routing]: резолверы фолбэчат на активного;
+        // пустой id (legacy-конфиг) → nil — роль не участвует, ровно текущее
+        // поведение.
+        let segmentRoleID = config.segmentProviderID()
+        self.segmentRoleProviderID = segmentRoleID.isEmpty ? nil : segmentRoleID
+        let finalRoleID = config.finalProviderID()
+        self.finalRoleProviderID = finalRoleID.isEmpty ? nil : finalRoleID
+        self.insertMethod = config.insertMethod
+        self.autoFailover = config.autoFailover
+        self.reviewBeforeInsert = config.reviewBeforeInsert
+        // Failover/retry распознаёт СЕКЦИЕЙ провайдера через тот же построитель
+        // (см. выше): повторы ведут себя как основной путь.
+        self.retryProvider = RetryProvider(transcribeFunction: { wav, provider in
+            let transcriber = makeTranscriber(provider)
             return try await transcriber.transcribe(wav: wav)
         })
         super.init()
@@ -711,7 +749,21 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
                 let outcome = try await ChunkedPipeline().run(
                     samples: samples,
                     stt: { wav, filename, prompt in
-                        let result = try await self.transcriber.transcribe(wav: wav, filename: filename, prompt: prompt)
+                        // Роли из [routing]: сегменты (filename "segment-N.wav")
+                        // идут segment_provider, финальный проход по всему WAV
+                        // ("final.wav") — final_provider. Роль не задана
+                        // (= фолбэк на активного) — активный transcriber, ровно
+                        // текущее поведение. Failover на ролях нет — провайдер
+                        // роли используется напрямую. Сбой сегмента абортит весь
+                        // прогон (ChunkedPipeline.run не ловит ошибки сегментов),
+                        // финальный проход при этом не выполняется.
+                        let selected: Transcriber
+                        if filename == "final.wav" {
+                            selected = self.roleTranscriber(self.finalRoleProviderID) ?? self.transcriber
+                        } else {
+                            selected = self.roleTranscriber(self.segmentRoleProviderID) ?? self.transcriber
+                        }
+                        let result = try await selected.transcribe(wav: wav, filename: filename, prompt: prompt)
                         return result.text
                     },
                     insert: { operation in
@@ -880,14 +932,18 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             // Тот же per-segment путь, что и в offline-чанкинге (ChunkedPipeline.
             // recognizeSegment): WAV → STT с prompt-контекстом → финализация.
             // Failover здесь не нужен — финальный проход по всему WAV «докрутит»
-            // ошибку (как в processChunked).
+            // ошибку (в offline-чанкинге сбой сегмента, напротив, абортит прогон).
             let result = try await ChunkedPipeline.recognizeSegment(
                 samples: segmentSamples,
                 index: index,
                 insertedText: runState.insertedText,
                 prompt: runState.promptParts.isEmpty ? nil : runState.promptParts.joined(separator: " "),
                 stt: { wav, filename, prompt in
-                    let r = try await self.transcriber.transcribe(wav: wav, filename: filename, prompt: prompt)
+                    // Роль segment из [routing] — как в processChunked: провайдер
+                    // сегментов; не задан — активный transcriber (failover здесь
+                    // не нужен — финальный проход «докрутит»).
+                    let transcriber = self.roleTranscriber(self.segmentRoleProviderID) ?? self.transcriber
+                    let r = try await transcriber.transcribe(wav: wav, filename: filename, prompt: prompt)
                     return r.text
                 },
                 filename: "live-segment-\(index + 1).wav"
@@ -1068,7 +1124,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
                 samples: samples,
                 insertedText: runState.insertedText,
                 stt: { wav, filename, prompt in
-                    let r = try await self.transcriber.transcribe(wav: wav, filename: filename, prompt: prompt)
+                    // Роль final из [routing]: финальный проход по всей записи
+                    // идёт провайдером роли; не задан — активный transcriber
+                    // (ровно текущее поведение: без failover — роль выбрана явно).
+                    let transcriber = self.roleTranscriber(self.finalRoleProviderID) ?? self.transcriber
+                    let r = try await transcriber.transcribe(wav: wav, filename: filename, prompt: prompt)
                     return r.text
                 },
                 insert: { operation in
@@ -1156,12 +1216,33 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         Logger.log("LAST_TEXT: \(text.replacingOccurrences(of: "\n", with: " "))")
     }
 
+    /// Транскрайбер роли маршрутизации (segment/final). Возвращает nil, когда роль
+    /// не задана или указывает на активного провайдера — тогда вызывающий
+    /// использует активный transcriber (строго текущее поведение). Иначе —
+    /// прямой Transcriber провайдера роли из секции, БЕЗ failover-цепочки
+    /// (роли выбраны явно; автоfailover остаётся только для основного пути).
+    private func roleTranscriber(_ roleProviderID: String?) -> Transcriber? {
+        guard let roleProviderID = roleProviderID,
+              roleProviderID != activeProviderID,
+              let provider = providersByID[roleProviderID] else {
+            return nil
+        }
+        return makeTranscriber(provider)
+    }
+
     /// Распознавание с автоматическим failover (auto_failover = true):
     /// основной провайдер — self.transcriber (активный из конфига); при
     /// TranscribeError пробуем кандидатов из failover-порядка. Ошибка, НЕ
     /// относящаяся к провайдеру (микрофон и т.п.), failover не запускает.
     /// Возвращает (результат, id failover-провайдера; nil — основной).
     private func transcribeAutomatically(wav: Data) async throws -> (TranscriptionResult, String?) {
+        // Роль final из [routing] (целая запись не-chunked): задана и отлична
+        // от активного — прямой провайдер роли БЕЗ failover-цепочки. Роль не
+        // задана/совпадает с активным — ровно текущее поведение ниже.
+        if let transcriber = roleTranscriber(finalRoleProviderID) {
+            let result = try await transcriber.transcribe(wav: wav)
+            return (result, nil)
+        }
         do {
             let result = try await transcriber.transcribe(wav: wav)
             return (result, nil)

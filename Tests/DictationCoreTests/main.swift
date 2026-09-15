@@ -49,6 +49,7 @@ let suites: [XCTestCase.Type] = [
     LiveSegmentFailureTests.self,
     LiveOrchestrationBranchTests.self,
     OverlayLevelTests.self,
+    RoutingRoleTests.self,
 ]
 
 var passed = 0

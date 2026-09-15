@@ -28,6 +28,10 @@ public struct AppConfig: Equatable {
     public var logLevel: String
     public var language: String
 
+    /// Заголовок для передачи proxy_key (по умолчанию `X-Proxy-Key`).
+    /// `"X-Api-Key"` — для kodmai.alwaysdata.net (прокси принимает только его).
+    public var proxyKeyHeader: String = "X-Proxy-Key"
+
     /// Транспорт STT (ключ `transport`, корневой или в секции активного
     /// провайдера). Пусто — транспорт не задан, агент ходит как раньше.
     /// `"infinityfree"` — Byet-прокси с вычисляемой `__test`-кукой в памяти.
@@ -57,6 +61,27 @@ public struct AppConfig: Equatable {
 
     /// Имена секций провайдеров (id) в порядке появления.
     public var providerNames: [String] { providers.map { $0.id } }
+
+    // MARK: Маршрутизация STT по ролям
+
+    /// Маршрутизация STT-провайдеров по ролям (секция `[routing]` конфига):
+    /// `segment_provider` — сегменты пошаговой диктовки, `final_provider` —
+    /// финальный проход по всей записи. Пусто — роль играет active_provider
+    /// (ровно текущее поведение).
+    public var routing = Routing()
+
+    /// Маршрутизация `[routing]`: по одному id провайдера на роль.
+    public struct Routing: Equatable {
+        /// Провайдер сегментов пошаговой (чанковой) диктовки; пусто — активный.
+        public var segmentProvider: String = ""
+        /// Провайдер финального прохода по всей записи; пусто — активный.
+        public var finalProvider: String = ""
+
+        public init(segmentProvider: String = "", finalProvider: String = "") {
+            self.segmentProvider = segmentProvider
+            self.finalProvider = finalProvider
+        }
+    }
 
     // MARK: UX-опции (средние улучшения)
 
@@ -95,6 +120,33 @@ public struct AppConfig: Equatable {
             result.append(provider)
         }
         return result
+    }
+
+    // MARK: Роли маршрутизации (резолверы)
+
+    /// id провайдера для сегментов пошаговой диктовки (роль `segment`):
+    /// `routing.segmentProvider`, если задан и есть среди секций `[providers.X]`;
+    /// иначе — активный провайдер. ВНИМАНИЕ: НЕ бросает при неизвестном id
+    /// (устаревшее значение роли фолбэчит на активного, а не роняет конфиг).
+    public func segmentProviderID() -> String {
+        routingProviderID(resolving: routing.segmentProvider)
+    }
+
+    /// id провайдера финального прохода по всей записи (роль `final`):
+    /// `routing.finalProvider`, если задан и есть среди секций `[providers.X]`;
+    /// иначе — активный провайдер. НЕ бросает при неизвестном id (см. выше).
+    public func finalProviderID() -> String {
+        routingProviderID(resolving: routing.finalProvider)
+    }
+
+    /// Общий резолвер роли: непустой id, существующий в `providers`, — сам id;
+    /// пустое/неизвестное значение — фолбэк на active_provider (в legacy-конфиге
+    /// он пуст — роль не задана, агент работает как раньше).
+    private func routingProviderID(resolving roleID: String) -> String {
+        if !roleID.isEmpty, providers.contains(where: { $0.id == roleID }) {
+            return roleID
+        }
+        return activeProvider
     }
 
     // MARK: Defaults
@@ -189,6 +241,9 @@ public struct AppConfig: Equatable {
         /// Транспорт этой секции (ключ `transport` внутри `[providers.X]`).
         /// Пусто — берётся корневой `transport` (поведение как раньше).
         public var transport: String = ""
+        /// Имя заголовка для proxy_key (ключ `proxy_key_header` в секции или
+        /// корневой). Пусто — берётся корневой, затем дефолт `X-Proxy-Key`.
+        public var proxyKeyHeader: String = ""
 
         public static func withDefaults(id: String) -> Provider {
             Provider(
@@ -200,7 +255,8 @@ public struct AppConfig: Equatable {
                 apiKeyFile: nil,
                 proxyKey: "",
                 apiSecret: "",
-                transport: ""
+                transport: "",
+                proxyKeyHeader: ""
             )
         }
     }
@@ -280,6 +336,7 @@ public struct AppConfig: Equatable {
         var logLevel: String = defaults.logLevel
         var language: String = defaults.language
         var transport: String = defaults.transport
+        var proxyKeyHeader: String = defaults.proxyKeyHeader
         var undoMaxInterval: Double = defaults.undoMaxInterval
         var undoSoundEnabled: Bool = defaults.undoSoundEnabled
         var chunked: Bool = defaults.chunked
@@ -293,6 +350,10 @@ public struct AppConfig: Equatable {
         var insertMethod: InsertMethod = defaults.insertMethod
         var reviewBeforeInsert: Bool = defaults.reviewBeforeInsert
 
+        // Маршрутизация STT по ролям ([routing]): пусто — роль играет активный.
+        var segmentProvider: String = ""
+        var finalProvider: String = ""
+
         // true, если на верхнем уровне встречен хотя бы один legacy-ключ STT
         // (base_url/model/api_key/api_key_file/proxy_key) — для детекта неоднозначности.
         var legacySTTKeysSeen = false
@@ -301,6 +362,8 @@ public struct AppConfig: Equatable {
         // true внутри непровайдерской секции ([api] и т.п.) — все ключи пропускаем,
         // чтобы они не утекали в top-level.
         var insideForeignSection = false
+        // true внутри секции [routing] — ключи ролей читаем здесь, а не в top-level.
+        var currentRoutingSection = false
 
         let lines = content.components(separatedBy: .newlines)
         for (index, rawLine) in lines.enumerated() {
@@ -335,9 +398,16 @@ public struct AppConfig: Equatable {
                     providers.append(Provider.withDefaults(id: providerID))
                     currentProviderID = providerID
                     insideForeignSection = false
+                    currentRoutingSection = false
+                } else if header == "routing" {
+                    // Секция маршрутизации STT по ролям: ключи ролей читаем здесь.
+                    currentProviderID = nil
+                    insideForeignSection = false
+                    currentRoutingSection = true
                 } else {
                     // Чужая секция: ключи внутри неё игнорируем (регресс-гард).
                     currentProviderID = nil
+                    currentRoutingSection = false
                     insideForeignSection = true
                 }
                 continue
@@ -372,10 +442,26 @@ public struct AppConfig: Equatable {
                     providers[providerIndex].apiSecret = try parseString(valuePart, line: index + 1, rawLine: rawLine)
                 case "proxy_key":
                     providers[providerIndex].proxyKey = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+                case "proxy_key_header":
+                    providers[providerIndex].proxyKeyHeader = try parseString(valuePart, line: index + 1, rawLine: rawLine)
                 case "transport":
                     providers[providerIndex].transport = try parseString(valuePart, line: index + 1, rawLine: rawLine)
                 default:
                     // Неизвестный ключ внутри секции — игнорируем
+                    break
+                }
+                continue
+            }
+
+            // Ключи секции [routing] (маршрутизация STT по ролям).
+            if currentRoutingSection {
+                switch key {
+                case "segment_provider":
+                    segmentProvider = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+                case "final_provider":
+                    finalProvider = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+                default:
+                    // Неизвестный ключ внутри [routing] — игнорируем
                     break
                 }
                 continue
@@ -397,6 +483,8 @@ public struct AppConfig: Equatable {
             case "proxy_key":
                 proxyKey = try parseString(valuePart, line: index + 1, rawLine: rawLine)
                 legacySTTKeysSeen = true
+            case "proxy_key_header":
+                proxyKeyHeader = try parseString(valuePart, line: index + 1, rawLine: rawLine)
             case "transport":
                 transport = try parseString(valuePart, line: index + 1, rawLine: rawLine)
             case "active_provider":
@@ -451,12 +539,14 @@ public struct AppConfig: Equatable {
             soundsEnabled: soundsEnabled,
             logLevel: logLevel,
             language: language,
+            proxyKeyHeader: proxyKeyHeader,
             transport: transport,
             undoMaxInterval: undoMaxInterval,
             undoSoundEnabled: undoSoundEnabled,
             chunked: chunked,
             activeProvider: activeProvider,
             providers: providers,
+            routing: Routing(segmentProvider: segmentProvider, finalProvider: finalProvider),
             providersOrder: providersOrder,
             autoFailover: autoFailover,
             insertMethod: insertMethod,
@@ -509,6 +599,10 @@ public struct AppConfig: Equatable {
         // cookie-логику не поднимает.
         if !provider.transport.isEmpty {
             config.transport = provider.transport
+        }
+        // Имя заголовка секции приоритетнее корневого; пустое — наследуется.
+        if !provider.proxyKeyHeader.isEmpty {
+            config.proxyKeyHeader = provider.proxyKeyHeader
         }
     }
 
@@ -667,13 +761,35 @@ public struct AppConfig: Equatable {
         value: String,
         to path: String
     ) throws {
+        try writeSectionKeyValue(section: "providers.\(providerID)", key: key, value: value, to: path)
+    }
+
+    /// Точечная правка ключа ВНУТРИ секции `[routing]` (маршрутизация STT по
+    /// ролям): те же правила, что у `writeProviderKeyValue` — byte-preserving,
+    /// ключ в конец секции, при отсутствии секции дописывается целиком
+    /// (`[routing]\n<key> = <value>`). Атомарная запись + права 0600.
+    /// Используется командой `dictatorctl routing set|unset`.
+    public static func writeRoutingKeyValue(key: String, value: String, to path: String) throws {
+        try writeSectionKeyValue(section: "routing", key: key, value: value, to: path)
+    }
+
+    /// Общая реализация точечной правки ключа внутри секции (см. две
+    /// обёртки выше): поиск заголовка `[<section>]` с учётом хвостового
+    /// комментария, замена значения в кавычках (комментарий строки сохраняется)
+    /// либо вставка `key = value` в конец секции / новой секцией.
+    private static func writeSectionKeyValue(
+        section: String,
+        key: String,
+        value: String,
+        to path: String
+    ) throws {
         let fm = FileManager.default
         var content = ""
         if fm.fileExists(atPath: path), let existing = try? String(contentsOfFile: path, encoding: .utf8) {
             content = existing
         }
 
-        let sectionHeader = "[providers.\(providerID)]"
+        let sectionHeader = "[\(section)]"
         var lines = content.components(separatedBy: "\n")
         var headerIndex: Int?
         var inSection = false
@@ -784,7 +900,9 @@ public struct AppConfig: Equatable {
         # Пустые base_url/model в секциях — агент подставит дефолты адаптера
         # (например OpenAI → https://api.openai.com/v1/audio/transcriptions,
         # whisper-1; Groq → whisper-large-v3; Deepgram → nova-3). Для секций
-        # relay и открытого OpenAI-совместимого провайдера base_url обязателен.
+        # relay, cloudflare и открытого OpenAI-совместимого провайдера
+        # base_url обязателен (cloudflare — полный URL, account_id и модель
+        # в пути; например .../accounts/<ACCOUNT_ID>/ai/run/@cf/openai/whisper-large-v3-turbo).
 
         language = "ru"
         sounds_enabled = true
@@ -829,6 +947,25 @@ public struct AppConfig: Equatable {
         model = ""
         api_key = ""
         transport = "relay"
+
+        [providers.cloudflare]
+        name = "Cloudflare Workers AI"
+        base_url = ""
+        model = ""
+        api_key = ""
+        transport = "cloudflare"
+
+        # Маршрутизация STT по ролям: final_provider применяется и в
+        # чанковом пути (финальный проход по всей записи), и в не-чанковом
+        # (одиночный прогон). segment_provider — только в чанковом пути
+        # (сегменты речи), в не-чанковом segment не используется.
+        # Не задано — роль играет active_provider. Роли (segment/final)
+        # используют провайдер напрямую — auto_failover на ролях не действует.
+        # Чтобы включить — раскомментируйте секцию:
+        #
+        # [routing]
+        # segment_provider = "cloudflare"
+        # final_provider = "groq"
         """
     }
 }

@@ -416,17 +416,23 @@ func providerUse(_ name: String, _ args: [String]) -> Int32 {
         return 1
     }
     print("Активный провайдер: \(name)")
+    return restartAgentIfNeeded(args)
+}
+
+/// Перезапуск агента через launchctl (--no-restart пропускает). Общий для
+/// команд, меняющих конфиг: provider use и routing set/unset.
+func restartAgentIfNeeded(_ args: [String]) -> Int32 {
     if args.contains("--no-restart") {
         print("Агент не перезапущен (--no-restart)")
+        return 0
+    }
+    let target = "\(guiDomain)/\(agentServiceName)"
+    let kick = runProcess("/bin/launchctl", ["kickstart", "-k", target])
+    if kick.status == 0 {
+        print("Агент перезапущен")
     } else {
-        let target = "\(guiDomain)/\(agentServiceName)"
-        let kick = runProcess("/bin/launchctl", ["kickstart", "-k", target])
-        if kick.status == 0 {
-            print("Агент перезапущен")
-        } else {
-            let msg = kick.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            eprint("Агент не перезапущен (запустите `dictatorctl start`): \(msg.isEmpty ? kick.stdout : msg)")
-        }
+        let msg = kick.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        eprint("Агент не перезапущен (запустите `dictatorctl start`): \(msg.isEmpty ? kick.stdout : msg)")
     }
     return 0
 }
@@ -501,11 +507,14 @@ func cmdProvider(_ args: [String]) -> Int32 {
     case "list":
         return providerList()
     case "use", "set":
-        guard let name = args.dropFirst().first else {
+        let rest = Array(args.dropFirst())
+        // --no-restart не позиционный: распознаётся в любом месте (в т.ч.
+        // до имени — иначе уходит в валидацию как невалидный id).
+        guard let name = rest.first(where: { $0 != "--no-restart" }) else {
             eprint("Использование: dictatorctl provider use <имя> [--no-restart]")
             return 1
         }
-        return providerUse(name, Array(args.dropFirst()))
+        return providerUse(name, rest)
     case "status":
         return providerStatus()
     case "show":
@@ -516,6 +525,119 @@ func cmdProvider(_ args: [String]) -> Int32 {
         return providerShow(name)
     default:
         eprint("Использование: dictatorctl provider list|use|status|show")
+        return 1
+    }
+}
+
+// MARK: - Маршрутизация STT по ролям ([routing])
+
+/// `dictatorctl routing [show]`: роли из секции [routing] и их effective-значения
+/// (фолбэк на активного провайдера при пустой/неизвестной роли). Толерантный
+/// разбор как у provider list — показ работает даже при stale active_provider.
+func routingShow() -> Int32 {
+    let path = AppConfig.defaultPath()
+    guard FileManager.default.fileExists(atPath: path) else {
+        print("Конфиг не найден: \(path)")
+        print("Создайте шаблон: `dictatorctl config init`")
+        return 0
+    }
+    let (activeID, providers) = (try? AppConfig.loadProvidersOnly(from: nil)) ?? ("", [])
+    // routing парсится только в полном разборе (грубый откат на дефолты при
+    // сломанном active_provider — чинится командой provider use).
+    let config = (try? AppConfig.load(from: nil)) ?? AppConfig.defaults
+    let ids = providers.map { $0.id }
+    let seg = config.routing.segmentProvider
+    let fin = config.routing.finalProvider
+    let activeDisplay = activeID.isEmpty ? "(не задан)" : activeID
+    func effective(_ role: String) -> String {
+        !role.isEmpty && ids.contains(role)
+            ? role
+            : (activeID.isEmpty ? "(не задан)" : "\(activeID) (активный)")
+    }
+    print("active_provider: \(activeDisplay)")
+    print("segment_provider: \(seg.isEmpty ? "(не задан)" : seg)")
+    print("final_provider: \(fin.isEmpty ? "(не задан)" : fin)")
+    print("segment (effective): \(effective(seg))")
+    print("final (effective): \(effective(fin))")
+    return 0
+}
+
+/// Ключ роли в конфиге ([routing]); nil — неизвестная роль.
+func routingKey(for role: String) -> String? {
+    switch role {
+    case "segment": return "segment_provider"
+    case "final": return "final_provider"
+    default: return nil
+    }
+}
+
+/// `dictatorctl routing set segment|final <id> [--no-restart]`: точечная правка
+/// ключа роли в [routing]. Валидация id по секциям [providers.X] как в
+/// provider use; атомарная запись + chmod 600; перезапуск агента (кроме
+/// --no-restart). Роль действует с перезапуска агента.
+func routingSet(role: String, providerID: String, args: [String]) -> Int32 {
+    guard let key = routingKey(for: role) else {
+        eprint("Использование: dictatorctl routing set segment|final <провайдер-id> [--no-restart]")
+        return 1
+    }
+    do {
+        let (_, providers) = try AppConfig.loadProvidersOnly(from: nil)
+        guard providers.contains(where: { $0.id == providerID }) else {
+            let available = providers.map { $0.id }
+            eprint("ОШИБКА: провайдер '\(providerID)' не найден. Доступные: \(available.joined(separator: ", "))")
+            eprint("Список: `dictatorctl provider list`")
+            return 2
+        }
+        try AppConfig.writeRoutingKeyValue(key: key, value: "\"\(providerID)\"", to: AppConfig.defaultPath())
+    } catch {
+        eprint("ОШИБКА: \(error)")
+        return 1
+    }
+    print("Роль \(role): \(providerID)")
+    return restartAgentIfNeeded(args)
+}
+
+/// `dictatorctl routing unset segment|final [--no-restart]`: очистка роли
+/// (пишется пустое значение — резолвер фолбэчит на активного провайдера).
+func routingUnset(role: String, args: [String]) -> Int32 {
+    guard let key = routingKey(for: role) else {
+        eprint("Использование: dictatorctl routing unset segment|final [--no-restart]")
+        return 1
+    }
+    do {
+        try AppConfig.writeRoutingKeyValue(key: key, value: "\"\"", to: AppConfig.defaultPath())
+    } catch {
+        eprint("ОШИБКА: \(error)")
+        return 1
+    }
+    print("Роль \(role) сброшена — фолбэк на активного провайдера")
+    return restartAgentIfNeeded(args)
+}
+
+func cmdRouting(_ args: [String]) -> Int32 {
+    switch args.first?.lowercased() {
+    case nil, "show", "status":
+        return routingShow()
+    case "set":
+        let rest = Array(args.dropFirst())
+        // --no-restart не позиционный: распознаётся в любом месте (в т.ч.
+        // до роли/имени — иначе уходит в валидацию как невалидный id).
+        let positional = rest.filter { $0 != "--no-restart" }
+        guard let role = positional.first, let providerID = positional.dropFirst().first else {
+            eprint("Использование: dictatorctl routing set segment|final <провайдер-id> [--no-restart]")
+            return 1
+        }
+        return routingSet(role: role, providerID: providerID, args: rest)
+    case "unset":
+        let rest = Array(args.dropFirst())
+        let positional = rest.filter { $0 != "--no-restart" }
+        guard let role = positional.first else {
+            eprint("Использование: dictatorctl routing unset segment|final [--no-restart]")
+            return 1
+        }
+        return routingUnset(role: role, args: rest)
+    default:
+        eprint("Использование: dictatorctl routing [show]|set|unset")
         return 1
     }
 }
@@ -574,6 +696,7 @@ func cmdTranscribe(_ args: [String]) -> Int32 {
         model: config.model,
         apiKey: config.apiKey,
         proxyKey: config.proxyKey,
+        proxyKeyHeader: config.proxyKeyHeader,
         language: config.language,
         timeout: config.timeoutSeconds,
         logLevel: config.logLevel,
@@ -717,6 +840,15 @@ let usage = """
                                    перезапуск агента (--no-restart без перезапуска)
     provider status                Активный провайдер + статус агента
     provider show ИМЯ              Подробно о провайдере (секреты маскируются)
+  routing [show]                   Маршрутизация STT по ролям ([routing]):
+                                   segment/final + их effective (фолбэк на active)
+    routing set РОЛЬ ИМЯ [--no-restart]
+                                   РОЛЬ = segment (сегменты пошаговой диктовки)
+                                   или final (проход по всей записи); ИМЯ среди
+                                   [providers.X]; правка config.toml (chmod 600),
+                                   перезапуск агента (--no-restart без перезапуска)
+    routing unset РОЛЬ [--no-restart]
+                                   Очистить роль — фолбэк на активного провайдера
   transcribe ФАЙЛ [--json]         Разовая расшифровка аудиофайла
                                    (не-WAV конвертируется через afconvert; с --json
                                    сырой ответ сохраняется в transcription_raw.json рядом с ФАЙЛ)
@@ -752,6 +884,8 @@ case "config":
     exit(cmdConfig(Array(args.dropFirst())))
 case "provider":
     exit(cmdProvider(Array(args.dropFirst())))
+case "routing":
+    exit(cmdRouting(Array(args.dropFirst())))
 case "transcribe":
     exit(cmdTranscribe(Array(args.dropFirst())))
 case "retry":
