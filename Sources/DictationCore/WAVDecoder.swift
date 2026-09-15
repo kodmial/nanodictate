@@ -22,13 +22,32 @@ public struct WAVInfo: Equatable {
     }
 }
 
+/// Метаданные WAV-файла: fmt+data (без копирования сэмплов).
+public struct WAVPCMHeader: Equatable {
+    public let sampleRate: Int
+    public let channels: Int
+    public let bitsPerSample: Int
+    public let dataOffset: Int
+    public let dataSize: Int
+    public var sampleCount: Int { dataSize / 2 }
+}
+
 public enum WAVDecoder {
 
-    public static func decodePCM16(_ data: Data) -> WAVInfo? {
-        let bytes = [UInt8](data)
-        guard bytes.count >= 44 else { return nil }
-        guard String(bytes: bytes[0..<4], encoding: .ascii) == "RIFF" else { return nil }
-        guard String(bytes: bytes[8..<12], encoding: .ascii) == "WAVE" else { return nil }
+    /// Разбирает ЗАГОЛОВОК WAV (RIFF/fmt/data: PCM, каналы, sampleRate, битность,
+    /// оффсет и размер PCM-данных) БЕЗ копирования сэмплов. Только canonical PCM
+    /// 16-бит (как decodePCM16); неизвестные чанки (LIST/fact/...) пропускаются.
+    /// Двигается по цепочке чанков (4 байта id + 4 байта size, выравнивание по
+    /// 2 байта — нечётный payload дополняется байтом паддинга). Требования
+    /// canonical layout: fmt-чанк обязан идти ДО data (data раньше fmt → nil);
+    /// из нескольких data-чанков учитывается ПЕРВЫЙ, остальные игнорируются.
+    /// Для файла достаточно окна, покрывающего чанки ДО data: заголовок
+    /// самого data-чанка (id+size, 8 байт) должен быть в окне, его payload
+    /// (весь звук) в окне НЕ обязателен — запоминаются только оффсет и размер.
+    public static func pcmHeader(in data: Data) -> WAVPCMHeader? {
+        guard data.count >= 44 else { return nil }
+        guard String(bytes: data[0..<4], encoding: .ascii) == "RIFF" else { return nil }
+        guard String(bytes: data[8..<12], encoding: .ascii) == "WAVE" else { return nil }
 
         // Двигаемся по чанкам: fmt обязателен до data, остальные пропускаем.
         var cursor = 12
@@ -38,24 +57,34 @@ public enum WAVDecoder {
         var dataOffset = -1
         var dataSize = 0
 
-        while cursor + 8 <= bytes.count {
-            let chunkID = String(bytes: bytes[cursor..<(cursor + 4)], encoding: .ascii) ?? ""
-            let size = Int(readUInt32LE(bytes, at: cursor + 4))
+        while cursor + 8 <= data.count {
+            let chunkID = String(bytes: data[cursor..<(cursor + 4)], encoding: .ascii) ?? ""
+            let size = Int(readUInt32LE(data, at: cursor + 4))
             let payloadStart = cursor + 8
-            guard payloadStart + size <= bytes.count else { return nil }
+
+            if chunkID == "data" {
+                // data-чанк найден: дальше можно не идти. ПЕРВАЯ data wins —
+                // последующие data-чанки (нестандартные файлы) игнорируются.
+                // Payload может быть сколь угодно большим (весь звук) и в окне
+                // не нужен — берём только оффсет и размер из заголовка.
+                dataOffset = payloadStart
+                dataSize = size
+                break
+            }
+
+            // Для остальных чанков нужно знать payload, чтобы перешагнуть через
+            // него к следующему заголовку.
+            guard payloadStart + size <= data.count else { return nil }
 
             switch chunkID {
             case "fmt ":
                 guard size >= 16 else { return nil }
-                let audioFormat = Int(readUInt16LE(bytes, at: payloadStart))
+                let audioFormat = Int(readUInt16LE(data, at: payloadStart))
                 guard audioFormat == 1 else { return nil } // PCM only
-                channels = Int(readUInt16LE(bytes, at: payloadStart + 2))
-                sampleRate = Int(readUInt32LE(bytes, at: payloadStart + 4))
-                bitsPerSample = Int(readUInt16LE(bytes, at: payloadStart + 14))
+                channels = Int(readUInt16LE(data, at: payloadStart + 2))
+                sampleRate = Int(readUInt32LE(data, at: payloadStart + 4))
+                bitsPerSample = Int(readUInt16LE(data, at: payloadStart + 14))
                 guard bitsPerSample == 16 else { return nil }
-            case "data":
-                dataOffset = payloadStart
-                dataSize = size
             default:
                 break
             }
@@ -64,26 +93,43 @@ public enum WAVDecoder {
         }
 
         guard sampleRate > 0, channels > 0, dataOffset >= 0, dataSize > 0 else { return nil }
-        let sampleCount = dataSize / 2
+        // Заголовок data-чанка (id+size) гарантированно в окне условием цикла
+        // (dataOffset = курсор найденного чанка + 8 ≤ data.count); сам payload
+        // в окне НЕ обязателен — для файла достаточно префикса до data.
+        guard dataOffset <= data.count else { return nil }
+        return WAVPCMHeader(sampleRate: sampleRate, channels: channels, bitsPerSample: bitsPerSample,
+                            dataOffset: dataOffset, dataSize: dataSize)
+    }
+
+    /// Декодирует WAV ЦЕЛИКОМ в [Int16]. В отличие от pcmHeader (работает по
+    /// префиксу) требует, чтобы payload data-чанка полностью присутствовал в
+    /// буфере: объявленный dataSize больше фактического → nil (усечённый WAV).
+    public static func decodePCM16(_ data: Data) -> WAVInfo? {
+        guard let header = pcmHeader(in: data) else { return nil }
+        let sampleCount = header.sampleCount
         guard sampleCount > 0 else { return nil }
+        // Резерв ограничиваем реально доступными байтами: объявленный dataSize
+        // может быть огромным (префикс большого файла, size=2^32-1) — не
+        // аллоцируем резерв под несуществующие сэмплы перед проверкой.
+        let availableSamples = max(0, (data.count - header.dataOffset) / 2)
 
         var samples: [Int16] = []
-        samples.reserveCapacity(sampleCount)
+        samples.reserveCapacity(min(sampleCount, availableSamples))
         for i in 0..<sampleCount {
-            let offset = dataOffset + i * 2
-            guard offset + 2 <= bytes.count else { break }
-            let value = readUInt16LE(bytes, at: offset)
+            let offset = header.dataOffset + i * 2
+            guard offset + 2 <= data.count else { break }
+            let value = readUInt16LE(data, at: offset)
             samples.append(Int16(bitPattern: value))
         }
         guard samples.count == sampleCount else { return nil }
-        return WAVInfo(sampleRate: sampleRate, channels: channels, samples: samples)
+        return WAVInfo(sampleRate: header.sampleRate, channels: header.channels, samples: samples)
     }
 
-    private static func readUInt16LE(_ bytes: [UInt8], at offset: Int) -> UInt16 {
+    private static func readUInt16LE(_ bytes: Data, at offset: Int) -> UInt16 {
         UInt16(bytes[offset]) | (UInt16(bytes[offset + 1]) << 8)
     }
 
-    private static func readUInt32LE(_ bytes: [UInt8], at offset: Int) -> UInt32 {
+    private static func readUInt32LE(_ bytes: Data, at offset: Int) -> UInt32 {
         UInt32(bytes[offset])
             | (UInt32(bytes[offset + 1]) << 8)
             | (UInt32(bytes[offset + 2]) << 16)

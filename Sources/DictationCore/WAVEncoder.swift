@@ -32,8 +32,14 @@ public enum WAVEncoder {
         // data sub-chunk
         data.append(contentsOf: "data".utf8)
         data.append(contentsOf: withUnsafeBytes(of: dataSize.littleEndian) { Array($0) })
-        for sample in samples {
-            data.append(contentsOf: withUnsafeBytes(of: sample.littleEndian) { Array($0) })
+        // Резервная ёмкость уже выделена (44 + samples.count * 2): bulk-append
+        // сырых байт вместо per-sample append — в разы быстрее на больших чанках
+        // (30 c @16 кГц = 480 000 сэмплов = 960 КБ; per-sample append аллоцировал
+        // временный Array на каждый сэмпл). Малая endian — native на всех Mac.
+        if !samples.isEmpty {
+            samples.withUnsafeBytes { raw in
+                data.append(contentsOf: raw)
+            }
         }
 
         return data
