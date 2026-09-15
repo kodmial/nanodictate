@@ -48,4 +48,22 @@ if [[ ! -f "$DIST" ]]; then
   exit 1
 fi
 
+# Swift toolchain for the `swift build` the server runs: the Command Line Tools
+# ManifestAPI has no PackageDescription.swiftmodule, so plain `swift build`
+# cannot compile Package.swift. Mirror build.sh — prefer SWIFT_TOOLCHAIN (the
+# one inherited from ~/.claude.json, or the full toolchain at ~/.swift-toolchain)
+# and export the SwiftPM manifest vars so spawn'd builds inherit them.
+if [[ -n "${SWIFT_TOOLCHAIN:-}" && ! -x "$SWIFT_TOOLCHAIN/usr/bin/swift" ]]; then
+  echo "start.sh: SWIFT_TOOLCHAIN=$SWIFT_TOOLCHAIN has no executable swift" >&2
+  exit 1
+fi
+if [[ -z "${SWIFT_TOOLCHAIN:-}" && -x /Users/dima/.swift-toolchain/usr/bin/swift ]]; then
+  export SWIFT_TOOLCHAIN=/Users/dima/.swift-toolchain
+  echo "start.sh: SWIFT_TOOLCHAIN unset — using $SWIFT_TOOLCHAIN" >&2
+fi
+if [[ -n "${SWIFT_TOOLCHAIN:-}" ]]; then
+  export SWIFT_EXEC_MANIFEST="$SWIFT_TOOLCHAIN/usr/bin/swiftc"
+  export SWIFTPM_CUSTOM_LIBS_DIR="$SWIFT_TOOLCHAIN/usr/lib/swift/pm"
+fi
+
 exec node "$DIST" "$@"
