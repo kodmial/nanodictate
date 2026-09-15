@@ -10,8 +10,9 @@ import Foundation
 /// дополнительно сохраняются в `recordingsDirectory` как `recording-*.wav`.
 ///
 /// Секреты маскируются всегда: `Authorization` → `Bearer ***`,
-/// `X-Proxy-Key` → `***`, в теле ответа затираются значения вложенных ключей
-/// `api_key` / `proxy_key` / `authorization`.
+/// `X-Proxy-Key` → `***` (включая кастомное имя из `proxy_key_header` — все
+/// заголовки вне allowlist безопасных замаскированы), в теле ответа затираются
+/// значения вложенных ключей `api_key` / `proxy_key` / `authorization`.
 public enum DebugDump {
 
     /// Каталог отладочного лога; `~` раскрывается автоматически.
@@ -58,17 +59,31 @@ public enum DebugDump {
     // MARK: - Маскирование
 
     /// Маскирует значение заголовка по имени (сравнение без учёта регистра).
-    /// Authorization маскируется целиком: `Bearer ***`; X-Proxy-Key: `***`.
+    /// Authorization маскируется целиком: `Bearer ***`; X-Proxy-Key — `***`.
+    /// Значение ЛЮБОГО заголовка вне allowlist `safeDumpHeaders` тоже
+    /// маскируется (`***`): имя секретного заголовка может быть кастомным
+    /// (`proxy_key_header`), поэтому «не в списке безопасных» = секрет.
     public static func maskedHeaderValue(name: String, value: String) -> String {
-        switch name.lowercased() {
+        let normalized = name.lowercased()
+        switch normalized {
         case "authorization":
             return "Bearer ***"
         case "x-proxy-key":
             return "***"
         default:
-            return value
+            return safeDumpHeaders.contains(normalized) ? value : "***"
         }
     }
+
+    /// Заголовки, значения которых безопасно писать в debug-лог как есть.
+    /// Всё, чего нет в этом списке, маскируется (`***`) — кастомное имя
+    /// proxy-заголовка (`proxy_key_header`, например `X-Api-Key`) маскируется
+    /// автоматически, как и любой другой неизвестный заголовок.
+    private static let safeDumpHeaders: Set<String> = [
+        "accept", "accept-encoding", "accept-language", "cache-control",
+        "connection", "content-length", "content-type", "host", "origin",
+        "pragma", "referer", "rquid", "user-agent",
+    ]
 
     /// Маскирует секретные ключи в теле ответа (обычно JSON). Тело сохраняется
     /// как есть, кроме значений ключей `api_key` / `proxy_key` / `authorization`,

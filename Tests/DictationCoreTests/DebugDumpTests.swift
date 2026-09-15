@@ -92,6 +92,91 @@ final class DebugDumpTests: XCTestCase {
         XCTAssertFalse(entry.contains("nested-secret"), "вложенный api_key не должен светиться")
     }
 
+    // MARK: - 1a. Маскировка: кастомное имя секретного заголовка и allowlist
+
+    /// Кастомное имя proxy-заголовка (`proxy_key_header = "X-Api-Key"`) должно
+    /// маскироваться так же, как дефолтные authorization/x-proxy-key.
+    @objc func testCustomNamedSecretHeaderIsMasked() {
+        XCTAssertEqual(DebugDump.maskedHeaderValue(name: "X-Api-Key", value: "groq-secret"), "***")
+        XCTAssertEqual(DebugDump.maskedHeaderValue(name: "x-api-key", value: "groq-secret"), "***")
+        XCTAssertEqual(DebugDump.maskedHeaderValue(name: "X-Custom-Token", value: "token"), "***")
+        XCTAssertEqual(DebugDump.maskedHeaderValue(name: "cookie", value: "__test=abc"), "***")
+    }
+
+    /// Старые имена секретных заголовков по-прежнему маскируются.
+    @objc func testLegacySecretHeaderNamesStillMasked() {
+        XCTAssertEqual(DebugDump.maskedHeaderValue(name: "Authorization", value: "Bearer tok"), "Bearer ***")
+        XCTAssertEqual(DebugDump.maskedHeaderValue(name: "authorization", value: "Bearer tok"), "Bearer ***")
+        XCTAssertEqual(DebugDump.maskedHeaderValue(name: "X-Proxy-Key", value: "proxy"), "***")
+        XCTAssertEqual(DebugDump.maskedHeaderValue(name: "x-proxy-key", value: "proxy"), "***")
+    }
+
+    /// Обычные незасекреченные заголовки НЕ перемаскируются.
+    @objc func testSafeHeadersAreNotMasked() {
+        XCTAssertEqual(
+            DebugDump.maskedHeaderValue(name: "Content-Type", value: "multipart/form-data; boundary=x"),
+            "multipart/form-data; boundary=x"
+        )
+        XCTAssertEqual(
+            DebugDump.maskedHeaderValue(name: "User-Agent", value: "Mozilla/5.0"),
+            "Mozilla/5.0"
+        )
+    }
+
+    /// В собранной записи дампа значение кастомного proxy-заголовка уходит
+    /// маской, а обычный Content-Type остаётся видимым.
+    @objc func testCustomProxyHeaderNameIsMaskedInDumpEntry() {
+        let entry = DebugDump.summarize(
+            timestamp: Date(timeIntervalSince1970: 0),
+            method: "POST",
+            url: "https://kodmai.alwaysdata.net/go/https://stt.example/v1/audio/transcriptions",
+            headers: [
+                (name: "Content-Type", value: "multipart/form-data; boundary=x"),
+                (name: "Authorization", value: "Bearer k"),
+                (name: "X-Api-Key", value: "proxy-secret-777")
+            ],
+            fields: [],
+            filePart: nil,
+            status: 200,
+            responseBody: Data(#"{"text":"ок"}"#.utf8)
+        )
+
+        XCTAssertTrue(entry.contains("X-Api-Key: ***"))
+        XCTAssertTrue(entry.contains("Authorization: Bearer ***"))
+        XCTAssertFalse(entry.contains("proxy-secret-777"), "кастомный proxy-заголовок не должен светиться")
+        XCTAssertTrue(entry.contains("Content-Type: multipart/form-data; boundary=x"),
+                      "несекретный Content-Type остаётся видимым")
+    }
+
+    /// End-to-end: транскрайбер с `proxyKeyHeader: "X-Api-Key"` при debug-логе
+    /// не должен писать значение proxy-ключа в файл дампа открытым текстом.
+    @objc func testDebugDumpMasksCustomProxyKeyHeaderEndToEnd() {
+        let dir = redirectDumpToTempDir()
+        let transport = MockTransport(status: 200, body: Data(#"{"text":"привет"}"#.utf8))
+        let transcriber = Transcriber(
+            baseURL: "https://kodmai.alwaysdata.net/go/https://example.test/v1/audio/transcriptions",
+            model: "gigaam-v3",
+            apiKey: "k",
+            proxyKey: "custom-header-secret-99",
+            proxyKeyHeader: "X-Api-Key",
+            logLevel: "debug",
+            transport: transport,
+            networkChecker: { true }
+        )
+
+        runAsync("transcribeCustomProxyHeaderDebug") {
+            _ = try await transcriber.transcribe(wav: Data([0x52, 0x49, 0x46, 0x46]))
+        }
+
+        guard let content = readDebugLog(in: dir) else {
+            XCTFail("при log_level == debug файл дампа должен создаваться")
+            return
+        }
+        XCTAssertTrue(content.contains("X-Api-Key: ***"))
+        XCTAssertFalse(content.contains("custom-header-secret-99"),
+                       "значение кастомного proxy-заголовка не должно попасть в дамп")
+    }
+
     // MARK: - 2. Полнота: поля, file-парт, тело ответа
 
     @objc func testDumpContainsFieldsFilePartAndResponseBody() {
