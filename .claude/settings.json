@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "dictation-deploy": {
+      "command": "node",
+      "args": [
+        "/Users/dima/projects/dictation/mcp/dictation-deploy-mcp-server/dist/index.js"
+      ]
+    }
+  }
+}
