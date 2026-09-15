@@ -1,9 +1,9 @@
 {
   "mcpServers": {
     "dictation-deploy": {
-      "command": "node",
+      "command": "bash",
       "args": [
-        "/Users/dima/projects/dictation/mcp/dictation-deploy-mcp-server/dist/index.js"
+        "/Users/dima/projects/dictation/mcp/dictation-deploy-mcp-server/start.sh"
       ]
     }
   }

@@ -26,31 +26,31 @@ import { CONFIGURATIONS, SIGNING_IDENTITY } from "./constants.js";
 
 // ── Shared input pieces ─────────────────────────────────────────────────────
 
-enum ResponseFormat {
+export enum ResponseFormat {
   MARKDOWN = "markdown",
   JSON = "json",
 }
 
-const CONFIGURATION_SCHEMA = z.enum(CONFIGURATIONS);
-const RESPONSE_FORMAT_SCHEMA = z.nativeEnum(ResponseFormat);
+export const CONFIGURATION_SCHEMA = z.enum(CONFIGURATIONS);
+export const RESPONSE_FORMAT_SCHEMA = z.nativeEnum(ResponseFormat);
 
-const CONFIG_PARAM = CONFIGURATION_SCHEMA.default("debug").describe(
+export const CONFIG_PARAM = CONFIGURATION_SCHEMA.default("debug").describe(
   "Build configuration: 'debug' or 'release' (default 'debug')",
 );
-const FORMAT_PARAM = RESPONSE_FORMAT_SCHEMA.default(ResponseFormat.MARKDOWN).describe(
+export const FORMAT_PARAM = RESPONSE_FORMAT_SCHEMA.default(ResponseFormat.MARKDOWN).describe(
   "Response format: 'markdown' for human-readable text, 'json' for machine-readable data",
 );
 
 // ── Output schemas (structuredContent contract) ────────────────────────────
 
-const SymlinkSchema = z.object({
+export const SymlinkSchema = z.object({
   created: z.boolean(),
   target: z.string(),
   linkPath: z.string(),
   detail: z.string(),
 });
 
-const BuildOutputSchema = z.object({
+export const BuildOutputSchema = z.object({
   success: z.boolean(),
   configuration: CONFIGURATION_SCHEMA,
   exitCode: z.number(),
@@ -59,7 +59,7 @@ const BuildOutputSchema = z.object({
   tail: z.string(),
 });
 
-const SignBinarySchema = z.object({
+export const SignBinarySchema = z.object({
   name: z.string(),
   path: z.string(),
   signed: z.boolean(),
@@ -67,7 +67,7 @@ const SignBinarySchema = z.object({
   detail: z.string(),
 });
 
-const SignOutputSchema = z.object({
+export const SignOutputSchema = z.object({
   success: z.boolean(),
   configuration: CONFIGURATION_SCHEMA,
   identity: z.string(),
@@ -75,13 +75,13 @@ const SignOutputSchema = z.object({
   detail: z.string(),
 });
 
-const RestartOutputSchema = z.object({
+export const RestartOutputSchema = z.object({
   success: z.boolean(),
   method: z.string(),
   detail: z.string(),
 });
 
-const CodeSignatureSchema = z.object({
+export const CodeSignatureSchema = z.object({
   signed: z.boolean(),
   identity: z.union([z.string(), z.null()]),
   teamId: z.union([z.string(), z.null()]),
@@ -89,7 +89,7 @@ const CodeSignatureSchema = z.object({
   entitlementsFile: z.union([z.string(), z.null()]),
 });
 
-const StatusOutputSchema = z.object({
+export const StatusOutputSchema = z.object({
   agentRunning: z.boolean(),
   pids: z.array(z.number()),
   launchAgentLoaded: z.boolean(),
@@ -99,7 +99,7 @@ const StatusOutputSchema = z.object({
   signatureStable: z.boolean(),
 });
 
-const DeployOutputSchema = z.object({
+export const DeployOutputSchema = z.object({
   success: z.boolean(),
   configuration: CONFIGURATION_SCHEMA,
   build: z.union([
@@ -130,7 +130,7 @@ const DeployOutputSchema = z.object({
 
 type TextContent = { type: "text"; text: string };
 
-function respond<T>(text: string, structuredContent: T) {
+export function respond<T>(text: string, structuredContent: T) {
   // The SDK types structuredContent as { [x: string]: unknown }; the cast at
   // this boundary is intentional — the data objects come from typed functions
   // in commands.ts.
@@ -141,7 +141,7 @@ function respond<T>(text: string, structuredContent: T) {
 }
 
 /** Choose text representation per the requested response_format. */
-function render(
+export function render(
   format: ResponseFormat,
   markdown: string,
   data: unknown,
@@ -153,7 +153,7 @@ function render(
 
 // ── Markdown renderers ──────────────────────────────────────────────────────
 
-function buildMarkdown(r: BuildResult): string {
+export function buildMarkdown(r: BuildResult): string {
   return [
     "# Dictation build",
     "",
@@ -168,7 +168,7 @@ function buildMarkdown(r: BuildResult): string {
   ].join("\n");
 }
 
-function signMarkdown(r: SignResult): string {
+export function signMarkdown(r: SignResult): string {
   const lines: string[] = [
     "# Dictation sign",
     "",
@@ -190,7 +190,7 @@ function signMarkdown(r: SignResult): string {
   return lines.join("\n");
 }
 
-function restartMarkdown(r: RestartResult): string {
+export function restartMarkdown(r: RestartResult): string {
   return [
     "# Dictation agent restart",
     "",
@@ -201,7 +201,7 @@ function restartMarkdown(r: RestartResult): string {
   ].join("\n");
 }
 
-function statusMarkdown(r: StatusResult): string {
+export function statusMarkdown(r: StatusResult): string {
   const lines: string[] = [
     "# Dictation agent status",
     "",
@@ -244,7 +244,7 @@ function statusMarkdown(r: StatusResult): string {
   return lines.join("\n");
 }
 
-function deployMarkdown(input: {
+export function deployMarkdown(input: {
   configuration: "debug" | "release";
   success: boolean;
   build: BuildResult | null;
@@ -285,7 +285,7 @@ function deployMarkdown(input: {
 
 // ── Tool handlers ───────────────────────────────────────────────────────────
 
-const BuildInputSchema = z
+export const BuildInputSchema = z
   .object({
     configuration: CONFIG_PARAM,
     response_format: FORMAT_PARAM,
@@ -301,7 +301,7 @@ async function handleBuild(params: BuildInput) {
   );
 }
 
-const SignInputSchema = z
+export const SignInputSchema = z
   .object({
     configuration: CONFIG_PARAM,
     response_format: FORMAT_PARAM,
@@ -317,7 +317,7 @@ async function handleSign(params: SignInput) {
   );
 }
 
-const RestartInputSchema = z
+export const RestartInputSchema = z
   .object({
     response_format: FORMAT_PARAM,
   })
@@ -332,7 +332,7 @@ async function handleRestart(params: RestartInput) {
   );
 }
 
-const StatusInputSchema = z
+export const StatusInputSchema = z
   .object({
     configuration: CONFIG_PARAM,
     response_format: FORMAT_PARAM,
@@ -348,7 +348,7 @@ async function handleStatus(params: StatusInput) {
   );
 }
 
-const DeployInputSchema = z
+export const DeployInputSchema = z
   .object({
     configuration: CONFIG_PARAM,
     response_format: FORMAT_PARAM,

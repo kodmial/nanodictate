@@ -24,7 +24,7 @@ The fix, applied by `dictation_sign` / `dictation_deploy`:
    certificate (create once via Keychain Access → Certificate Assistant →
    "Sign to Run Locally");
 2. **fixed entitlements plists** (`Resources/com.dictation.agent.entitlements`,
-   `Resources/com.dictation.dictatorctl.entitlements` in the worktree);
+   `Resources/com.dictation.dictatorctl.entitlements` in the repo root);
 3. `codesign --force --sign "Dictation Code Signing" --entitlements <file>
    --options runtime --identifier <bundle-id> <binary>`.
 
@@ -40,21 +40,18 @@ Same identity + same entitlements + same code → same cdhash → grants survive
 ## Layout
 
 ```
-main checkout  /Users/dima/projects/dictation        — swift build & codesign run HERE
-worktree       <repo>/.claude/worktrees/feat+long-file-gigaam
-                 mcp/dictation-deploy-mcp-server/     — this server
-                 Resources/*.entitlements             — signing entitlements
+repo root  /Users/dima/projects/dictation         — swift build & codesign run HERE
+             mcp/dictation-deploy-mcp-server/     — this server (same checkout)
+             Resources/*.entitlements             — signing entitlements
 ```
 
-`swift build` and `codesign` target the **main checkout** (the running agent is
-launched from there). All source/entitlement files live in the worktree; the
-entitlement paths are resolved at runtime by `resolveEntitlementsPath()`
-(`src/constants.ts`): first `<PROJECT_ROOT>/Resources/<name>`, then
-`<SERVER_ROOT>/Resources/<name>`, returning the source
-`"main-checkout"` | `"worktree"` | `"missing"`. Until the branch merges the
-files only exist in the worktree; after the merge they land in the main
-checkout (where `SERVER_ROOT` equals `PROJECT_ROOT`), so the lookup keeps
-working without further edits.
+`swift build` and `codesign` target the **repo root** (the running agent is
+launched from there). All source/entitlement files live in the same checkout:
+the server's `SERVER_ROOT` (`src/constants.ts`) equals the project root, so
+`resolveEntitlementsPath()` resolves from `<PROJECT_ROOT>/Resources/<name>`
+directly and reports the source `"main-checkout"` | `"missing"` — the worktree
+fallback probe (`"worktree"` source) no longer applies since the server merged
+into the main checkout.
 
 ## Setup
 
@@ -63,6 +60,23 @@ cd mcp/dictation-deploy-mcp-server
 npm install
 npm run build          # tsc → dist/
 node dist/index.js     # or configure as the MCP server command
+```
+
+On a fresh clone `dist/` and `node_modules/` are absent (both gitignored);
+`start.sh` covers that: it installs dependencies (`npm ci`, falling back to
+`npm install`) and runs the build when `dist/index.js` is missing, then
+`exec`s the compiled server. Configure it as the MCP server in
+`~/.claude/settings.json` / `.claude/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "dictation-deploy": {
+      "command": "bash",
+      "args": ["/Users/dima/projects/dictation/mcp/dictation-deploy-mcp-server/start.sh"]
+    }
+  }
+}
 ```
 
 ## Tools
