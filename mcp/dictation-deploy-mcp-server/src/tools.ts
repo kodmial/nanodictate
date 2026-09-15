@@ -414,7 +414,7 @@ async function handleDeploy(params: DeployInput) {
 // ── Registration ────────────────────────────────────────────────────────────
 
 const SHARED_FOOTER =
-  " The build/sign commands run in the main checkout (/Users/dima/projects/dictation), not in the worktree.";
+  " The build/sign commands run from the repo root; if dist/ is missing, start.sh rebuilds automatically.";
 
 export function registerTools(server: McpServer): void {
   server.registerTool(
