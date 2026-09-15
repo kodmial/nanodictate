@@ -24,7 +24,7 @@ final class ByetMockTransport: HTTPTransport, @unchecked Sendable {
         self.rejectPostCount = rejectPostCount
     }
 
-    func send(request: URLRequest) async throws -> (status: Int, body: Data) {
+    func send(request: URLRequest) async throws -> (status: Int, body: Data, headers: [String: String]) {
         record(request)
 
         let contentType = request.value(forHTTPHeaderField: "Content-Type") ?? ""
@@ -32,12 +32,12 @@ final class ByetMockTransport: HTTPTransport, @unchecked Sendable {
         let hasCookie = request.value(forHTTPHeaderField: "Cookie") != nil
 
         if isSTT && consumeReject() {
-            return (statusCode, Data(challengeBody.utf8))
+            return (statusCode, Data(challengeBody.utf8), [:])
         }
         if hasCookie && honorCookie {
-            return (statusCode, Data(#"{"text":"ok"}"#.utf8))
+            return (statusCode, Data(#"{"text":"ok"}"#.utf8), [:])
         }
-        return (statusCode, Data(challengeBody.utf8))
+        return (statusCode, Data(challengeBody.utf8), [:])
     }
 
     private func record(_ request: URLRequest) {
@@ -273,7 +273,7 @@ final class ByetCookieProviderTests: XCTestCase {
 
     @objc func testRefreshFailsOnNetworkErrorReturnsNil() {
         final class FailingTransport: HTTPTransport, @unchecked Sendable {
-            func send(request: URLRequest) async throws -> (status: Int, body: Data) {
+            func send(request: URLRequest) async throws -> (status: Int, body: Data, headers: [String: String]) {
                 throw URLError(.cannotConnectToHost)
             }
         }

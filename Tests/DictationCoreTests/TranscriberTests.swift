@@ -9,6 +9,9 @@ final class MockTransport: HTTPTransport, @unchecked Sendable {
     var body: Data
     var sendError: Error?
 
+    /// Если заданы, подставляются в ответ (нужны для Retry-After).
+    var responseHeaders: [String: String] = [:]
+
     /// If set, the first N calls will throw sendError; then normal behavior.
     /// Once failCount is exhausted, sendError is cleared so later calls succeed.
     var failCount: Int = 0
@@ -22,7 +25,7 @@ final class MockTransport: HTTPTransport, @unchecked Sendable {
         self.sendError = sendError
     }
 
-    func send(request: URLRequest) async throws -> (status: Int, body: Data) {
+    func send(request: URLRequest) async throws -> (status: Int, body: Data, headers: [String: String]) {
         requestCount += 1
         lastRequest = request
 
@@ -38,7 +41,35 @@ final class MockTransport: HTTPTransport, @unchecked Sendable {
             throw sendError
         }
 
-        return (status, body)
+        return (status, body, responseHeaders)
+    }
+}
+
+/// Транспорт с последовательностью HTTP-статусов: отдаёт статусы списком по
+/// очереди, последний — навсегда (проверка ретраев 5xx и терминальности 4xx).
+final class StatusSequenceTransport: HTTPTransport, @unchecked Sendable {
+    let statuses: [Int]
+    private(set) var requestCount = 0
+    init(statuses: [Int]) { self.statuses = statuses }
+    func send(request: URLRequest) async throws -> (status: Int, body: Data, headers: [String: String]) {
+        let index = min(requestCount, statuses.count - 1)
+        requestCount += 1
+        return (statuses[index], Data(#"{"text":"ok after retries"}"#.utf8), [:])
+    }
+}
+
+/// Записывает паузы между ретраями (инъекция retrySleep) — thread-safe, зовётся
+/// из async-контекста.
+final class SleepRecorder {
+    private let lock = NSLock()
+    private var values: [TimeInterval] = []
+    func record(_ delay: TimeInterval) {
+        lock.lock(); defer { lock.unlock() }
+        values.append(delay)
+    }
+    var delays: [TimeInterval] {
+        lock.lock(); defer { lock.unlock() }
+        return values
     }
 }
 
@@ -48,12 +79,13 @@ final class TranscriberTests: XCTestCase {
 
     private let wavData = Data([0x52, 0x49, 0x46, 0x46]) // "RIFF"
 
-    private func makeTranscriber(transport: MockTransport) -> Transcriber {
+    private func makeTranscriber(transport: MockTransport, retrySleep: ((TimeInterval) async -> Void)? = nil) -> Transcriber {
         Transcriber(baseURL: "https://example.test/v1/audio/transcriptions",
                     model: "gigaam-v3",
                     apiKey: "test-key",
                     transport: transport,
-                    networkChecker: { true })
+                    networkChecker: { true },
+                    retrySleep: retrySleep ?? { _ in })
     }
 
     /// Runs an async closure to completion inside a synchronous test method.
@@ -159,13 +191,15 @@ final class TranscriberTests: XCTestCase {
 
     // MARK: Retry on network error
 
-    @objc func testNetworkErrorRetriesTwice() {
+    /// Сетевая ошибка ретраится до исчерпания попыток (maxAttempts = 4):
+    /// каждая попытка снова даёт .cannotConnectToHost.
+    @objc func testNetworkErrorRetriesUntilExhausted() {
         let transport = MockTransport(status: 0,
                                       body: Data(),
                                       sendError: URLError(.cannotConnectToHost))
         let transcriber = makeTranscriber(transport: transport)
 
-        runAsync("testRetry") {
+        runAsync("testNetworkErrorRetriesUntilExhausted") {
             do {
                 _ = try await transcriber.transcribe(wav: self.wavData)
                 XCTFail("Expected TranscribeError.network")
@@ -177,8 +211,39 @@ final class TranscriberTests: XCTestCase {
                     XCTFail("Expected .network, got \(error)")
                 }
             }
-            XCTAssertEqual(transport.requestCount, 2)
+            XCTAssertEqual(transport.requestCount, 4, "4 попытки до исчерпания ретраев")
         }
+    }
+
+    /// Паузы между попытками: экспоненциальный backoff 0.5·2^n плюс джиттер
+    /// (0…0.25 с). Ретраи идут не мгновенно и с РАСТУЩЕЙ задержкой.
+    @objc func testBackoffDelaysIncreaseMonotonically() {
+        let transport = MockTransport(status: 0,
+                                      body: Data(),
+                                      sendError: URLError(.cannotConnectToHost))
+        let recorder = SleepRecorder()
+        let transcriber = makeTranscriber(transport: transport,
+                                          retrySleep: { recorder.record($0) })
+
+        runAsync("testBackoffDelays") {
+            do {
+                _ = try await transcriber.transcribe(wav: self.wavData)
+                XCTFail("Expected TranscribeError.network")
+            } catch let error as TranscribeError {
+                if case .network = error {} else { XCTFail("Expected .network, got \(error)") }
+            }
+        }
+
+        let delays = recorder.delays
+        XCTAssertEqual(delays.count, 3, "между 4 попытками — 3 паузы")
+        for (i, delay) in delays.enumerated() {
+            // retryIndex = i+1: 0.5*2^(i+1) + jitter(0…0.25)
+            let base = Transcriber.backoffDelay(beforeRetry: i + 1, jitter: 0)
+            XCTAssertGreaterThanOrEqual(delay, base, "пауза не меньше номинальной \(base) с")
+            XCTAssertLessThanOrEqual(delay, base + 0.25, "джиттер не больше 0.25 с")
+        }
+        XCTAssertTrue(delays[0] < delays[1], "1 с < 2 с — паузы растут")
+        XCTAssertTrue(delays[1] < delays[2], "2 с < 4 с — паузы растут")
     }
 
     // MARK: Invalid response
@@ -326,7 +391,192 @@ final class TranscriberTests: XCTestCase {
         }
     }
 
-    // MARK: - NEW: Timeout error → terminal .network("Таймаут STT") WITHOUT retry
+    // MARK: - NEW: 429 Retry-After из заголовка ответа
+
+    /// 429 ретраится, а пауза берётся ИЗ заголовка Retry-After, а не из backoff.
+    @objc func test429HonorsRetryAfterHeader() {
+        let transport = MockTransport(status: 429, body: Data("rate limited".utf8))
+        transport.responseHeaders = ["Retry-After": "3"]
+        let recorder = SleepRecorder()
+        let transcriber = makeTranscriber(transport: transport,
+                                          retrySleep: { recorder.record($0) })
+
+        runAsync("test429RetryAfter") {
+            do {
+                _ = try await transcriber.transcribe(wav: self.wavData)
+                XCTFail("Expected .http(429)")
+            } catch let error as TranscribeError {
+                if case .http(let code, _) = error {
+                    XCTAssertEqual(code, 429)
+                } else {
+                    XCTFail("Expected .http(429), got \(error)")
+                }
+            }
+            XCTAssertEqual(transport.requestCount, 4, "429 ретраится до исчерпания попыток")
+        }
+        XCTAssertEqual(recorder.delays, [3, 3, 3], "каждая пауза = Retry-After 3 с")
+    }
+
+    /// Retry-After больше 10 с срезается на 10: суммарный backoff ограничен.
+    @objc func test429RetryAfterCappedAtTenSeconds() {
+        let transport = MockTransport(status: 429, body: Data("slow down".utf8))
+        transport.responseHeaders = ["Retry-After": "60"]
+        let recorder = SleepRecorder()
+        let transcriber = makeTranscriber(transport: transport,
+                                          retrySleep: { recorder.record($0) })
+
+        runAsync("test429Cap") {
+            do {
+                _ = try await transcriber.transcribe(wav: self.wavData)
+                XCTFail("Expected .http(429)")
+            } catch let error as TranscribeError {
+                if case .http(let code, _) = error {
+                    XCTAssertEqual(code, 429)
+                } else {
+                    XCTFail("Expected .http(429), got \(error)")
+                }
+            }
+        }
+        XCTAssertEqual(recorder.delays, [10, 10, 10], "Retry-After 60 с ограничен капсом в 10 с")
+    }
+
+    // MARK: - NEW: Retry-After в формате HTTP-date (RFC 7231 §7.1.1.1)
+
+    /// Retry-After датой (IMF-fixdate / RFC 850 / asctime): задержка =
+    /// (дата − сейчас) в секундах, а не nil.
+    @objc func testRetryAfterHTTPDateParsedAsDelay() {
+        let targetDelay: TimeInterval = 40
+        let formats = [
+            "EEE, dd MMM yyyy HH:mm:ss zzz",   // IMF-fixdate
+            "EEEE, dd-MMM-yy HH:mm:ss zzz",   // obsolete RFC 850
+            "EEE MMM d HH:mm:ss yyyy",        // asctime
+        ]
+        for format in formats {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            formatter.dateFormat = format
+            let dateString = formatter.string(from: Date().addingTimeInterval(targetDelay))
+            let delay = Transcriber.retryAfterSeconds(from: ["Retry-After": dateString])
+            XCTAssertNotNil(delay, "HTTP-date «\(dateString)» (\(format)) должен парситься")
+            XCTAssertTrue(delay! > targetDelay - 5 && delay! < targetDelay + 5,
+                          "задержка ≈ (дата − сейчас), got \(String(describing: delay))")
+        }
+    }
+
+    /// Не-дата и не-число → nil (тогда дефолтный backoff), а не крах.
+    @objc func testRetryAfterGarbageReturnsNil() {
+        XCTAssertNil(Transcriber.retryAfterSeconds(from: ["Retry-After": "soon!"]))
+        XCTAssertNil(Transcriber.retryAfterSeconds(from: ["Retry-After": ""]))
+    }
+
+    // MARK: - NEW: отмена во время retrySleep не шлёт повторный POST
+
+    /// Дефолтный retrySleep глотает отмену (try?), поэтому проверка
+    /// Task.isCancelled — в начале итерации ретрай-цикла: после cancelAll
+    /// (первый успех параллельного failover) сиблинг НЕ делает лишний запрос.
+    @objc func testCancelDuringRetrySleepSkipsRepeatRequest() {
+        let transport = MockTransport(status: 200, body: Data(#"{"text":"ok"}"#.utf8))
+        transport.sendError = URLError(.notConnectedToInternet)
+        transport.failCount = 10 // все попытки падают — если отмена не сработает
+        // БЕЗ инъекции retrySleep: реальный сон (backoff первой попытки ~1 c).
+        let transcriber = Transcriber(baseURL: "https://example.test/v1/audio/transcriptions",
+                                      model: "gigaam-v3",
+                                      apiKey: "test-key",
+                                      transport: transport,
+                                      networkChecker: { true })
+        let done = expectation(description: "cancelled transcribe finished")
+        let task = Task {
+            _ = try? await transcriber.transcribe(wav: self.wavData)
+            done.fulfill()
+        }
+
+        // Даём первой попытке упасть и уйти в retrySleep, затем отменяем.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        task.cancel()
+        wait(for: [done], timeout: 10)
+
+        XCTAssertEqual(transport.requestCount, 1,
+                       "после отмены во время сна повторный POST не отправляется")
+    }
+
+    // MARK: - NEW: 5xx ретраится, потом успех; 4xx (кроме 429) — терминально
+
+    @objc func testHTTP500RetriedThenSucceeds() {
+        let transport = StatusSequenceTransport(statuses: [500, 500, 200])
+        // 500 → ретрай → 500 → ретрай → 200: тело с третьей попытки и есть ответ.
+        let transcriber = Transcriber(baseURL: "https://example.test/v1/audio/transcriptions",
+                                      model: "gigaam-v3",
+                                      apiKey: "test-key",
+                                      transport: transport,
+                                      networkChecker: { true },
+                                      retrySleep: { _ in })
+
+        runAsync("test500Retried") {
+            let result = try await transcriber.transcribe(wav: self.wavData)
+            XCTAssertEqual(result.text, "ok after retries", "успех после ретраев 5xx")
+        }
+        XCTAssertEqual(transport.requestCount, 3, "две 500-попытки + успешная")
+    }
+
+    @objc func testHTTP400IsTerminalNoRetry() {
+        let transport = StatusSequenceTransport(statuses: [400, 200])
+        let transcriber = Transcriber(baseURL: "https://example.test/v1/audio/transcriptions",
+                                      model: "gigaam-v3",
+                                      apiKey: "test-key",
+                                      transport: transport,
+                                      networkChecker: { true },
+                                      retrySleep: { _ in })
+
+        runAsync("test400Terminal") {
+            do {
+                _ = try await transcriber.transcribe(wav: self.wavData)
+                XCTFail("Expected .http(400)")
+            } catch let error as TranscribeError {
+                if case .http(let code, _) = error {
+                    XCTAssertEqual(code, 400)
+                } else {
+                    XCTFail("Expected .http(400), got \(error)")
+                }
+            }
+        }
+        XCTAssertEqual(transport.requestCount, 1, "4xx кроме 429 — терминальная ошибка, ретраев нет")
+    }
+
+    // MARK: - NEW: Word-таймстампы из verbose_json
+
+    /// Успешный verbose_json-ответ: words[] разбираются в TranscriptionResult.
+    @objc func testSuccessParsesWordTimestamps() {
+        let json = #"{"text":"один два","words":[{"word":"один","start":0.1,"end":0.5},{"word":"два","start":0.6,"end":1.0}]}"#
+        let transport = MockTransport(status: 200, body: Data(json.utf8))
+        let transcriber = makeTranscriber(transport: transport)
+
+        runAsync("testWordsParsed") {
+            let result = try await transcriber.transcribe(wav: self.wavData)
+            XCTAssertEqual(result.text, "один два")
+            XCTAssertEqual(result.words.count, 2)
+            XCTAssertEqual(result.words[0].word, "один")
+            XCTAssertEqual(result.words[0].start, 0.1, accuracy: 0.0001)
+            XCTAssertEqual(result.words[0].end, 0.5, accuracy: 0.0001)
+            XCTAssertEqual(result.words[1].word, "два")
+            XCTAssertEqual(result.words[1].end, 1.0, accuracy: 0.0001)
+        }
+    }
+
+    /// Без words[] (обычный text-ответ) — список таймстампов пустой.
+    @objc func testSuccessWithoutWordsKeepsEmptyList() {
+        let json = #"{"text":"просто текст"}"#
+        let transport = MockTransport(status: 200, body: Data(json.utf8))
+        let transcriber = makeTranscriber(transport: transport)
+
+        runAsync("testEmptyWords") {
+            let result = try await transcriber.transcribe(wav: self.wavData)
+            XCTAssertEqual(result.text, "просто текст")
+            XCTAssertTrue(result.words.isEmpty, "words по умолчанию пуст")
+        }
+    }
+
+    // MARK: - Timeout error → terminal .network("Таймаут STT") WITHOUT retry
 
     @objc func testTimeoutErrorReturnsNetwork() {
         let transport = MockTransport(status: 0, body: Data(),

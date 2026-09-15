@@ -764,7 +764,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
                             selected = self.roleTranscriber(self.segmentRoleProviderID) ?? self.transcriber
                         }
                         let result = try await selected.transcribe(wav: wav, filename: filename, prompt: prompt)
-                        return result.text
+                        return ChunkedPipeline.SttResult(text: result.text, words: result.words)
                     },
                     insert: { operation in
                         DispatchQueue.main.async {
@@ -937,14 +937,14 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
                 samples: segmentSamples,
                 index: index,
                 insertedText: runState.insertedText,
-                prompt: runState.promptParts.isEmpty ? nil : runState.promptParts.joined(separator: " "),
+                prompt: runState.promptParts.isEmpty ? nil : ChunkedPipeline.truncatedPrompt(runState.promptParts),
                 stt: { wav, filename, prompt in
                     // Роль segment из [routing] — как в processChunked: провайдер
                     // сегментов; не задан — активный transcriber (failover здесь
                     // не нужен — финальный проход «докрутит»).
                     let transcriber = self.roleTranscriber(self.segmentRoleProviderID) ?? self.transcriber
                     let r = try await transcriber.transcribe(wav: wav, filename: filename, prompt: prompt)
-                    return r.text
+                    return ChunkedPipeline.SttResult(text: r.text, words: r.words)
                 },
                 filename: "live-segment-\(index + 1).wav"
             )
@@ -1129,7 +1129,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
                     // (ровно текущее поведение: без failover — роль выбрана явно).
                     let transcriber = self.roleTranscriber(self.finalRoleProviderID) ?? self.transcriber
                     let r = try await transcriber.transcribe(wav: wav, filename: filename, prompt: prompt)
-                    return r.text
+                    return ChunkedPipeline.SttResult(text: r.text, words: r.words)
                 },
                 insert: { operation in
                     DispatchQueue.main.async {
@@ -1255,21 +1255,22 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             Logger.log("primary provider failed (\(transcribeError)) — trying failover providers",
                        level: "info")
             retryProvider.lastFailedProviderID = activeProviderID
-            var lastError: Error = transcribeError
-            for provider in failoverCandidates {
-                do {
-                    if let retryResult = try await retryProvider.retranscribe(with: provider) {
-                        return (retryResult, provider.id)
-                    }
+            // Параллельный failover вынесен в DictationCore (тестируемая
+            // функция): RetryProvider.parallelFailover — все кандидаты
+            // запускаются одним withTaskGroup (независимые STT-запросы),
+            // первый успех выигрывает и отменяет остальных (cancelAll);
+            // TranscribeError-ы накапливаются — побеждает последний
+            // завершившийся; не-TranscribeError прерывает цепочку, как в
+            // последовательном цикле (микрофон и т.п.). lastFailedProviderID
+            // стоит ДО группы и сбрасывается в retranscribe на успехе.
+            return try await RetryProvider.parallelFailover(
+                candidates: failoverCandidates
+            ) { provider in
+                guard let retryResult = try await self.retryProvider.retranscribe(with: provider) else {
                     throw TranscribeError.invalidResponse("failover retry lost the stored WAV")
-                } catch let nextError as TranscribeError {
-                    lastError = nextError
-                } catch {
-                    // Не-TranscribeError на повторе — прерываем цепочку.
-                    throw error
                 }
+                return (retryResult, provider.id)
             }
-            throw lastError
         }
     }
 

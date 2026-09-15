@@ -188,7 +188,7 @@ public enum ProviderRequestBuilder {
         case .gigaChat:
             return planGigaChat(baseURL: resolvedBaseURL, model: resolvedModel, apiKey: apiKey, apiSecret: apiSecret, language: language, wav: wav, filename: filename, prompt: prompt)
         case .openai, .groq, .local, .relay, .openAICompatible:
-            return planOpenAICompatible(baseURL: resolvedBaseURL, model: resolvedModel, apiKey: apiKey, language: language, wav: wav, filename: filename, prompt: prompt)
+            return planOpenAICompatible(adapterID: adapterID, baseURL: resolvedBaseURL, model: resolvedModel, apiKey: apiKey, language: language, wav: wav, filename: filename, prompt: prompt)
         }
     }
 
@@ -238,12 +238,63 @@ public enum ProviderRequestBuilder {
         return text
     }
 
+    /// Извлечение word-таймстампов из тела ответа (пустое — провайдер их не
+    /// вернул, и это НЕ ошибка: сшивка сегментов деградирует к по-словному diff).
+    /// - `path == nil` — OpenAI-совместимый `verbose_json`: массив `words` на
+    ///   верхнем уровне (`[{"word":…,"start":…,"end":…}]`).
+    /// - `path == ["results","channels","0","alternatives","0","transcript"]` —
+    ///   deepgram: слова в `results.channels[0].alternatives[0].words`, слово
+    ///   из `word` (fallback — `punctuated_word`).
+    /// Битые/частичные записи в массиве пропускаются, битый JSON — пустой
+    /// результат.
+    public static func extractWords(from body: Data, path: [String]?) -> [TimedWord] {
+        guard body.count > 0,
+              let json = try? JSONSerialization.jsonObject(with: body) else {
+            return []
+        }
+        var wordsValue: Any?
+        if let path = path {
+            // Тот же путь, что для текста, но последний сегмент — "words".
+            guard path.count > 1 else { return [] }
+            var current: Any = json
+            var ok = true
+            for segment in path.dropLast() {
+                if let dict = current as? [String: Any] {
+                    guard let next = dict[segment] else { ok = false; break }
+                    current = next
+                } else if let array = current as? [Any], let index = Int(segment), array.indices.contains(index) {
+                    current = array[index]
+                } else {
+                    ok = false
+                    break
+                }
+            }
+            wordsValue = ok ? (current as? [String: Any])?["words"] : nil
+        } else {
+            wordsValue = (json as? [String: Any])?["words"]
+        }
+        guard let items = wordsValue as? [[String: Any]] else { return [] }
+        var words: [TimedWord] = []
+        for item in items {
+            guard let word = (item["word"] as? String) ?? (item["punctuated_word"] as? String),
+                  let start = (item["start"] as? NSNumber)?.doubleValue,
+                  let end = (item["end"] as? NSNumber)?.doubleValue else {
+                continue
+            }
+            words.append(TimedWord(word: word, start: start, end: end))
+        }
+        return words
+    }
+
     /// OpenAI-совместимый multipart/form-data: file первым, затем model,
-    /// language (если не пусто), prompt (если не пусто), закрывающий boundary.
-    /// Это ЕДИНЫЙ источник правды о формате тела — legacy-путь Transcriber
-    /// (adapterID == nil) и адаптеры openai/groq/local/relay дают байт-в-байт
-    /// те же данные.
-    public static func multipartBody(wav: Data, filename: String, model: String, language: String, prompt: String?, boundary: String) -> Data {
+    /// language (если не пусто), prompt (если не пусто), опционально
+    /// response_format/timestamp_granularities[] (word-таймстампы), закрывающий
+    /// boundary. Это ЕДИНЫЙ источник правды о формате тела — legacy-путь
+    /// Transcriber (adapterID == nil) и адаптеры openai/groq/local/relay дают
+    /// байт-в-байт те же данные (поля таймстампов добавляются только явными
+    /// параметрами).
+    public static func multipartBody(wav: Data, filename: String, model: String, language: String, prompt: String?, boundary: String,
+                                     responseFormat: String? = nil, timestampGranularities: [String] = []) -> Data {
         var body = Data()
 
         func append(_ string: String) {
@@ -283,6 +334,24 @@ public enum ProviderRequestBuilder {
             append("\r\n")
         }
 
+        // Field: response_format — просим verbose_json (даёт word-таймстампы)
+        if let responseFormat = responseFormat, !responseFormat.isEmpty {
+            append("--\(boundary)\r\n")
+            append("Content-Disposition: form-data; name=\"response_format\"\r\n")
+            append("\r\n")
+            append(responseFormat)
+            append("\r\n")
+        }
+
+        // Fields: timestamp_granularities[] — включаем word-таймстампы
+        for granularity in timestampGranularities {
+            append("--\(boundary)\r\n")
+            append("Content-Disposition: form-data; name=\"timestamp_granularities[]\"\r\n")
+            append("\r\n")
+            append(granularity)
+            append("\r\n")
+        }
+
         // Closing boundary
         append("--\(boundary)--\r\n")
 
@@ -293,6 +362,7 @@ public enum ProviderRequestBuilder {
 
     /// OpenAI / Groq / Local / Relay / openAI-compatible: мультипарт + Bearer.
     private static func planOpenAICompatible(
+        adapterID: String,
         baseURL: String,
         model: String,
         apiKey: String,
@@ -302,12 +372,30 @@ public enum ProviderRequestBuilder {
         prompt: String?
     ) -> STTRequestSpec {
         let boundary = "Boundary-\(UUID().uuidString)"
-        let multipart = multipartBody(wav: wav, filename: filename, model: model, language: language, prompt: prompt, boundary: boundary)
+        // Word-таймстампы (verbose_json) — только где поддержка гарантирована.
+        let timestamps = supportsWordTimestamps(adapterID)
+        let multipart = multipartBody(
+            wav: wav, filename: filename, model: model, language: language, prompt: prompt, boundary: boundary,
+            responseFormat: timestamps ? "verbose_json" : nil,
+            timestampGranularities: timestamps ? ["word"] : []
+        )
         return STTRequestSpec(
             url: URL(string: baseURL),
             headers: [("Authorization", "Bearer \(apiKey)")],
             body: .multipart(data: multipart, contentType: "multipart/form-data; boundary=\(boundary)")
         )
+    }
+
+    /// Провайдеры, у которых включаем word-таймстампы (verbose_json +
+    /// timestamp_granularities[]=word). local/giga-chat/relay не включаем:
+    /// whisper.cpp/sherpa/GigaAM поддержку не гарантируют, личный relay
+    /// консервативен (пусть вернёт базовый текст). deepgram ходит своим
+    /// query-параметром `words=true` (см. planDeepgram).
+    private static func supportsWordTimestamps(_ adapterID: String) -> Bool {
+        switch STTAdapterID.from(adapterID) {
+        case .openai, .groq, .openAICompatible: return true
+        case .local, .deepgram, .gigaChat, .relay: return false
+        }
     }
 
     /// Deepgram (проверено по докам): `Authorization: Token <key>`, тело — сырой
@@ -329,6 +417,8 @@ public enum ProviderRequestBuilder {
             items.append(URLQueryItem(name: "language", value: language))
         }
         items.append(URLQueryItem(name: "smart_format", value: "true"))
+        // Word-таймстампы native: `words=true` (временнáя сшивка сегментов).
+        items.append(URLQueryItem(name: "words", value: "true"))
         components.queryItems = items
         return STTRequestSpec(
             url: components.url,

@@ -289,14 +289,14 @@ public final class ByetCookieProvider {
         if let cookie = cookie {
             request.setValue("\(Self.cookieName)=\(cookie)", forHTTPHeaderField: "Cookie")
         }
-        let result: (status: Int, body: Data)
+        let result: (status: Int, body: Data, headers: [String: String])
         do {
             if let transport = transport {
                 result = try await transport.send(request: request)
             } else {
                 let (data, response) = try await URLSession.shared.data(for: request)
                 guard let http = response as? HTTPURLResponse else { return nil }
-                result = (http.statusCode, data)
+                result = (http.statusCode, data, [:])
             }
         } catch {
             return nil

@@ -269,4 +269,140 @@ final class STTAdapterTests: XCTestCase {
     @objc func testExtractTextEmptyBodyThrows() {
         XCTAssertThrowsError(try ProviderRequestBuilder.extractText(from: Data(), path: nil)) { _ in }
     }
+
+    // MARK: - Word-таймстампы (verbose_json / deepgram words)
+
+    /// openai план: multipart просит verbose_json + timestamp_granularities[]=word.
+    @objc func testOpenAIPlanRequestsVerboseJSON() {
+        let spec = ProviderRequestBuilder.plan(
+            adapterID: "openai", baseURL: "", model: "", apiKey: "sk-openai",
+            language: "ru", wav: wav, filename: "file.wav", prompt: "контекст")
+        guard case .multipart(let data, _) = spec.body else {
+            XCTFail("openai должен быть multipart")
+            return
+        }
+        let text = String(data: data, encoding: .utf8)!
+        XCTAssertTrue(text.contains("name=\"response_format\"\r\n\r\nverbose_json\r\n"),
+                      "verbose_json даёт word-таймстампы")
+        XCTAssertTrue(text.contains("name=\"timestamp_granularities[]\"\r\n\r\nword\r\n"))
+        // Поля идут ПОСЛЕ prompt, перед закрывающим boundary (граница в конце).
+        let formatPos = text.range(of: "response_format")!.lowerBound
+        let granPos = text.range(of: "timestamp_granularities[]")!.lowerBound
+        XCTAssertTrue(formatPos < granPos)
+        let closingPos = text.range(of: "--Boundary-", options: .backwards)!.lowerBound
+        XCTAssertTrue(granPos < closingPos, "закрывающий boundary после полей таймстампов")
+    }
+
+    /// local: word-таймстампов НЕ просим (GigaAM/sherpa поддержку не гарантируют).
+    @objc func testLocalPlanOmitsTimestampFields() {
+        let spec = ProviderRequestBuilder.plan(
+            adapterID: "local", baseURL: "", model: "", apiKey: "",
+            language: "ru", wav: wav)
+        guard case .multipart(let data, _) = spec.body else {
+            XCTFail("local — multipart")
+            return
+        }
+        let text = String(data: data, encoding: .utf8)!
+        XCTAssertFalse(text.contains("response_format"))
+        XCTAssertFalse(text.contains("timestamp_granularities"))
+    }
+
+    /// relay (GigaAM proxy/прокси-план): таймстампов НЕ просим — только
+    /// плоский OpenAI-совместимый multipart.
+    @objc func testRelayPlanOmitsTimestampFields() {
+        let spec = ProviderRequestBuilder.plan(
+            adapterID: "relay", baseURL: "https://relay.example.com/transcribe", model: "m", apiKey: "k",
+            language: "ru", wav: wav, filename: "file.wav")
+        // relay не имеет дефолтного baseURL — задан явно, url должен быть.
+        XCTAssertEqual(spec.url?.absoluteString, "https://relay.example.com/transcribe")
+        guard case .multipart(let data, _) = spec.body else {
+            XCTFail("relay — multipart")
+            return
+        }
+        let text = String(data: data, encoding: .utf8)!
+        XCTAssertFalse(text.contains("response_format"))
+        XCTAssertFalse(text.contains("timestamp_granularities"))
+    }
+
+    /// giga-chat: таймстампов НЕ просим (scheme не поддерживает), несмотря на
+    /// OAuth-шаг — тело остаётся плоским multipart.
+    @objc func testGigaChatPlanOmitsTimestampFields() {
+        let spec = ProviderRequestBuilder.plan(
+            adapterID: "giga-chat", baseURL: "", model: "", apiKey: "client-id", apiSecret: "client-secret",
+            language: "ru", wav: wav, filename: "file.wav")
+        XCTAssertNotNil(spec.oauth, "giga-chat идёт через OAuth-шаг")
+        guard case .multipart(let data, _) = spec.body else {
+            XCTFail("giga-chat — multipart")
+            return
+        }
+        let text = String(data: data, encoding: .utf8)!
+        XCTAssertFalse(text.contains("response_format"))
+        XCTAssertFalse(text.contains("timestamp_granularities"))
+    }
+
+    /// deepgram: таймстампы запрашиваются query-параметром words=true.
+    @objc func testDeepgramPlanRequestsWords() {
+        let spec = ProviderRequestBuilder.plan(
+            adapterID: "deepgram", baseURL: "", model: "", apiKey: "dg-key",
+            language: "ru", wav: wav)
+        XCTAssertTrue(spec.url?.query?.contains("words=true") ?? false,
+                      "deepgram: word-таймстампы — параметром words")
+        let wordsPos = spec.url!.query!.range(of: "words=true")!.lowerBound
+        let smartPos = spec.url!.query!.range(of: "smart_format=true")!.lowerBound
+        XCTAssertTrue(wordsPos > smartPos)
+    }
+
+    /// multipartBody напрямую: явный emission response_format + granularities[].
+    @objc func testMultipartBodyEmitsTimestampFields() {
+        let boundary = "Boundary-TEST"
+        let body = ProviderRequestBuilder.multipartBody(
+            wav: wav, filename: "a.wav", model: "m", language: "", prompt: nil, boundary: boundary,
+            responseFormat: "verbose_json", timestampGranularities: ["word"])
+        let text = String(data: body, encoding: .utf8)!
+        XCTAssertTrue(text.contains("name=\"response_format\"\r\n\r\nverbose_json\r\n"))
+        XCTAssertTrue(text.contains("name=\"timestamp_granularities[]\"\r\n\r\nword\r\n"))
+        XCTAssertTrue(text.hasSuffix("--Boundary-TEST--\r\n"))
+    }
+
+    /// OpenAI-ответ: words[] на верхнем уровне, у каждого слова — word/start/end.
+    @objc func testExtractWordsOpenAIFlat() {
+        let body = Data(#"{"text":"один два","words":[{"word":"один","start":0.1,"end":0.5},{"word":"два","start":0.5,"end":1.0}]}"#.utf8)
+        let words = ProviderRequestBuilder.extractWords(from: body, path: nil)
+        XCTAssertEqual(words.count, 2)
+        XCTAssertEqual(words[0].word, "один")
+        XCTAssertEqual(words[0].start, 0.1, accuracy: 0.0001)
+        XCTAssertEqual(words[0].end, 0.5, accuracy: 0.0001)
+        XCTAssertEqual(words[1].word, "два")
+        XCTAssertEqual(words[1].end, 1.0, accuracy: 0.0001)
+    }
+
+    /// Deepgram-ответ: слова в конце transcriptPath-пути; слово — word с
+    /// fallback на punctuated_word.
+    @objc func testExtractWordsDeepgramPath() {
+        let body = Data(#"{"results":{"channels":[{"alternatives":[{"transcript":"один два","words":[{"word":"один","start":0.0,"end":0.4},{"punctuated_word":"два.","start":0.5,"end":0.9}]}]}]}}"#.utf8)
+        let path = ["results", "channels", "0", "alternatives", "0", "transcript"]
+        let words = ProviderRequestBuilder.extractWords(from: body, path: path)
+        XCTAssertEqual(words.count, 2)
+        XCTAssertEqual(words[0].word, "один")
+        XCTAssertEqual(words[1].word, "два.", "fallback на punctuated_word")
+    }
+
+    /// Битые/частичные записи пропускаются; битый JSON и отсутствующие слова — [].
+    @objc func testExtractWordsSkippedAndBroken() {
+        // У «б» нет end — запись отбрасывается.
+        let partial = Data(#"{"words":[{"word":"а","start":0.1,"end":0.2},{"word":"б","start":0.3}]}"#.utf8)
+        XCTAssertEqual(ProviderRequestBuilder.extractWords(from: partial, path: nil).map { $0.word }, ["а"])
+
+        XCTAssertTrue(ProviderRequestBuilder.extractWords(from: Data("nope".utf8), path: nil).isEmpty,
+                      "битый JSON → пустой список")
+        XCTAssertTrue(ProviderRequestBuilder.extractWords(from: Data(), path: nil).isEmpty,
+                      "пустое тело → пустой список")
+        // words нет вовсе.
+        let noWords = Data(#"{"text":"просто текст"}"#.utf8)
+        XCTAssertTrue(ProviderRequestBuilder.extractWords(from: noWords, path: nil).isEmpty)
+        // Deepgram без words в альтернативе.
+        let dg = Data(#"{"results":{"channels":[{"alternatives":[{"transcript":"т"}]}]}}"#.utf8)
+        let path = ["results", "channels", "0", "alternatives", "0", "transcript"]
+        XCTAssertTrue(ProviderRequestBuilder.extractWords(from: dg, path: path).isEmpty)
+    }
 }

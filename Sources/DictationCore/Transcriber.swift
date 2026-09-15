@@ -1,15 +1,35 @@
 import Foundation
 import Network
 
+// MARK: - TimedWord
+
+/// Слово с таймстампами из ответа STT (verbose_json / deepgram words).
+/// Относительное время внутри распознанного аудио, секунды.
+public struct TimedWord: Equatable {
+    public let word: String
+    public let start: Double
+    public let end: Double
+
+    public init(word: String, start: Double, end: Double) {
+        self.word = word
+        self.start = start
+        self.end = end
+    }
+}
+
 // MARK: - TranscriptionResult
 
 public struct TranscriptionResult {
     public let text: String
     public let rawData: Data // raw API response (JSON as-is)
+    /// Word-таймстампы из ответа; пусто — провайдер их не вернул
+    /// (не ошибка: сшивка сегментов деградирует к по-словному diff).
+    public let words: [TimedWord]
 
-    public init(text: String, rawData: Data) {
+    public init(text: String, rawData: Data, words: [TimedWord] = []) {
         self.text = text
         self.rawData = rawData
+        self.words = words
     }
 }
 
@@ -129,9 +149,9 @@ public enum NetworkReachability {
 // MARK: - HTTPTransport
 
 public protocol HTTPTransport: AnyObject {
-    /// Send a request; return the response (status + body).
+    /// Send a request; return the response (status + body + headers).
     /// The default implementation is URLSession.
-    func send(request: URLRequest) async throws -> (status: Int, body: Data)
+    func send(request: URLRequest) async throws -> (status: Int, body: Data, headers: [String: String])
 }
 
 // MARK: - Transcriber
@@ -148,6 +168,12 @@ public final class Transcriber {
     /// + небольшой запас.
     public static let networkRequestTimeout: TimeInterval = 20
 
+    /// Всего попыток STT-запроса (первичная + до 3 ретраев с backoff). Сетевые
+    /// ошибки почти всегда падают быстро (connection refused/reset), поэтому
+    /// 4 быстрые попытки + backoff ≈ 5 с — внутри бюджета ворчдога оверлея;
+    /// таймаут (20 с) терминальный и ретраев не порождает.
+    public static let maxAttempts = 4
+
     /// Каноническое сообщение «нет интернета» — на него опирается маппинг
     /// оверлея `OverlayErrorText` и тесты.
     public static let noInternetMessage = "Нет интернета"
@@ -161,6 +187,9 @@ public final class Transcriber {
     private let apiKey: String
     private let apiSecret: String
     private let proxyKey: String
+    /// Имя заголовка для proxy-ключа (по умолчанию `X-Proxy-Key`); из конфига
+    /// (`proxy_key_header`) менять можно, чтобы прокси-слой не конфликтовал.
+    private let proxyKeyHeader: String
     private let language: String
     /// Таймаут из конфига (`timeout_seconds`); фактический таймаут запроса —
     /// `min(timeout, networkRequestTimeout)`.
@@ -179,11 +208,72 @@ public final class Transcriber {
     /// (byte-identical запросы, тесты не меняются).
     private let adapterID: String?
 
+    /// Кандидат в ретрай (см. `shouldRetry`): HTTP 429/5xx и транспортные
+    /// (не-таймаутные) сетевые ошибки. Всё остальное терминально.
+    static func isRetryable(_ error: TranscribeError) -> Bool {
+        switch error {
+        case .http(let code, _):
+            return code == 429 || (500...599).contains(code)
+        case .network:
+            return true
+        case .invalidResponse:
+            return false
+        }
+    }
+
+    /// Попытка №`retryIndex` (1-я, 2-я, …) спит до повтора: экспоненциальный
+    /// базовый интервал `0.5 * 2^n` сек + джиттер `jitter` сек (случайный
+    /// 0…0.25 по умолчанию — растаскивает совпавшие по времени клиенты).
+    static func backoffDelay(beforeRetry retryIndex: Int, jitter: Double = Double.random(in: 0...0.25)) -> TimeInterval {
+        0.5 * pow(2.0, Double(retryIndex)) + jitter
+    }
+
+    /// `Retry-After` из заголовков ответа (секунды), если задан и читается.
+    /// Заголовок ищем без учёта регистра; RFC 7231 допускает и секунды, и
+    /// HTTP-date (задержка = дата − сейчас, потолок неотрицательности).
+    /// Кривое значение → nil (тогда — дефолтный backoff).
+    static func retryAfterSeconds(from headers: [String: String]) -> TimeInterval? {
+        guard let raw = headers.first(where: { $0.key.caseInsensitiveCompare("retry-after") == .orderedSame })?.value else {
+            return nil
+        }
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        if let seconds = Double(trimmed), seconds.isFinite, seconds >= 0 {
+            return seconds
+        }
+        // Retry-After в формате HTTP-date (RFC 7231 §7.1.1.1).
+        guard let date = httpDate(from: trimmed) else { return nil }
+        return max(0, date.timeIntervalSince(Date()))
+    }
+
+    /// Парсинг HTTP-date (RFC 7231 §7.1.1.1): IMF-fixdate
+    /// («EEE, dd MMM yyyy HH:mm:ss GMT»), obsolete RFC 850
+    /// («EEEE, dd-MMM-yy HH:mm:ss GMT») и asctime («EEE MMM d HH:mm:ss yyyy»).
+    /// Не распознано — nil.
+    static func httpDate(from raw: String) -> Date? {
+        let value = raw.trimmingCharacters(in: .whitespaces)
+        let formats = [
+            "EEE, dd MMM yyyy HH:mm:ss zzz",
+            "EEEE, dd-MMM-yy HH:mm:ss zzz",
+            "EEE MMM d HH:mm:ss yyyy",
+        ]
+        for format in formats {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            formatter.dateFormat = format
+            if let date = formatter.date(from: value) { return date }
+        }
+        return nil
+    }
+
+    private let retrySleep: (TimeInterval) async -> Void
+
     public init(
         baseURL: String,
         model: String,
         apiKey: String,
         proxyKey: String = "",
+        proxyKeyHeader: String = "X-Proxy-Key",
         language: String = "ru",
         timeout: TimeInterval = 120,
         logLevel: String = "info",
@@ -191,7 +281,8 @@ public final class Transcriber {
         networkChecker: (() async -> Bool)? = nil,
         byetCookieProvider: ByetCookieProvider? = nil,
         apiSecret: String = "",
-        adapterID: String? = nil
+        adapterID: String? = nil,
+        retrySleep: ((TimeInterval) async -> Void)? = nil
     ) {
         if let adapterID = adapterID, !adapterID.isEmpty {
             // Адаптер известного провайдера: пустые baseURL/model из конфига
@@ -207,6 +298,7 @@ public final class Transcriber {
         self.apiKey = apiKey
         self.apiSecret = apiSecret
         self.proxyKey = proxyKey
+        self.proxyKeyHeader = proxyKeyHeader
         self.language = language
         self.timeout = timeout
         self.logLevel = logLevel
@@ -214,11 +306,18 @@ public final class Transcriber {
         self.networkChecker = networkChecker ?? { await NetworkReachability.isInternetReachable() }
         self.byetCookieProvider = byetCookieProvider
         self.adapterID = adapterID
+        // Инъектируемый сон между ретраями: тесты прогоняют backoff без реальных
+        // пауз. Дефолт — настоящий Task.sleep (секунды > 0).
+        self.retrySleep = retrySleep ?? { seconds in
+            guard seconds > 0 else { return }
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+        }
     }
 
     /// Transcribe WAV audio via a multipart/form-data POST to the transcription endpoint.
-    /// On network failure, retries once (2 attempts total). HTTP and invalid-response
-    /// errors are not retried.
+    /// On retryable failures (network, HTTP 429/5xx) retries with exponential
+    /// backoff and jitter, up to `maxAttempts` total. Timeouts, cancellation
+    /// and invalid responses are terminal.
     /// - Parameter prompt: необязательный контекст для Whisper-совместимых API
     ///   (поле `prompt` form-data): текст уже распознанных сегментов при пошаговой
     ///   диктовке. По умолчанию nil — старый путь (одного запроса) не меняется.
@@ -253,7 +352,7 @@ public final class Transcriber {
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         if !proxyKey.isEmpty {
-            request.setValue(proxyKey, forHTTPHeaderField: "X-Proxy-Key")
+            request.setValue(proxyKey, forHTTPHeaderField: proxyKeyHeader)
         }
         await applyByetHeaders(to: &request)
         request.timeoutInterval = min(timeout, Self.networkRequestTimeout)
@@ -310,7 +409,7 @@ public final class Transcriber {
             request.setValue(value, forHTTPHeaderField: name)
         }
         if !proxyKey.isEmpty {
-            request.setValue(proxyKey, forHTTPHeaderField: "X-Proxy-Key")
+            request.setValue(proxyKey, forHTTPHeaderField: proxyKeyHeader)
         }
         await applyByetHeaders(to: &request)
         request.timeoutInterval = min(timeout, Self.networkRequestTimeout)
@@ -337,7 +436,7 @@ public final class Transcriber {
         }
         request.timeoutInterval = min(timeout, Self.networkRequestTimeout)
 
-        let response: (status: Int, body: Data)
+        let response: (status: Int, body: Data, headers: [String: String])
         do {
             response = try await send(request: request)
         } catch is CancellationError {
@@ -377,7 +476,9 @@ public final class Transcriber {
     }
 
     /// Общий цикл «отправить + (по необходимости) повторить» для обоих путей.
-    /// - 2 попытки суммарно: первичный + 1 ретрай (только сетевые ошибки);
+    /// - до `maxAttempts` попыток: первичная + ретраи с экспоненциальным
+    ///   backoff и джиттером (только retryable ошибки: HTTP 429/5xx,
+    ///   транспортные не-таймаутные); HTTP 429 ждёт Retry-After (потолок 10 с);
     /// - Byet-челлендж ретраится один раз со свежей кукой (attempt не сжигается);
     /// - `transcriptPath == nil` — плоский ключ "text"; иначе извлекается по
     ///   JSON-пути адаптера (deepgram).
@@ -404,13 +505,26 @@ public final class Transcriber {
             throw TranscribeError.network(Self.noInternetMessage)
         }
 
-        // 2 attempts total: initial + 1 retry (network errors only).
+        // maxAttempts попыток (первичная + до maxAttempts-1 ретраев) с
+        // экспоненциальным backoff и джиттером. Ретраятся только retryable
+        // ошибки (HTTP 429/5xx, транспортные не-таймаутные); таймаут, cancel
+        // и invalidResponse — терминальные, повтор не жжёт бюджет оверлея.
         var lastError: TranscribeError?
         var attempt = 0
+        // Retry-After из заголовка HTTP 429 — ждём указанное сервером время.
+        var retryAfterHeader: TimeInterval?
         // Byet-челлендж ретраится не больше одного раза (свежей кукой).
         var challengeRetried = false
-        for _ in 0..<2 {
+        while attempt < Self.maxAttempts {
+            // Отмена родителя (например, первый успех параллельного failover
+            // отменил сиблингов — cancelAll): повторный POST не отправляем.
+            // Дефолтный retrySleep глотает отмену через try?, поэтому проверка
+            // именно здесь — гарантия отсутствия «лишних» запросов после победы.
+            if Task.isCancelled {
+                throw CancellationError()
+            }
             attempt += 1
+            retryAfterHeader = nil
             do {
                 let started = CFAbsoluteTimeGetCurrent()
                 let response = try await send(request: request)
@@ -418,6 +532,11 @@ public final class Transcriber {
                 debugDump(request: request, wavByteCount: wav.count, filename: filename, prompt: prompt, recording: recording, response: response)
                 if logLevel.lowercased() == "debug" {
                     Logger.log(String(format: "STT response: HTTP %d in %.2f s, bodyBytes=%d", response.status, elapsed, response.body.count), level: "debug")
+                }
+                // HTTP 429: при Retry-After в заголовках отступаем на указанное
+                // сервером время (потолок ~10 с — бюджет ворчдога оверлея).
+                if response.status == 429 {
+                    retryAfterHeader = Self.retryAfterSeconds(from: response.headers)
                 }
                 // Byet-челлендж (transport == "relay"/"infinityfree"): сервер вместо
                 // контента прислал JS-заглушку. Единственный ретрай — со свежей
@@ -444,9 +563,20 @@ public final class Transcriber {
                 }
                 return result
             } catch let error as TranscribeError {
-                // http / invalidResponse — do not retry.
-                Logger.log("STT error (attempt \(attempt)): \(Self.describe(error))", level: "error")
-                throw error
+                // HTTP 4xx (кроме 429)/invalidResponse — не ретраим.
+                guard Self.isRetryable(error) else {
+                    Logger.log("STT error (attempt \(attempt)): \(Self.describe(error))", level: "error")
+                    throw error
+                }
+                lastError = error
+                Logger.log("STT retryable error (attempt \(attempt)/\(Self.maxAttempts)): \(Self.describe(error))", level: "error")
+                if attempt >= Self.maxAttempts { break }
+                // Пауза: Retry-After при 429 (потолок 10 с), иначе backoff.
+                var delay = Self.backoffDelay(beforeRetry: attempt)
+                if case .http(429, _) = error, let retryAfter = retryAfterHeader {
+                    delay = min(retryAfter, 10)
+                }
+                await retrySleep(delay)
             } catch is CancellationError {
                 // Do not retry cancelled requests.
                 Logger.log("STT cancelled (attempt \(attempt))", level: "error")
@@ -465,8 +595,10 @@ public final class Transcriber {
             } catch {
                 // Transport-level (network) failure — eligible for retry.
                 let message = error.localizedDescription
-                Logger.log("STT network error (attempt \(attempt)/2): \(message)", level: "error")
                 lastError = TranscribeError.network(message)
+                Logger.log("STT network error (attempt \(attempt)/\(Self.maxAttempts)): \(message)", level: "error")
+                if attempt >= Self.maxAttempts { break }
+                await retrySleep(Self.backoffDelay(beforeRetry: attempt))
             }
         }
         // Все попытки упали на транспортном уровне — ответа так и нет.
@@ -474,7 +606,7 @@ public final class Transcriber {
         // чтобы было видно, что до HTTP дело не дошло; ошибки дампа не роняют.
         debugDump(request: request, wavByteCount: wav.count, filename: filename, prompt: prompt, recording: recording, response: nil)
         if let lastError = lastError {
-            Logger.log("STT failed after 2 attempts: \(Self.describe(lastError))", level: "error")
+            Logger.log("STT failed after \(Self.maxAttempts) attempts: \(Self.describe(lastError))", level: "error")
             throw lastError
         }
         throw TranscribeError.network("Unknown transport error")
@@ -499,7 +631,7 @@ public final class Transcriber {
 
     // MARK: - Send
 
-    private func send(request: URLRequest) async throws -> (status: Int, body: Data) {
+    private func send(request: URLRequest) async throws -> (status: Int, body: Data, headers: [String: String]) {
         if let transport = transport {
             return try await transport.send(request: request)
         }
@@ -507,7 +639,15 @@ public final class Transcriber {
         guard let httpResponse = response as? HTTPURLResponse else {
             throw URLError(.badServerResponse)
         }
-        return (httpResponse.statusCode, data)
+        // Заголовки ответа — для Retry-After (HTTP 429). HTTPURLResponse хранит
+        // их с любым регистром ключа; поиск у нас без учёта регистра.
+        var headers: [String: String] = [:]
+        for (name, value) in httpResponse.allHeaderFields {
+            if let stringValue = value as? String {
+                headers[String(describing: name)] = stringValue
+            }
+        }
+        return (httpResponse.statusCode, data, headers)
     }
 
     // MARK: - Debug dump (log_level == "debug")
@@ -529,7 +669,7 @@ public final class Transcriber {
     /// (все попытки упали на транспортном уровне до HTTP), в секции ответа
     /// пишется `(no response — transport error)`. Поведение запроса/ответа не
     /// меняет; ошибок не бросает.
-    private func debugDump(request: URLRequest, wavByteCount: Int, filename: String, prompt: String?, recording: DebugDump.RecordingInfo?, response: (status: Int, body: Data)?) {
+    private func debugDump(request: URLRequest, wavByteCount: Int, filename: String, prompt: String?, recording: DebugDump.RecordingInfo?, response: (status: Int, body: Data, headers: [String: String])?) {
         guard logLevel.lowercased() == "debug" else { return }
 
         var headers: [(name: String, value: String)] = []
@@ -570,8 +710,10 @@ public final class Transcriber {
     /// Разбор HTTP-ответа в результат распознавания.
     /// - `transcriptPath == nil` — OpenAI-совместимый плоский `{"text": "…"}`;
     /// - иначе текст извлекается по JSON-пути адаптера (deepgram).
+    /// Word-таймстампы (если вернул провайдер) кладутся в `result.words`;
+    /// битый/пустой массив — не ошибка (пусто).
     /// Ошибки и их строки — ровно те же, что были в legacy-пути (см. тесты).
-    private static func parseResponse(_ response: (status: Int, body: Data), transcriptPath: [String]? = nil) throws -> TranscriptionResult {
+    private static func parseResponse(_ response: (status: Int, body: Data, headers: [String: String]), transcriptPath: [String]? = nil) throws -> TranscriptionResult {
         let status = response.status
         let body = response.body
         guard (200...299).contains(status) else {
@@ -582,7 +724,8 @@ public final class Transcriber {
             throw TranscribeError.http(status, String(text.prefix(500)))
         }
         let text = try ProviderRequestBuilder.extractText(from: body, path: transcriptPath)
-        return TranscriptionResult(text: text, rawData: body)
+        let words = ProviderRequestBuilder.extractWords(from: body, path: transcriptPath)
+        return TranscriptionResult(text: text, rawData: body, words: words)
     }
 
     // MARK: - Multipart body

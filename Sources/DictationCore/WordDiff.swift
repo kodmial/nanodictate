@@ -96,6 +96,17 @@ public enum WordDiff {
         text.split(whereSeparator: { $0.isWhitespace }).map(String.init)
     }
 
+    /// Хвост текста после первых `wordCount` слов — по СИМВОЛЬНОМУ смещению
+    /// (не реконструкция из токенов: внутренняя пунктуация/пробелы целы).
+    /// Один пробел (или несколько) после последнего вырезанного слова остаётся
+    /// хвосту — вызывающий (временнáя сшивка сегментов) обрезает ведущие
+    /// пробелы сам. `wordCount >= числа слов` → пустая строка.
+    public static func tailAfterWords(_ wordCount: Int, in text: String) -> String {
+        let offset = offsetAfter(words: wordCount, in: text)
+        guard offset < text.count else { return "" }
+        return String(text[text.index(text.startIndex, offsetBy: offset)...])
+    }
+
     /// Символьный offset сразу после конца n-го слова (n = 0 → 0).
     /// Пробелы после последнего общего слова остаются «хвосту».
     private static func offsetAfter(words wordCount: Int, in text: String) -> Int {

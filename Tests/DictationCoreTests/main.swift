@@ -50,6 +50,10 @@ let suites: [XCTestCase.Type] = [
     LiveOrchestrationBranchTests.self,
     OverlayLevelTests.self,
     RoutingRoleTests.self,
+    BatchSegmenterTests.self,
+    BatchTextJoinerTests.self,
+    BatchTranscriberTests.self,
+    WAVDecoderTests.self,
 ]
 
 var passed = 0

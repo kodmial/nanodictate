@@ -643,12 +643,284 @@ func cmdRouting(_ args: [String]) -> Int32 {
 }
 
 func cmdTranscribe(_ args: [String]) -> Int32 {
-    guard let file = args.first else {
+    // Пакетные флаги (--provider/--out/--max-segment/--overlap/--no-progress/
+    // --resume) включают пакетный режим; без них — разовая расшифровка как раньше.
+    var batch = BatchTranscribeOptions()
+    var batchRequested = false
+    var file: String?
+    var i = 0
+    while i < args.count {
+        let a = args[i]
+        switch a {
+        case "--provider":
+            guard i + 1 < args.count else { eprint("ОШИБКА: --provider требует id (например, gigaam)"); return 1 }
+            batch.providerID = args[i + 1]; i += 2; batchRequested = true
+        case "--out":
+            guard i + 1 < args.count else { eprint("ОШИБКА: --out требует путь"); return 1 }
+            batch.outPath = args[i + 1]; i += 2; batchRequested = true
+        case "--max-segment":
+            guard i + 1 < args.count, let v = Double(args[i + 1]), v > 0 else {
+                eprint("ОШИБКА: --max-segment требует положительное число секунд"); return 1
+            }
+            batch.maxSegment = v; i += 2; batchRequested = true
+        case "--overlap":
+            guard i + 1 < args.count, let v = Double(args[i + 1]), v >= 0 else {
+                eprint("ОШИБКА: --overlap требует неотрицательное число секунд"); return 1
+            }
+            batch.overlap = v; i += 2; batchRequested = true
+        case "--no-progress":
+            batch.showProgress = false; i += 1; batchRequested = true
+        case "--resume":
+            batch.resume = true; i += 1; batchRequested = true
+        case "--json":
+            batch.json = true; i += 1
+        case "--help", "-h":
+            eprint(usageTranscribeBatch)
+            return 0
+        default:
+            if a.hasPrefix("-") {
+                eprint("ОШИБКА: неизвестный флаг \(a)")
+                eprint(usageTranscribeBatch)
+                return 1
+            }
+            guard file == nil else { eprint("ОШИБКА: лишний аргумент \(a)"); return 1 }
+            file = a; i += 1
+        }
+    }
+    guard let file = file else {
         eprint("Использование: dictatorctl transcribe ФАЙЛ [--json]")
+        eprint(usageTranscribeBatch)
         return 1
     }
-    let jsonFlag = args.contains("--json")
+    if !batchRequested {
+        return cmdTranscribeLegacy(file, json: batch.json)
+    }
+    return cmdTranscribeBatch(file, options: batch)
+}
 
+struct BatchTranscribeOptions {
+    var providerID = "gigaam"
+    var outPath: String?
+    var maxSegment: TimeInterval = 30
+    var overlap: TimeInterval = 2.5
+    var showProgress = true
+    var resume = false
+    var json = false
+}
+
+let usageTranscribeBatch = """
+  Пакетный режим (длинные файлы, чанки + оверлэп + retry + checkpoint):
+    --provider <id>  Провайдер из [providers.X] конфига (по умолчанию gigaam);
+                     весь файл обрабатывается ОДНИМ провайдером
+    --out <path>     Куда записать текст (по умолчанию — stdout);
+                     чекпоинт рядом: <path>.checkpoint.json
+    --max-segment <s> Длина чанка в секундах (по умолчанию 30)
+    --overlap <s>    Перекрытие чанков в секундах (по умолчанию 2.5)
+    --no-progress    Не печатать прогресс в stderr
+    --resume         Продолжить из чекпоинта (Ctrl+C + тот же запуск)
+  Пример: dictatorctl transcribe lecture.m4a --provider selfhosted --out result.txt
+"""
+
+func formatClock(_ seconds: TimeInterval) -> String {
+    let s = max(0, Int(seconds.rounded()))
+    return String(format: "%02d:%02d", s / 60, s % 60)
+}
+
+/// Стабильный отпечаток строки (djb2 по UTF-8 байтам) для ключа чекпоинта.
+/// `String.hashValue` не годится: рандомизирован между процессами.
+func stableCheckpointStamp(_ s: String) -> String {
+    var hash: UInt64 = 5381
+    for byte in s.utf8 {
+        hash = (hash &* 33) &+ UInt64(byte)
+    }
+    return String(hash, radix: 16)
+}
+
+func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int32 {
+    let fm = FileManager.default
+
+    // 1. Конфиг и провайдер (всё из config.toml, ничего не зашито).
+    let config: AppConfig
+    do { config = try AppConfig.load(from: nil) }
+    catch {
+        eprint("ОШИБКА: не удалось загрузить конфиг: \(error)")
+        return 1
+    }
+    var provider = config.providers.first(where: { $0.id == options.providerID })
+    if provider == nil && options.providerID == "gigaam" {
+        // Стоковый конфиг (config init) секции gigaam не содержит: фолбэк на
+        // активного провайдера, иначе — первого доступного, чтобы batch-режим
+        // работал out-of-box без правки флага.
+        let active: AppConfig.Provider? = (try? ProviderStore.loadProviders())
+            .flatMap { list in list.first(where: { $0.isActive }).flatMap { active in
+                config.providers.first(where: { $0.id == active.id })
+            } }
+        let fallback = active ?? config.providers.first
+        if let fallback = fallback {
+            eprint("ПРЕДУПРЕЖДЕНИЕ: провайдер 'gigaam' не найден в конфиге — выбран '\(fallback.id)'")
+            provider = fallback
+        }
+    }
+    guard let provider = provider else {
+        eprint("ОШИБКА: провайдер '\(options.providerID)' не найден. Доступны: \(config.providers.map { $0.id }.joined(separator: ", "))")
+        return 1
+    }
+    guard !provider.baseURL.isEmpty else {
+        eprint("ОШИБКА: у провайдера '\(provider.id)' пустой base_url в конфиге")
+        return 1
+    }
+
+    // 2. Приведение к 16 кГц моно 16-бит WAV (afconvert, если нужно).
+    let inputURL = URL(fileURLWithPath: file)
+    var wavURL = inputURL
+    var tempWavURL: URL?
+    let alreadyOK = (try? Data(contentsOf: inputURL)).flatMap({ WAVDecoder.decodePCM16($0) })
+        .map { $0.sampleRate == 16000 && $0.channels == 1 } ?? false
+    if !alreadyOK {
+        let converted = fm.temporaryDirectory.appendingPathComponent("dictatorctl-batch-\(UUID().uuidString).wav")
+        let conv = runProcess("/usr/bin/afconvert",
+                              ["-f", "WAVE", "-d", "LEI16@16000", "-c", "1", file, converted.path])
+        guard conv.status == 0 else {
+            let msg = conv.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            eprint("ОШИБКА: не удалось конвертировать \(file) в WAV: \(msg.isEmpty ? conv.stdout : msg)")
+            return 1
+        }
+        tempWavURL = converted
+        wavURL = converted
+    }
+    guard let wavData = try? Data(contentsOf: wavURL),
+          let info = WAVDecoder.decodePCM16(wavData) else {
+        eprint("ОШИБКА: не удалось декодировать WAV (нужен PCM16 16 кГц моно) из \(file)")
+        if let t = tempWavURL { try? fm.removeItem(at: t) }
+        return 1
+    }
+    if let t = tempWavURL { try? fm.removeItem(at: t) } // сэмплы уже в памяти
+
+    // 3. Чекпоинт: рядом с --out, иначе стабильный путь во временной папке.
+    // Ключ временного чекпоинта учитывает ОТПЕЧАТОК ПОЛНОГО ПУТИ файла
+    // (разные файлы с одинаковым именем не сталкиваются) + провайдера +
+    // maxSegment + overlap (нарезка чанков зависит от обоих).
+    let checkpointPath: String
+    if let out = options.outPath {
+        checkpointPath = out + ".checkpoint.json"
+    } else {
+        checkpointPath = fm.temporaryDirectory
+            .appendingPathComponent("dictation-batch-\(stableCheckpointStamp(inputURL.path))-\(provider.id)-\(Int(options.maxSegment))-\(Int(options.overlap)).checkpoint.json")
+            .path
+    }
+    if options.resume && !fm.fileExists(atPath: checkpointPath) {
+        eprint("ПРЕДУПРЕЖДЕНИЕ: --resume, но чекпоинт \(checkpointPath) не найден — начинаю с нуля")
+    }
+    let sourcePath = inputURL.path
+    if options.resume, fm.fileExists(atPath: checkpointPath),
+       let cp = try? BatchTranscriber.loadCheckpoint(from: checkpointPath),
+       cp.sourceFile != sourcePath {
+        eprint("ПРЕДУПРЕЖДЕНИЕ: чекпоинт \(checkpointPath) от другого файла ('\(cp.sourceFile)') — он не используется, начинаю с нуля")
+    }
+
+    // 4. Реальный транспорт чанка: запрос по полям провайдера + Retry-After.
+    let transport = URLSessionBatchTransport()
+    let apiKey = RetryProvider.resolveAPIKey(for: provider) // env > api_key > api_key_file
+    let language = config.language.isEmpty ? "ru" : config.language
+    let sendOne: BatchTranscriber.SendOne = { attempt, wav, chunkIndex in
+        guard let prepared = BatchRequestBuilder.makeRequest(
+            provider: provider,
+            apiKey: apiKey,
+            language: language,
+            timeout: config.timeoutSeconds,
+            wav: wav,
+            chunkIndex: chunkIndex
+        ) else {
+            throw BatchHTTPError.invalidResponse("Не удалось собрать запрос: битый base_url у '\(provider.id)'")
+        }
+        let response: BatchHTTPResponse
+        do { response = try await transport.send(request: prepared.request) }
+        catch { throw BatchHTTPError.network(error.localizedDescription) }
+        guard (200...299).contains(response.status) else {
+            let snippet = String(data: response.body, encoding: .utf8) ?? ""
+            throw BatchHTTPError.http(response.status,
+                                      message: String(snippet.prefix(300)),
+                                      retryAfter: response.retryAfterSeconds)
+        }
+        do {
+            return try ProviderRequestBuilder.extractText(from: response.body, path: prepared.transcriptPath)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            throw BatchHTTPError.invalidResponse("Не удалось разобрать ответ: \(error)")
+        }
+    }
+
+    Task {
+        do {
+            let outcome = try await BatchTranscriber.run(
+                samples: info.samples,
+                sampleRate: 16000,
+                maxSegment: options.maxSegment,
+                overlap: options.overlap,
+                providerID: provider.id,
+                sourceFile: sourcePath,
+                checkpointPath: checkpointPath,
+                resume: options.resume,
+                sendOne: sendOne,
+                delay: { seconds in
+                    if seconds > 0 {
+                        try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                    }
+                },
+                onProgress: options.showProgress ? { i, n, start, end, elapsed, status in
+                    let tag = status == BatchSegmentRecord.statusOK ? "done" : "skip"
+                    eprint(String(format: "[%d/%d] %@—%@, %.1fs, %@", i, n, formatClock(start), formatClock(end), elapsed, tag))
+                } : nil
+            )
+
+            // 5. Текст: в --out (атомарно) или в stdout. В файл — с завершающим
+            // переводом строки (пустой текст — пустой файл, без голого \n).
+            if let out = options.outPath {
+                do {
+                    let content = outcome.text.isEmpty ? outcome.text : outcome.text + "\n"
+                    try content.write(to: URL(fileURLWithPath: out), atomically: true, encoding: .utf8)
+                } catch {
+                    eprint("ОШИБКА: не удалось записать \(out): \(error)")
+                    exit(1)
+                }
+            } else {
+                print(outcome.text)
+            }
+
+            // 6. Итог в stderr.
+            let duration = Double(info.samples.count) / 16000.0
+            var summary = "Готово: длительность \(formatClock(duration)), сегментов \(outcome.totalSegments), "
+                + "распознано \(outcome.okCount), пропущено \(outcome.skippedCount), время обработки \(Int(outcome.elapsed)) с"
+            if !outcome.skippedIndexes.isEmpty {
+                summary += "; пропущенные сегменты: \(outcome.skippedIndexes.map(String.init).joined(separator: ", "))"
+            }
+            eprint(summary)
+            eprint("Чекпоинт: \(checkpointPath)")
+
+            // 7. --json: как в разовом режиме — transcription_raw.json рядом с ФАЙЛ
+            // (в пакетном режиме это копия чекпоинта с текстами чанков).
+            if options.json {
+                let rawURL = inputURL.deletingLastPathComponent().appendingPathComponent("transcription_raw.json")
+                do {
+                    try Data(contentsOf: URL(fileURLWithPath: checkpointPath)).write(to: rawURL, options: .atomic)
+                    eprint("Сохранено: \(rawURL.path)")
+                } catch {
+                    eprint("Не удалось сохранить \(rawURL.path): \(error)")
+                }
+            }
+            exit(0)
+        } catch {
+            eprint("ОШИБКА: \(error)")
+            exit(1)
+        }
+    }
+
+    // Keep the main thread alive until the async batch finishes (it exits above).
+    RunLoop.main.run()
+    return 1 // unreachable
+}
+
+func cmdTranscribeLegacy(_ file: String, json: Bool) -> Int32 {
     let fm = FileManager.default
     let inputURL = URL(fileURLWithPath: file)
 
@@ -715,7 +987,7 @@ func cmdTranscribe(_ args: [String]) -> Int32 {
         do {
             let result = try await transcriber.transcribe(wav: data, filename: filename)
             print(result.text)
-            if jsonFlag {
+            if json {
                 do {
                     try result.rawData.write(to: rawURL, options: .atomic)
                     print("Сохранено: \(rawURL.path)")
@@ -852,6 +1124,13 @@ let usage = """
   transcribe ФАЙЛ [--json]         Разовая расшифровка аудиофайла
                                    (не-WAV конвертируется через afconvert; с --json
                                    сырой ответ сохраняется в transcription_raw.json рядом с ФАЙЛ)
+  transcribe ФАЙЛ [--json]         Пакетный режим для длинных файлов: те же флаги
+    [--provider <id>] [--out <путь>] [--max-segment <с>] [--overlap <с>]
+    [--no-progress] [--resume]
+                                   Один провайдер (по умолчанию gigaam), чанки
+                                   max-segment с overlap, retry 3×, плейсхолдер
+                                   [..] при провале, чекпоинт <--out>.checkpoint.json
+                                   (без --out — во временной папке) для --resume
   retry ИМЯ                        Повторить распознавание последней записи другим
                                    провайдером (агент хранит последний WAV в памяти;
                                    вставку выполняет сам агент)

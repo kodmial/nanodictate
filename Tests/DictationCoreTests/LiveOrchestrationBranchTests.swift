@@ -361,7 +361,7 @@ final class LiveOrchestrationBranchTests: XCTestCase {
                 index: 0,
                 insertedText: "",
                 prompt: nil,
-                stt: { _, _, _ in "" }
+                stt: { _, _, _ in ChunkedPipeline.SttResult(text: "") }
             )
             XCTAssertEqual(result.insertText, "", "пустой STT-ответ даёт пустой insertText")
             XCTAssertEqual(result.promptText, "", "пустой STT-ответ даёт пустой promptText")

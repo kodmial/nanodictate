@@ -49,11 +49,18 @@ public struct AudioSegment: Equatable {
     /// PCM-сэмплы: тело сегмента + последние `overlap` секунд предыдущего
     /// (или целый предыдущий, если он короче оверлэпа). У первого — без оверлэпа.
     public let samples: [Int16]
+    /// ФАКТИЧЕСКИ приклеенный оверлэп предыдущего тела, секунды. Всегда 0 у
+    /// первого сегмента; у следующих — `min(конфигурируемый overlap, длина
+    /// предыдущего тела)` в сэмплах → секунды. dedupeOverlap режет дубликаты
+    /// РОВНО по этой величине (а не по `config.overlap`, который при коротком
+    /// предыдущем сегменте больше реально приклеенного хвоста).
+    public let overlapSeconds: TimeInterval
 
-    public init(start: TimeInterval, end: TimeInterval, samples: [Int16]) {
+    public init(start: TimeInterval, end: TimeInterval, samples: [Int16], overlapSeconds: TimeInterval = 0) {
         self.start = start
         self.end = end
         self.samples = samples
+        self.overlapSeconds = overlapSeconds
     }
 }
 
@@ -168,18 +175,23 @@ public enum AudioSegmenter {
             let body = Array(samples[bodyStart..<bodyEnd])
 
             var segSamples = body
+            var overlapSeconds: TimeInterval = 0
             if index > 0 {
                 // Оверлэп берётся из ХВОСТА ТЕЛА предыдущего сегмента (речь),
                 // а не из region вблизи bodyStart (там может быть тишина паузы).
                 let prevEnd = min(ranges[index - 1].upperBound * windowSize, samples.count)
                 let overlapFrom = max(0, prevEnd - overlapCount)
                 segSamples = Array(samples[overlapFrom..<prevEnd]) + body
+                // Фактически приклеено min(overlapCount, prevEnd) сэмплов —
+                // короткое предыдущее тело каппит конфигурируемый оверлэп.
+                overlapSeconds = TimeInterval(prevEnd - overlapFrom) / Double(sampleRate)
             }
 
             result.append(AudioSegment(
                 start: TimeInterval(bodyStart) / Double(sampleRate),
                 end: TimeInterval(bodyEnd) / Double(sampleRate),
-                samples: segSamples
+                samples: segSamples,
+                overlapSeconds: overlapSeconds
             ))
         }
         return result

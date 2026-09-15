@@ -247,6 +247,122 @@ final class RetryProviderTests: XCTestCase {
         }
     }
 
+    // MARK: - Параллельный failover (RetryProvider.parallelFailover)
+
+    /// Потокобезопасный накопитель событий из group-тасков (модификация в
+    /// async-контексте из нескольких задач; box — @unchecked Sendable).
+    private final class OrderBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [String] = []
+        func record(_ value: String) {
+            lock.lock(); defer { lock.unlock() }
+            values.append(value)
+        }
+        var snapshot: [String] {
+            lock.lock(); defer { lock.unlock() }
+            return values
+        }
+    }
+
+    /// (a) Первый успех выигрывает и отменяет остальных: быстрый кандидат №1,
+    /// кандидаты №2 и №3 перед «POST» спят — после cancelAll они НЕ делают
+    /// лишних POST (дефолтный retrySleep глотает отмену, но верх цикла
+    /// Transcriber.sendWithRetry её ловит).
+    @objc func testParallelFailoverFirstSuccessCancelsOthers() {
+        runAsync("testParallelFailoverFirstSuccessCancelsOthers") {
+            let completedPOSTs = OrderBox()
+            let cancelledStarts = OrderBox()
+
+            let (result, providerID) = try await RetryProvider.parallelFailover(
+                candidates: ["1", "2", "3"]
+            ) { candidate in
+                if candidate == "1" {
+                    return (self.makeResult("first"), "1")
+                }
+                // Медленные кандидаты: у них достаточно времени, чтобы кандидат
+                // №1 успел выиграть и отменить их (cancelAll).
+                do {
+                    try await Task.sleep(nanoseconds: 300_000_000)
+                } catch {
+                    cancelledStarts.record(candidate)
+                    throw CancellationError()
+                }
+                if Task.isCancelled {
+                    cancelledStarts.record(candidate)
+                    throw CancellationError()
+                }
+                completedPOSTs.record(candidate)
+                return (self.makeResult("slow-\(candidate)"), candidate)
+            }
+
+            XCTAssertEqual(result.text, "first")
+            XCTAssertEqual(providerID, "1")
+            XCTAssertTrue(completedPOSTs.snapshot.isEmpty,
+                          "отменённые кандидаты не делают «лишних» POST после победы кандидата №1")
+            XCTAssertTrue(cancelledStarts.snapshot.count >= 1,
+                          "минимум один медленный кандидат наблюдал отмену")
+        }
+    }
+
+    /// (b) Все кандидаты кидают TranscribeError → наружу уходит ошибка
+    /// ПОСЛЕДНЕГО завершившегося (контролируемый порядок: «c» мгновенно,
+    /// «b» через 50 мс, «a» через 200 мс).
+    @objc func testParallelFailoverAllTranscribeErrorsKeepsLastCompleted() {
+        runAsync("testParallelFailoverAllTranscribeErrorsKeepsLastCompleted") {
+            do {
+                _ = try await RetryProvider.parallelFailover(
+                    candidates: ["a", "b", "c"]
+                ) { candidate in
+                    switch candidate {
+                    case "a":
+                        try await Task.sleep(nanoseconds: 200_000_000)
+                        throw TranscribeError.network("last-completed-a")
+                    case "b":
+                        try await Task.sleep(nanoseconds: 50_000_000)
+                        throw TranscribeError.http(500, "b")
+                    default:
+                        throw TranscribeError.invalidResponse("c")
+                    }
+                }
+                XCTFail("Ожидалась ошибка")
+            } catch let error as TranscribeError {
+                XCTAssertEqual(error, .network("last-completed-a"),
+                               "побеждает ошибка последнего завершившегося (a завершился позже всех)")
+            } catch {
+                XCTFail("Неожиданная ошибка: \(error)")
+            }
+        }
+    }
+
+    /// (c) Не-TranscribeError (abortError) пробрасывается независимо от уже
+    /// накопленного lastFailure: «a» мгновенно кидает TranscribeError, «b»
+    /// (после паузы) — NonTranscribeError. Наружу — abortError, даже если
+    /// lastFailure уже был увиден.
+    @objc func testParallelFailoverAbortWinsOverLastFailure() {
+        runAsync("testParallelFailoverAbortWinsOverLastFailure") {
+            let order = OrderBox()
+            do {
+                _ = try await RetryProvider.parallelFailover(
+                    candidates: ["a", "b"]
+                ) { candidate in
+                    if candidate == "a" {
+                        order.record("failure-a")
+                        throw TranscribeError.http(500, "a")
+                    }
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                    order.record("abort-b")
+                    throw NonTranscribeError()
+                }
+                XCTFail("Ожидалась ошибка")
+            } catch is NonTranscribeError {
+                XCTAssertEqual(order.snapshot, ["failure-a", "abort-b"],
+                               "lastFailure увиден РАНЬШЕ abortError, но побеждает abortError")
+            } catch {
+                XCTFail("Неожиданная ошибка: \(error)")
+            }
+        }
+    }
+
     // MARK: - resolveAPIKey: env > api_key > api_key_file
 
     @objc func testResolveAPIKeyEnvWinsOverInlineAndFile() {

@@ -30,7 +30,19 @@ public final class RetryProvider {
 
     /// Провайдер, которым последняя запись уже была распознана (неуспешно) —
     /// исключается из failover-очереди.
-    public var lastFailedProviderID: String?
+    /// Lock-backed: при параллельном failover (main.swift transcribeAutomatically)
+    /// писать/читать могут разные Task-и одновременно.
+    private var _lastFailedProviderID: String?
+    public var lastFailedProviderID: String? {
+        get {
+            lock.lock(); defer { lock.unlock() }
+            return _lastFailedProviderID
+        }
+        set {
+            lock.lock(); defer { lock.unlock() }
+            _lastFailedProviderID = newValue
+        }
+    }
 
     public init(transcribeFunction: TranscribeFunction? = nil) {
         self.transcribeFunction = transcribeFunction ?? RetryProvider.defaultTranscribe
@@ -193,5 +205,69 @@ public final class RetryProvider {
             }
         }
         throw lastError ?? TranscribeError.invalidResponse("failover failed without a provider error")
+    }
+
+    // MARK: - Параллельный failover (withTaskGroup)
+
+    /// Параллельный failover по кандидатам: все транскрибации запускаются одним
+    /// withTaskGroup (независимые STT-запросы), первый успех выигрывает и
+    /// отменяет остальных (cancelAll). Семантика (перенесена из DictatorAgent
+    /// transcribeAutomatically 1:1):
+    /// - первый `.success` → `group.cancelAll()` и возврат;
+    /// - TranscribeError → запоминается как `lastFailure`, побеждает ПОСЛЕДНИЙ
+    ///   завершившийся (исход возвращается как Result и разворачивается после
+    ///   withTaskGroup — тело группы не бросает);
+    /// - НЕ-TranscribeError (abortError, например ошибка микрофона) → абортит
+    ///   группу и пробрасывается независимо от накопленного `lastFailure`;
+    /// - пустые кандидаты → `TranscribeError.invalidResponse("failover has no
+    ///   candidates")`.
+    ///
+    /// `lastFailedProviderID` функция НЕ трогает: он ставится вызывающим ДО
+    /// группы и сбрасывается на успехе в `retranscribe`/`transcribeWithFailover`.
+    /// `Candidate` — минимальный тип, из которого транскрибация достаёт нужные
+    /// поля (в проде — `AppConfig.Provider`, в тестах — простой id).
+    public static func parallelFailover<Candidate>(
+        candidates: [Candidate],
+        transcribe: @escaping (Candidate) async throws -> (TranscriptionResult, String)
+    ) async throws -> (TranscriptionResult, String) {
+        guard !candidates.isEmpty else {
+            throw TranscribeError.invalidResponse("failover has no candidates")
+        }
+        let outcome = await withTaskGroup(
+            of: Result<(TranscriptionResult, String), Error>.self,
+            returning: Result<(TranscriptionResult, String), Error>.self
+        ) { group in
+            for candidate in candidates {
+                group.addTask {
+                    do {
+                        return .success(try await transcribe(candidate))
+                    } catch {
+                        return .failure(error)
+                    }
+                }
+            }
+            var lastFailure: TranscribeError?
+            var abortError: Error?
+            while let outcome = await group.next() {
+                switch outcome {
+                case .success(let hit):
+                    group.cancelAll()
+                    return .success(hit)
+                case .failure(let error):
+                    if let transcribeError = error as? TranscribeError {
+                        lastFailure = transcribeError
+                    } else {
+                        abortError = error
+                        group.cancelAll()
+                        // Не-TranscribeError (микрофон и т.п.): прерываем,
+                        // остальные результаты группы больше не нужны.
+                    }
+                }
+            }
+            if let abortError { return .failure(abortError) }
+            if let lastFailure { return .failure(lastFailure) }
+            return .failure(TranscribeError.invalidResponse("failover has no candidates"))
+        }
+        return try outcome.get()
     }
 }
