@@ -281,7 +281,7 @@ public final class Transcriber {
         apiKey: String,
         proxyKey: String = "",
         proxyKeyHeader: String = "X-Proxy-Key",
-        language: String = "ru",
+        language: String = "",
         timeout: TimeInterval = 120,
         logLevel: String = "info",
         transport: HTTPTransport? = nil,

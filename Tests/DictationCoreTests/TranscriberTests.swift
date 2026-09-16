@@ -678,12 +678,34 @@ final class TranscriberTests: XCTestCase {
         }
     }
 
-    // MARK: - NEW: language=ru form field in multipart body (default)
+    // MARK: - NEW: без явного language (default) поле language в multipart НЕ шлётся
+    // (авто-детект Whisper); явное language = "ru" — шлётся ровно как задано.
 
-    @objc func testRequestContainsLanguageField() {
+    @objc func testRequestOmitsLanguageFieldByDefault() {
         let transport = MockTransport(status: 200, body: Data(#"{"text":"x"}"#.utf8))
-        // Default Transcriber has language = "ru"
+        // Default Transcriber has language = "" (авто-детект)
         let transcriber = makeTranscriber(transport: transport)
+
+        runAsync("testDefaultNoLanguage") {
+            _ = try await transcriber.transcribe(wav: self.wavData, filename: "audio.wav")
+            guard let body = transport.lastRequest?.httpBody,
+                  let text = String(data: body, encoding: .utf8) else {
+                XCTFail("No HTTP body")
+                return
+            }
+            XCTAssertFalse(text.contains("name=\"language\""),
+                           "default: язык не задан — поле language не должно уходить в запрос (авто-детект)")
+        }
+    }
+
+    @objc func testRequestContainsLanguageFieldWhenExplicit() {
+        let transport = MockTransport(status: 200, body: Data(#"{"text":"x"}"#.utf8))
+        let transcriber = Transcriber(baseURL: "https://test.api/endpoint",
+                                      model: "m",
+                                      apiKey: "k",
+                                      language: "ru",
+                                      transport: transport,
+                                      networkChecker: { true })
 
         runAsync("testLanguageField") {
             _ = try await transcriber.transcribe(wav: self.wavData, filename: "audio.wav")

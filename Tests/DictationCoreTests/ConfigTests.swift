@@ -284,8 +284,33 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(d.doubleAltMaxInterval, 0.4)
         XCTAssertTrue(d.soundsEnabled)
         XCTAssertEqual(d.logLevel, "info")
-        XCTAssertEqual(d.language, "ru")
+        XCTAssertEqual(d.language, "")
         XCTAssertFalse(d.chunked)
+    }
+
+    // MARK: - ui_language НЕ является STT-языком (изоляция полей)
+
+    @objc func testUiLanguageDoesNotBecomeSTTLanguage() throws {
+        // Конфиг с ui_language, но БЕЗ language: STT-язык остаётся пустым
+        // (авто-детект), ui_language живёт отдельно (ТОЛЬКО для меню/TUI).
+        let content = """
+        ui_language = "en"
+        base_url = "https://x"
+        """
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.uiLanguage, "en")
+        XCTAssertEqual(config.language, "", "ui_language не должен протекать в STT language")
+    }
+
+    @objc func testExplicitLanguageStillParsed() throws {
+        // Явный language = "ru" в конфиге форвардится в STT-запрос как раньше.
+        let content = """
+        language = "ru"
+        ui_language = "en"
+        """
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.language, "ru")
+        XCTAssertEqual(config.uiLanguage, "en")
     }
 
     // MARK: - api_secret в секции провайдера
@@ -679,7 +704,7 @@ final class ConfigTests: XCTestCase {
         let content = AppConfig.initTemplate()
         let config = try AppConfig.parse(content)
         XCTAssertEqual(config.activeProvider, "openai")
-        XCTAssertEqual(config.language, "ru")
+        XCTAssertEqual(config.language, "")
         XCTAssertTrue(config.soundsEnabled)
         // Семь секций: openai, groq, local, deepgram, giga-chat, cookie-relay, cloudflare.
         XCTAssertEqual(config.providerNames, ["openai", "groq", "local", "deepgram", "giga-chat", "cookie-relay", "cloudflare"])

@@ -178,7 +178,11 @@ public struct AppConfig: Equatable {
         doubleAltMaxInterval: 0.4,
         soundsEnabled: true,
         logLevel: "info",
-        language: "ru",
+        // Язык STT-подсказки: пусто = авто-детект Whisper (языковой параметр в
+        // запрос НЕ шлётся). Явное значение в конфиге (`language = "ru"`)
+        // форвардится в запрос. ui_language — отдельное поле ТОЛЬКО для языка
+        // меню/TUI и в STT-запрос никогда не попадает.
+        language: "",
         uiLanguage: "en",
         transport: "",
         httpProxy: "",
@@ -985,7 +989,9 @@ public struct AppConfig: Equatable {
         #   cookie-relay   — прокси с JS cookie-челленджем (автоматическая
         #                    расшифровка AES-128-CBC, не требует ключа)
 
-        language = "ru"
+        # Язык STT-подсказки (пусто = авто-детект Whisper, языковой параметр
+        # в запрос НЕ шлётся). Явное значение (language = "ru") форвардится.
+        language = ""
         ui_language = "en"
         sounds_enabled = true
         timeout_seconds = 120

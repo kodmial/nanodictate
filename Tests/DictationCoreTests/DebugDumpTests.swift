@@ -268,7 +268,7 @@ final class DebugDumpTests: XCTestCase {
         XCTAssertTrue(content.contains("Authorization: Bearer ***"))
         XCTAssertTrue(content.contains("X-Proxy-Key: ***"))
         XCTAssertTrue(content.contains("model = gigaam-v3"))
-        XCTAssertTrue(content.contains("language = ru"))
+        XCTAssertFalse(content.contains("language ="), "по умолчанию language пуст — поле language не должно попасть в дамп (авто-детект)")
         XCTAssertTrue(content.contains("filename = audio.wav"))
         XCTAssertTrue(content.contains("size = 4 bytes"))
         XCTAssertTrue(content.contains("HTTP 200"))

@@ -108,6 +108,39 @@ final class STTAdapterTests: XCTestCase {
                       "verbose_json запрашивается (Groq поддерживает)")
         XCTAssertFalse(text.contains("timestamp_granularities"),
                        "Groq отвергает timestamp_granularities[] (HTTP 400) — не шлём")
+        XCTAssertFalse(text.contains("name=\"language\""),
+                       "пустой language — поле language в запрос НЕ уходит (авто-детект Whisper)")
+    }
+
+    // MARK: - Не задан language → языковой параметр в запрос не попадает
+
+    @objc func testUnsetLanguageOmitsLanguageParam() {
+        // Путь, которым ходит живой агент: конфиг без language → plan(groq)
+        // с пустым языком → в multipart нет field language (авто-детект).
+        let spec = ProviderRequestBuilder.plan(
+            adapterID: "groq", baseURL: "", model: "", apiKey: "sk-groq",
+            language: "", wav: wav)
+        guard case .multipart(let data, _) = spec.body else {
+            XCTFail("groq — multipart")
+            return
+        }
+        let text = String(data: data, encoding: .utf8)!
+        XCTAssertFalse(text.contains("name=\"language\""),
+                       "не задан language — language=... не должен уходить в запрос")
+    }
+
+    @objc func testExplicitLanguageIsForwarded() {
+        // Явный language = "ru" в конфиге форвардится в запрос как раньше.
+        let spec = ProviderRequestBuilder.plan(
+            adapterID: "groq", baseURL: "", model: "", apiKey: "sk-groq",
+            language: "ru", wav: wav)
+        guard case .multipart(let data, _) = spec.body else {
+            XCTFail("groq — multipart")
+            return
+        }
+        let text = String(data: data, encoding: .utf8)!
+        XCTAssertTrue(text.contains("name=\"language\"\r\n\r\nru\r\n"),
+                       "явный language форвардится в multipart как раньше")
     }
 
     @objc func testLocalPlanWithoutKey() {

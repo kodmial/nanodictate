@@ -927,7 +927,7 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
     // 4. Реальный транспорт чанка: запрос по полям провайдера + Retry-After.
     let transport = URLSessionBatchTransport()
     let apiKey = RetryProvider.resolveAPIKey(for: provider) // env > api_key > api_key_file
-    let language = config.language.isEmpty ? "ru" : config.language
+    let language = config.language
     let sendOne: BatchTranscriber.SendOne = { attempt, wav, chunkIndex, prompt in
         guard let prepared = BatchRequestBuilder.makeRequest(
             provider: provider,
