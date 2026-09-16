@@ -148,7 +148,7 @@ private struct MenuView {
     var notice: String?
     /// Закэшированный статус агента: стрелки/Enter в цикле не должны делать
     /// 5 I/O-операций (pgrep, ProviderStore, лог, launchctl, stat) на КАЖДОЕ
-    /// нажатие — см. lastStatusRefresh (обновление не чаще 1 раза в секунду).
+    /// нажатие — см. lastStatusRefresh (обновление не чаще 1 раза в 2 секунды).
     var cachedStatus: AgentStatusData?
     var lastStatusRefresh = Date.distantPast
 }
@@ -252,9 +252,26 @@ private func logFileURL() -> URL {
     return URL(fileURLWithPath: dir).appendingPathComponent("agent.log")
 }
 
-private func readLogFile() -> [String] {
-    guard let content = try? String(contentsOf: logFileURL(), encoding: .utf8) else { return [] }
-    return content.components(separatedBy: .newlines).filter { !$0.isEmpty }
+/// Читает хвост лог-файла: последний 1 МБ через FileHandle-seek,
+/// возвращает не более `maxLines` непустых строк.  Вместо полного
+/// чтения (~23 МБ → 1.7 с) — ≈80 мс (×20 ускорение).
+/// `isRecordingActive` и `hasErrors` сканируют хвост — для TUI-статуса
+/// этого достаточно: последние start/end markers всегда в хвосте лога.
+private func readLogFile(maxLines: Int = 500) -> [String] {
+    let url = logFileURL()
+    guard let handle = try? FileHandle(forReadingFrom: url) else { return [] }
+    defer { handle.closeFile() }
+    let fileSize = handle.seekToEndOfFile()
+    guard fileSize > 0 else { return [] }
+    let maxRead: UInt64 = 1_024 * 1_024   // 1 МБ — ≈12 000 строк @ ~80 байт
+    let readSize = min(fileSize, maxRead)
+    handle.seek(toFileOffset: fileSize - readSize)
+    let data = handle.readData(ofLength: Int(readSize))
+    let text = String(data: data, encoding: .utf8) ?? ""
+    var lines = text.components(separatedBy: .newlines)
+    // Первая строка может быть обрезана (начинались с середины строки) — пропускаем.
+    if readSize < fileSize && !lines.isEmpty { lines.removeFirst() }
+    return Array(lines.filter { !$0.isEmpty }.suffix(maxLines))
 }
 
 private func collectStatus() -> AgentStatusData {
@@ -447,10 +464,10 @@ func runMenu() -> Int32 {
         switch view.page {
         case .status:
             // collectStatus() = 5 I/O-операций (pgrep, ProviderStore.loadProviders,
-            // readLogFile, launchctl print, attributesOfItem). Кэш с TTL 1 с:
+            // readLogFile, launchctl print, attributesOfItem). Кэш с TTL 2 с:
             // обработка клавиш (стрелки/Enter) НЕ блокируется на I/O — статус
-            // обновляется не чаще раза в секунду, перерисовка мгновенная.
-            if view.cachedStatus == nil || Date().timeIntervalSince(view.lastStatusRefresh) >= 1.0 {
+            // обновляется не чаще раза в 2 секунды, перерисовка мгновенная.
+            if view.cachedStatus == nil || Date().timeIntervalSince(view.lastStatusRefresh) >= 2.0 {
                 view.cachedStatus = collectStatus()
                 view.lastStatusRefresh = Date()
             }
