@@ -1,11 +1,11 @@
 import Foundation
 import CommonCrypto
 
-// MARK: - ByetCookieProvider
+// MARK: - CookieRelayProvider
 //
-// Унифицированный транспорт STT-провайдера (ключ `transport` в конфиге).
-// Разбор Byet JS-челленджа, которым InfinityFree (а точнее Byet) встречает
-// «небраузерные» запросы: сервер вместо контента присылает HTML со скриптом
+// Унифицированный транспорт STT-провайдера (ключ `transport` в конфиге),
+// режим "cookie-relay": ретрансляция через прокси, встречающий «небраузерные»
+// запросы JS-челленджем. Сервер вместо контента присылает HTML со скриптом
 // и константами a/b/c (hex по 32 символа); браузер вычисляет cookie
 // `__test = toHex(slowAES.decrypt(c, 2, a, b))` и редиректит с ним.
 //
@@ -22,14 +22,14 @@ import CommonCrypto
 //   4. Один фиксированный браузерный UA (Chrome) — и за челленджем, и на
 //      STT-запросы через прокси.
 
-public final class ByetCookieProvider {
+public final class CookieRelayProvider {
 
-    /// TTL токена в памяти (сек). Cookie Byet выдаёт на ≥ 120 секунд —
+    /// TTL токена в памяти (сек). Cookie прокси выдаёт на ≥ 120 секунд —
     /// до этого срока свежий токен не пересчитывается вообще.
     public static let tokenTTL: TimeInterval = 120
 
     /// Единственный User-Agent, которым агент «ходит»: и за челленджем, и на
-    /// STT-запросы через InfinityFree-прокси (браузерный UA обязателен —
+    /// STT-запросы через cookie-relay прокси (браузерный UA обязателен —
     /// curl/8.0 получает «Empty reply from server»).
     public static let chromeUA =
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -64,7 +64,7 @@ public final class ByetCookieProvider {
 
     public init(
         origin: String,
-        ua: String = ByetCookieProvider.chromeUA,
+        ua: String = CookieRelayProvider.chromeUA,
         transport: HTTPTransport? = nil,
         now: @escaping () -> Date = { Date() }
     ) {
@@ -74,18 +74,18 @@ public final class ByetCookieProvider {
         self.now = now
     }
 
-    /// Фабрика для `transport == "infinityfree"`: origin выводится из baseURL
+    /// Фабрика для `transport == "cookie-relay"`: origin выводится из baseURL
     /// STT-эндпоинта (прокси). nil — URL непарсится, cookie-слой не поднять.
-    public static func makeForInfinityFree(
+    public static func makeForCookieRelay(
         baseURL: String,
         transport: HTTPTransport? = nil
-    ) -> ByetCookieProvider? {
+    ) -> CookieRelayProvider? {
         guard let origin = origin(from: baseURL) else { return nil }
-        return ByetCookieProvider(origin: origin, transport: transport)
+        return CookieRelayProvider(origin: origin, transport: transport)
     }
 
-    /// Схема+хост из URL STT-эндпоинта — origin, где Byet раздаёт челлендж.
-    /// Например "https://kodmai.xo.je/go/…" → "https://kodmai.xo.je".
+    /// Схема+хост из URL STT-эндпоинта — origin, где прокси раздаёт челлендж.
+    /// Например "https://proxy.example.com/go/…" → "https://proxy.example.com".
     public static func origin(from baseURL: String) -> String? {
         guard let url = URL(string: baseURL),
               let scheme = url.scheme,
@@ -134,7 +134,7 @@ public final class ByetCookieProvider {
 
     // MARK: - Статика: разбор челленджа и AES-128-CBC
 
-    /// Признак Byet-челленджа: страница содержит aes.js, toNumbers и
+    /// Признак cookie-челленджа: страница содержит aes.js, toNumbers и
     /// document.cookie — то есть вместо контента сервер прислал JS-заглушку.
     public static func looksLikeChallenge(_ body: String) -> Bool {
         body.contains("aes.js") && body.contains("toNumbers") && body.contains("document.cookie")

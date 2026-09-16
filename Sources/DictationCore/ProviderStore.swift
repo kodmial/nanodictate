@@ -26,7 +26,7 @@ public enum ProviderStoreError: Error, CustomStringConvertible {
     public var description: String {
         switch self {
         case .unknownProvider(let id, let available):
-            let list = available.isEmpty ? "(нет провайдеров)" : available.joined(separator: ", ")
+            let list = available.isEmpty ? L10n.tr("menu.noProviders") : available.joined(separator: ", ")
             return "Provider '\(id)' not found. Available: \(list)"
         }
     }

@@ -50,16 +50,29 @@ fi
 
 # Swift toolchain for the `swift build` the server runs: the Command Line Tools
 # ManifestAPI has no PackageDescription.swiftmodule, so plain `swift build`
-# cannot compile Package.swift. Mirror build.sh — prefer SWIFT_TOOLCHAIN (the
-# one inherited from ~/.claude.json, or the full toolchain at ~/.swift-toolchain)
-# and export the SwiftPM manifest vars so spawn'd builds inherit them.
+# cannot compile Package.swift. Mirror the removed build.sh — prefer SWIFT_TOOLCHAIN
+# (the one inherited from ~/.claude.json) and export the SwiftPM manifest vars
+# so spawn'd builds inherit them.
 if [[ -n "${SWIFT_TOOLCHAIN:-}" && ! -x "$SWIFT_TOOLCHAIN/usr/bin/swift" ]]; then
   echo "start.sh: SWIFT_TOOLCHAIN=$SWIFT_TOOLCHAIN has no executable swift" >&2
   exit 1
 fi
-if [[ -z "${SWIFT_TOOLCHAIN:-}" && -x /Users/dima/.swift-toolchain/usr/bin/swift ]]; then
-  export SWIFT_TOOLCHAIN=/Users/dima/.swift-toolchain
-  echo "start.sh: SWIFT_TOOLCHAIN unset — using $SWIFT_TOOLCHAIN" >&2
+if [[ -z "${SWIFT_TOOLCHAIN:-}" ]]; then
+  # Auto-detect: derive the toolchain dir from `xcrun --find swift`.
+  SWIFT_BIN="$(xcrun --find swift 2>/dev/null || true)"
+  if [[ -n "$SWIFT_BIN" ]]; then
+    # …/<toolchain>/usr/bin/swift → …/<toolchain>/usr/bin → …/<toolchain>/usr → …/<toolchain>
+    AUTO_TOOLCHAIN="$(cd "$(dirname "$(dirname "$(dirname "$SWIFT_BIN")")")" && pwd)"
+    if [[ -n "$AUTO_TOOLCHAIN" && -x "$AUTO_TOOLCHAIN/usr/bin/swift" ]]; then
+      export SWIFT_TOOLCHAIN="$AUTO_TOOLCHAIN"
+      echo "start.sh: SWIFT_TOOLCHAIN unset — auto-detected $SWIFT_TOOLCHAIN" >&2
+    fi
+  fi
+fi
+if [[ -z "${SWIFT_TOOLCHAIN:-}" ]]; then
+  echo "start.sh: cannot locate a Swift toolchain. Install Xcode Command Line Tools, " >&2
+  echo "          or set SWIFT_TOOLCHAIN to the toolchain directory (e.g. the one containing usr/bin/swift)." >&2
+  exit 1
 fi
 if [[ -n "${SWIFT_TOOLCHAIN:-}" ]]; then
   export SWIFT_EXEC_MANIFEST="$SWIFT_TOOLCHAIN/usr/bin/swiftc"

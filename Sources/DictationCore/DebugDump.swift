@@ -243,7 +243,12 @@ public enum DebugDump {
             )
             try data.write(to: fileURL)
         } catch {
-            Logger.log("Не удалось сохранить аудиозапись \(path): \(error)", level: "error")
+            Logger.log(
+                L10n.tr("debug.recordingSaveFailed")
+                    .replacingOccurrences(of: "{path}", with: path)
+                    .replacingOccurrences(of: "{error}", with: "\(error)"),
+                level: "error"
+            )
         }
     }
 }

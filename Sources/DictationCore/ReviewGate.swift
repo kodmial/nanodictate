@@ -26,8 +26,8 @@ public enum ReviewGate {
     /// - Enter/пустой ввод/«y»/«Y» → .insert
     /// - любое другое (в т.ч. Esc через escape-последовательность) → .cancel
     public static func confirm(text: String) -> Decision {
-        print("Текст: \(text)")
-        print("Вставить [Enter] / Отменить [Esc]", terminator: " ")
+        print("\(L10n.tr("review.prompt")): \(text)")
+        print(L10n.tr("review.confirmInsert"), terminator: " ")
         fflush(stdout)
         guard let input = readLineFunction() else { return .cancel }
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -21,7 +21,12 @@ final class BatchTranscriberTests: XCTestCase {
         return box.value!
     }
 
-    private func tone(_ seconds: Double, sampleRate: Int, value: Int16 = 100) -> [Int16] {
+    private func tone(_ seconds: Double, sampleRate: Int, value: Int16 = 500) -> [Int16] {
+        // Дефолт 500 = речь: rms(500)/32767 ≈ 0.0153 > nearSilenceThreshold
+        // (~0.00316 ≈ 103.5 в Int16) — тишины нет, plan() с cutAtPauses
+        // не сдвигает границы, геометрия фиксированная (чанки по maxSegment).
+        // Значение 100 < порога читалось бы как полная тишина → паузная
+        // нарезка (~1 с чанки) и сломанные ожидания 2-секундных чанков.
         Array(repeating: value, count: max(0, Int((seconds * Double(sampleRate)).rounded())))
     }
 
@@ -155,7 +160,7 @@ final class BatchTranscriberTests: XCTestCase {
                 overlap: 0.5,
                 providerID: "gigaam",
                 sourceFile: "/tmp/test.wav",
-                sendOne: { attempt, wav, index in
+                sendOne: { attempt, wav, index, prompt in
                     sentIndexes.append(index)
                     return texts[index]
                 },
@@ -171,6 +176,129 @@ final class BatchTranscriberTests: XCTestCase {
         XCTAssertEqual(sentIndexes, [0, 1, 2, 3], "каждый чанк распознаётся ровно один раз")
     }
 
+    // MARK: Контекстная склейка (chaining) — 4-й параметр sendOne = prompt
+
+    @objc func testSequentialChainingPassesTailOfPreviousChunk() throws {
+        let samples = tone(8, sampleRate: 1000)
+        var prompts: [String?] = []
+        let outcome = try runAsync {
+            try await BatchTranscriber.run(
+                samples: samples,
+                sampleRate: 1000,
+                maxSegment: 2,
+                overlap: 0.5,
+                providerID: "gigaam",
+                sourceFile: "x.wav",
+                sendOne: { _, _, index, prompt in
+                    prompts.append(prompt)
+                    return "текст \(index)"
+                },
+                delay: { try await self.instantDelay($0) }
+            )
+        }
+        XCTAssertEqual(outcome.okCount, 4)
+        XCTAssertEqual(prompts.count, 4)
+        XCTAssertNil(prompts[0], "первый чанк контекста не имеет")
+        XCTAssertEqual(prompts[1], "текст 0", "чанк 1 получает текст предыдущего чанка")
+        XCTAssertEqual(prompts[2], "текст 1")
+        XCTAssertEqual(prompts[3], "текст 2")
+    }
+
+    @objc func testChainingSkipsPlaceholderChunks() throws {
+        // Чанк 1 падает → плейсхолдер; чанк 2 должен цеплять текст чанка 0
+        // (плейсхолдер "[…]" не участвует в цепочке).
+        let samples = tone(6, sampleRate: 1000)
+        var prompts: [String?] = []
+        let outcome = try runAsync {
+            try await BatchTranscriber.run(
+                samples: samples,
+                sampleRate: 1000,
+                maxSegment: 2,
+                overlap: 0.5,
+                providerID: "gigaam",
+                sourceFile: "x.wav",
+                sendOne: { _, _, index, prompt in
+                    prompts.append(prompt)
+                    if index == 1 { throw BatchHTTPError.network("упал") }
+                    return "слово \(index)"
+                },
+                delay: { try await self.instantDelay($0) }
+            )
+        }
+        XCTAssertEqual(outcome.skippedIndexes, [2])
+        XCTAssertNil(prompts[0])
+        XCTAssertEqual(prompts.count, 1 + 4 + 1,
+                       "чанк 0 + 4 попытки чанка 1 + чанк 2: 6 вызовов sendOne")
+        XCTAssertTrue(prompts.dropFirst().allSatisfy { $0 == "слово 0" },
+                      "плейсхолдер пропускается — цепляется последний успешный текст чанка 0")
+    }
+
+    @objc func testParallelPassesNilPrompt() throws {
+        // Параллельный путь (maxConcurrent > 1): порядок воркеров произвольный,
+        // цепочка не выстраивается — prompt всегда nil.
+        let samples = tone(4, sampleRate: 1000)
+        var prompts: [String?] = []
+        let outcome = try runAsync {
+            try await BatchTranscriber.run(
+                samples: samples,
+                sampleRate: 1000,
+                maxSegment: 2,
+                overlap: 0.5,
+                providerID: "gigaam",
+                sourceFile: "x.wav",
+                sendOne: { _, _, index, prompt in
+                    prompts.append(prompt)
+                    return "текст \(index)"
+                },
+                delay: { try await self.instantDelay($0) },
+                maxConcurrent: 2
+            )
+        }
+        XCTAssertEqual(outcome.okCount, 2)
+        XCTAssertEqual(prompts.count, 2)
+        XCTAssertTrue(prompts.allSatisfy { $0 == nil }, "параллельный путь — контекст не шлётся")
+        XCTAssertEqual(outcome.text, "текст 0 текст 1", "порядок итога сохраняется")
+    }
+
+    @objc func testChainingUsesResumeSeededRecordsAsContext() throws {
+        // Resume: чанк 0 уже в чекпоинте (ok) — sendOne для него не вызывается,
+        // но его текст входит в цепочку для следующих чанков.
+        let samples = tone(8, sampleRate: 1000)
+        let path = tempCheckpointPath("chaining-resume")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let cp = BatchCheckpoint(
+            version: BatchCheckpoint.currentVersion,
+            providerID: "gigaam",
+            sourceFile: "x.wav",
+            totalSegments: 4,
+            segments: [BatchSegmentRecord(index: 0, bodyStart: 0, bodyEnd: 2,
+                                          status: BatchSegmentRecord.statusOK, text: "прелюдия")]
+        )
+        try BatchTranscriber.saveCheckpoint(cp, to: path)
+
+        var prompts: [String?] = []
+        let outcome = try runAsync {
+            try await BatchTranscriber.run(
+                samples: samples,
+                sampleRate: 1000,
+                maxSegment: 2,
+                overlap: 0.5,
+                providerID: "gigaam",
+                sourceFile: "x.wav",
+                checkpointPath: path,
+                resume: true,
+                sendOne: { _, _, index, prompt in
+                    prompts.append(prompt)
+                    return "шаг \(index)"
+                },
+                delay: { try await self.instantDelay($0) }
+            )
+        }
+        XCTAssertEqual(prompts, ["прелюдия", "шаг 1", "шаг 2"],
+                       "чанк 0 распознан из resume; чанк 1 цепляет его текст")
+        XCTAssertEqual(outcome.text, "прелюдия шаг 1 шаг 2 шаг 3")
+    }
+
     @objc func testRunEmptySamplesNoCalls() throws {
         var calls = 0
         let outcome = try runAsync {
@@ -179,7 +307,7 @@ final class BatchTranscriberTests: XCTestCase {
                 sampleRate: 16000,
                 providerID: "gigaam",
                 sourceFile: "x.wav",
-                sendOne: { _, _, _ in calls += 1; return "nope" },
+                sendOne: { _, _, _, _ in calls += 1; return "nope" },
                 delay: { _ in try await self.instantDelay(0) }
             )
         }
@@ -199,7 +327,7 @@ final class BatchTranscriberTests: XCTestCase {
                 overlap: 0.5,
                 providerID: "gigaam",
                 sourceFile: "x.wav",
-                sendOne: { _, _, index in
+                sendOne: { _, _, index, _ in
                     sent.append(index)
                     if index == 2 { throw BatchHTTPError.network("упал") }
                     return "слова \(index)"
@@ -227,7 +355,7 @@ final class BatchTranscriberTests: XCTestCase {
                 overlap: 0.5,
                 providerID: "gigaam",
                 sourceFile: "x.wav",
-                sendOne: { _, _, index in "текст \(index)" },
+                sendOne: { _, _, index, _ in "текст \(index)" },
                 delay: { _ in try await self.instantDelay(0) },
                 onProgress: { i, n, _, _, _, status in
                     XCTAssertEqual(n, 2)
@@ -255,7 +383,7 @@ final class BatchTranscriberTests: XCTestCase {
                 samples: samples, sampleRate: 1000, maxSegment: 2, overlap: 0.5,
                 providerID: "gigaam", sourceFile: "x.wav",
                 checkpointPath: path,
-                sendOne: { _, _, index in firstCalls += 1; return "текст \(index)" },
+                sendOne: { _, _, index, _ in firstCalls += 1; return "текст \(index)" },
                 delay: { _ in try await self.instantDelay(0) }
             )
         }
@@ -270,7 +398,7 @@ final class BatchTranscriberTests: XCTestCase {
                 samples: samples, sampleRate: 1000, maxSegment: 2, overlap: 0.5,
                 providerID: "gigaam", sourceFile: "x.wav",
                 checkpointPath: path, resume: true,
-                sendOne: { _, _, index in resumedCalls += 1; return "НЕ ДОЛЖЕН ВЫЗЫВАТЬСЯ" },
+                sendOne: { _, _, index, _ in resumedCalls += 1; return "НЕ ДОЛЖЕН ВЫЗЫВАТЬСЯ" },
                 delay: { _ in try await self.instantDelay(0) }
             )
         }
@@ -290,7 +418,7 @@ final class BatchTranscriberTests: XCTestCase {
                 samples: samples, sampleRate: 1000, maxSegment: 2, overlap: 0.5,
                 providerID: "other", sourceFile: "x.wav",
                 checkpointPath: path,
-                sendOne: { _, _, index in "a \(index)" },
+                sendOne: { _, _, index, _ in "a \(index)" },
                 delay: { _ in try await self.instantDelay(0) }
             )
         }
@@ -300,7 +428,7 @@ final class BatchTranscriberTests: XCTestCase {
                 samples: samples, sampleRate: 1000, maxSegment: 2, overlap: 0.5,
                 providerID: "gigaam", sourceFile: "x.wav",
                 checkpointPath: path, resume: true,
-                sendOne: { _, _, index in calls += 1; return "b \(index)" },
+                sendOne: { _, _, index, _ in calls += 1; return "b \(index)" },
                 delay: { _ in try await self.instantDelay(0) }
             )
         }
@@ -314,7 +442,7 @@ final class BatchTranscriberTests: XCTestCase {
             try await BatchTranscriber.run(
                 samples: samples, sampleRate: 1000, maxSegment: 2, overlap: 0.5,
                 providerID: "gigaam", sourceFile: "x.wav",
-                sendOne: { _, _, index in
+                sendOne: { _, _, index, _ in
                     if index == 2 { throw BatchHTTPError.network("x") }
                     return "текст \(index)"
                 },
@@ -338,7 +466,7 @@ final class BatchTranscriberTests: XCTestCase {
                 samples: samples, sampleRate: 1000, maxSegment: 2, overlap: 0.5,
                 providerID: "gigaam", sourceFile: "/tmp/a.wav",
                 checkpointPath: path,
-                sendOne: { _, _, index in "старый \(index)" },
+                sendOne: { _, _, index, _ in "старый \(index)" },
                 delay: { _ in try await self.instantDelay(0) }
             )
         }
@@ -351,7 +479,7 @@ final class BatchTranscriberTests: XCTestCase {
                 samples: samples, sampleRate: 1000, maxSegment: 2, overlap: 0.5,
                 providerID: "gigaam", sourceFile: "/tmp/b.wav",
                 checkpointPath: path, resume: true,
-                sendOne: { _, _, index in calls += 1; return "новый \(index)" },
+                sendOne: { _, _, index, _ in calls += 1; return "новый \(index)" },
                 delay: { _ in try await self.instantDelay(0) }
             )
         }
@@ -514,6 +642,54 @@ final class BatchTranscriberTests: XCTestCase {
                       "language попадает в мультипарт")
     }
 
+    @objc func testMakeRequestAppendsStableFieldsForBatchParams() throws {
+        // Пакетный путь (gigaam = openAICompatible): batchParams → prompt +
+        // temperature=0 добавляются в мультипарт; vad_filter не шлётся
+        // (гейтинг: только groq).
+        guard let prepared = BatchRequestBuilder.makeRequest(
+            provider: makeBatchProvider(),
+            apiKey: "secret",
+            language: "ru",
+            timeout: 60,
+            wav: Data("RIFFWAVEfmt data".utf8),
+            chunkIndex: 2,
+            batchParams: BatchSTTParams(prompt: "хвост предыдущего чанка")
+        ) else {
+            XCTFail("запрос с валидным base_url должен собраться")
+            return
+        }
+        let body = String(data: prepared.request.httpBody ?? Data(), encoding: .utf8) ?? ""
+        XCTAssertTrue(body.contains("name=\"prompt\"\r\n\r\nхвост предыдущего чанка"),
+                      "prompt chaining попадает в мультипарт")
+        XCTAssertTrue(body.contains("name=\"temperature\"\r\n\r\n0"),
+                      "temperature=0 шлётся (стабильная транскрибация)")
+        XCTAssertFalse(body.contains("vad_filter"),
+                       "gigaam/openAICompatible — vad_filter не шлётся (только groq)")
+        XCTAssertFalse(body.contains("no_speech_threshold"),
+                       "whisper-пороги не шлются никому из текущих провайдеров")
+    }
+
+    @objc func testMakeRequestWithoutBatchParamsHasNoStableFields() throws {
+        // Legacy-путь без batchParams: тело запроса байт-в-байт как раньше —
+        // никаких temperature/vad_filter/порогов.
+        guard let prepared = BatchRequestBuilder.makeRequest(
+            provider: makeBatchProvider(),
+            apiKey: "secret",
+            language: "ru",
+            timeout: 60,
+            wav: Data("RIFFWAVEfmt data".utf8),
+            chunkIndex: 2
+        ) else {
+            XCTFail("запрос с валидным base_url должен собраться")
+            return
+        }
+        let body = String(data: prepared.request.httpBody ?? Data(), encoding: .utf8) ?? ""
+        XCTAssertFalse(body.contains("temperature"), "без batchParams temperature не добавляется")
+        XCTAssertFalse(body.contains("vad_filter"))
+        XCTAssertFalse(body.contains("no_speech_threshold"))
+        XCTAssertFalse(body.contains("prompt"))
+    }
+
     // MARK: Parallel mode (maxConcurrent > 1)
 
     @objc func testRunParallelDefaultIsSequential() throws {
@@ -524,7 +700,7 @@ final class BatchTranscriberTests: XCTestCase {
             try await BatchTranscriber.run(
                 samples: samples, sampleRate: 1000, maxSegment: 2, overlap: 0.5,
                 providerID: "gigaam", sourceFile: "x.wav",
-                sendOne: { _, _, index in
+                sendOne: { _, _, index, _ in
                     if index == 0 { try await Task.sleep(nanoseconds: 30_000_000) }
                     order.record(index)
                     return "text \(index)"
@@ -539,7 +715,7 @@ final class BatchTranscriberTests: XCTestCase {
 
     @objc func testRunParallelResultsIdenticalToSequential() throws {
         let samples = tone(8, sampleRate: 1000)
-        let send: BatchTranscriber.SendOne = { _, _, index in "текст \(index)" }
+        let send: BatchTranscriber.SendOne = { _, _, index, _ in "текст \(index)" }
 
         let seq = try runAsync {
             try await BatchTranscriber.run(
@@ -571,7 +747,7 @@ final class BatchTranscriberTests: XCTestCase {
             try await BatchTranscriber.run(
                 samples: samples, sampleRate: 1000, maxSegment: 2, overlap: 0.5,
                 providerID: "gigaam", sourceFile: "x.wav",
-                checkpointPath: path, sendOne: { _, _, index in "p \(index)" },
+                checkpointPath: path, sendOne: { _, _, index, _ in "p \(index)" },
                 delay: { _ in try await self.instantDelay(0) }, maxConcurrent: 2
             )
         }
@@ -585,7 +761,7 @@ final class BatchTranscriberTests: XCTestCase {
                 samples: samples, sampleRate: 1000, maxSegment: 2, overlap: 0.5,
                 providerID: "gigaam", sourceFile: "x.wav",
                 checkpointPath: path, resume: true,
-                sendOne: { _, _, index in resumedCalls += 1; return "FAIL \(index)" },
+                sendOne: { _, _, index, _ in resumedCalls += 1; return "FAIL \(index)" },
                 delay: { _ in try await self.instantDelay(0) }, maxConcurrent: 2
             )
         }
@@ -620,7 +796,7 @@ final class BatchTranscriberTests: XCTestCase {
                 samples: samples, sampleRate: 1000, maxSegment: 2, overlap: 0.5,
                 providerID: "gigaam", sourceFile: "x.wav",
                 checkpointPath: path, resume: true,
-                sendOne: { _, _, index in
+                sendOne: { _, _, index, _ in
                     lock.lock(); resumedCalls.append(index); lock.unlock()
                     return "p \(index)"
                 },
@@ -684,7 +860,7 @@ final class BatchTranscriberTests: XCTestCase {
 
     @objc func testRunFileURLStreaming() throws {
         let sr = 1000
-        let samples = tone(4, sampleRate: sr, value: 42)
+        let samples = tone(4, sampleRate: sr)
         let wavData = WAVEncoder.encode(samples: samples, sampleRate: sr)
 
         let tmpURL = FileManager.default.temporaryDirectory
@@ -699,7 +875,7 @@ final class BatchTranscriberTests: XCTestCase {
                 overlap: 0.5,
                 providerID: "gigaam",
                 sourceFile: "input.wav",
-                sendOne: { _, _, index in "chunk \(index)" },
+                sendOne: { _, _, index, _ in "chunk \(index)" },
                 delay: { _ in try await self.instantDelay(0) }
             )
         }

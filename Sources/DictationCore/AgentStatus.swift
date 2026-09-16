@@ -51,6 +51,19 @@ public struct MenuItem: Equatable {
     }
 }
 
+/// Действие пункта экрана «Статус» по ключу (чистая логика, без I/O).
+/// I/O-слой (menu.swift) только исполняет возвращённый экшен.
+public enum StatusMenuAction: Equatable {
+    case toggleLanguage
+    case showProviders
+    case showLogs
+    case toggleAgent
+    case showLastResult
+    case retryTranscribe
+    case toggleReview
+    case quit
+}
+
 /// Жест подтверждения в диалоге смены провайдера (уже отделён от терминала):
 /// `.yes` — клавиша y, `.enter` — Enter, `.other` — любая иная клавиша.
 public enum ConfirmationGesture: Equatable {
@@ -70,16 +83,34 @@ public enum MenuGate {
 /// Построение экранов и текстов меню. Никакого ввода/вывода — только строки.
 public enum AgentScreen {
 
+    /// Маппинг ключа экрана «Статус» в действие меню. Единый источник правды:
+    /// именно он не даёт ключу "0" попасть в default (.quit) — пункт языка
+    /// обязан переключать язык, а не выходить из меню.
+    public static func statusMenuAction(forKey key: String) -> StatusMenuAction {
+        switch key {
+        case "0": return .toggleLanguage
+        case "1": return .showProviders
+        case "2": return .showLogs
+        case "3": return .toggleAgent
+        case "4": return .showLastResult
+        case "5": return .retryTranscribe
+        case "6": return .toggleReview
+        default:  return .quit
+        }
+    }
+
     /// Заголовки и подсказки (владеет текстом меню; ANSI добавляет menu.swift).
-    public static func statusTitle() -> String { "AltDictation — статус" }
-    public static func providersTitle() -> String { "Провайдеры" }
-    public static func logsTitle(lineCount: Int) -> String { "Логи — agent.log (всего \(lineCount) строк)" }
+    public static func statusTitle() -> String { L10n.tr("status.title") }
+    public static func providersTitle() -> String { L10n.tr("menu.providers") }
+    public static func logsTitle(lineCount: Int) -> String {
+        L10n.tr("status.logs").replacingOccurrences(of: "{n}", with: "\(lineCount)")
+    }
 
     public static func statusHint() -> String {
-        "цифры/стрелки — выбор · Enter — выполнить · q/esc — выход"
+        L10n.tr("status.hintNav")
     }
     public static func providersHint() -> String {
-        "цифра/Enter — выбрать · y/Enter — подтвердить · другая клавиша — отмена · r — обновить · q/esc — назад"
+        L10n.tr("status.hintProviders")
     }
 
     /// Принимает ли жест подтверждение смены провайдера: y и Enter — да,
@@ -91,7 +122,7 @@ public enum AgentScreen {
         }
     }
     public static func logsHint() -> String {
-        "↑/↓ — прокрутка · q/esc — назад"
+        L10n.tr("status.hintLogs")
     }
 
     /// События лога, после которых запись завершена (запись НЕ активна).
@@ -135,8 +166,14 @@ public enum AgentScreen {
             return name
         }
         return providersEmpty
-            ? "(нет провайдеров — legacy-конфиг)"
-            : "(не выбран — `dictatorctl provider use <имя>`)"
+            ? L10n.tr("menu.noProvidersLegacy")
+            : L10n.tr("menu.notSelected")
+    }
+
+    /// Выравнивание колонки значений: label + отступ = ровно 12 символов
+    /// (значения начинаются с 13-й колонки независимо от длины метки EN/RU).
+    private static func padCol12(_ label: String) -> String {
+        label + String(repeating: " ", count: max(0, 12 - label.count))
     }
 
     /// Экран «Статус»: агент, запись, провайдер, лог (размер/ошибки/хвост).
@@ -145,16 +182,17 @@ public enum AgentScreen {
             ? "running" + (s.agentPID.map { " (pid \($0))" } ?? "")
             : "stopped"
         let recording = s.recordingActive ? "active" : "idle"
+        let errorsText = s.logHasErrors ? L10n.tr("status.hasErrors") : L10n.tr("status.noErrors")
         var lines = [
-            "Агент:      \(agent)",
-            "Запись:     \(recording)",
-            "Провайдер:  \(providerLine(providerName: s.providerName, providerID: s.providerID, providersEmpty: s.providersEmpty))",
-            "Лог:        \(s.logPath)",
-            "Размер:     \(byteCountText(s.logSizeBytes)) · ошибки: \(s.logHasErrors ? "есть" : "нет")",
+            "\(padCol12(L10n.tr("status.agent") + ":"))\(agent)",
+            "\(padCol12(L10n.tr("status.recording") + ":"))\(recording)",
+            "\(padCol12(L10n.tr("status.provider") + ":"))\(providerLine(providerName: s.providerName, providerID: s.providerID, providersEmpty: s.providersEmpty))",
+            "\(padCol12(L10n.tr("status.log") + ":"))\(s.logPath)",
+            "\(padCol12(L10n.tr("status.size") + ":"))\(byteCountText(s.logSizeBytes)) · \(errorsText)",
         ]
         if !s.logTail.isEmpty {
             lines.append("")
-            lines.append("Хвост лога:")
+            lines.append(L10n.tr("status.logTail"))
             lines += s.logTail.map { "  " + $0 }
         }
         return lines.joined(separator: "\n")
@@ -163,13 +201,14 @@ public enum AgentScreen {
     /// Пункты экрана «Статус»: ключ + подпись (действия назначает menu.swift).
     public static func statusMenuItems(agentRunning: Bool) -> [MenuItem] {
         [
-            MenuItem(key: "1", label: "Провайдеры"),
-            MenuItem(key: "2", label: "Логи"),
-            MenuItem(key: "3", label: agentRunning ? "Остановить агента" : "Запустить агента"),
-            MenuItem(key: "4", label: "Показать последний текст распознавания"),
-            MenuItem(key: "5", label: "Повторить распознавание другим провайдером"),
-            MenuItem(key: "6", label: "Ревью перед вставкой (вкл/выкл)"),
-            MenuItem(key: "q", label: "Выход"),
+            MenuItem(key: "0", label: L10n.tr("menu.language")),
+            MenuItem(key: "1", label: L10n.tr("menu.providers")),
+            MenuItem(key: "2", label: L10n.tr("menu.logs")),
+            MenuItem(key: "3", label: agentRunning ? L10n.tr("menu.stopAgent") : L10n.tr("menu.startAgent")),
+            MenuItem(key: "4", label: L10n.tr("menu.showLastText")),
+            MenuItem(key: "5", label: L10n.tr("menu.retryOther")),
+            MenuItem(key: "6", label: L10n.tr("menu.reviewToggle")),
+            MenuItem(key: "q", label: L10n.tr("menu.quit")),
         ]
     }
 

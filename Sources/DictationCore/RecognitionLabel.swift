@@ -3,14 +3,14 @@ import Foundation
 /// Маршрут STT-запроса: напрямую на провайдера или через реле (transport).
 ///
 /// Расшифровывается из поля `transport` секции провайдера: пустое/отсутствующее
-/// значение — прямой запрос; заданное значение (например `infinityfree`) —
+/// значение — прямой запрос; заданное значение (например `cookie-relay`) —
 /// запрос идёт через этот маршрут. Значение берётся из ТОГО ЖЕ провайдера,
 /// из которого агент собирает Transcriber/RetryProvider, — ярлык обязан
 /// отражать фактический маршрут, а не строку из конфига.
 public enum STTRoute: Equatable {
     /// Прямой запрос к провайдеру.
     case direct
-    /// Запрос через реле с именем `relay` (например transport = "infinityfree").
+    /// Запрос через реле с именем `relay` (например transport = "cookie-relay").
     case relay(String)
 }
 
@@ -23,11 +23,13 @@ public enum STTRoute: Equatable {
 public enum RecognitionLabel {
 
     /// Маршрут запроса из значения `transport` (nil/пусто → прямой).
+    /// Значение канонизируется (legacy-алиасы старого конфига →
+    /// "cookie-relay") — ярлык не зависит от устаревших строк конфига.
     public static func route(transport: String?) -> STTRoute {
         guard let transport = transport else { return .direct }
         let trimmed = transport.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .direct }
-        return .relay(trimmed)
+        return .relay(AppConfig.canonicalTransport(trimmed))
     }
 
     /// id активного провайдера сессии: `active_provider`, если задан (после
@@ -57,7 +59,7 @@ public enum RecognitionLabel {
     }
 
     /// Ярлык сессии диктовки из РАЗРЕШЁННОГО конфига — того же самого, из
-    /// которого агент в init собрал Transcriber и Byet-слой (resolvedConfig).
+    /// которого агент в init собрал Transcriber и cookie-relay-слой (resolvedConfig).
     /// Конфиг в момент показа оверлея НЕ перечитывается и ярлык не хардкодится:
     /// единый источник истины — разрешённый провайдер сессии.
     ///

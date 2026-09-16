@@ -34,7 +34,7 @@ public enum STTAdapterID: String, Equatable {
         case .local:    return "http://127.0.0.1:8080/v1/audio/transcriptions"
         case .deepgram: return "https://api.deepgram.com/v1/listen"
         case .gigaChat: return "https://gigachat.devices.sberbank.ru/api/v1/audio/transcriptions"
-        // relay — личный транспорт, cloudflare/openAICompatible — ручные: base_url обязателен.
+        // relay — личный транспорт (cookie-relay), cloudflare/openAICompatible — ручные: base_url обязателен.
         case .relay, .cloudflare, .openAICompatible: return ""
         }
     }
@@ -84,7 +84,7 @@ public struct STTOAuthStep {
 
 /// Полная спецификация HTTP-запроса распознавания, которую собирает адаптер
 /// (`ProviderRequestBuilder.plan`). Transcriber исполняет её: oauth-шаг (если
-/// есть) → URLRequest из полей поступает в `send`; транспорт, Byet-cookie-слой,
+/// есть) → URLRequest из полей поступает в `send`; транспорт, cookie-relay-слой,
 /// preflight сети и ретраи остаются в Transcriber.
 public struct STTRequestSpec {
     /// Конечный URL (включая query-параметры). nil — не собрался («Invalid base URL»).
@@ -135,7 +135,7 @@ public struct STTRequestSpec {
 
 /// Единственный строитель STT-запросов: из полей конфига провайдера собирает
 /// `STTRequestSpec`. В HTTP-запрос его превращает Transcriber; транспорт,
-/// Byet-cookie-слой, preflight сети и ретраи — тоже зона Transcriber.
+/// cookie-relay-слой, preflight сети и ретраи — тоже зона Transcriber.
 ///
 /// baseURL/model перед вызовом `plan` уже разрешены в дефолты адаптера
 /// (пусто в конфиге → свой дефолт адаптера). Для relay/openAICompatible
@@ -172,6 +172,10 @@ public enum ProviderRequestBuilder {
     ///   - language: код языка (для OpenAI-совместимых — form-поле language,
     ///     для deepgram — query-параметр language).
     ///   - wav/filename/prompt: аудио и опциональный контекст (multipart-поля).
+    ///   - batchParams: пакетные параметры устойчивой транскрибации
+    ///     (контекстный prompt chaining + temperature + stable-поля). nil —
+    ///     пакетный путь не задействован (пошаговая диктовка): поведение
+    ///     байт-в-байт прежнее.
     public static func plan(
         adapterID: String,
         baseURL: String,
@@ -181,22 +185,27 @@ public enum ProviderRequestBuilder {
         language: String,
         wav: Data,
         filename: String = "audio.wav",
-        prompt: String? = nil
+        prompt: String? = nil,
+        batchParams: BatchSTTParams? = nil
     ) -> STTRequestSpec {
         // Пустые baseURL/model из конфига (шаблон `config init`) разрешаются
         // в дефолты адаптера. Повторный вызов resolve для уже непустых
         // значений — no-op, так что вызывающий может резолвить заранее.
         let resolvedBaseURL = resolveBaseURL(baseURL, for: adapterID)
         let resolvedModel = resolveModel(model, for: adapterID)
+        // Пакетный контекстный prompt (chaining) имеет приоритет над явным;
+        // stable-поля — гейтинг по провайдеру (cloudflare/deepgram = nil).
+        let effectivePrompt = batchParams?.prompt ?? prompt
+        let stable = BatchStableMultipartFields.stableFields(for: adapterID, params: batchParams)
         switch STTAdapterID.from(adapterID) {
         case .deepgram:
             return planDeepgram(baseURL: resolvedBaseURL, model: resolvedModel, apiKey: apiKey, language: language, wav: wav)
         case .gigaChat:
-            return planGigaChat(baseURL: resolvedBaseURL, model: resolvedModel, apiKey: apiKey, apiSecret: apiSecret, language: language, wav: wav, filename: filename, prompt: prompt)
+            return planGigaChat(baseURL: resolvedBaseURL, model: resolvedModel, apiKey: apiKey, apiSecret: apiSecret, language: language, wav: wav, filename: filename, prompt: effectivePrompt, stable: stable)
         case .cloudflare:
             return planCloudflare(baseURL: resolvedBaseURL, apiKey: apiKey, wav: wav)
         case .openai, .groq, .local, .relay, .openAICompatible:
-            return planOpenAICompatible(adapterID: adapterID, baseURL: resolvedBaseURL, model: resolvedModel, apiKey: apiKey, language: language, wav: wav, filename: filename, prompt: prompt)
+            return planOpenAICompatible(adapterID: adapterID, baseURL: resolvedBaseURL, model: resolvedModel, apiKey: apiKey, language: language, wav: wav, filename: filename, prompt: effectivePrompt, stable: stable)
         }
     }
 
@@ -296,13 +305,15 @@ public enum ProviderRequestBuilder {
 
     /// OpenAI-совместимый multipart/form-data: file первым, затем model,
     /// language (если не пусто), prompt (если не пусто), опционально
-    /// response_format/timestamp_granularities[] (word-таймстампы), закрывающий
-    /// boundary. Это ЕДИНЫЙ источник правды о формате тела — legacy-путь
-    /// Transcriber (adapterID == nil) и адаптеры openai/groq/local/relay дают
-    /// байт-в-байт те же данные (поля таймстампов добавляются только явными
-    /// параметрами).
+    /// response_format/timestamp_granularities[] (word-таймстампы), затем
+    /// stable-поля устойчивой транскрибации (температура/vad_filter/пороги —
+    /// только не-nil, после гейтинга), закрывающий boundary. Это ЕДИНЫЙ
+    /// источник правды о формате тела — legacy-путь Transcriber (adapterID ==
+    /// nil) и адаптеры openai/groq/local/relay дают байт-в-байт те же данные
+    /// (поля таймстампов и stable добавляются только явными параметрами).
     public static func multipartBody(wav: Data, filename: String, model: String, language: String, prompt: String?, boundary: String,
-                                     responseFormat: String? = nil, timestampGranularities: [String] = []) -> Data {
+                                     responseFormat: String? = nil, timestampGranularities: [String] = [],
+                                     stable: BatchStableMultipartFields? = nil) -> Data {
         var body = Data()
 
         func append(_ string: String) {
@@ -360,6 +371,46 @@ public enum ProviderRequestBuilder {
             append("\r\n")
         }
 
+        // Fields: stable — устойчивая транскрибация (порядок полей фиксирован,
+        // значения компактны: «0» вместо «0.0», «-1» вместо «-1.0»).
+        if let stable = stable {
+            if let temperature = stable.temperature {
+                append("--\(boundary)\r\n")
+                append("Content-Disposition: form-data; name=\"temperature\"\r\n")
+                append("\r\n")
+                append(BatchStableMultipartFields.numberString(temperature))
+                append("\r\n")
+            }
+            if let vadFilter = stable.vadFilter {
+                append("--\(boundary)\r\n")
+                append("Content-Disposition: form-data; name=\"vad_filter\"\r\n")
+                append("\r\n")
+                append(vadFilter ? "true" : "false")
+                append("\r\n")
+            }
+            if let threshold = stable.noSpeechThreshold {
+                append("--\(boundary)\r\n")
+                append("Content-Disposition: form-data; name=\"no_speech_threshold\"\r\n")
+                append("\r\n")
+                append(BatchStableMultipartFields.numberString(threshold))
+                append("\r\n")
+            }
+            if let ratio = stable.compressionRatioThreshold {
+                append("--\(boundary)\r\n")
+                append("Content-Disposition: form-data; name=\"compression_ratio_threshold\"\r\n")
+                append("\r\n")
+                append(BatchStableMultipartFields.numberString(ratio))
+                append("\r\n")
+            }
+            if let logprob = stable.logprobThreshold {
+                append("--\(boundary)\r\n")
+                append("Content-Disposition: form-data; name=\"logprob_threshold\"\r\n")
+                append("\r\n")
+                append(BatchStableMultipartFields.numberString(logprob))
+                append("\r\n")
+            }
+        }
+
         // Closing boundary
         append("--\(boundary)--\r\n")
 
@@ -377,7 +428,8 @@ public enum ProviderRequestBuilder {
         language: String,
         wav: Data,
         filename: String,
-        prompt: String?
+        prompt: String?,
+        stable: BatchStableMultipartFields? = nil
     ) -> STTRequestSpec {
         let boundary = "Boundary-\(UUID().uuidString)"
         // Word-таймстампы (verbose_json) — только где поддержка гарантирована.
@@ -386,7 +438,8 @@ public enum ProviderRequestBuilder {
         let multipart = multipartBody(
             wav: wav, filename: filename, model: model, language: language, prompt: prompt, boundary: boundary,
             responseFormat: verbose ? "verbose_json" : nil,
-            timestampGranularities: timestamps ? ["word"] : []
+            timestampGranularities: timestamps ? ["word"] : [],
+            stable: stable
         )
         return STTRequestSpec(
             url: URL(string: baseURL),
@@ -484,12 +537,13 @@ public enum ProviderRequestBuilder {
         language: String,
         wav: Data,
         filename: String,
-        prompt: String?
+        prompt: String?,
+        stable: BatchStableMultipartFields? = nil
     ) -> STTRequestSpec {
         let rqUID = UUID().uuidString.uppercased()
         let basic = Data("\(apiKey):\(apiSecret)".utf8).base64EncodedString()
         let boundary = "Boundary-\(UUID().uuidString)"
-        let multipart = multipartBody(wav: wav, filename: filename, model: model, language: language, prompt: prompt, boundary: boundary)
+        let multipart = multipartBody(wav: wav, filename: filename, model: model, language: language, prompt: prompt, boundary: boundary, stable: stable)
         return STTRequestSpec(
             url: URL(string: baseURL),
             headers: [("RqUID", rqUID)],

@@ -129,7 +129,7 @@ final class DebugDumpTests: XCTestCase {
         let entry = DebugDump.summarize(
             timestamp: Date(timeIntervalSince1970: 0),
             method: "POST",
-            url: "https://kodmai.alwaysdata.net/go/https://stt.example/v1/audio/transcriptions",
+            url: "https://proxy.example.com/go/https://stt.example/v1/audio/transcriptions",
             headers: [
                 (name: "Content-Type", value: "multipart/form-data; boundary=x"),
                 (name: "Authorization", value: "Bearer k"),
@@ -154,7 +154,7 @@ final class DebugDumpTests: XCTestCase {
         let dir = redirectDumpToTempDir()
         let transport = MockTransport(status: 200, body: Data(#"{"text":"привет"}"#.utf8))
         let transcriber = Transcriber(
-            baseURL: "https://kodmai.alwaysdata.net/go/https://example.test/v1/audio/transcriptions",
+            baseURL: "https://proxy.example.com/go/https://example.test/v1/audio/transcriptions",
             model: "gigaam-v3",
             apiKey: "k",
             proxyKey: "custom-header-secret-99",

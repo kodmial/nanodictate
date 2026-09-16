@@ -84,11 +84,16 @@ final class AudioServiceVADTests: XCTestCase {
     /// 4096 фр. @44.1 кГц ≈ 1486 сэмплов @16 кГц; пауза 0.2 c = порог 3200
     /// сэмплов (накрывается тремя чистыми буферами тишины). Пауза 1.0 c =
     /// порог 16000 сэмплов — больше пост-ролла (4000), нужна для проверки
-    /// точной границы пост-ролла без клампинга концом буфера.
-    private func makeLiveService(engine: FakeEngine, pause: TimeInterval = 0.2) -> AudioService {
+    /// точной границы пост-ролла без клампинга концом буфера. `autoStop` —
+    /// конфигурация автоостановки по тишине (по умолчанию `.defaults`).
+    private func makeLiveService(
+        engine: FakeEngine,
+        pause: TimeInterval = 0.2,
+        autoStop: AutoStopConfig = .defaults
+    ) -> AudioService {
         var config = AudioSegmenterConfig.defaults
         config.pauseDuration = pause
-        return AudioService(logLevel: "info", engine: engine, segmenterConfig: config)
+        return AudioService(logLevel: "info", engine: engine, segmenterConfig: config, autoStopConfig: autoStop)
     }
 
     private func runStart(_ service: AudioService) -> Bool {
@@ -306,6 +311,133 @@ final class AudioServiceVADTests: XCTestCase {
         wait(for: [limitDone], timeout: 5)
 
         XCTAssertEqual(events, ["tail", "limit"], "хвост обязан встать в очередь до финализации записи")
+    }
+
+    // MARK: - Принудительный стоп по непрерывной тишине (автоостановка ~3 c)
+
+    /// Непрерывная тишина ≥ 3 c в активной записи останавливает её тем же
+    /// путём, что лимит: onAutoStop вызывается на главной очереди с собранными
+    /// сэмплами. Кадр: буфер 4096 фр. @44.1 кГц ≈ 1486 сэмплов @16 кГц ≈ 0.093 c;
+    /// порог 3.0 c накрывается ~33 тихими буферами (~3.1 c).
+    ///
+    /// Вход FakeEngine — буферы КОНСТАНТНОЙ амплитуды 0.001 (≪ порога 0.00316):
+    /// микрофонного «звона» тут нет. Единственная оговорка — ресэмплер
+    /// AVAudioConverter после скачка амплитуды 0.2 → 0.001 может «звенеть»
+    /// первый конвертированный буфер (RMS ≈ 0.013 > порога) — тогда он
+    /// уходит в речевую ветку и не накапливается (примечание в шапке файла).
+    /// 45 буферов тишины (≈ 4.2 c) дают большой запас поверх ~33 в любом
+    /// случае: срабатывание не зависит от этой детали.
+    @objc func testContinuousSilenceTriggersAutoStop() {
+        let engine = FakeEngine()
+        let service = makeLiveService(engine: engine)
+        var autoStopSamples: [Int16] = []
+        var segmentDeliveries = 0
+        var tailDeliveries = 0
+        service.onSpeechSegment = { _, isTail in
+            if isTail { tailDeliveries += 1 } else { segmentDeliveries += 1 }
+        }
+        let autoStopDone = expectation(description: "auto-stop by silence")
+        service.onAutoStop = { samples in
+            autoStopSamples = samples
+            autoStopDone.fulfill()
+        }
+
+        guard runStart(service) else {
+            XCTFail("старт должен пройти", file: #file, line: #line)
+            return
+        }
+
+        // Речь 2 буфера → тишина 45 буферов (~4 c): автоостановка срабатывает
+        // на ~33-м чистом тихом буфере; оставшиеся буферы отбрасываются
+        // early-выходом (autoStopScheduled). Элapsed ≪ 60 c — лимит не мешает.
+        emit(engine, amplitude: 0.2, count: 2)
+        emit(engine, amplitude: 0.001, count: 45)
+        wait(for: [autoStopDone], timeout: 5)
+
+        XCTAssertTrue(autoStopSamples.count > 2000, "в onAutoStop приходят собранные сэмплы записи, а не пусто")
+        XCTAssertTrue(autoStopSamples.count <= 47 * 1486 + 4096, "снимок не раздут: буферы после срабатывания не дописываются")
+        // 3 секунды тишины полностью «съедают» уттеренс закрытием по паузе
+        // live-VAD (0.2 c у хелпера; в проде — 1.0 c): к моменту автоостановки
+        // открытого уттеренса нет — хвост не доставляется, это правильное
+        // поведение (см. handleAutoStop: в live-диктовке финальный проход
+        // работает по снимку, хвост не участвует).
+        XCTAssertEqual(tailDeliveries, 0, "при автоостановке открытого уттеренса быть не может: речь была >3 c назад")
+        XCTAssertGreaterThanOrEqual(segmentDeliveries, 1, "уттеренс закрыт live-VAD по паузе ещё ДО автоостановки")
+    }
+
+    /// Пауза короче 3 c запись НЕ останавливает: тишина в 6 буферов (~0.5 c)
+    /// не добирает порог, после неё продолжается речь, и только явный stop()
+    /// завершает запись со ВСЕМ собранным (включая речь ПОСЛЕ паузы) — фича
+    /// не рвёт запись на задумчивой паузе внутри диктовки.
+    @objc func testShortSilenceDoesNotStopRecording() {
+        let engine = FakeEngine()
+        let service = makeLiveService(engine: engine, pause: 1.0)
+        var autoStopFired = false
+        service.onAutoStop = { _ in autoStopFired = true }
+        var tails: [[Int16]] = []
+        service.onSpeechSegment = { samples, isTail in
+            if isTail { tails.append(samples) }
+        }
+
+        guard runStart(service) else {
+            XCTFail("старт должен пройти", file: #file, line: #line)
+            return
+        }
+
+        // Речь 2 → пауза 6 буферов (~0.5 c тишины; если первый после скачка
+        // амплитуды «звенит» на ресэмплере — ~0.46 c, всё равно ≪ 3 c)
+        // → снова речь 2.
+        emit(engine, amplitude: 0.2, count: 2)
+        emit(engine, amplitude: 0.001, count: 6)
+        emit(engine, amplitude: 0.2, count: 2)
+        // Явный стоп: не даёт дождаться никакой автоостановки — всё синхронно.
+        let samples = service.stop()
+
+        XCTAssertFalse(autoStopFired, "короткая пауза (< 3 c) не останавливает запись")
+        // Хвост покрывает обе порции речи (пауза 0.5 c < pause 1.0 c — один
+        // уттеренс, с pre-roll / пост-роллом в границах).
+        XCTAssertEqual(tails.count, 1, "стоп отдаёт один незакрытый уттеренс")
+        XCTAssertTrue(tails[0].count > 5000, "уттеренс включает речь ПОСЛЕ паузы")
+        XCTAssertTrue(samples.count > 4000, "stop возвращает всю запись (речь + пауза)")
+    }
+
+    /// Рубильник: конфиг с enabled == false не останавливает запись даже после
+    /// тишины ~4.2 c (45 буферов) — запись живёт до явного стопа. Спасательный
+    /// люк для шумного окружения/длинных диктовок; дефолт не меняется
+    /// (ср. testContinuousSilenceTriggersAutoStop с конфигом по умолчанию).
+    @objc func testDisabledAutoStopDoesNotFire() {
+        let engine = FakeEngine()
+        var disabledConfig = AutoStopConfig.defaults
+        disabledConfig.enabled = false
+        let service = makeLiveService(engine: engine, autoStop: disabledConfig)
+        var autoStopFired = false
+        service.onAutoStop = { _ in autoStopFired = true }
+        var segmentDeliveries = 0
+        service.onSpeechSegment = { _, isTail in
+            if !isTail { segmentDeliveries += 1 }
+        }
+
+        guard runStart(service) else {
+            XCTFail("старт должен пройти", file: #file, line: #line)
+            return
+        }
+
+        // Речь 2 буфера → тишина 45 буферов (~4.2 c): при выключенной фиче
+        // тишина НЕ завершает запись — итог подводит явный stop().
+        emit(engine, amplitude: 0.2, count: 2)
+        emit(engine, amplitude: 0.001, count: 45)
+        let samples = service.stop()
+
+        XCTAssertFalse(autoStopFired, "выключенная фича не останавливает запись по тишине")
+        // Тишина 4.2 c ≫ пауза live-VAD 0.2 c — уттеренс закрылся обычным путём
+        // сегментации (это работает независимо от автоостановки).
+        XCTAssertGreaterThanOrEqual(segmentDeliveries, 1, "уттеренс закрыт live-VAD по паузе ещё до stop")
+        // Полная запись 47 буферов ≈ 69839 сэмплов: ресэмплер AVAudioConverter
+        // жертвует ~3 сэмпла на priming, поэтому строгая граница «47 × 1486»
+        // (69842) физически недостижима. Нижняя граница «47 × 1480» с запасом
+        // на джиттер конвертера доказывает, что в снимок вошли ВСЕ 47 буферов
+        // (~4.4 c) — никакая автоостановка запись не обрезала.
+        XCTAssertTrue(samples.count >= 47 * 1480, "stop возвращает всю запись, включая длинную тишину: \(samples.count)")
     }
 
     // MARK: - Сброс VAD между сегментами и между сеансами

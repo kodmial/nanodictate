@@ -15,7 +15,7 @@ config.local.toml
 *.local.toml
 
 # Copies of the LaunchAgent plist (original lives in Resources/)
-com.dima.altdictation.plist
+com.dictation.*.plist
 com.dictation.agent.plist
 Resources/dictation-agent.plist
 

@@ -116,6 +116,7 @@ private func readMenuKey() -> MenuKey {
     case 0x71, 0x51: return .quit    // q / Q
     case 0x79, 0x59: return .yes     // y / Y
     case 0x72, 0x52: return .refresh // r / R
+    case 0x30: return .number(0)
     case 0x31...0x39: return .number(Int(byte - 0x30))
     default: return .unknown
     }
@@ -124,7 +125,7 @@ private func readMenuKey() -> MenuKey {
 // MARK: - Экраны и действия
 
 private enum MenuAction {
-    case quit, back, refresh, showProviders, showLogs, toggleAgent
+    case quit, back, refresh, showProviders, showLogs, toggleAgent, toggleLanguage
     case switchProvider(String)
     case showLastResult, retryTranscribe, toggleReview
 }
@@ -145,6 +146,11 @@ private struct MenuView {
     var providers: [STTProvider] = []
     var logLines: [String] = []
     var notice: String?
+    /// Закэшированный статус агента: стрелки/Enter в цикле не должны делать
+    /// 5 I/O-операций (pgrep, ProviderStore, лог, launchctl, stat) на КАЖДОЕ
+    /// нажатие — см. lastStatusRefresh (обновление не чаще 1 раза в секунду).
+    var cachedStatus: AgentStatusData?
+    var lastStatusRefresh = Date.distantPast
 }
 
 private func entryKeyText(_ key: MenuKey?) -> String {
@@ -161,7 +167,7 @@ private func statusPageText(status: AgentStatusData, entries: [MenuEntry], curso
     var lines = [ansiBold + AgentScreen.statusTitle() + ansiReset, String(repeating: "─", count: 28)]
     lines += AgentScreen.statusScreen(status).components(separatedBy: "\n")
     lines.append(String(repeating: "─", count: 28))
-    lines.append("Пункты:")
+    lines.append(L10n.tr("menu.items"))
     for (i, e) in entries.enumerated() {
         let mark = i == cursor ? "›" : " "
         lines.append("\(mark) \(entryKeyText(e.key)) — \(e.label)")
@@ -174,7 +180,7 @@ private func statusPageText(status: AgentStatusData, entries: [MenuEntry], curso
 private func providersPageText(providers: [STTProvider], cursor: Int, notice: String?) -> String {
     var lines = [ansiBold + AgentScreen.providersTitle() + ansiReset, String(repeating: "─", count: 28)]
     if providers.isEmpty {
-        lines.append("(нет провайдеров — используется legacy-конфиг)")
+        lines.append(L10n.tr("menu.empty.providers"))
     } else {
         for (i, p) in providers.enumerated() {
             let mark = i == cursor ? "›" : " "
@@ -191,7 +197,7 @@ private func logsPageText(lines: [String], window: Int, top: Int) -> String {
     var out = [ansiBold + AgentScreen.logsTitle(lineCount: lines.count) + ansiReset,
                String(repeating: "─", count: 28)]
     if lines.isEmpty {
-        out.append("(лог пуст или не найден)")
+        out.append(L10n.tr("menu.empty.log"))
     } else {
         let end = min(top + window, lines.count)
         for i in top..<end { out.append(lines[i]) }
@@ -204,20 +210,29 @@ private func logsPageText(lines: [String], window: Int, top: Int) -> String {
 // MARK: - Пункты
 
 private func statusEntries(agentRunning: Bool) -> [MenuEntry] {
-    AgentScreen.statusMenuItems(agentRunning: agentRunning).map { item in
-        let key: MenuKey?
+    // Пункт языка добавляем ровно ОДИН раз: statusMenuItems() тоже возвращает
+    // ключ "0" — дублировать его нельзя (раньше маппинг без case "0" уводил
+    // дубль в default → .quit, и меню рисовало лишнюю строку "q — Language",
+    // Enter по которой ВЫХОДИЛ из меню вместо переключения языка).
+    var entries = [MenuEntry(key: .number(0), label: L10n.tr("menu.language"), action: .toggleLanguage)]
+    entries += AgentScreen.statusMenuItems(agentRunning: agentRunning).compactMap { item in
+        // "0" уже добавлен первым пунктом — не рисуем дубль.
+        guard item.key != "0" else { return nil }
+        let key: MenuKey = Int(item.key).map(MenuKey.number) ?? .quit
         let action: MenuAction
-        switch item.key {
-        case "1": key = .number(1); action = .showProviders
-        case "2": key = .number(2); action = .showLogs
-        case "3": key = .number(3); action = .toggleAgent
-        case "4": key = .number(4); action = .showLastResult
-        case "5": key = .number(5); action = .retryTranscribe
-        case "6": key = .number(6); action = .toggleReview
-        default:  key = .quit;      action = .quit
+        switch AgentScreen.statusMenuAction(forKey: item.key) {
+        case .toggleLanguage:  action = .toggleLanguage
+        case .showProviders:   action = .showProviders
+        case .showLogs:        action = .showLogs
+        case .toggleAgent:     action = .toggleAgent
+        case .showLastResult:  action = .showLastResult
+        case .retryTranscribe: action = .retryTranscribe
+        case .toggleReview:    action = .toggleReview
+        case .quit:            action = .quit
         }
         return MenuEntry(key: key, label: item.label, action: action)
     }
+    return entries
 }
 
 private func providerEntries(_ providers: [STTProvider]) -> [MenuEntry] {
@@ -288,7 +303,7 @@ private func runSelfCommand(_ subcommand: String) -> String {
     let out = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
     if !out.isEmpty { return out }
     let err = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-    return err.isEmpty ? "команда завершилась (exit \(result.status))" : err
+    return err.isEmpty ? String(format: L10n.tr("menu.agent.notfound"), "\(result.status)") : err
 }
 
 /// Перевод клавиши меню в жест подтверждения (чистую логику принимает AgentScreen).
@@ -304,17 +319,20 @@ private func confirmationGesture(_ key: MenuKey) -> ConfirmationGesture {
 /// (как `dictatorctl provider use`, без --no-restart). Возвращает текст для notice.
 private func confirmAndSwitchProvider(_ provider: STTProvider, _ view: inout MenuView) -> String {
     let display = provider.name.isEmpty ? provider.id : provider.name
-    render(ansiBold + "Переключить активного провайдера на '\(display)' [\(provider.id)]?" + ansiReset
-        + "\n  (y/Enter — подтвердить · другая клавиша — отмена)")
-    guard AgentScreen.confirmationAccepts(key: confirmationGesture(readMenuKey())) else { return "Отменено" }
+    render(ansiBold + String(format: L10n.tr("menu.switch.confirm"), display, provider.id) + ansiReset
+        + "\n\(L10n.tr("menu.switch.hint"))")
+    guard AgentScreen.confirmationAccepts(key: confirmationGesture(readMenuKey())) else { return L10n.tr("menu.switch.cancelled") }
     do {
         try ProviderStore.setActive(providerID: provider.id)
     } catch {
-        return "Ошибка переключения: \(error)"
+        return String(format: L10n.tr("menu.switch.error"), "\(error)")
     }
     let kick = runProcess("/bin/launchctl", ["kickstart", "-k", "\(guiDomain)/com.dictation.agent"])
-    let restart = kick.status == 0 ? "агент перезапущен" : "агент не перезапущен (запустите `dictatorctl start`)"
-    return "Провайдер '\(display)' теперь активен · \(restart)"
+    let kickMsg = kick.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+    let restart = kick.status == 0
+        ? L10n.tr("cli.provider.restart")
+        : String(format: L10n.tr("cli.provider.kickfail"), kickMsg.isEmpty ? kick.stdout : kickMsg)
+    return String(format: L10n.tr("menu.switch.ok"), display, restart)
 }
 
 /// Выполняет действие пункта меню. true — нужно выйти из меню.
@@ -331,6 +349,7 @@ private func execute(_ action: MenuAction, _ view: inout MenuView) -> Bool {
         view.providers = (try? ProviderStore.loadProviders()) ?? []
         view.logLines = readLogFile()
         view.cursor = 0
+        view.lastStatusRefresh = .distantPast
     case .showProviders:
         view.page = .providers
         view.cursor = 0
@@ -343,9 +362,10 @@ private func execute(_ action: MenuAction, _ view: inout MenuView) -> Bool {
         view.notice = agentIsRunning() ? runSelfCommand("stop") : runSelfCommand("start")
         view.page = .status
         view.cursor = 0
+        view.lastStatusRefresh = .distantPast // агент старт/стоп → статус
     case .switchProvider(let id):
         guard let provider = view.providers.first(where: { $0.id == id }) else {
-            view.notice = "Провайдер '\(id)' не найден"
+            view.notice = String(format: L10n.tr("menu.switch.error"), id)
             break
         }
         view.notice = confirmAndSwitchProvider(provider, &view)
@@ -356,18 +376,18 @@ private func execute(_ action: MenuAction, _ view: inout MenuView) -> Bool {
         view.notice = runSelfCommand("last")
     case .retryTranscribe:
         guard !view.providers.isEmpty else {
-            view.notice = "Нет провайдеров для retry (legacy-конфиг)"
+            view.notice = L10n.tr("menu.no.providers.retry")
             break
         }
-        let prompt = ansiBold + "Повторить распознавание последней записи провайдером:" + ansiReset
+        let prompt = ansiBold + L10n.tr("menu.retry.prompt") + ansiReset
             + "\n" + view.providers.enumerated()
                 .map { "  \($0.offset + 1)) \(AgentScreen.providerItemLine($0.element))" }
                 .joined(separator: "\n")
-            + "\n  (номер — выбор · другая клавиша — отмена)"
+            + "\n\(L10n.tr("menu.retry.hint"))"
         render(prompt)
         guard case .number(let n) = readMenuKey(),
               n >= 1, n <= view.providers.count else {
-            view.notice = "Отменено"
+            view.notice = L10n.tr("menu.switch.cancelled")
             break
         }
         view.notice = runSelfCommand("retry \(view.providers[n - 1].id)")
@@ -377,17 +397,25 @@ private func execute(_ action: MenuAction, _ view: inout MenuView) -> Bool {
         do {
             try AppConfig.writeReviewBeforeInsert(value: newValue, to: AppConfig.defaultPath())
             let kick = runProcess("/bin/launchctl", ["kickstart", "-k", "\(guiDomain)/com.dictation.agent"])
-            let restart = kick.status == 0 ? "агент перезапущен" : "агент не перезапущен (запустите `dictatorctl start`)"
+            let kickMsg = kick.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            let restart = kick.status == 0
+                ? L10n.tr("cli.provider.restart")
+                : String(format: L10n.tr("cli.provider.kickfail"), kickMsg.isEmpty ? kick.stdout : kickMsg)
             if newValue {
                 // Под launchd у агента нет терминала: гейт ревью пропускается
                 // (см. hasInteractiveStdin в main.swift) — предупреждаем заранее.
-                view.notice = "Ревью: вкл · \(restart) — ВНИМАНИЕ: под launchd без терминала ревью пропускается, текст вставляется сразу"
+                view.notice = String(format: L10n.tr("menu.review.on"), restart)
             } else {
-                view.notice = "Ревью перед вставкой: выкл · \(restart)"
+                view.notice = String(format: L10n.tr("menu.review.off"), restart)
             }
         } catch {
-            view.notice = "Ошибка записи конфига: \(error)"
+            view.notice = String(format: L10n.tr("menu.review.configerror"), "\(error)")
         }
+    case .toggleLanguage:
+        let newLang = L10n.language == .en ? "ru" : "en"
+        try? AppConfig.writeKeyValue(key: "ui_language", value: newLang, to: AppConfig.defaultPath())
+        L10n.language = newLang == "ru" ? .ru : .en
+        view.notice = L10n.tr("menu.language") + ": " + (L10n.language == .en ? L10n.tr("menu.languageEn") : L10n.tr("menu.languageRu"))
     }
     return false
 }
@@ -397,6 +425,8 @@ private func execute(_ action: MenuAction, _ view: inout MenuView) -> Bool {
 func runMenu() -> Int32 {
     // Меню требует TTY и на вывод, и на ввод; иначе — тихий выход к usage в main.swift.
     guard isTTY(), isatty(STDIN_FILENO) == 1 else { return 0 }
+    let uiLanguage = (try? AppConfig.load(from: nil))?.uiLanguage
+    L10n.language = uiLanguage == "ru" ? .ru : .en
     installSignalHandlers() // снимок termios до raw-режима + SIGINT/SIGTERM
     setRawMode(true)
     defer {
@@ -416,7 +446,15 @@ func runMenu() -> Int32 {
         var text = ""
         switch view.page {
         case .status:
-            let status = collectStatus()
+            // collectStatus() = 5 I/O-операций (pgrep, ProviderStore.loadProviders,
+            // readLogFile, launchctl print, attributesOfItem). Кэш с TTL 1 с:
+            // обработка клавиш (стрелки/Enter) НЕ блокируется на I/O — статус
+            // обновляется не чаще раза в секунду, перерисовка мгновенная.
+            if view.cachedStatus == nil || Date().timeIntervalSince(view.lastStatusRefresh) >= 1.0 {
+                view.cachedStatus = collectStatus()
+                view.lastStatusRefresh = Date()
+            }
+            let status = view.cachedStatus!
             entries = statusEntries(agentRunning: status.agentRunning)
             view.cursor = min(view.cursor, max(0, entries.count - 1))
             text = statusPageText(status: status, entries: entries, cursor: view.cursor, notice: view.notice)
@@ -443,6 +481,7 @@ func runMenu() -> Int32 {
             view.providers = (try? ProviderStore.loadProviders()) ?? []
             view.logLines = readLogFile()
             view.cursor = 0
+            view.lastStatusRefresh = .distantPast // r — принудительно свежий статус
         case .up:
             view.cursor = max(0, view.cursor - 1)
         case .down:

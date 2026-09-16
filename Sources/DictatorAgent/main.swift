@@ -57,7 +57,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     private let makeTranscriber: (AppConfig.Provider) -> Transcriber
 
     /// РАЗРЕШЁННЫЙ конфиг сессии — единый источник истины для реального
-    /// запросного пути: из него в init собран Transcriber и Byet-слой
+    /// запросного пути: из него в init собран Transcriber и cookie-relay-слой
     /// (baseURL/model/apiKey/transport), из него же на старте сессии
     /// вычисляется метка оверлея «через что идёт распознавание»
     /// (RecognitionLabel.forSession). Конфиг в момент показа оверлея не
@@ -211,41 +211,46 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         self.chunked = config.chunked
         self.sounds = SysSounds(enabled: config.soundsEnabled)
         self.overlay = OverlayController(logLevel: config.logLevel)
-        self.audio = AudioService(logLevel: config.logLevel)
+        self.audio = AudioService(
+            logLevel: config.logLevel,
+            // Пломбинг автоостановки по тишине из окружения (сама фича — в
+            // DictationCore/AudioService): пустое окружение → `.defaults`,
+            // ровно по задаче (включено, ~3 c, −50 dBFS). Спасательный люк —
+            // DICTATION_AUTOSTOP_DISABLED / _DURATION / _RMS, см. AutoStopConfig.
+            autoStopConfig: AutoStopConfig.fromEnvironment()
+        )
         self.hotkeys = HotkeyService(
             doubleTapMaxInterval: config.doubleAltMaxInterval,
             logLevel: config.logLevel
         )
-        // Byet-cookie-слой включается только при relay-транспорте ("relay" —
-        // канонический id, "infinityfree" — legacy-алиас старого конфига;
+        // Cookie-relay-слой включается только при transport = "cookie-relay"
+        // (legacy-алиасы старого конфига канонизируются при парсинге;
         // корневой key или секция активного провайдера: resolveActiveProvider
         // уже скопировал его в effective-конфиг). nil — поведение как раньше.
-        let isRelayTransport = { (transport: String) -> Bool in
-            transport == "relay" || transport == "infinityfree"
-        }
-        let byetCookieProvider = isRelayTransport(config.transport)
-            ? ByetCookieProvider.makeForInfinityFree(baseURL: config.baseURL)
+        let cookieRelayProvider = config.transport == "cookie-relay"
+            ? CookieRelayProvider.makeForCookieRelay(baseURL: config.baseURL)
             : nil
-        // Единый реестр Byet-провайдеров по baseURL (кука выпускается на origin
-        // прокси; одинаковый baseURL → тот же origin → тот же инстанс). Важно:
-        // реестр строится ОДИН раз в init и в замыкании только читается —
-        // гонок нет, а failover/retry переиспользуют ТОТ ЖЕ инстанс, что
-        // основной путь, вместе с его разогретым токеном (иначе первый retry-
-        // запрос ушёл бы без куки на лишний челлендж-раундтрип).
-        var byetByURL: [String: ByetCookieProvider] = [:]
-        if let byetCookieProvider = byetCookieProvider {
-            byetByURL[config.baseURL] = byetCookieProvider
+        // Единый реестр cookie-relay-провайдеров по baseURL (кука выпускается
+        // на origin прокси; одинаковый baseURL → тот же origin → тот же
+        // инстанс). Важно: реестр строится ОДИН раз в init и в замыкании
+        // только читается — гонок нет, а failover/retry переиспользуют
+        // ТОТ ЖЕ инстанс, что основной путь, вместе с его разогретым
+        // токеном (иначе первый retry-запрос ушёл бы без куки на лишний
+        // челлендж-раундтрип).
+        var cookieRelayByURL: [String: CookieRelayProvider] = [:]
+        if let cookieRelayProvider = cookieRelayProvider {
+            cookieRelayByURL[config.baseURL] = cookieRelayProvider
         }
         for retryCandidate in config.providers {
             let t = retryCandidate.transport.isEmpty ? config.transport : retryCandidate.transport
-            guard isRelayTransport(t), byetByURL[retryCandidate.baseURL] == nil,
-                  let made = ByetCookieProvider.makeForInfinityFree(baseURL: retryCandidate.baseURL) else { continue }
-            byetByURL[retryCandidate.baseURL] = made
+            guard t == "cookie-relay", cookieRelayByURL[retryCandidate.baseURL] == nil,
+                  let made = CookieRelayProvider.makeForCookieRelay(baseURL: retryCandidate.baseURL) else { continue }
+            cookieRelayByURL[retryCandidate.baseURL] = made
         }
-        let retryTransport = { (provider: AppConfig.Provider) -> ByetCookieProvider? in
+        let retryTransport = { (provider: AppConfig.Provider) -> CookieRelayProvider? in
             let t = provider.transport.isEmpty ? config.transport : provider.transport
-            guard isRelayTransport(t) else { return nil }
-            return byetByURL[provider.baseURL]
+            guard t == "cookie-relay" else { return nil }
+            return cookieRelayByURL[provider.baseURL]
         }
         // Активный провайдер: явный active_provider, либо (по документированному
         // сценарию «только секции [providers.X], без active_provider») — первый
@@ -276,7 +281,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
                 language: config.language,
                 timeout: config.timeoutSeconds,
                 logLevel: config.logLevel,
-                byetCookieProvider: retryTransport(provider),
+                cookieRelayProvider: retryTransport(provider),
+                httpProxy: provider.httpProxy.isEmpty ? config.httpProxy : provider.httpProxy,
+                proxyUser: provider.proxyUser.isEmpty ? config.proxyUser : provider.proxyUser,
+                proxyPassword: provider.proxyPassword.isEmpty ? config.proxyPassword : provider.proxyPassword,
                 apiSecret: provider.apiSecret,
                 adapterID: provider.id
             )
@@ -297,7 +305,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
                 language: config.language,
                 timeout: config.timeoutSeconds,
                 logLevel: config.logLevel,
-                byetCookieProvider: byetCookieProvider,
+                cookieRelayProvider: cookieRelayProvider,
+                httpProxy: config.httpProxy,
+                proxyUser: config.proxyUser,
+                proxyPassword: config.proxyPassword,
                 apiSecret: config.apiSecret,
                 adapterID: self.activeProviderID
             )
@@ -320,10 +331,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         })
         super.init()
 
-        // Прогрев Byet-токена: первый Alt+Alt не должен уходить с протухшей/пустой
-        // кукой — фоновая заготовка токена стартует сразу (неблокирующе для ввода).
-        if let byetCookieProvider = byetCookieProvider {
-            Task { _ = await byetCookieProvider.refreshBlocking() }
+        // Прогрев cookie-relay-токена: первый Alt+Alt не должен уходить с
+        // протухшей/пустой кукой — фоновая заготовка токена стартует сразу
+        // (неблокирующе для ввода).
+        if let cookieRelayProvider = cookieRelayProvider {
+            Task { _ = await cookieRelayProvider.refreshBlocking() }
         }
 
         self.audio.levelDelegate = self
@@ -334,6 +346,15 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         self.audio.onRecordingLimitReached = { [weak self] samples in
             DispatchQueue.main.async {
                 self?.handleRecordingLimitReached(samples: samples)
+            }
+        }
+
+        // Автоостановка по непрерывной тишине (~3 с): эквивалент повторного
+        // Alt+Alt без нажатия — запись остановлена внутри AudioService, здесь
+        // только финализация сэмплов тем же стандартным путём.
+        self.audio.onAutoStop = { [weak self] samples in
+            DispatchQueue.main.async {
+                self?.handleAutoStop(samples: samples)
             }
         }
 
@@ -378,7 +399,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         NSWorkspace.shared.open(
             URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
         )
-        Logger.log("Необходимо разрешить доступность для клавиатуры — системная панель открыта", level: "info")
+        Logger.log(L10n.tr("error.accessibilityRequired"), level: "info")
 
         // Автоподхват права: опрос каждые 2 секунды на главном потоке.
         accessibilityPollTimer?.invalidate()
@@ -486,7 +507,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         case .authorized:
             startRecording()
         case .denied, .restricted:
-            showMicrophoneError("Разрешите доступ к микрофону: System Settings → Конфиденциальность")
+            showMicrophoneError(L10n.tr("error.micPermission"))
         case .notDetermined:
             guard !micPermissionRequestInFlight else {
                 Logger.log("mic permission request already in flight — ignoring Alt+Alt", level: "info")
@@ -499,7 +520,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
                 guard let self = self, self.micRequestSession == session else { return }
                 Logger.log("mic permission request timed out after \(Int(Self.micRequestTimeout)) s", level: "error")
                 self.micPermissionRequestInFlight = false
-                self.showMicrophoneError("Запрос доступа к микрофону не обработан: System Settings → Конфиденциальность")
+                self.showMicrophoneError(L10n.tr("error.micPermissionUnhandled"))
             }
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
                 DispatchQueue.main.async {
@@ -507,11 +528,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
                     self.micPermissionRequestInFlight = false
                     Logger.log("mic permission request result: \(granted ? "granted" : "denied")", level: "info")
                     granted ? self.startRecording()
-                        : self.showMicrophoneError("Разрешите доступ к микрофону: System Settings → Конфиденциальность")
+                        : self.showMicrophoneError(L10n.tr("error.micPermission"))
                 }
             }
         @unknown default:
-            showMicrophoneError("Разрешите доступ к микрофону: System Settings → Конфиденциальность")
+            showMicrophoneError(L10n.tr("error.micPermission"))
         }
     }
 
@@ -534,7 +555,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         overlay.setSTTLabel(RecognitionLabel.forSession(resolvedConfig))
         // Фаза «запись»: микрофон + таймер, время старта фиксируется здесь.
         overlay.setRecordingPhase()
-        overlay.setStatus("Записываю…")
+        overlay.setStatus(L10n.tr("overlay.recording"))
         Logger.log("record start")
 
         isStarting = true
@@ -552,7 +573,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             self.startSession += 1
             self.isStarting = false
             self.audio.cancel()
-            self.showMicrophoneError("Микрофон не отвечает")
+            self.showMicrophoneError(L10n.tr("error.micNoResponse"))
         }
 
         audio.start { [weak self] result in
@@ -580,7 +601,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
                 }
             case .failure(let error):
                 Logger.log("microphone unavailable: \(error.localizedDescription)", level: "error")
-                self.showMicrophoneError("Не удалось включить микрофон")
+                self.showMicrophoneError(L10n.tr("error.micEnableFailed"))
             }
         }
     }
@@ -632,7 +653,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         cancelRecognition = false
         // Фаза «обработка»: вместо иконки — анимация точек, пока идёт STT.
         overlay.setProcessingPhase()
-        overlay.setStatus("Распознаю…")
+        overlay.setStatus(L10n.tr("overlay.recognizing"))
         // Длительность по фактически собранным сэмплам (16 кГц моно) —
         // видно, в каких единицах уходит аудио в STT. Звук завершения играем
         // НЕ здесь, а в completeInsertion ПОСЛЕ вставки текста.
@@ -721,7 +742,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         // (тот же сброс, что и в processSingleRequest).
         cancelRecognition = false
         overlay.setProcessingPhase()
-        overlay.setStatus("Распознаю…")
+        overlay.setStatus(L10n.tr("overlay.recognizing"))
         sounds.playEnd()
         let duration = Double(samples.count) / 16000.0
         Logger.log(String(format: "chunked transcribe submit (\(samples.count) samples, %.2f s)", duration), level: "info")
@@ -791,9 +812,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
                                   self.state == .transcribing else { return }
                             switch phase {
                             case .segment(let index):
-                                self.overlay.setStatus("Распознаю… (часть \(index + 1))")
+                                self.overlay.setStatus(L10n.tr("overlay.recognizingPart").replacingOccurrences(of: "{n}", with: "\(index + 1)"))
                             case .finalizing:
-                                self.overlay.setStatus("Финальная обработка…")
+                                self.overlay.setStatus(L10n.tr("overlay.finalProcessing"))
                             }
                         }
                     }
@@ -842,7 +863,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             case .cancel:
                 Inserter.delete(characters: text)
                 overlay.resetPhase()
-                overlay.setStatus("Отменено")
+                overlay.setStatus(L10n.tr("overlay.cancelled"))
                 hideAfter(0.8, reason: "chunked review cancelled")
                 state = .idle
                 Logger.log("chunked transcription cancelled by review gate")
@@ -858,7 +879,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         lastInsertedAt = CFAbsoluteTimeGetCurrent()
 
         overlay.resetPhase()
-        overlay.setStatus("Завершаю…")
+        overlay.setStatus(L10n.tr("overlay.finishing"))
         sounds.playCompletionAfterInsert()
         hideAfter(0.8, reason: "chunked insert done")
         state = .idle
@@ -877,9 +898,28 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         Logger.log("record limit reached (\(samples.count) samples)", level: "info")
         if chunked {
             // Живая диктовка: «хвост» уже отдан колбэком onSpeechSegment ДО
-            // этого вызова (performLimitStop: tail → onRecordingLimitReached) и
+            // этого вызова (performForcedStop: tail → onRecordingLimitReached) и
             // стоит в liveExecutor первым; здесь — только страж и финальный
             // проход по переданным сэмплам (без audio.stop()).
+            liveFinalizeFromSamples(samples)
+        } else {
+            processSamples(samples)
+        }
+    }
+
+    /// Запись автоматически остановлена по непрерывной тишине (~3 с) — тот же
+    /// путь, что и ручное повторное Alt+Alt: финализируем собранные сэмплы.
+    /// Детектор жил в AudioService (там известна реальная длительность буферов),
+    /// колбэк приходит на главной очереди; «хвост» live-диктовки уже отдан
+    /// onSpeechSegment ДО этого вызова.
+    private func handleAutoStop(samples: [Int16]) {
+        guard state == .recording else { return }
+        Logger.log("auto-stop by silence (\(samples.count) samples)", level: "info")
+        if chunked {
+            // Живая диктовка: «хвост» стоит в liveExecutor первым (tail был
+            // доставлен onSpeechSegment раньше onAutoStop), здесь — финальный
+            // проход по снимку. audio.stop() не вызываем: AudioService уже
+            // разбирает движок своим путём (teardown на engineQueue).
             liveFinalizeFromSamples(samples)
         } else {
             processSamples(samples)
@@ -925,7 +965,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             guard let self = self,
                   self.liveSession == runState.session,
                   self.state == .recording || self.state == .transcribing else { return }
-            self.overlay.setStatus("Распознаю… (часть \(index + 1))")
+            self.overlay.setStatus(L10n.tr("overlay.recognizingPart").replacingOccurrences(of: "{n}", with: "\(index + 1)"))
         }
 
         do {
@@ -969,7 +1009,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
                 // Статус возвращается к фазе записи — кроме «хвоста» (идёт
                 // фиксация: «Распознаю…» покажет страж/финальный проход).
                 if self.state == .recording {
-                    self.overlay.setStatus("Записываю…")
+                    self.overlay.setStatus(L10n.tr("overlay.recording"))
                 }
             }
         } catch {
@@ -1007,7 +1047,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         state = .transcribing
         cancelRecognition = false
         overlay.setProcessingPhase()
-        overlay.setStatus("Распознаю…")
+        overlay.setStatus(L10n.tr("overlay.recognizing"))
         sounds.playEnd()
 
         // Синхронный останов: незакрытый уттеренс отдаётся колбэком ДО возврата
@@ -1035,11 +1075,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         }
     }
 
-    /// Финализация живого цикла по принудительному стопу лимита (максимальная
-    /// длительность записи). «Хвост» уже доставлен onSpeechSegment ДО этого
-    /// вызова (порядок в performLimitStop: tail → onRecordingLimitReached) и
-    /// стоит в liveExecutor первым; здесь — только страж и финальный проход
-    /// по переданным сэмплам (без audio.stop()).
+    /// Финализация живого цикла по принудительному стопу (лимит длительности
+    /// или автоостановке по тишине ~3 c). «Хвост» уже доставлен onSpeechSegment
+    /// ДО этого вызова (порядок в performForcedStop: tail → колбэк) и стоит
+    /// в liveExecutor первым; здесь — только страж и финальный проход по
+    /// переданным сэмплам (без audio.stop()).
     private func liveFinalizeFromSamples(_ samples: [Int16]) {
         guard let runState = liveRunState else {
             processChunked(samples)
@@ -1048,7 +1088,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         state = .transcribing
         cancelRecognition = false
         overlay.setProcessingPhase()
-        overlay.setStatus("Распознаю…")
+        overlay.setStatus(L10n.tr("overlay.recognizing"))
         sounds.playEnd()
         let duration = Double(samples.count) / 16000.0
         Logger.log(String(format: "live limit finalize (\(samples.count) samples, %.2f s)", duration), level: "info")
@@ -1143,7 +1183,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
                 onFinalizing: {
                     DispatchQueue.main.async {
                         guard self.processingSession == session, self.state == .transcribing else { return }
-                        self.overlay.setStatus("Финальная обработка…")
+                        self.overlay.setStatus(L10n.tr("overlay.finalProcessing"))
                     }
                 }
             )
@@ -1188,7 +1228,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
                 break
             case .cancel:
                 overlay.resetPhase()
-                overlay.setStatus("Отменено")
+                overlay.setStatus(L10n.tr("overlay.cancelled"))
                 hideAfter(0.8, reason: "review cancelled")
                 state = .idle
                 Logger.log("transcription cancelled by review gate")
@@ -1206,7 +1246,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
 
         // UI+звук — только после гарантированной вставки.
         overlay.resetPhase()
-        overlay.setStatus("Завершаю…")
+        overlay.setStatus(L10n.tr("overlay.finishing"))
         sounds.playCompletionAfterInsert()
         hideAfter(0.8, reason: "insert done")
         state = .idle
@@ -1306,7 +1346,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
                         return
                     }
                     self.overlay.resetPhase()
-                    self.overlay.setStatus("Ошибка retry: \(networkText ?? Self.message(for: error))")
+                    self.overlay.setStatus(L10n.tr("overlay.retryError").replacingOccurrences(of: "{message}", with: networkText ?? Self.message(for: error)))
                     self.hideAfter(2.0, reason: "retry failed")
                 }
             }
@@ -1330,7 +1370,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             case .insert:
                 break
             case .cancel:
-                overlay.setStatus("Retry отменён")
+                overlay.setStatus(L10n.tr("overlay.retryCancelled"))
                 hideAfter(0.8, reason: "retry review cancelled")
                 Logger.log("retry cancelled by review gate")
                 return
@@ -1340,7 +1380,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         }
         Inserter.insert(text: text, method: insertMethod)
         overlay.resetPhase()
-        overlay.setStatus("Retry вставлен")
+        overlay.setStatus(L10n.tr("overlay.retryInserted"))
         hideAfter(1.0, reason: "retry inserted")
         Logger.log("retry transcription inserted (\(text.count) chars)")
         Logger.log("LAST_TEXT: \(text.replacingOccurrences(of: "\n", with: " "))")
@@ -1359,7 +1399,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         lastInsertedText = nil
         lastInsertedAt = nil
         overlay.resetPhase()
-        overlay.setStatus("Пустой результат")
+        overlay.setStatus(L10n.tr("overlay.emptyResult"))
         hideAfter(0.8, reason: "empty result")
         state = .idle
         Logger.log("empty transcription result — not inserted", level: "info")
@@ -1380,7 +1420,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         }
         overlay.show()
         overlay.resetPhase()
-        overlay.setStatus("Отменена вставка")
+        overlay.setStatus(L10n.tr("overlay.insertCancelled"))
         Inserter.delete(characters: text)
         if undoSoundEnabled {
             sounds.playUndo()
@@ -1401,7 +1441,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             sounds.playError()
         }
         overlay.resetPhase()
-        overlay.setStatus("Ошибка: \(message)")
+        overlay.setStatus(L10n.tr("overlay.error").replacingOccurrences(of: "{message}", with: message))
         hideAfter(2.0, reason: "transcription failed")
         state = .idle
         Logger.log("transcription failed: \(message)", level: "error")
@@ -1429,7 +1469,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             return
         }
         overlay.resetPhase()
-        overlay.setStatus("Отменено")
+        overlay.setStatus(L10n.tr("overlay.cancelled"))
         sounds.playCancel()
         hideAfter(0.8, reason: "cancelled")
         state = .idle
@@ -1488,6 +1528,10 @@ do {
     config = AppConfig.defaults
 }
 
+// UI-язык из конфига — ДО первого использования L10n.tr (статические
+// сообщения Transcriber.noInternetMessage/… резолвятся при первом доступе).
+L10n.language = AppLanguage(rawValue: config.uiLanguage) ?? .en
+
 let app = NSApplication.shared
 let agent = Agent(config: config)
 
@@ -1498,7 +1542,7 @@ do {
 } catch {
     Logger.log("hotkey service failed to start: \(error.localizedDescription)", level: "error")
     let alert = NSAlert()
-    alert.messageText = "Не удалось запустить агент диктовки"
+    alert.messageText = L10n.tr("error.agentLaunchFailed")
     alert.informativeText = error.localizedDescription
     alert.runModal()
     exit(1)

@@ -86,20 +86,20 @@ func cmdStart() -> Int32 {
         try fm.createDirectory(at: launchAgentsDir, withIntermediateDirectories: true)
         try fm.createDirectory(at: logsDir, withIntermediateDirectories: true)
     } catch {
-        eprint("Не удалось создать директории: \(error)")
+        eprint(String(format: L10n.tr("cli.dir.error"), "\(error)"))
         return 1
     }
 
     guard let template = findPlistTemplate() else {
-        eprint("Не найден шаблон dictation-agent.plist.template (Resources рядом с бинарём или в проекте; либо укажите DICTATION_PLIST_TEMPLATE)")
+        eprint(L10n.tr("cli.plist.notfound"))
         return 1
     }
     guard let binaryPath = findAgentBinaryPath() else {
-        eprint("Не удалось определить путь к DictatorAgent")
+        eprint(L10n.tr("cli.agent.notfound"))
         return 1
     }
     guard let templateText = try? String(contentsOf: template, encoding: .utf8) else {
-        eprint("Не удалось прочитать шаблон plist: \(template.path)")
+        eprint(String(format: L10n.tr("cli.plist.readerror"), template.path))
         return 1
     }
     // Шаблон генерируется в plist с РЕАЛЬНЫМ путём бинаря агента и лог-файлом
@@ -113,7 +113,7 @@ func cmdStart() -> Int32 {
     do {
         try plistText.data(using: .utf8)!.write(to: dest, options: .atomic)
     } catch {
-        eprint("Не удалось записать plist: \(error)")
+        eprint(String(format: L10n.tr("cli.plist.writeerror"), "\(error)"))
         return 1
     }
 
@@ -136,8 +136,8 @@ func cmdStart() -> Int32 {
     }
     let msg1 = bootstrap.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
     let msg2 = load.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-    eprint(msg1.isEmpty ? "launchctl bootstrap: нет вывода" : "launchctl bootstrap не удался: \(msg1)")
-    eprint(msg2.isEmpty ? "launchctl load fallback: нет вывода" : "launchctl load fallback не удался: \(msg2)")
+    eprint(msg1.isEmpty ? L10n.tr("cli.bootstrap.nodata") : String(format: L10n.tr("cli.bootstrap.fail"), msg1))
+    eprint(msg2.isEmpty ? L10n.tr("cli.load.nodata") : String(format: L10n.tr("cli.load.fail"), msg2))
     return 1
 }
 
@@ -155,8 +155,8 @@ func cmdStop() -> Int32 {
     }
     let msg1 = bootout.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
     let msg2 = unload.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-    eprint(msg1.isEmpty ? "launchctl bootout: нет вывода" : "launchctl bootout не удался: \(msg1)")
-    eprint(msg2.isEmpty ? "launchctl unload fallback: нет вывода" : "launchctl unload fallback не удался: \(msg2)")
+    eprint(msg1.isEmpty ? L10n.tr("cli.bootout.nodata") : String(format: L10n.tr("cli.bootout.fail"), msg1))
+    eprint(msg2.isEmpty ? L10n.tr("cli.unload.nodata") : String(format: L10n.tr("cli.unload.fail"), msg2))
     return 1
 }
 
@@ -178,16 +178,16 @@ func cmdStatus() -> Int32 {
         if let active = ProviderStore.activeProvider {
             print("provider: \(active.name)")
         } else if providers.isEmpty {
-            print("provider: (нет провайдеров — legacy-конфиг)")
+            print("provider: \(L10n.tr("cli.no.providers"))")
         } else {
-            print("provider: (не выбран — `dictatorctl provider use <имя>`)")
+            print("provider: \(L10n.tr("cli.no.active"))")
         }
     } catch {
-        print("provider: (ошибка: \(error))")
+        print("provider: (\(error))")
     }
 
     if !FileManager.default.fileExists(atPath: AppConfig.defaultPath()) {
-        print("hint: конфиг не найден — создайте шаблон командой `dictatorctl config init`")
+        print(L10n.tr("cli.config.hint"))
     }
 
     return running ? 0 : 1
@@ -219,13 +219,13 @@ func maskFileSecrets(in content: String) -> String {
 
 /// "(пусто)" для пустых секретов, иначе — первые 4 + "***" + последние 4 символа.
 func secretDisplay(_ secret: String) -> String {
-    secret.isEmpty ? "(пусто)" : AppConfig.maskSecret(secret)
+    secret.isEmpty ? L10n.tr("cli.placeholder.empty") : AppConfig.maskSecret(secret)
 }
 
 /// Спросить в TTY, перезаписывать ли существующий конфиг. В пайпе — false.
 func configOverwriteConfirmed(_ path: String) -> Bool {
     guard isTTY(), stdinIsTTY() else { return false }
-    eprint("Конфиг \(path) уже существует. Перезаписать? (y/N)")
+    eprint(String(format: L10n.tr("cli.config.overwrite"), path))
     let answer = readLine()?.trimmingCharacters(in: .whitespaces).lowercased() ?? ""
     return answer == "y" || answer == "yes"
 }
@@ -240,11 +240,11 @@ func writeConfigTemplate(path: String) -> Int32 {
             .write(to: URL(fileURLWithPath: path), options: .atomic)
         try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
     } catch {
-        eprint("ОШИБКА: не удалось записать \(path): \(error)")
+        eprint(String(format: L10n.tr("cli.config.writeerror"), path, "\(error)"))
         return 1
     }
-    print("Шаблон конфига создан: \(path) (chmod 600)")
-    print("Заполните секреты: `dictatorctl config set-key <провайдер>` или отредактируйте файл.")
+    print(String(format: L10n.tr("cli.config.template"), path))
+    print(L10n.tr("cli.config.fillserts"))
     return 0
 }
 
@@ -254,7 +254,7 @@ func writeConfigTemplate(path: String) -> Int32 {
 /// env-переменная DICTATION_API_KEY (она приоритетнее файла).
 func cmdConfigSetKey(path: String, args: [String]) -> Int32 {
     guard let providerID = args.first else {
-        eprint("Использование: dictatorctl config set-key <провайдер-id> [ключ] [--stdin]")
+        eprint(L10n.tr("cli.setkey.usage"))
         return 1
     }
     let rest = Array(args.dropFirst())
@@ -269,25 +269,25 @@ func cmdConfigSetKey(path: String, args: [String]) -> Int32 {
         value = String(data: data, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     } else {
-        eprint("Введите значение api_key для '\(providerID)' (Enter — подтвердить):")
+        eprint(String(format: L10n.tr("cli.setkey.prompt"), providerID))
         guard let line = readLine() else {
-            eprint("Отменено")
+            eprint(L10n.tr("cli.setkey.cancelled"))
             return 1
         }
         value = line.trimmingCharacters(in: .whitespacesAndNewlines)
     }
     guard !value.isEmpty else {
-        eprint("Значение пусто — ключ не записан (передайте аргументом или через stdin)")
+        eprint(L10n.tr("cli.setkey.empty"))
         return 1
     }
     guard !value.contains("\""), !value.contains("\\"), !value.contains("\n") else {
-        eprint("ОШИБКА: значение содержит недопустимые символы (\", \\, перевод строки)")
+        eprint(L10n.tr("cli.setkey.invalid"))
         return 1
     }
 
     if let envKey = ProcessInfo.processInfo.environment["DICTATION_API_KEY"], !envKey.isEmpty {
-        eprint("ВНИМАНИЕ: активна env-переменная DICTATION_API_KEY — приоритетнее api_key из файла;")
-        eprint("пока она задана, записанный ключ использоваться не будет (см. `dictatorctl config show`).")
+        eprint(L10n.tr("cli.setkey.envwarn"))
+        eprint(L10n.tr("cli.setkey.envnote"))
     }
 
     do {
@@ -295,10 +295,10 @@ func cmdConfigSetKey(path: String, args: [String]) -> Int32 {
         // как writeKeyValue для строк (ср. writeActiveProvider).
         try AppConfig.writeProviderKeyValue(providerID: providerID, key: "api_key", value: "\"\(value)\"", to: path)
     } catch {
-        eprint("ОШИБКА: \(error)")
+        eprint(String(format: L10n.tr("cli.config.writeerror"), providerID, "\(error)"))
         return 1
     }
-    print("api_key провайдера '\(providerID)' обновлён: \(path) (chmod 600)")
+    print(String(format: L10n.tr("cli.setkey.updated"), providerID, path))
     return 0
 }
 
@@ -321,8 +321,8 @@ func cmdConfig(_ args: [String]) -> Int32 {
     // `config init [--force]` — создать шаблон (без подтверждения не перезаписывает).
     if args.first?.lowercased() == "init" {
         guard !exists || args.contains("--force") || configOverwriteConfirmed(path) else {
-            eprint("Конфиг уже существует: \(path)")
-            eprint("Для перезаписи используйте `dictatorctl config init --force`.")
+            eprint(String(format: L10n.tr("cli.config.exists"), path))
+            eprint(L10n.tr("cli.config.forcehint"))
             return 1
         }
         return writeConfigTemplate(path: path)
@@ -339,21 +339,21 @@ func cmdConfig(_ args: [String]) -> Int32 {
         if args.contains("--show-file") {
             if exists {
                 guard let content = try? String(contentsOfFile: path, encoding: .utf8) else {
-                    eprint("Не удалось прочитать конфиг: \(path)")
+                    eprint(String(format: L10n.tr("cli.config.noread"), path))
                     return 1
                 }
                 print(maskFileSecrets(in: content))
             } else {
-                print("Конфиг не найден: создайте шаблон командой `dictatorctl config init` (\(path))")
+                print(String(format: L10n.tr("cli.config.missing"), path))
             }
             return 0
         }
 
         print("path: \(path)")
         if !exists {
-            print("Конфиг не найден: создайте шаблон командой `dictatorctl config init` (\(path))")
+            print(String(format: L10n.tr("cli.config.missing"), path))
         }
-        print("active_provider: \(ProviderStore.activeProvider?.id ?? "(не выбран)")")
+        print("active_provider: \(ProviderStore.activeProvider?.id ?? L10n.tr("cli.config.noset"))")
         print("base_url: \(config.baseURL)")
         print("model: \(config.model)")
         print("timeout_seconds: \(config.timeoutSeconds)")
@@ -368,7 +368,7 @@ func cmdConfig(_ args: [String]) -> Int32 {
         }
         return 0
     } catch {
-        eprint("ОШИБКА: \(error)")
+        eprint(String(format: L10n.tr("cli.flag.configload"), "\(error)"))
         return 1
     }
 }
@@ -379,7 +379,7 @@ func providerList() -> Int32 {
     do {
         let (activeID, providers) = try AppConfig.loadProvidersOnly(from: nil)
         guard !providers.isEmpty else {
-            print("Нет секций [providers.X] в конфиге (используется legacy-конфиг).")
+            print(L10n.tr("cli.provider.nosections"))
             return 0
         }
         for p in providers {
@@ -397,10 +397,10 @@ func providerList() -> Int32 {
                 print("    api_secret: \(secretDisplay(p.apiSecret))")
             }
         }
-        print("(* — активный провайдер)")
+        print(L10n.tr("cli.provider.activeMarker"))
         return 0
     } catch {
-        eprint("ОШИБКА: \(error)")
+        eprint(String(format: L10n.tr("cli.flag.configload"), "\(error)"))
         return 1
     }
 }
@@ -409,13 +409,13 @@ func providerUse(_ name: String, _ args: [String]) -> Int32 {
     do {
         try ProviderStore.setActive(providerID: name)
     } catch let ProviderStoreError.unknownProvider(providerID: id, available: available) {
-        eprint("ОШИБКА: провайдер '\(id)' не найден. Доступные: \(available.joined(separator: ", "))")
+        eprint(String(format: L10n.tr("cli.provider.notfound"), id, available.joined(separator: ", ")))
         return 2
     } catch {
-        eprint("ОШИБКА: \(error)")
+        eprint(String(format: L10n.tr("cli.flag.configload"), "\(error)"))
         return 1
     }
-    print("Активный провайдер: \(name)")
+    print(String(format: L10n.tr("cli.provider.active"), name))
     return restartAgentIfNeeded(args)
 }
 
@@ -423,16 +423,16 @@ func providerUse(_ name: String, _ args: [String]) -> Int32 {
 /// команд, меняющих конфиг: provider use и routing set/unset.
 func restartAgentIfNeeded(_ args: [String]) -> Int32 {
     if args.contains("--no-restart") {
-        print("Агент не перезапущен (--no-restart)")
+        print(L10n.tr("cli.provider.norestart"))
         return 0
     }
     let target = "\(guiDomain)/\(agentServiceName)"
     let kick = runProcess("/bin/launchctl", ["kickstart", "-k", target])
     if kick.status == 0 {
-        print("Агент перезапущен")
+        print(L10n.tr("cli.provider.restart"))
     } else {
         let msg = kick.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-        eprint("Агент не перезапущен (запустите `dictatorctl start`): \(msg.isEmpty ? kick.stdout : msg)")
+        eprint(String(format: L10n.tr("cli.provider.kickfail"), msg.isEmpty ? kick.stdout : msg))
     }
     return 0
 }
@@ -447,12 +447,12 @@ func providerStatus() -> Int32 {
             print("model: \(active.model)")
             print("base_url: \(active.baseURL)")
         } else if providers.isEmpty {
-            print("active: (нет провайдеров — legacy-конфиг)")
+            print("active: \(L10n.tr("cli.no.providers"))")
         } else {
-            print("active: (не выбран — `dictatorctl provider use <имя>`)")
+            print("active: \(L10n.tr("cli.no.active"))")
         }
     } catch {
-        eprint("ОШИБКА: \(error)")
+        eprint(String(format: L10n.tr("cli.flag.configload"), "\(error)"))
         return 1
     }
     print(running ? "agent: running" : "agent: not running")
@@ -464,7 +464,7 @@ func providerShow(_ name: String) -> Int32 {
         let (activeID, providers) = try AppConfig.loadProvidersOnly(from: nil)
         guard let p = providers.first(where: { $0.id == name }) else {
             let available = providers.map { $0.id }
-            eprint("ОШИБКА: провайдер '\(name)' не найден. Доступные: \(available.joined(separator: ", "))")
+            eprint(String(format: L10n.tr("cli.provider.notfound"), name, available.joined(separator: ", ")))
             return 2
         }
         print("id: \(p.id)")
@@ -473,8 +473,8 @@ func providerShow(_ name: String) -> Int32 {
         print("base_url: \(p.baseURL)")
         print("model: \(p.model)")
         if p.apiKey.isEmpty {
-            print("api_key: (пусто)")
-            print("! api_key: ВНИМАНИЕ — секрет не задан")
+            print("api_key: \(L10n.tr("cli.config.noset"))")
+            print(L10n.tr("cli.config.secretWarning"))
         } else {
             print("api_key: \(secretDisplay(p.apiKey))")
         }
@@ -482,22 +482,22 @@ func providerShow(_ name: String) -> Int32 {
             let expanded = (keyFile as NSString).expandingTildeInPath
             print("api_key_file: \(keyFile)")
             if !FileManager.default.fileExists(atPath: expanded) {
-                print("! api_key_file: ВНИМАНИЕ — файл не существует (\(expanded))")
+                print(String(format: L10n.tr("cli.config.secretFileMissing"), expanded))
             }
         }
         if p.proxyKey.isEmpty {
-            print("proxy_key: (пусто)")
+            print("proxy_key: \(L10n.tr("cli.config.noset"))")
         } else {
             print("proxy_key: \(secretDisplay(p.proxyKey))")
         }
         if p.apiSecret.isEmpty {
-            print("api_secret: (пусто)")
+            print("api_secret: \(L10n.tr("cli.config.noset"))")
         } else {
             print("api_secret: \(secretDisplay(p.apiSecret))")
         }
         return 0
     } catch {
-        eprint("ОШИБКА: \(error)")
+        eprint(String(format: L10n.tr("cli.flag.configload"), "\(error)"))
         return 1
     }
 }
@@ -511,7 +511,7 @@ func cmdProvider(_ args: [String]) -> Int32 {
         // --no-restart не позиционный: распознаётся в любом месте (в т.ч.
         // до имени — иначе уходит в валидацию как невалидный id).
         guard let name = rest.first(where: { $0 != "--no-restart" }) else {
-            eprint("Использование: dictatorctl provider use <имя> [--no-restart]")
+            eprint(L10n.tr("usage.provider.use"))
             return 1
         }
         return providerUse(name, rest)
@@ -519,12 +519,12 @@ func cmdProvider(_ args: [String]) -> Int32 {
         return providerStatus()
     case "show":
         guard let name = args.dropFirst().first else {
-            eprint("Использование: dictatorctl provider show <имя>")
+            eprint(L10n.tr("usage.provider.show"))
             return 1
         }
         return providerShow(name)
     default:
-        eprint("Использование: dictatorctl provider list|use|status|show")
+        eprint(L10n.tr("usage.provider"))
         return 1
     }
 }
@@ -537,8 +537,7 @@ func cmdProvider(_ args: [String]) -> Int32 {
 func routingShow() -> Int32 {
     let path = AppConfig.defaultPath()
     guard FileManager.default.fileExists(atPath: path) else {
-        print("Конфиг не найден: \(path)")
-        print("Создайте шаблон: `dictatorctl config init`")
+        print(String(format: L10n.tr("cli.config.missing"), path))
         return 0
     }
     let (activeID, providers) = (try? AppConfig.loadProvidersOnly(from: nil)) ?? ("", [])
@@ -548,15 +547,15 @@ func routingShow() -> Int32 {
     let ids = providers.map { $0.id }
     let seg = config.routing.segmentProvider
     let fin = config.routing.finalProvider
-    let activeDisplay = activeID.isEmpty ? "(не задан)" : activeID
+    let activeDisplay = activeID.isEmpty ? L10n.tr("cli.config.unset") : activeID
     func effective(_ role: String) -> String {
         !role.isEmpty && ids.contains(role)
             ? role
-            : (activeID.isEmpty ? "(не задан)" : "\(activeID) (активный)")
+            : (activeID.isEmpty ? L10n.tr("cli.config.unset") : "\(activeID) \(L10n.tr("cli.config.active"))")
     }
     print("active_provider: \(activeDisplay)")
-    print("segment_provider: \(seg.isEmpty ? "(не задан)" : seg)")
-    print("final_provider: \(fin.isEmpty ? "(не задан)" : fin)")
+    print("segment_provider: \(seg.isEmpty ? L10n.tr("cli.config.unset") : seg)")
+    print("final_provider: \(fin.isEmpty ? L10n.tr("cli.config.unset") : fin)")
     print("segment (effective): \(effective(seg))")
     print("final (effective): \(effective(fin))")
     return 0
@@ -577,23 +576,23 @@ func routingKey(for role: String) -> String? {
 /// --no-restart). Роль действует с перезапуска агента.
 func routingSet(role: String, providerID: String, args: [String]) -> Int32 {
     guard let key = routingKey(for: role) else {
-        eprint("Использование: dictatorctl routing set segment|final <провайдер-id> [--no-restart]")
+        eprint(L10n.tr("cli.routing.usage"))
         return 1
     }
     do {
         let (_, providers) = try AppConfig.loadProvidersOnly(from: nil)
         guard providers.contains(where: { $0.id == providerID }) else {
             let available = providers.map { $0.id }
-            eprint("ОШИБКА: провайдер '\(providerID)' не найден. Доступные: \(available.joined(separator: ", "))")
-            eprint("Список: `dictatorctl provider list`")
+            eprint(String(format: L10n.tr("cli.routing.noexist"), providerID, available.joined(separator: ", ")))
+            eprint(L10n.tr("cli.routing.listHint"))
             return 2
         }
         try AppConfig.writeRoutingKeyValue(key: key, value: "\"\(providerID)\"", to: AppConfig.defaultPath())
     } catch {
-        eprint("ОШИБКА: \(error)")
+        eprint(String(format: L10n.tr("cli.flag.configload"), "\(error)"))
         return 1
     }
-    print("Роль \(role): \(providerID)")
+    print(String(format: L10n.tr("cli.routing.role"), role, providerID))
     return restartAgentIfNeeded(args)
 }
 
@@ -601,16 +600,16 @@ func routingSet(role: String, providerID: String, args: [String]) -> Int32 {
 /// (пишется пустое значение — резолвер фолбэчит на активного провайдера).
 func routingUnset(role: String, args: [String]) -> Int32 {
     guard let key = routingKey(for: role) else {
-        eprint("Использование: dictatorctl routing unset segment|final [--no-restart]")
+        eprint(L10n.tr("cli.routing.unset.usage"))
         return 1
     }
     do {
         try AppConfig.writeRoutingKeyValue(key: key, value: "\"\"", to: AppConfig.defaultPath())
     } catch {
-        eprint("ОШИБКА: \(error)")
+        eprint(String(format: L10n.tr("cli.flag.configload"), "\(error)"))
         return 1
     }
-    print("Роль \(role) сброшена — фолбэк на активного провайдера")
+    print(String(format: L10n.tr("cli.routing.reset"), role))
     return restartAgentIfNeeded(args)
 }
 
@@ -624,7 +623,7 @@ func cmdRouting(_ args: [String]) -> Int32 {
         // до роли/имени — иначе уходит в валидацию как невалидный id).
         let positional = rest.filter { $0 != "--no-restart" }
         guard let role = positional.first, let providerID = positional.dropFirst().first else {
-            eprint("Использование: dictatorctl routing set segment|final <провайдер-id> [--no-restart]")
+            eprint(L10n.tr("cli.routing.usage"))
             return 1
         }
         return routingSet(role: role, providerID: providerID, args: rest)
@@ -632,12 +631,12 @@ func cmdRouting(_ args: [String]) -> Int32 {
         let rest = Array(args.dropFirst())
         let positional = rest.filter { $0 != "--no-restart" }
         guard let role = positional.first else {
-            eprint("Использование: dictatorctl routing unset segment|final [--no-restart]")
+            eprint(L10n.tr("cli.routing.unset.usage"))
             return 1
         }
         return routingUnset(role: role, args: rest)
     default:
-        eprint("Использование: dictatorctl routing [show]|set|unset")
+        eprint(L10n.tr("cli.routing.main.usage"))
         return 1
     }
 }
@@ -653,30 +652,32 @@ func cmdTranscribe(_ args: [String]) -> Int32 {
         let a = args[i]
         switch a {
         case "--provider":
-            guard i + 1 < args.count else { eprint("ОШИБКА: --provider требует id (например, gigaam)"); return 1 }
+            guard i + 1 < args.count else { eprint(L10n.tr("cli.flag.provider")); return 1 }
             batch.providerID = args[i + 1]; i += 2; batchRequested = true
         case "--out":
-            guard i + 1 < args.count else { eprint("ОШИБКА: --out требует путь"); return 1 }
+            guard i + 1 < args.count else { eprint(L10n.tr("cli.flag.out")); return 1 }
             batch.outPath = args[i + 1]; i += 2; batchRequested = true
         case "--max-segment":
             guard i + 1 < args.count, let v = Double(args[i + 1]), v > 0 else {
-                eprint("ОШИБКА: --max-segment требует положительное число секунд"); return 1
+                eprint(L10n.tr("cli.flag.maxsegment")); return 1
             }
             batch.maxSegment = v; i += 2; batchRequested = true
         case "--overlap":
             guard i + 1 < args.count, let v = Double(args[i + 1]), v >= 0 else {
-                eprint("ОШИБКА: --overlap требует неотрицательное число секунд"); return 1
+                eprint(L10n.tr("cli.flag.overlap")); return 1
             }
             batch.overlap = v; i += 2; batchRequested = true
         case "--no-progress":
             batch.showProgress = false; i += 1; batchRequested = true
         case "--cut-at-pauses":
             batch.cutAtPauses = true; i += 1; batchRequested = true
+        case "--no-cut-at-pauses":
+            batch.cutAtPauses = false; i += 1; batchRequested = true
         case "--resume":
             batch.resume = true; i += 1; batchRequested = true
         case "--parallel":
             guard i + 1 < args.count, let v = Int(args[i + 1]), v >= 1 else {
-                eprint("ОШИБКА: --parallel требует целое число >= 1 (число воркеров)"); return 1
+                eprint(L10n.tr("cli.flag.parallel")); return 1
             }
             batch.maxConcurrent = v; i += 2; batchRequested = true
         case "--json":
@@ -686,16 +687,16 @@ func cmdTranscribe(_ args: [String]) -> Int32 {
             return 0
         default:
             if a.hasPrefix("-") {
-                eprint("ОШИБКА: неизвестный флаг \(a)")
+                eprint(String(format: L10n.tr("cli.flag.unknown"), a))
                 eprint(usageTranscribeBatch)
                 return 1
             }
-            guard file == nil else { eprint("ОШИБКА: лишний аргумент \(a)"); return 1 }
+            guard file == nil else { eprint(String(format: L10n.tr("cli.flag.extra"), a)); return 1 }
             file = a; i += 1
         }
     }
     guard let file = file else {
-        eprint("Использование: dictatorctl transcribe ФАЙЛ [--json]")
+        eprint(L10n.tr("cli.transcribe.nofile"))
         eprint(usageTranscribeBatch)
         return 1
     }
@@ -712,29 +713,18 @@ struct BatchTranscribeOptions {
     var overlap: TimeInterval = 2.5
     var maxConcurrent = 1
     var showProgress = true
-    var cutAtPauses = false
+    // По умолчанию ВКЛЮЧЕНО: резать по паузам речи ≥ 0.3 с (рекомендация
+    // «Практики длинной речи»). --no-cut-at-pauses — обратно к фиксированной
+    // длине (для совместимости с чекпоинтами старых прогонов).
+    var cutAtPauses = true
     var resume = false
     var json = false
 }
 
 let usageTranscribeBatch = """
-  Пакетный режим (длинные файлы, чанки + оверлэп + retry + checkpoint):
-    --provider <id>  Провайдер из [providers.X] конфига (по умолчанию gigaam);
-                     весь файл обрабатывается ОДНИМ провайдером
-    --out <path>     Куда записать текст (по умолчанию — stdout);
-                     чекпоинт рядом: <path>.checkpoint.json
-    --max-segment <s> Длина чанка в секундах (по умолчанию 30)
-    --overlap <s>    Перекрытие чанков в секундах (по умолчанию 2.5)
-    --parallel <N>   Число параллельных запросов (по умолчанию 1 = последовательно).
-                     >1 включает пул воркеров: чанки отправляются параллельно,
-                     порядок результата и чекпоинт/resume не меняются.
-                     Параметр для самохоста (sherpa-onnx / GigaAM): обратная
-                     связь сервера НЕ ссылается на порядок чанков.
-    --no-progress    Не печатать прогресс в stderr
-    --cut-at-pauses  Резать чанки ПАУЗАМИ речи (граница ≈ конец речи, меньше
-                     галлюцинаций на кромке; вместо фиксированной длины)
-    --resume         Продолжить из чекпоинта (Ctrl+C + тот же запуск)
-  Пример: dictatorctl transcribe lecture.m4a --provider selfhosted --out result.txt
+  \(L10n.tr("usage.transcribe"))
+  \(L10n.tr("usage.batch"))
+    \(L10n.tr("usage.batch.desc"))
 """
 
 func formatClock(_ seconds: TimeInterval) -> String {
@@ -781,7 +771,7 @@ final class BatchProgressBar {
         let avg = completed > 0 ? elapsed / Double(completed) : 0
         let eta = avg * Double(max(0, total - completed))
         let percent = Int((pct * 100).rounded())
-        let line = String(format: "\u{1B}[2K\r[%d/%d] %@ %3d%% · %@ · средн. %.1fс/чанк",
+        let line = String(format: "\u{1B}[2K\r[%d/%d] %@ %3d%% · %@ · " + L10n.tr("progress.avgPerChunk"),
                           completed, total, bar, percent, BatchProgressBar.etaText(eta), avg)
         FileHandle.standardError.write(Data(line.utf8))
     }
@@ -799,13 +789,13 @@ final class BatchProgressBar {
     /// лишнего времени).
     private static func etaText(_ seconds: TimeInterval) -> String {
         let s = Int(seconds.rounded(.up))
-        if s < 60 { return "~\(s) сек осталось" }
+        if s < 60 { return String(format: L10n.tr("progress.eta.sec"), s) }
         let m = s / 60
-        if m < 60 { return "~\(m) мин осталось" }
+        if m < 60 { return String(format: L10n.tr("progress.eta.min"), m) }
         let h = m / 60
         let mm = m % 60
-        if mm == 0 { return "~\(h) ч осталось" }
-        return "~\(h) ч \(mm) мин осталось"
+        if mm == 0 { return String(format: L10n.tr("progress.eta.hour"), h) }
+        return String(format: L10n.tr("progress.eta.hm"), h, mm)
     }
 }
 
@@ -816,7 +806,7 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
     let config: AppConfig
     do { config = try AppConfig.load(from: nil) }
     catch {
-        eprint("ОШИБКА: не удалось загрузить конфиг: \(error)")
+        eprint(String(format: L10n.tr("cli.flag.configload"), "\(error)"))
         return 1
     }
     var provider = config.providers.first(where: { $0.id == options.providerID })
@@ -830,16 +820,16 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
             } }
         let fallback = active ?? config.providers.first
         if let fallback = fallback {
-            eprint("ПРЕДУПРЕЖДЕНИЕ: провайдер 'gigaam' не найден в конфиге — выбран '\(fallback.id)'")
+            eprint(String(format: L10n.tr("cli.transcribe.warn"), fallback.id))
             provider = fallback
         }
     }
     guard let provider = provider else {
-        eprint("ОШИБКА: провайдер '\(options.providerID)' не найден. Доступны: \(config.providers.map { $0.id }.joined(separator: ", "))")
+        eprint(String(format: L10n.tr("cli.transcribe.noprovider"), options.providerID, config.providers.map { $0.id }.joined(separator: ", ")))
         return 1
     }
     guard !provider.baseURL.isEmpty else {
-        eprint("ОШИБКА: у провайдера '\(provider.id)' пустой base_url в конфиге")
+        eprint(String(format: L10n.tr("cli.transcribe.nourl"), provider.id))
         return 1
     }
 
@@ -868,12 +858,12 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
         // afconvert не поможет — показываем исходную ошибку и выходим.
         if let probeError = error as? WAVFilePCMBatchContent.WAVFileError,
            case .fileNotFound = probeError {
-            eprint("ОШИБКА: файл не найден: \(file)")
+            eprint(String(format: L10n.tr("cli.transcribe.filenotfound"), file))
             return 1
         }
         if let probeError = error as? WAVFilePCMBatchContent.WAVFileError,
            case .ioError(let message) = probeError {
-            eprint("ОШИБКА: не удалось прочитать \(file): \(message)")
+            eprint(String(format: L10n.tr("cli.transcribe.readerror"), file, message))
             return 1
         }
         // invalidWAV (не PCM16 WAV / не 16 кГц моно) — штатный случай:
@@ -884,13 +874,13 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
                               ["-f", "WAVE", "-d", "LEI16@16000", "-c", "1", file, converted.path])
         guard conv.status == 0 else {
             let msg = conv.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            eprint("ОШИБКА: не удалось конвертировать \(file) в WAV: \(msg.isEmpty ? conv.stdout : msg)")
+            eprint(String(format: L10n.tr("cli.transcribe.waverror"), file, msg.isEmpty ? conv.stdout : msg))
             return 1
         }
         tempWavURL = converted
         wavURL = converted
         guard let content = try? WAVFilePCMBatchContent(wavURL: converted) else {
-            eprint("ОШИБКА: не удалось открыть сконвертированный WAV (\(converted.path))")
+            eprint(String(format: L10n.tr("cli.transcribe.converror"), converted.path))
             try? fm.removeItem(at: converted)
             return 1
         }
@@ -914,29 +904,31 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
     if let out = options.outPath {
         checkpointPath = out + ".checkpoint.json"
     } else {
-        // Нарезка зависит от нарезочных параметров; --cut-at-pauses задаёт
-        // другие границы — отдельный ключ чекпоинта, иначе resume подхватил
-        // бы чанки несовместимой нарезки.
+        // Нарезка зависит от нарезочных параметров; выравнивание на паузы
+        // (--cut-at-pauses, по умолчанию ВКЛЮЧЕНО) задаёт другие границы —
+        // суффикс "-pause" в ключе чекпоинта. Старые чекпоинты без суффикса
+        // (фиксированная нарезка, до внедрения паузного выравнивания)
+        // заведомо несовместимы и корректно игнорируются resume.
         let pauseFactor = options.cutAtPauses ? "-pause" : ""
         checkpointPath = fm.temporaryDirectory
             .appendingPathComponent("dictation-batch-\(stableCheckpointStamp(inputURL.path))-\(provider.id)-\(Int(options.maxSegment))-\(Int(options.overlap))\(pauseFactor).checkpoint.json")
             .path
     }
     if options.resume && !fm.fileExists(atPath: checkpointPath) {
-        eprint("ПРЕДУПРЕЖДЕНИЕ: --resume, но чекпоинт \(checkpointPath) не найден — начинаю с нуля")
+        eprint(String(format: L10n.tr("progress.noresume"), checkpointPath))
     }
     let sourcePath = inputURL.path
     if options.resume, fm.fileExists(atPath: checkpointPath),
        let cp = try? BatchTranscriber.loadCheckpoint(from: checkpointPath),
        cp.sourceFile != sourcePath {
-        eprint("ПРЕДУПРЕЖДЕНИЕ: чекпоинт \(checkpointPath) от другого файла ('\(cp.sourceFile)') — он не используется, начинаю с нуля")
+        eprint(String(format: L10n.tr("progress.badcheckpoint"), checkpointPath, cp.sourceFile))
     }
 
     // 4. Реальный транспорт чанка: запрос по полям провайдера + Retry-After.
     let transport = URLSessionBatchTransport()
     let apiKey = RetryProvider.resolveAPIKey(for: provider) // env > api_key > api_key_file
     let language = config.language.isEmpty ? "ru" : config.language
-    let sendOne: BatchTranscriber.SendOne = { attempt, wav, chunkIndex in
+    let sendOne: BatchTranscriber.SendOne = { attempt, wav, chunkIndex, prompt in
         guard let prepared = BatchRequestBuilder.makeRequest(
             provider: provider,
             apiKey: apiKey,
@@ -944,10 +936,11 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
             timeout: config.timeoutSeconds,
             wav: wav,
             chunkIndex: chunkIndex,
+            batchParams: BatchSTTParams(prompt: prompt),
             proxyKey: provider.proxyKey,
             proxyKeyHeader: provider.proxyKeyHeader.isEmpty ? config.proxyKeyHeader : provider.proxyKeyHeader
         ) else {
-            throw BatchHTTPError.invalidResponse("Не удалось собрать запрос: битый base_url у '\(provider.id)'")
+            throw BatchHTTPError.invalidResponse(String(format: L10n.tr("cli.batch.badBaseUrl"), provider.id))
         }
         let response: BatchHTTPResponse
         do { response = try await transport.send(request: prepared.request) }
@@ -962,7 +955,7 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
             return try ProviderRequestBuilder.extractText(from: response.body, path: prepared.transcriptPath)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
-            throw BatchHTTPError.invalidResponse("Не удалось разобрать ответ: \(error)")
+            throw BatchHTTPError.invalidResponse(String(format: L10n.tr("cli.batch.parseError"), "\(error)"))
         }
     }
 
@@ -1000,7 +993,7 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
                     let content = outcome.text.isEmpty ? outcome.text : outcome.text + "\n"
                     try content.write(to: URL(fileURLWithPath: out), atomically: true, encoding: .utf8)
                 } catch {
-                    eprint("ОШИБКА: не удалось записать \(out): \(error)")
+                    eprint(String(format: L10n.tr("cli.transcribe.writeError"), out, "\(error)"))
                     if let t = tempWavForCleanup { try? fm.removeItem(at: t) }
                     exit(1)
                 }
@@ -1012,13 +1005,13 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
 
             // 6. Итог в stderr.
             let duration = Double(batchSampleCount) / Double(batchSampleRate)
-            var summary = "Готово: длительность \(formatClock(duration)), сегментов \(outcome.totalSegments), "
-                + "распознано \(outcome.okCount), пропущено \(outcome.skippedCount), время обработки \(Int(outcome.elapsed)) с"
+            var summary = String(format: L10n.tr("progress.summary"),
+                                formatClock(duration), outcome.totalSegments, outcome.okCount, outcome.skippedCount, Int(outcome.elapsed))
             if !outcome.skippedIndexes.isEmpty {
-                summary += "; пропущенные сегменты: \(outcome.skippedIndexes.map(String.init).joined(separator: ", "))"
+                summary += String(format: L10n.tr("progress.skipped"), outcome.skippedIndexes.map(String.init).joined(separator: ", "))
             }
             eprint(summary)
-            eprint("Чекпоинт: \(checkpointPath)")
+            eprint(String(format: L10n.tr("progress.checkpoint"), checkpointPath))
 
             // 7. --json: как в разовом режиме — transcription_raw.json рядом с ФАЙЛ
             // (в пакетном режиме это копия чекпоинта с текстами чанков).
@@ -1026,14 +1019,14 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
                 let rawURL = inputURL.deletingLastPathComponent().appendingPathComponent("transcription_raw.json")
                 do {
                     try Data(contentsOf: URL(fileURLWithPath: checkpointPath)).write(to: rawURL, options: .atomic)
-                    eprint("Сохранено: \(rawURL.path)")
+                    eprint(String(format: L10n.tr("progress.jsonsaved"), rawURL.path))
                 } catch {
-                    eprint("Не удалось сохранить \(rawURL.path): \(error)")
+                    eprint(String(format: L10n.tr("progress.jsonfail"), rawURL.path, "\(error)"))
                 }
             }
             exit(0)
         } catch {
-            eprint("ОШИБКА: \(error)")
+            eprint(String(format: L10n.tr("cli.error.generic"), "\(error)"))
             exit(1)
         }
     }
@@ -1055,7 +1048,7 @@ func cmdTranscribeLegacy(_ file: String, json: Bool) -> Int32 {
                               ["-f", "WAVE", "-d", "LEI16@16000", "-c", "1", file, converted.path])
         guard conv.status == 0 else {
             let msg = conv.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            eprint("ОШИБКА: не удалось конвертировать \(file) в WAV: \(msg.isEmpty ? conv.stdout : msg)")
+            eprint(String(format: L10n.tr("cli.transcribe.waverror"), file, msg.isEmpty ? conv.stdout : msg))
             return 1
         }
         tempWavURL = converted
@@ -1066,7 +1059,7 @@ func cmdTranscribeLegacy(_ file: String, json: Bool) -> Int32 {
     do {
         data = try Data(contentsOf: wavURL)
     } catch {
-        eprint("ОШИБКА: не удалось прочитать \(wavURL.path): \(error)")
+        eprint(String(format: L10n.tr("cli.transcribe.readerror"), wavURL.path, "\(error)"))
         if let t = tempWavURL { try? fm.removeItem(at: t) }
         return 1
     }
@@ -1077,7 +1070,7 @@ func cmdTranscribeLegacy(_ file: String, json: Bool) -> Int32 {
     do {
         config = try AppConfig.load(from: nil)
     } catch {
-        eprint("ОШИБКА: \(error)")
+        eprint(String(format: L10n.tr("cli.flag.configload"), "\(error)"))
         return 1
     }
 
@@ -1095,9 +1088,12 @@ func cmdTranscribeLegacy(_ file: String, json: Bool) -> Int32 {
         language: config.language,
         timeout: config.timeoutSeconds,
         logLevel: config.logLevel,
-        byetCookieProvider: config.transport == "relay" || config.transport == "infinityfree"
-            ? ByetCookieProvider.makeForInfinityFree(baseURL: config.baseURL)
+        cookieRelayProvider: config.transport == "cookie-relay"
+            ? CookieRelayProvider.makeForCookieRelay(baseURL: config.baseURL)
             : nil,
+        httpProxy: config.httpProxy,
+        proxyUser: config.proxyUser,
+        proxyPassword: config.proxyPassword,
         apiSecret: config.apiSecret,
         adapterID: activeAdapterID
     )
@@ -1113,14 +1109,14 @@ func cmdTranscribeLegacy(_ file: String, json: Bool) -> Int32 {
             if json {
                 do {
                     try result.rawData.write(to: rawURL, options: .atomic)
-                    print("Сохранено: \(rawURL.path)")
+                    print(String(format: L10n.tr("progress.jsonsaved"), rawURL.path))
                 } catch {
-                    eprint("Не удалось сохранить \(rawURL.path): \(error)")
+                    eprint(String(format: L10n.tr("progress.jsonfail"), rawURL.path, "\(error)"))
                 }
             }
             exit(0)
         } catch {
-            eprint("ОШИБКА: \(error)")
+            eprint(String(format: L10n.tr("cli.error.generic"), "\(error)"))
             exit(1)
         }
     }
@@ -1134,7 +1130,7 @@ func cmdLogs() -> Int32 {
     let logURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Logs/Dictation/agent.log")
     guard let content = try? String(contentsOf: logURL, encoding: .utf8) else {
-        print("Лог не найден")
+        print(L10n.tr("cli.logs.notfound"))
         return 1
     }
     let body = content.components(separatedBy: .newlines).suffix(50).joined(separator: "\n")
@@ -1150,7 +1146,7 @@ func cmdLast() -> Int32 {
     let logURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Logs/Dictation/agent.log")
     guard let content = try? String(contentsOf: logURL, encoding: .utf8) else {
-        print("Лог агента не найден")
+        print(L10n.tr("cli.last.notfound"))
         return 1
     }
     let marker = "LAST_TEXT: "
@@ -1160,7 +1156,7 @@ func cmdLast() -> Int32 {
             return String(line[range.upperBound...])
         }
     guard let last = matches.last, !last.isEmpty else {
-        print("Пока нет распознанного текста (маркер LAST_TEXT не найден в логе)")
+        print(L10n.tr("cli.last.notext"))
         return 1
     }
     print(last)
@@ -1176,18 +1172,18 @@ func cmdRetry(_ name: String) -> Int32 {
     do {
         providers = try AppConfig.loadProvidersOnly(from: nil).providers
     } catch {
-        eprint("ОШИБКА: \(error)")
+        eprint(String(format: L10n.tr("cli.flag.configload"), "\(error)"))
         return 1
     }
     guard let provider = providers.first(where: { $0.id == name }) else {
         let available = providers.map { $0.id }
-        eprint("ОШИБКА: провайдер '\(name)' не найден. Доступные: \(available.joined(separator: ", "))")
+        eprint(String(format: L10n.tr("cli.provider.notfound"), name, available.joined(separator: ", ")))
         return 2
     }
     let target = "\(guiDomain)/\(agentServiceName)"
     let running = runProcess("/bin/launchctl", ["print", target]).status == 0
     guard running else {
-        eprint("ОШИБКА: агент не запущен — последний WAV хранится в памяти агента. Запустите агент (`dictatorctl start`) и повторите.")
+        eprint(L10n.tr("cli.retry.notrunning"))
         return 1
     }
     DistributedNotificationCenter.default().postNotificationName(
@@ -1197,74 +1193,60 @@ func cmdRetry(_ name: String) -> Int32 {
         deliverImmediately: true
     )
     let display = provider.name.isEmpty ? provider.id : provider.name
-    print("Retry отправлен агенту: повторное распознавание последней записи провайдером '\(display) [\(provider.id)]'")
+    print(String(format: L10n.tr("cli.retry.sent"), display, provider.id))
     return 0
 }
 
 /// Список id провайдеров одной строкой (подсказка для usage retry).
 func providerNamesText() -> String {
     let ids = (try? AppConfig.loadProvidersOnly(from: nil).providers.map { $0.id }) ?? []
-    return ids.isEmpty ? "(нет секций [providers.X] в конфиге)" : ids.joined(separator: ", ")
+    return ids.isEmpty ? L10n.tr("cli.provider.nosections") : ids.joined(separator: ", ")
 }
 
 // MARK: - Usage
 
 let usage = """
-Использование: dictatorctl <команда> [аргументы]
+\(L10n.tr("usage.title"))
 
-Команды:
-  start                            Установить и запустить LaunchAgent
-  stop                             Остановить LaunchAgent
-  status                           Статус агента (launchctl + pgrep — pid процесса)
-  config                           Показать конфиг (секреты маскируются: abcd***wxyz)
-    config init [--force]          Создать шаблон config.toml (chmod 600; существующий
-                                   файл без --force перезаписывается только после
-                                   подтверждения в терминале)
-    config set-key ПРОВАЙДЕР [КЛЮЧ] [--stdin]
-                                   Записать api_key в секцию [providers.ПРОВАЙДЕР]
-                                   (chmod 600; КЛЮЧ не указан — ввод с клавиатуры или
-                                   stdin при --stdin/пайпе; предупреждение, если задан
-                                   DICTATION_API_KEY)
-    config path                    Путь к конфиг-файлу (алиас config --path)
-    config --show-file             Содержимое конфиг-файла с маскировкой секретов
-  provider list                    Список STT-провайдеров из config.toml (* — активный)
-    provider use ИМЯ [--no-restart]
-    provider set ИМЯ [--no-restart] (алиас use)
-                                   Сделать ИМЯ активным провайдером: правка
-                                   active_provider в config.toml, chmod 600 и
-                                   перезапуск агента (--no-restart без перезапуска)
-    provider status                Активный провайдер + статус агента
-    provider show ИМЯ              Подробно о провайдере (секреты маскируются)
-  routing [show]                   Маршрутизация STT по ролям ([routing]):
-                                   segment/final + их effective (фолбэк на active)
-    routing set РОЛЬ ИМЯ [--no-restart]
-                                   РОЛЬ = segment (сегменты пошаговой диктовки)
-                                   или final (проход по всей записи); ИМЯ среди
-                                   [providers.X]; правка config.toml (chmod 600),
-                                   перезапуск агента (--no-restart без перезапуска)
-    routing unset РОЛЬ [--no-restart]
-                                   Очистить роль — фолбэк на активного провайдера
-  transcribe ФАЙЛ [--json]         Разовая расшифровка аудиофайла
-                                   (не-WAV конвертируется через afconvert; с --json
-                                   сырой ответ сохраняется в transcription_raw.json рядом с ФАЙЛ)
-  transcribe ФАЙЛ [--json]         Пакетный режим для длинных файлов: те же флаги
-    [--provider <id>] [--out <путь>] [--max-segment <с>] [--overlap <с>]
+\(L10n.tr("usage.cmds"))
+  start                            \(L10n.tr("usage.start"))
+  stop                             \(L10n.tr("usage.stop"))
+  status                           \(L10n.tr("usage.status"))
+  config                           \(L10n.tr("usage.config"))
+    config init [--force]          \(L10n.tr("usage.config.init"))
+    config set-key \(L10n.tr("usage.placeholder.provider")) [\(L10n.tr("usage.placeholder.key"))] [--stdin]
+                                   \(L10n.tr("usage.config.setkey"))
+    config path                    \(L10n.tr("usage.config.path"))
+    config --show-file             \(L10n.tr("usage.config.showfile"))
+  provider list                    \(L10n.tr("usage.provider"))
+    provider use \(L10n.tr("usage.placeholder.name")) [--no-restart]
+    provider set \(L10n.tr("usage.placeholder.name")) [--no-restart] (\(L10n.tr("usage.placeholder.setAlias")))
+                                   \(L10n.tr("usage.provider.use"))
+    provider status                \(L10n.tr("usage.provider.status"))
+    provider show \(L10n.tr("usage.placeholder.name"))              \(L10n.tr("usage.provider.show"))
+  routing [show]                   \(L10n.tr("usage.routing"))
+    routing set \(L10n.tr("usage.placeholder.role")) \(L10n.tr("usage.placeholder.name")) [--no-restart]
+                                   \(L10n.tr("usage.routing.set"))
+    routing unset \(L10n.tr("usage.placeholder.role")) [--no-restart]
+                                   \(L10n.tr("usage.routing.unset"))
+  transcribe \(L10n.tr("usage.placeholder.file")) [--json]         \(L10n.tr("usage.transcribe"))
+  transcribe \(L10n.tr("usage.placeholder.file")) [--json]         \(L10n.tr("usage.batch"))
+    [--provider <id>] [--out \(L10n.tr("usage.placeholder.path"))] [--max-segment <\(L10n.tr("usage.placeholder.seconds"))>] [--overlap <\(L10n.tr("usage.placeholder.seconds"))>]
     [--no-progress] [--resume]
-                                   Один провайдер (по умолчанию gigaam), чанки
-                                   max-segment с overlap, retry 3×, плейсхолдер
-                                   [..] при провале, чекпоинт <--out>.checkpoint.json
-                                   (без --out — во временной папке) для --resume
-  retry ИМЯ                        Повторить распознавание последней записи другим
-                                   провайдером (агент хранит последний WAV в памяти;
-                                   вставку выполняет сам агент)
-  last                             Показать последний распознанный текст (маркер LAST_TEXT)
-  logs                             Последние 50 строк лога агента
-  help                             Показать эту справку
+                                   \(L10n.tr("usage.batch.desc"))
+  retry \(L10n.tr("usage.placeholder.name"))                        \(L10n.tr("usage.retry"))
+  last                             \(L10n.tr("usage.last"))
+  logs                             \(L10n.tr("usage.logs"))
+  help                             \(L10n.tr("usage.help"))
 """
 
 // MARK: - Main
 
 let args = Array(CommandLine.arguments.dropFirst())
+
+// Localize early: read ui_language from config (if exists) before any output.
+let uiLanguage = (try? AppConfig.load(from: nil))?.uiLanguage
+L10n.language = uiLanguage == "ru" ? .ru : .en
 
 guard let command = args.first?.lowercased() else {
     // Без команды в интерактивном терминале — лёгкое меню; в пайпе/скрипте — usage.
@@ -1292,8 +1274,8 @@ case "transcribe":
     exit(cmdTranscribe(Array(args.dropFirst())))
 case "retry":
     guard let name = args.dropFirst().first else {
-        eprint("Использование: dictatorctl retry ИМЯ")
-        eprint("Доступные провайдеры: \(providerNamesText())")
+        eprint(L10n.tr("cli.retry.usage"))
+        eprint(String(format: L10n.tr("cli.retry.available"), providerNamesText()))
         exit(1)
     }
     exit(cmdRetry(name))
@@ -1305,7 +1287,7 @@ case "help", "-h", "--help":
     print(usage)
     exit(0)
 default:
-    eprint("Неизвестная команда: \(command)")
+    eprint(String(format: L10n.tr("cli.cmd.unknown"), command))
     print(usage)
     exit(1)
 }

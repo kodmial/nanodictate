@@ -80,11 +80,11 @@ final class AgentStatusTests: XCTestCase {
     @objc func testProviderLineVariants() {
         XCTAssertEqual(
             AgentScreen.providerLine(providerName: nil, providerID: nil, providersEmpty: true),
-            "(нет провайдеров — legacy-конфиг)"
+            "(no providers — legacy config)"
         )
         XCTAssertEqual(
             AgentScreen.providerLine(providerName: nil, providerID: nil, providersEmpty: false),
-            "(не выбран — `dictatorctl provider use <имя>`)"
+            "(not selected — dictatorctl provider use <name>)"
         )
         XCTAssertEqual(
             AgentScreen.providerLine(providerName: "Groq", providerID: "groq", providersEmpty: false),
@@ -108,11 +108,11 @@ final class AgentStatusTests: XCTestCase {
         )
         let screen = AgentScreen.statusScreen(data)
         XCTAssertTrue(screen.contains("running (pid 123)"))
-        XCTAssertTrue(screen.contains("Запись:     active"))
+        XCTAssertTrue(screen.contains("Recording:  active"))
         XCTAssertTrue(screen.contains("Groq [groq]"))
-        XCTAssertTrue(screen.contains("Хвост лога:"))
+        XCTAssertTrue(screen.contains("Log tail:"))
         XCTAssertTrue(screen.contains("record start"))
-        XCTAssertTrue(screen.contains("ошибки: нет"))
+        XCTAssertTrue(screen.contains("errors: no"))
         XCTAssertFalse(screen.contains("[error]"))
     }
 
@@ -125,42 +125,91 @@ final class AgentStatusTests: XCTestCase {
         )
         let screen = AgentScreen.statusScreen(data)
         XCTAssertTrue(screen.contains("stopped"))
-        XCTAssertTrue(screen.contains("Запись:     idle"))
-        XCTAssertTrue(screen.contains("legacy-конфиг"))
-        XCTAssertTrue(screen.contains("ошибки: есть"))
+        XCTAssertTrue(screen.contains("Recording:  idle"))
+        XCTAssertTrue(screen.contains("legacy config"))
+        XCTAssertTrue(screen.contains("errors: yes"))
+    }
+
+    // MARK: - Пара: таблицы L10n (en/ru идентичны по ключам и плейсхолдерам)
+
+    @objc func testL10nTableParity() {
+        let en = L10n.table(.en)
+        let ru = L10n.table(.ru)
+        XCTAssertEqual(Set(en.keys), Set(ru.keys), "наборы ключей en/ru должны совпадать")
+        XCTAssertGreaterThanOrEqual(en.count, 90, "таблица должна содержать ~90+ ключей")
+    }
+
+    @objc func testL10nPlaceholderParity() {
+        let en = L10n.table(.en)
+        let ru = L10n.table(.ru)
+        let placeholders = ["{n}", "{message}", "{path}", "{error}"]
+        for key in en.keys {
+            for ph in placeholders where en[key]!.contains(ph) {
+                XCTAssertTrue(ru[key]!.contains(ph), "RU: у ключа \(key) нет плейсхолдера \(ph)")
+            }
+            for ph in placeholders where ru[key]!.contains(ph) {
+                XCTAssertTrue(en[key]!.contains(ph), "EN: у ключа \(key) нет плейсхолдера \(ph)")
+            }
+        }
+    }
+
+    // MARK: - Экран статуса: выравнивание колонки значений (13-я колонка)
+
+    @objc func testStatusScreenColumn13BothLanguages() {
+        let data = AgentStatusData(
+            agentRunning: true, agentPID: "123",
+            recordingActive: true,
+            providerName: "Groq", providerID: "groq",
+            logPath: "/tmp/agent.log", logSizeBytes: 1024,
+            logTail: [], logHasErrors: false
+        )
+        defer { L10n.language = .en }
+        for lang in AppLanguage.allCases {
+            L10n.language = lang
+            let screen = AgentScreen.statusScreen(data)
+            let lines = screen.split(separator: "\n").prefix(5).map(String.init)
+            for line in lines {
+                XCTAssertGreaterThanOrEqual(line.count, 13, "\(lang): строка короче 13 символов: '\(line)'")
+                XCTAssertTrue(String(line[String.Index(utf16Offset: 11, in: line)]) == " ",
+                              "\(lang): в 12-й колонке должен быть пробел-отступ: '\(line)'")
+                XCTAssertTrue(String(line[String.Index(utf16Offset: 12, in: line)]) != " ",
+                              "\(lang): значение должно начинаться с 13-й колонки: '\(line)'")
+            }
+        }
     }
 
     // MARK: - Пункты меню (выбор пункта)
 
     @objc func testStatusMenuItemsWhenAgentRunning() {
         let items = AgentScreen.statusMenuItems(agentRunning: true)
-        // 4/5/6 — пункты UX-улучшений: последний текст, retry другим провайдером,
-        // тумблер ревью. Базовые 1/2/3/q сохраняют места.
-        XCTAssertEqual(items.map { $0.key }, ["1", "2", "3", "4", "5", "6", "q"])
-        XCTAssertEqual(items[0].label, "Провайдеры")
-        XCTAssertEqual(items[1].label, "Логи")
-        XCTAssertEqual(items[2].label, "Остановить агента")
-        XCTAssertEqual(items[3].label, "Показать последний текст распознавания")
-        XCTAssertEqual(items[4].label, "Повторить распознавание другим провайдером")
-        XCTAssertEqual(items[5].label, "Ревью перед вставкой (вкл/выкл)")
-        XCTAssertEqual(items[6].label, "Выход")
+        // 0 — язык; 4/5/6 — пункты UX-улучшений: последний текст, retry другим
+        // провайдером, тумблер ревью. Базовые 1/2/3/q сохраняют места.
+        XCTAssertEqual(items.map { $0.key }, ["0", "1", "2", "3", "4", "5", "6", "q"])
+        XCTAssertEqual(items[0].label, "Language")
+        XCTAssertEqual(items[1].label, "Providers")
+        XCTAssertEqual(items[2].label, "Logs")
+        XCTAssertEqual(items[3].label, "Stop agent")
+        XCTAssertEqual(items[4].label, "Show last recognition text")
+        XCTAssertEqual(items[5].label, "Re-recognize with different provider")
+        XCTAssertEqual(items[6].label, "Review before insert (on/off)")
+        XCTAssertEqual(items[7].label, "Quit")
     }
 
     @objc func testStatusMenuItemsWhenAgentStopped() {
         let items = AgentScreen.statusMenuItems(agentRunning: false)
-        XCTAssertEqual(items[2].label, "Запустить агента")
+        XCTAssertEqual(items[3].label, "Start agent")
         XCTAssertEqual(items.last?.key, "q")
-        XCTAssertEqual(items.last?.label, "Выход")
+        XCTAssertEqual(items.last?.label, "Quit")
     }
 
     @objc func testTitlesAndHints() {
-        XCTAssertEqual(AgentScreen.statusTitle(), "AltDictation — статус")
-        XCTAssertEqual(AgentScreen.providersTitle(), "Провайдеры")
-        XCTAssertEqual(AgentScreen.logsTitle(lineCount: 7), "Логи — agent.log (всего 7 строк)")
+        XCTAssertEqual(AgentScreen.statusTitle(), "AltDictation — status")
+        XCTAssertEqual(AgentScreen.providersTitle(), "Providers")
+        XCTAssertEqual(AgentScreen.logsTitle(lineCount: 7), "Logs — agent.log (7 lines total)")
         XCTAssertTrue(AgentScreen.statusHint().contains("q/esc"))
-        XCTAssertTrue(AgentScreen.providersHint().contains("r — обновить"))
+        XCTAssertTrue(AgentScreen.providersHint().contains("r — refresh"))
         // Подсказка честно обещает подтверждение смены: y/Enter — да.
-        XCTAssertTrue(AgentScreen.providersHint().contains("y/Enter — подтвердить"))
+        XCTAssertTrue(AgentScreen.providersHint().contains("y/Enter — confirm"))
         XCTAssertTrue(AgentScreen.logsHint().contains("↑/↓"))
     }
 
@@ -249,6 +298,73 @@ final class AgentStatusTests: XCTestCase {
                 return
             }
             XCTAssertEqual(id, "nope")
+        }
+    }
+
+    // MARK: - L10n.tr(): fallback на ключ для неизвестных ключей
+
+    @objc func testTrFallbackReturnsKeyForUnknown() {
+        defer { L10n.language = .en }
+        let key = "no.such.key.xyz"
+        L10n.language = .en
+        XCTAssertEqual(L10n.tr(key), key, "EN: tr() должен вернуть сам ключ при отсутствии перевода")
+        L10n.language = .ru
+        XCTAssertEqual(L10n.tr(key), key, "RU: tr() должен вернуть сам ключ при отсутствии перевода")
+    }
+
+    // MARK: - L10n.toggled(): переключение языка
+
+    @objc func testToggleLanguageFlipsEnRu() {
+        defer { L10n.language = .en }
+        L10n.language = .en
+        XCTAssertEqual(L10n.toggled(), .ru)
+        L10n.language = .ru
+        XCTAssertEqual(L10n.toggled(), .en)
+    }
+
+    // MARK: - statusMenuAction(forKey:): ключ "0" = toggleLanguage, НЕ quit
+
+    @objc func testStatusMenuKeyZeroTogglesLanguageNotQuit() {
+        XCTAssertEqual(AgentScreen.statusMenuAction(forKey: "0"), .toggleLanguage,
+                       "Ключ 0 должен переключать язык, а не выходить")
+        XCTAssertEqual(AgentScreen.statusMenuAction(forKey: "1"), .showProviders)
+        XCTAssertEqual(AgentScreen.statusMenuAction(forKey: "2"), .showLogs)
+        XCTAssertEqual(AgentScreen.statusMenuAction(forKey: "3"), .toggleAgent)
+        XCTAssertEqual(AgentScreen.statusMenuAction(forKey: "4"), .showLastResult)
+        XCTAssertEqual(AgentScreen.statusMenuAction(forKey: "5"), .retryTranscribe)
+        XCTAssertEqual(AgentScreen.statusMenuAction(forKey: "6"), .toggleReview)
+        XCTAssertEqual(AgentScreen.statusMenuAction(forKey: "q"), .quit)
+        XCTAssertEqual(AgentScreen.statusMenuAction(forKey: ""), .quit)
+    }
+
+    // MARK: - ui_language: roundtrip через AppConfig.writeKeyValue
+
+    @objc func testUiLanguageReadAndWrite() {
+        guard let url = try? tmpFile("lang_roundtrip", """
+        ui_language = "en"
+        [providers.groq]
+        base_url = "https://groq.test/v1"
+        """) else {
+            XCTFail("tmpFile failed")
+            return
+        }
+        defer {
+            try? FileManager.default.removeItem(at: url)
+        }
+
+        let saved = L10n.language
+        defer { L10n.language = saved }
+
+        do {
+            try AppConfig.writeKeyValue(key: "ui_language", value: "\"ru\"", to: url.path)
+            let config = try AppConfig.load(from: url.path)
+            XCTAssertEqual(config.uiLanguage, "ru", "writeKeyValue должен записать 'ru', а load прочитать его")
+
+            try AppConfig.writeKeyValue(key: "ui_language", value: "\"en\"", to: url.path)
+            let config2 = try AppConfig.load(from: url.path)
+            XCTAssertEqual(config2.uiLanguage, "en", "roundtrip обратно на en")
+        } catch {
+            XCTFail("unexpected error: \(error)")
         }
     }
 }

@@ -4,175 +4,126 @@ On-screen dictation for macOS, triggered by a double-tap of the **Alt** key.
 Press **Alt** twice, speak, press **Alt** twice again — the recognized text is
 typed into whatever app is currently focused.
 
-This project provides three components:
+Built as a Swift Package Manager package (`swift-tools-version:5.7`, macOS 12+).
 
-- **DictationCore** — shared library with the core dictation logic
-  (recording, STT, overlay, text insertion).
-- **DictatorAgent** — background agent (LaunchAgent) that listens for the
-  trigger, shows the overlay and does the dictation work.
-- **dictatorctl** — command-line control utility (start/stop the agent,
-  inspect config, pick providers, transcribe a file, show logs).
+## Components
+
+- **DictationCore** — shared library with the core dictation logic (recording,
+  STT, overlay, text insertion, provider adapters, silence auto-stop, batch
+  transcription).
+- **DictatorAgent** — background LaunchAgent daemon that listens for the
+  trigger, shows the overlay, and performs the dictation work.
+- **dictatorctl** — command-line control utility and interactive TUI status
+  menu (start/stop the agent, inspect config, pick providers, transcribe
+  files, show logs).
 
 ## Features
 
 - Double-**Alt** start/stop dictation; **Esc** cancels.
+- Interactive TUI status menu (`dictatorctl`) with agent state, provider list,
+  log viewer, and language toggle as the first menu item.
+- Bilingual UI (English and Russian); set `ui_language = "en"` or `"ru"` in
+  config (default: `"en"`).
 - Overlay panel with live input level, recording/progress/status phases.
-- Text is inserted into the focused app via keyboard events (default) or
-  via clipboard + Cmd+V (`insert_method = "clipboard"`).
+- Text insertion via CGEvent keyboard events (default) or clipboard + Cmd+V
+  (`insert_method = "clipboard"`, restores previous clipboard).
 - Undo window: a double-**Alt** shortly after an insertion removes it.
-- Multiple STT providers in one config, with failover and manual retry:
-  - `auto_failover` — retry with the next provider on network/server errors;
-  - `dictatorctl retry <provider>` — re-recognize the last recording with
-    another provider.
+- Silence auto-stop (~3 s of quiet) with configurable duration and RMS
+  threshold; environment variables
+  `DICTATION_AUTOSTOP_DISABLED`, `DICTATION_AUTOSTOP_DURATION`,
+  `DICTATION_AUTOSTOP_RMS`.
+- Push-to-talk mode (external script: `ptt.sh`).
+- Batch file transcription with chunked segments, parallel workers, pause
+  cutting, checkpoint/resume, and a progress bar.
+- Multi-provider STT via adapters implementing the OpenAI-compatible
+  `/audio/transcriptions` protocol:
+  - **OpenAI** (`openai`)
+  - **Groq** (`groq`)
+  - **Deepgram** (`deepgram`)
+  - **GigaChat** (`giga-chat`, OAuth with `api_secret`)
+  - **GigaAM** (`gigaam`, default batch provider)
+  - **Local** (`local`, local whisper/llama.cpp/faster-whisper server)
+  - **Cloudflare Workers AI** (`cloudflare`, raw WAV + Bearer token, full URL
+    with `account_id` in path)
+  - **Cookie Relay** (`cookie-relay`, JS-challenge relay with computed
+    `__test` cookie)
+  - Any OpenAI-compatible endpoint via the generic `openai-compatible` adapter
+- Proxy transports (see [Proxy Transports](#proxy-transports)).
 - Optional review gate (`review_before_insert`) — confirm the text in the
   terminal before it is typed.
-- Optional chunked/live dictation (`chunked = true`) — segments are
-  recognized and inserted as you speak.
-- Speech-to-text is done via OpenAI-compatible audio-transcription endpoints
-  (see [Providers](#providers)).
+- Auto-failover between providers (`auto_failover`) and manual retry
+  (`dictatorctl retry <provider>`).
+- TOML configuration at `~/.config/dictation/config.toml`.
 
-## Requirements
+## Build & Test
 
-- macOS 12 or newer
-- Build tooling: Xcode Command Line Tools (or a Swift toolchain).
-  The package targets Swift 5.7 (`Package.swift`, `swift-tools-version:5.7`);
-  newer toolchains build it as well.
-
-## Install & Build
+Requirements: macOS 12+, Swift toolchain (Xcode CLT or standalone).
 
 ```sh
-./build.sh
+swift build -c release
 ```
 
-The script builds both binaries with `swift build`, re-signs them for
-code-signing, and symlinks `dictatorctl` into `/usr/local/bin` (when that
-directory is writable) so it works as a plain command.
-
-Environment variables (all optional):
-
-| Variable          | Meaning                                                                                                            |
-|-------------------|--------------------------------------------------------------------------------------------------------------------|
-| `SWIFT_TOOLCHAIN` | Path to a Swift toolchain, e.g. `~/swift-toolchain/usr`. When set, that toolchain's `swift` is used. Unset — the `swift` from `PATH` is used. |
-| `SIGN_IDENTITY`   | Code-signing identity name to use, e.g. `"Local Code Signing"`. Unset — the first valid identity from the login keychain is used automatically. |
-
-### Code signing (important)
-
-Both binaries are **always code-signed** by `build.sh`. macOS privacy
-(TCC) grants — Microphone, Accessibility, Input Monitoring — are keyed to
-the code signature of the process. With *ad-hoc* signing (or no signing at
-all) every rebuild produces a new signature, so the OS forgets your grants
-and you have to re-grant the permissions after each rebuild.
-
-To keep grants stable across rebuilds, create a local certificate:
-
-1. Open **Keychain Access** → *Keychain Access* → **Certificate Assistant →
-   Create a Certificate…**
-2. Name: e.g. `Local Code Signing`
-3. **Identity Type**: Self-Signed Root
-4. **Certificate Type**: Code Signing
-5. Create, then:
+Run the test suite (659 tests):
 
 ```sh
-SIGN_IDENTITY="Local Code Signing" ./build.sh
+zsh /private/tmp/dct-verify/build_all.sh
 ```
 
-If the script finds no valid identity in the keychain, it falls back to
-ad-hoc signing, prints a warning, and reminds you how to create the
-certificate above.
+The test runner is a standalone executable target (`DictationCoreTests`) that
+replaces `swift test` (which does not work without XCTest in this project
+layout). Individual tests can also be run with
+`swift run DictationCoreTests`.
 
-## Quick start
+## Install & Run
+
+### LaunchAgent (DictatorAgent)
 
 ```sh
-# 1. Build (DictatorAgent + dictatorctl; dictatorctl lands in /usr/local/bin)
-./build.sh
-
-# 2. Install and start the LaunchAgent
+# Install and start the LaunchAgent
 dictatorctl start
 
-# 3. Check the status
+# Check status
 dictatorctl status
+
+# Stop the agent
+dictatorctl stop
 ```
 
-The agent runs even with **no config file** — it falls back to built-in
-defaults. To use your own provider, create the config file first (see
-[Configuration](#configuration)); the expected path is
-`~/.config/dictation/config.toml`
-(`dictatorctl config --path` prints it, `dictatorctl config --show-file`
-shows its content with secrets masked).
+The agent installs a plist template (`Resources/dictation-agent.plist.template`)
+as `~/Library/LaunchAgents/com.dictation.agent.plist` and bootstraps it into
+`launchd`. The `start` command is idempotent.
 
-On the first dictation attempt macOS will ask for permissions. If anything
-is missing, the agent can't type or record — grant it:
+### CLI & TUI (dictatorctl)
 
-- **Microphone** — System Settings → Privacy & Security → Microphone;
-- **Accessibility** — System Settings → Privacy & Security → Accessibility
-  (needed for the global hotkey and for text insertion; when missing, the
-  agent opens this settings pane itself and waits);
-- **Input Monitoring** — System Settings → Privacy & Security → Input
-  Monitoring (keyboard-event monitoring on newer macOS; add the
-  `DictatorAgent` binary there if the hotkey does not fire).
-
-Add the *signed* binary (`.build/debug/DictatorAgent`) to the corresponding
-lists — the path matters, and it changes after a rebuild with a different
-signature (see [code signing](#code-signing-important)).
-
-Then just press **Alt** twice, speak, and press **Alt** twice again. Press
-**Esc** to cancel. A double-**Alt** right after an insertion undoes it.
-
-## Configuration
-
-Configuration is a small TOML-like file at
-`~/.config/dictation/config.toml`. Any line starting with `#` is a comment;
-unknown keys are ignored. Minimal example:
-
-```toml
-active_provider = "groq"
-
-[providers.groq]
-name = "Groq"
-base_url = "https://api.groq.com/openai/v1/audio/transcriptions"
-model = "whisper-large-v3"
-# Prefer a key file (chmod 600) over a literal key:
-api_key_file = "~/.config/dictation/keys/groq.txt"
-# ...or inline:
-# api_key = "gsk_..."
+```sh
+dictatorctl start | stop | status
+dictatorctl config init [--force]         # create default config.toml
+dictatorctl config path                   # show config path
+dictatorctl config set-key <provider>     # set API key interactively
+dictatorctl provider list                 # list configured providers
+dictatorctl provider use <name>           # set active provider
+dictatorctl routing show                  # show routing roles
+dictatorctl routing set segment <name>    # set segment provider
+dictatorctl routing set final <name>      # set final provider
+dictatorctl transcribe FILE [--json]      # one-shot file transcription
+dictatorctl retry <provider>              # retry last recording
+dictatorctl last                          # show last transcription
+dictatorctl logs                          # last 50 log lines
 ```
 
-Top-level options:
+The TUI status menu launches automatically when stdout is a TTY. It shows
+agent state, provider info, log tail, and supports keyboard navigation
+(arrows, Enter, number keys, Esc/q to exit).
 
-| Key                       | Default | Meaning                                                                                      |
-|---------------------------|---------|----------------------------------------------------------------------------------------------|
-| `active_provider`         | *(first)* | Which `[providers.<id>]` section is active. If only sections are present and it is unset, the first one wins. |
-| `providers`               | `[]`    | Explicit failover order, e.g. `providers = ["groq", "gigaam"]`. Unset — order of sections. |
-| `auto_failover`           | `false` | Retry with the next provider when the active one fails on a network/server error. |
-| `timeout_seconds`         | `120`   | Timeout for the STT request (capped at ~20 s per request).                                  |
-| `double_alt_max_interval` | `0.4`   | Max gap between the two Alt presses that counts as a trigger (seconds).                    |
-| `sounds_enabled`          | `true`  | Play system sounds on events.                                                               |
-| `log_level`               | `"info"`| `"debug"` enables extra logging and a debug dump of STT requests/responses.                 |
-| `language`                | `"ru"`  | Spoken language hint sent to the STT API (leave `""` to omit).                              |
-| `insert_method`           | `"cgevent"` | `"cgevent"` — keyboard events; `"clipboard"` — clipboard + Cmd+V (previous clipboard content is restored). |
-| `review_before_insert`    | `false` | Print the text to the terminal and wait for Enter before inserting (Esc cancels).           |
-| `chunked`                 | `false` | Chunked/live dictation: segments are inserted as you speak.                                 |
-| `undo_max_interval`       | `2.0`   | Window (seconds) in which a double-Alt undoes the last insertion.                           |
-| `undo_sound_enabled`      | `true`  | Play a sound when an insertion is undone.                                                   |
+### Configuration
 
-**Secrets.** Put API keys either inline (`api_key = "…"`) or in a separate
-file referenced by `api_key_file` (the first non-empty line is used; the
-directory is created with the file, keep it at `chmod 600`). The agent reads
-keys from the config file — stored explicitly, or referenced by path
-inside `config.toml`. The environment variable `DICTATION_API_KEY` is also
-read and takes priority over both `api_key` and `api_key_file`; it is never
-written to the config file.
+Config path: `~/.config/dictation/config.toml` (chmod 600, atomic writes).
 
-## Providers
-
-The agent speaks the **OpenAI audio-transcription protocol**: a
-`multipart/form-data` POST to a `/audio/transcriptions` endpoint with
-`file` (`audio.wav`), `model` and optional `language`, expecting a JSON
-`{"text": "…"}` response. **Any service that exposes such an endpoint works**
-— no per-provider code is required. A provider is just a `[providers.<id>]`
-section:
+Example template (created by `dictatorctl config init`):
 
 ```toml
+# active_provider = "openai"
+
 [providers.openai]
 name = "OpenAI"
 base_url = "https://api.openai.com/v1/audio/transcriptions"
@@ -187,56 +138,180 @@ api_key_file = "~/.config/dictation/keys/groq.txt"
 
 [providers.deepgram]
 name = "Deepgram"
-base_url = "https://api.deepgram.com/v1/...audio/transcriptions"  # OpenAI-compatible endpoint
-model = "nova-2"
+base_url = "https://api.deepgram.com/v1/listen"
+model = "nova-3"
 api_key_file = "~/.config/dictation/keys/deepgram.txt"
 
-[providers.gigaam]
-name = "GigaAM"
-base_url = "https://your-gateway/...audio/transcriptions"  # gigaam-v3 compatible gateway
-model = "gigaam-v3"
-api_key_file = "~/.config/dictation/keys/gigaam.txt"
+[providers.giga-chat]
+name = "GigaChat"
+base_url = "https://your-gigachat-endpoint.example.com/api/v1/audio/transcriptions"
+model = "GigaChat"
+api_key_file = "~/.config/dictation/keys/giga-chat.txt"
+api_secret = ""
 
 [providers.local]
 name = "Local whisper"
-base_url = "http://127.0.0.1:8080/audio/transcriptions"  # whisper.cpp / llama.cpp / faster-whisper server
-model = "ggml-large-v3"
+base_url = "http://127.0.0.1:8080/v1/audio/transcriptions"
+model = "whisper-1"
 api_key = ""
+
+[providers.cookie-relay]
+name = "Cookie Relay"
+base_url = "https://proxy.example.com/audio/transcriptions"
+model = "whisper-large-v3"
+transport = "cookie-relay"
+proxy_key = ""
+proxy_key_header = "X-Proxy-Key"
+
+[providers.cloudflare]
+name = "Cloudflare"
+base_url = "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run/@cf/openai/whisper-large-v3-turbo"
+model = ""
+# transport = "cloudflare"
+# api_key = ""
+
+# [routing]
+# segment_provider = ""
+# final_provider = ""
 ```
 
-Then select the active one:
+Top-level options:
+
+| Key                        | Default       | Meaning                                                                |
+|----------------------------|---------------|------------------------------------------------------------------------|
+| `active_provider`          | *(first)*     | Which `[providers.<id>]` section is active.                            |
+| `providers`                | `[]`          | Explicit failover order, e.g. `["groq", "gigaam"]`.                   |
+| `auto_failover`            | `false`       | Retry with the next provider on network/server errors.                 |
+| `timeout_seconds`          | `120`         | Timeout for the STT request.                                           |
+| `double_alt_max_interval`  | `0.4`         | Max gap between the two Alt presses (seconds).                         |
+| `sounds_enabled`           | `true`        | Play system sounds on events.                                          |
+| `log_level`                | `"info"`      | `"debug"` enables verbose logging and STT request/response dumps.      |
+| `language`                 | `"ru"`        | Spoken language hint sent to the STT API (`""` to omit).               |
+| `ui_language`              | `"en"`        | UI language: `"en"` or `"ru"`. Switchable from the TUI menu.           |
+| `insert_method`            | `"cgevent"`   | `"cgevent"` or `"clipboard"` (clipboard + Cmd+V).                      |
+| `review_before_insert`     | `false`       | Confirm text in terminal before inserting.                             |
+| `chunked`                  | `false`       | Chunked/live dictation: segments inserted as you speak.                |
+| `undo_max_interval`        | `2.0`         | Window (seconds) for double-Alt undo.                                  |
+
+**Secrets.** API keys go in `api_key` (inline) or `api_key_file` (file
+path; first non-empty line is used; `chmod 600`). The environment variable
+`DICTATION_API_KEY` overrides both and is never written to the config file.
+Provider-specific: `api_secret` is used for GigaChat OAuth.
+
+### Permissions
+
+On first run, macOS requests permissions. Grant them in **System Settings >
+Privacy & Security**:
+
+- **Microphone** — required for audio capture.
+- **Accessibility** — required for the global hotkey and text insertion.
+- **Input Monitoring** — keyboard-event monitoring (add `DictatorAgent` if
+  the hotkey does not fire).
+
+Add the *signed* binary (`.build/debug/DictatorAgent`) to each list. The
+path changes after a rebuild with a different signature — see
+[Code Signing](#code-signing).
+
+## Proxy Transports
+
+Each provider can set `transport` in its `[providers.<id>]` section (or at
+the top level) to route requests through a proxy.
+
+| Transport        | Config value     | Description                                                                 |
+|------------------|------------------|-----------------------------------------------------------------------------|
+| Direct           | *(empty / omit)* | No proxy; request goes straight to `base_url`.                              |
+| HTTP Proxy       | `"http"`         | Standard HTTP proxy. Uses `http_proxy` (or `https_proxy`) environment      |
+|                  |                  | variables. Optional `proxy_user` + `proxy_password` send                   |
+|                  |                  | `Proxy-Authorization: Basic ...` header.                                    |
+| Gateway          | `"gateway"`      | Secret relay via custom header. Uses `proxy_key` as the header value and    |
+|                  |                  | `proxy_key_header` as the header name (default: `X-Proxy-Key`).            |
+| Cookie Relay     | `"cookie-relay"` | JS-challenge relay with automatic cookie computation (`__test` cookie via   |
+|                  |                  | AES-128-CBC in memory) and periodic renewal.                                |
+
+Legacy aliases `"relay"` and `"infinityfree"` are automatically converted to
+`"cookie-relay"` with a deprecation warning.
+
+## UI Language
+
+The TUI and agent UI strings support English and Russian. Set
+`ui_language = "en"` or `"ui_language = "ru"` in `config.toml` (default:
+`"en"`). The first item in the TUI status menu toggles the language at
+runtime.
+
+## Development
+
+### Target structure
+
+```
+Package.swift                        # swift-tools-version:5.7, macOS 12+
+Sources/
+  AudioEngineGuard/                  # ObjC clang target (NSException + AVFAudio bridge)
+  DictationCore/                     # Core library (Config, STT, AudioService, BatchTranscriber, L10n, …)
+  DictatorAgent/                     # LaunchAgent executable
+  dictatorctl/                       # CLI + TUI executable
+Tests/
+  DictationCoreTests/                # Standalone test runner (659 tests)
+Resources/
+  *.entitlements                     # Code signing entitlements
+  *.plist.template                   # LaunchAgent plist template
+```
+
+### Running tests
 
 ```sh
-dictatorctl provider list
-dictatorctl provider use groq
+zsh /private/tmp/dct-verify/build_all.sh
 ```
 
-### Adding your own provider
+Or run the test executable directly:
 
-Add a `[providers.<id>]` section to `config.toml` with `base_url`, `model`
-and either `api_key` or `api_key_file`, set `active_provider` to its id, and
-restart the agent (`dictatorctl start`). Optionally set `name` (shown in the
-overlay) and `proxy_key` (sent as the `X-Proxy-Key` header).
-
-### Legacy config and relays
-
-A config with no `[providers.X]` sections — the legacy layout with top-level
-`base_url` / `model` / `api_key` — still works as-is.
-
-By default every provider is called **directly**. To route a provider through
-a relay, set the `transport` key in its section (or at the top level):
-
-```toml
-[providers.gigaam]
-base_url = "https://your-gateway/.../audio/transcriptions"
-model = "gigaam-v3"
-transport = "infinityfree"   # built-in cookie-aware relay for this provider
+```sh
+swift run DictationCoreTests
 ```
 
-An empty/omitted `transport` means a direct request. `"infinityfree"` is the
-one built-in relay transport (it handles the relay's JS challenge cookie
-transparently); any other value documents a relay label without activating
-it. The overlay shows the routing as `relay→provider`.
+## Deploy (MCP Server)
+
+The `mcp/dictation-deploy-mcp-server/` directory contains an MCP server
+(Model Context Protocol, stdio transport) that automates build, code signing,
+and agent restart. It preserves TCC (Microphone/Accessibility) grants by
+using a fixed signing identity and fixed entitlements across rebuilds.
+
+Tools provided:
+
+| Tool                | Description                                                          |
+|---------------------|----------------------------------------------------------------------|
+| `dictation_build`   | `swift build` for the chosen configuration.                          |
+| `dictation_sign`    | Re-sign both binaries with the stable identity + entitlements.       |
+| `dictation_deploy`  | Build, sign, restart — each step gated on the previous.              |
+| `dictation_restart` | Restart the LaunchAgent (`launchctl kickstart -k`).                  |
+| `dictation_status`  | Process state, launchd state, code signature details.                |
+
+See [`mcp/dictation-deploy-mcp-server/README.md`](mcp/dictation-deploy-mcp-server/README.md)
+for setup and usage details.
+
+### Code Signing
+
+macOS TCC grants (Microphone, Accessibility, Input Monitoring) are keyed to
+the binary's code signature (cdhash). Ad-hoc signing on every rebuild
+produces a new signature and resets all grants.
+
+The MCP server uses a fixed identity **"Dictation Code Signing"** (a
+self-signed certificate created once via Keychain Access > Certificate
+Assistant) with fixed entitlements files (`Resources/*.entitlements`) and
+`codesign --force --options runtime`. Same identity + same entitlements +
+same code = same cdhash = grants survive rebuilds.
+
+To create the signing certificate:
+
+1. Open **Keychain Access** > **Certificate Assistant** > **Create a
+   Certificate...**
+2. Name: `Dictation Code Signing`
+3. Identity Type: **Self-Signed Root**
+4. Certificate Type: **Code Signing**
+5. Create, then sign/redeploy via the MCP server.
+
+`dictation_sign` has **no ad-hoc fallback** — if the identity is missing
+from the keychain, it fails with a clear error and points to the steps
+above.
 
 ## Troubleshooting
 
@@ -247,22 +322,18 @@ it. The overlay shows the routing as `relay→provider`.
   launchctl print gui/$(id -u)/com.dictation.agent
   launchctl kickstart -k gui/$(id -u)/com.dictation.agent
   ```
-- **Logs** —
-  `~/Library/Logs/Dictation/agent.log` (tail it with
-  `tail -f ~/Library/Logs/Dictation/agent.log`; `dictatorctl logs` prints the
-  last 50 lines). Set `log_level = "debug"` for verbose logging; the STT
-  request/response debug dump goes to
-  `~/Library/Logs/Dictation/transcriber-debug.log`.
-- **Permissions re-requested after every rebuild** — the binary was re-signed
-  (or ad-hoc signed); macOS forgot the grants. Use a stable signing
-  certificate (see [Code signing](#code-signing-important)) and re-grant the
-  permissions once.
-- **"Таймаут STT" / "Нет интернета"** — network problem or the provider
-  endpoint/models are misconfigured; check `base_url`/`model` and the
-  internet connection.
-- **Config errors** — the agent names the offending file and line in the
-  log; `dictatorctl config --show-file` prints the parsed config with
-  secrets masked.
+- **Logs** — `~/Library/Logs/Dictation/agent.log`
+  (`dictatorctl logs` prints the last 50 lines; `tail -f` for live).
+  Set `log_level = "debug"` for verbose output; STT request/response
+  dumps go to `~/Library/Logs/Dictation/transcriber-debug.log`.
+- **Permissions re-requested after every rebuild** — binary was re-signed
+  with a different identity; use a stable signing certificate (see
+  [Code Signing](#code-signing)) and re-grant once.
+- **STT timeout / no internet** — check `base_url`, `model`, network
+  connection, and proxy transport settings.
+- **Config errors** — the agent logs the offending file and line;
+  `dictatorctl config --show-file` prints parsed config with secrets
+  masked.
 
 ## Uninstall
 
@@ -271,14 +342,9 @@ dictatorctl stop
 rm ~/Library/LaunchAgents/com.dictation.agent.plist
 rm -rf ~/.config/dictation           # config and key files
 rm -rf ~/Library/Logs/Dictation
-rm /usr/local/bin/dictatorctl        # symlink created by build.sh
+rm -f /usr/local/bin/dictatorctl     # symlink (if created by the MCP server)
 ```
 
 ## License
 
-[MIT](LICENSE)
-
-## Language note
-
-The UI strings (overlay statuses, CLI help and messages) are currently
-**Russian-only** — the project ships with single-language support.
+[MIT](LICENSE) — Copyright (c) 2026 AltDictation contributors.

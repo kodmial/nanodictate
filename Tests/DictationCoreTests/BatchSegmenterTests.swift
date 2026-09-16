@@ -147,4 +147,59 @@ final class BatchSegmenterTests: XCTestCase {
         XCTAssertEqual(specs[1].overlapRange?.upperBound, specs[0].bodyRange.upperBound,
                        "оверлэп чанка 1 = хвост тела чанка 0")
     }
+
+    // MARK: plan() дефолты — выравнивание на паузу включено (0.3 с)
+
+    @objc func testPlanDefaultCutsAtPause() throws {
+        // Речь 6 с + пауза 0.4 с (≥ дефолтные 0.3 с) + речь 4 с. ДЕФОЛТНЫЕ
+        // параметры (cutAtPauses=true, pauseDuration=0.3) — никаких явных
+        // аргументов нарезки.
+        let sr = 1000
+        var samples = tone(6, value: 500, sampleRate: sr)
+        samples += tone(0.4, value: 0, sampleRate: sr)
+        samples += tone(4, value: 500, sampleRate: sr)
+
+        let content = ArrayPCMBatchContent(samples: samples, sampleRate: sr)
+        let specs = try BatchSegmenter.plan(content: content, maxSegment: 10, overlap: 1.0)
+
+        XCTAssertEqual(specs.count, 2, "пауза 0.4 с ≥ 0.3 с — граница в тишину")
+        // Граница = начало паузы (6000) с точностью до окна RMS (0.085·sr = 85).
+        XCTAssertGreaterThanOrEqual(specs[0].bodyEnd, 6.0, "граница не раньше начала паузы")
+        XCTAssertLessThanOrEqual(specs[0].bodyEnd, 6.1, "граница не дальше одного окна RMS")
+        XCTAssertEqual(specs[0].bodyRange.upperBound, specs[1].bodyRange.lowerBound,
+                       "тела идут подряд после выравнивания")
+    }
+
+    @objc func testPlanDefaultKeepsFixedBoundaryWhenPauseTooShort() throws {
+        // Пауза 0.2 с < дефолтные 0.3 с — границу не сдвигаем: чанк
+        // фиксированной длины 10.0 с (пауза не набирает порог, речь продолжается
+        // внутри чанка).
+        let sr = 1000
+        var samples = tone(6, value: 500, sampleRate: sr)
+        samples += tone(0.2, value: 0, sampleRate: sr)
+        samples += tone(4, value: 500, sampleRate: sr)
+
+        let content = ArrayPCMBatchContent(samples: samples, sampleRate: sr)
+        let specs = try BatchSegmenter.plan(content: content, maxSegment: 10, overlap: 1.0)
+
+        XCTAssertEqual(specs.count, 2)
+        XCTAssertEqual(specs[0].bodyEnd, 10.0, accuracy: 0.001,
+                       "пауза 0.2 с < 0.3 с — фиксированная граница, тело чанка 10 с")
+        XCTAssertEqual(specs[0].bodyRange.upperBound, 10_000)
+    }
+
+    @objc func testPlanDefaultLastChunkNeverTrimmed() throws {
+        // Последний чанк не выравнивается (bodyEnd = totalSamples), даже если
+        // по дефолтным параметрам рядом есть тишина.
+        let sr = 1000
+        var samples = tone(6, value: 500, sampleRate: sr)
+        samples += tone(1.0, value: 0, sampleRate: sr)
+        samples += tone(2, value: 500, sampleRate: sr)
+
+        let content = ArrayPCMBatchContent(samples: samples, sampleRate: sr)
+        let specs = try BatchSegmenter.plan(content: content, maxSegment: 10, overlap: 1.0)
+
+        XCTAssertEqual(specs.count, 1, "файл 9 с < maxSegment 10 с — один чанк")
+        XCTAssertEqual(specs[0].bodyEnd, 9.0, accuracy: 0.001, "последний чанк без обрезания")
+    }
 }

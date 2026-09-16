@@ -77,7 +77,7 @@ test("parseTeamId normalizes codesign TeamIdentifier values", () => {
 
 const sampleOutput = [
   '  1) 0000000000000000000000000000000000000000 "Dictation Code Signing"',
-  '  2) 1111111111111111111111111111111111111111 "Apple Development: dima@example.com"',
+  '  2) 1111111111111111111111111111111111111111 "Apple Development: alice@example.com"',
 ].join("\n");
 
 test("matchSigningIdentity finds the identity in find-identity output", () => {

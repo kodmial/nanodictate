@@ -138,7 +138,7 @@ function findOnPath(name: string, pathEnv: string | undefined): string | null {
 }
 
 /**
- * Resolve the Swift toolchain 1:1 with build.sh in the main checkout:
+ * Resolve the Swift toolchain 1:1 with the removed build.sh in the main checkout:
  *
  *   - SWIFT_TOOLCHAIN set and `$SWIFT_TOOLCHAIN/usr/bin/swift` executable → use
  *     that toolchain and pass SWIFT_EXEC_MANIFEST / SWIFTPM_CUSTOM_LIBS_DIR for
@@ -223,7 +223,7 @@ function isWritableDir(dir: string): boolean {
 
 /**
  * `ln -sf .build/{configuration}/dictatorctl /usr/local/bin/dictatorctl`,
- * configuration-aware (mirrors the symlink step in build.sh). If /usr/local/bin
+ * configuration-aware (mirrors the symlink step in the removed build.sh). If /usr/local/bin
  * is missing or not writable the function returns a WARNING (created: false) —
  * the build itself still succeeded, so this must never fail the whole result.
  */
@@ -336,7 +336,7 @@ export function matchSigningIdentity(
       `"${identity}" not found in keychain. ` +
       (identities.length
         ? `Available identities:\n${identities.join("\n")}`
-        : "No identities found at all. Create a 'Sign to Run Locally' certificate via Keychain Access → Certificate Assistant."),
+        : "No identities found at all. Create a 'Dictation Code Signing' certificate via Keychain Access → Certificate Assistant."),
   };
 }
 

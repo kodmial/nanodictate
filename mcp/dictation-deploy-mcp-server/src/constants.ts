@@ -2,12 +2,12 @@
  * Shared constants for the dictation-deploy MCP server.
  *
  * Layout:
- *   MAIN CHECKOUT  /Users/dima/projects/dictation
+ *   PROJECT_ROOT  the repo checkout (resolved from this file's location,
+ *                  or overridden via the DICTATION_ROOT env var).
  *     — `swift build` runs here; built binaries live in .build/{debug,release}.
- *   SERVER_ROOT    the checkout this server is running from
- *     — before the feature branch merges that is the worktree
- *       (.claude/worktrees/<branch>); after the merge it is the main checkout
- *       itself, so SERVER_ROOT and PROJECT_ROOT coincide.
+ *   SERVER_ROOT   the checkout this server is running from
+ *     — three levels up from dist/<file>.js or src/<file>.ts; after the
+ *       feature branch merges it coincides with PROJECT_ROOT.
  *
  * The entitlements files live in each checkout's Resources/. They are consumed
  * through resolveEntitlementsPath(), which checks the main checkout first and
@@ -16,13 +16,19 @@
  */
 
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // ── Project roots ────────────────────────────────────────────────────────────
 
-/** Absolute path to the main (non-worktree) git checkout of the dictation project. */
-export const PROJECT_ROOT = "/Users/dima/projects/dictation";
+/**
+ * Absolute path to the main (non-worktree) git checkout of the dictation project.
+ * Resolved from this file's location (repo root → mcp → dictation-deploy-mcp-server → src),
+ * or overridden via the DICTATION_ROOT environment variable when set.
+ */
+export const PROJECT_ROOT =
+  process.env.DICTATION_ROOT ??
+  resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 
 /**
  * Absolute path to the checkout this server is installed in. Three levels up
@@ -35,7 +41,7 @@ export const SERVER_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 // ── Signing identity ────────────────────────────────────────────────────────
 
 /**
- * Stable code-signing identity (self-signed "Sign to Run Locally" certificate).
+ * Stable code-signing identity (self-signed "Dictation Code Signing" certificate).
  *
  * The same identity + same entitlements → the SAME code directory hash (cdhash)
  * across rebuilds, so macOS keeps the Accessibility / Microphone TCC grants.

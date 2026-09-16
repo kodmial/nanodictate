@@ -175,12 +175,14 @@ public final class Transcriber {
     public static let maxAttempts = 4
 
     /// Каноническое сообщение «нет интернета» — на него опирается маппинг
-    /// оверлея `OverlayErrorText` и тесты.
-    public static let noInternetMessage = "Нет интернета"
+    /// оверлея `OverlayErrorText` и тесты. Вычисляемое свойство: резолвится
+    /// при каждом обращении, чтобы тумблер языка в меню применялся на лету.
+    public static var noInternetMessage: String { L10n.tr("error.noInternet") }
 
     /// Каноническое сообщение «таймаут STT» — на него опирается маппинг
-    /// оверлея `OverlayErrorText` и тесты.
-    public static let sttTimeoutMessage = "Таймаут STT"
+    /// оверлея `OverlayErrorText` и тесты. Вычисляемое свойство: резолвится
+    /// при каждом обращении, чтобы тумблер языка в меню применялся на лету.
+    public static var sttTimeoutMessage: String { L10n.tr("error.sttTimeout") }
 
     private let baseURL: String
     private let model: String
@@ -199,10 +201,15 @@ public final class Transcriber {
     /// Preflight сети перед отправкой: true — сеть доступна. По умолчанию
     /// реальный замер через NetworkReachability; тесты инъецируют мок.
     private let networkChecker: () async -> Bool
-    /// Byet-cookie-слой (transport == "relay"/legacy "infinityfree"): вычисляемая
+    /// Cookie-relay-слой (transport == "cookie-relay"): вычисляемая
     /// `__test`-кука в памяти + единый Chrome UA. nil — cookie-логики нет,
     /// поведение как раньше.
-    private let byetCookieProvider: ByetCookieProvider?
+    private let cookieRelayProvider: CookieRelayProvider?
+    /// HTTP-прокси (forwarding): URL-rewrite на `http://<httpProxy>/<originURL>`.
+    /// Пусто — без HTTP-прокси, поведение как раньше.
+    private let httpProxy: String
+    private let proxyUser: String
+    private let proxyPassword: String
     /// ID адаптера запроса («openai», «groq», «deepgram», «giga-chat», …).
     /// nil — legacy-путь: OpenAI-совместимый мультипарт ровно как раньше
     /// (byte-identical запросы, тесты не меняются).
@@ -279,7 +286,10 @@ public final class Transcriber {
         logLevel: String = "info",
         transport: HTTPTransport? = nil,
         networkChecker: (() async -> Bool)? = nil,
-        byetCookieProvider: ByetCookieProvider? = nil,
+        cookieRelayProvider: CookieRelayProvider? = nil,
+        httpProxy: String = "",
+        proxyUser: String = "",
+        proxyPassword: String = "",
         apiSecret: String = "",
         adapterID: String? = nil,
         retrySleep: ((TimeInterval) async -> Void)? = nil
@@ -304,7 +314,10 @@ public final class Transcriber {
         self.logLevel = logLevel
         self.transport = transport
         self.networkChecker = networkChecker ?? { await NetworkReachability.isInternetReachable() }
-        self.byetCookieProvider = byetCookieProvider
+        self.cookieRelayProvider = cookieRelayProvider
+        self.httpProxy = httpProxy
+        self.proxyUser = proxyUser
+        self.proxyPassword = proxyPassword
         self.adapterID = adapterID
         // Инъектируемый сон между ретраями: тесты прогоняют backoff без реальных
         // пауз. Дефолт — настоящий Task.sleep (секунды > 0).
@@ -337,7 +350,7 @@ public final class Transcriber {
         }
 
         // Legacy-путь (adapterID == nil): byte-identical поведение, что было
-        // всегда — мультипарт, Bearer, Byet-UA/кука, таймаут, ретраи.
+        // всегда — мультипарт, Bearer, cookie-relay UA/кука, таймаут, ретраи.
         guard let url = URL(string: baseURL) else {
             Logger.log("STT error: invalid base URL", level: "error")
             throw TranscribeError.network("Invalid base URL")
@@ -354,7 +367,7 @@ public final class Transcriber {
         if !proxyKey.isEmpty {
             request.setValue(proxyKey, forHTTPHeaderField: proxyKeyHeader)
         }
-        await applyByetHeaders(to: &request)
+        await applyCookieRelayHeaders(to: &request)
         request.timeoutInterval = min(timeout, Self.networkRequestTimeout)
 
         return try await sendWithRetry(
@@ -396,7 +409,7 @@ public final class Transcriber {
         if let oauth = spec.oauth {
             guard !apiSecret.isEmpty else {
                 Logger.log("STT error: giga-chat требует api_secret (client_secret)", level: "error")
-                throw TranscribeError.network("giga-chat: не задан api_secret (client_secret провайдера)")
+                throw TranscribeError.network(L10n.tr("error.sttMissingSecret"))
             }
             headers.append(("Authorization", try await performOAuth(oauth)))
         }
@@ -411,7 +424,7 @@ public final class Transcriber {
         if !proxyKey.isEmpty {
             request.setValue(proxyKey, forHTTPHeaderField: proxyKeyHeader)
         }
-        await applyByetHeaders(to: &request)
+        await applyCookieRelayHeaders(to: &request)
         request.timeoutInterval = min(timeout, Self.networkRequestTimeout)
 
         return try await sendWithRetry(
@@ -455,22 +468,22 @@ public final class Transcriber {
         }
         guard let json = try? JSONSerialization.jsonObject(with: response.body) as? [String: Any],
               let token = json[oauth.tokenJSONKey] as? String, !token.isEmpty else {
-            throw TranscribeError.invalidResponse("OAuth: отсутствует '\(oauth.tokenJSONKey)' в ответе")
+            throw TranscribeError.invalidResponse(String(format: L10n.tr("error.oauthMissingToken"), oauth.tokenJSONKey))
         }
         return token
     }
 
     // MARK: - Общий цикл отправки (legacy и адаптерный пути)
 
-    /// Byet-cookie-слой (transport == "relay"/legacy "infinityfree"): единый
+    /// Cookie-relay-слой (transport == "cookie-relay"): единый
     /// браузерный UA + cookie-заголовок. `ensureFresh()` неблокирующий: свежий
     /// токен (< 120 с) возвращается мгновенно, без сети; протухший обновляется
     /// ФОНОМ, запрос уходит с текущим токеном. На челлендж отвечает ретрай
     /// в `sendWithRetry` (refreshBlocking до результата).
-    private func applyByetHeaders(to request: inout URLRequest) async {
-        guard let byet = byetCookieProvider else { return }
-        request.setValue(ByetCookieProvider.chromeUA, forHTTPHeaderField: "User-Agent")
-        if let cookie = await byet.ensureFresh() {
+    private func applyCookieRelayHeaders(to request: inout URLRequest) async {
+        guard let relay = cookieRelayProvider else { return }
+        request.setValue(CookieRelayProvider.chromeUA, forHTTPHeaderField: "User-Agent")
+        if let cookie = await relay.ensureFresh() {
             request.setValue(cookie, forHTTPHeaderField: "Cookie")
         }
     }
@@ -479,7 +492,7 @@ public final class Transcriber {
     /// - до `maxAttempts` попыток: первичная + ретраи с экспоненциальным
     ///   backoff и джиттером (только retryable ошибки: HTTP 429/5xx,
     ///   транспортные не-таймаутные); HTTP 429 ждёт Retry-After (потолок 10 с);
-    /// - Byet-челлендж ретраится один раз со свежей кукой (attempt не сжигается);
+    /// - cookie-челлендж ретраится один раз со свежей кукой (attempt не сжигается);
     /// - `transcriptPath == nil` — плоский ключ "text"; иначе извлекается по
     ///   JSON-пути адаптера (deepgram).
     /// - `skipPreflight: true` — адаптерный путь уже сделал preflight до OAuth.
@@ -513,7 +526,7 @@ public final class Transcriber {
         var attempt = 0
         // Retry-After из заголовка HTTP 429 — ждём указанное сервером время.
         var retryAfterHeader: TimeInterval?
-        // Byet-челлендж ретраится не больше одного раза (свежей кукой).
+        // cookie-челлендж ретраится не больше одного раза (свежей кукой).
         var challengeRetried = false
         while attempt < Self.maxAttempts {
             // Отмена родителя (например, первый успех параллельного failover
@@ -538,22 +551,22 @@ public final class Transcriber {
                 if response.status == 429 {
                     retryAfterHeader = Self.retryAfterSeconds(from: response.headers)
                 }
-                // Byet-челлендж (transport == "relay"/"infinityfree"): сервер вместо
+                // Cookie-челлендж (transport == "cookie-relay"): сервер вместо
                 // контента прислал JS-заглушку. Единственный ретрай — со свежей
                 // кукой (refreshBlocking до результата); attempt не сжигается.
                 // Повторный челлендж после свежего токена — серьёзная ошибка.
-                if let byet = byetCookieProvider,
+                if let relay = cookieRelayProvider,
                    !challengeRetried,
-                   ByetCookieProvider.looksLikeChallenge(response.body) {
-                    if let freshCookie = await byet.refreshBlocking() {
+                   CookieRelayProvider.looksLikeChallenge(response.body) {
+                    if let freshCookie = await relay.refreshBlocking() {
                         challengeRetried = true
                         request.setValue(freshCookie, forHTTPHeaderField: "Cookie")
                         attempt -= 1
-                        Logger.log("STT Byet challenge: cookie обновлён, повтор с новым __test", level: "info")
+                        Logger.log("STT cookie challenge: cookie обновлён, повтор с новым __test", level: "info")
                         continue
                     }
-                    Logger.log("STT Byet challenge: свежий cookie не получен", level: "error")
-                    throw TranscribeError.invalidResponse("Byet challenge page received; cookie refresh failed")
+                    Logger.log("STT cookie challenge: свежий cookie не получен", level: "error")
+                    throw TranscribeError.invalidResponse("Cookie challenge page received; cookie refresh failed")
                 }
                 let result = try Self.parseResponse(response, transcriptPath: transcriptPath)
                 if logLevel.lowercased() == "debug" {
@@ -631,7 +644,31 @@ public final class Transcriber {
 
     // MARK: - Send
 
+    /// Единая точка отправки всех путей (legacy, адаптерный, OAuth).
+    ///
+    /// HTTP-прокси (transport == "http", `http_proxy` в конфиге): URL запроса
+    /// переписывается по схеме «URL-как-путь» — исходный URL целиком
+    /// подставляется ПУТЁМ проксирующего URL:
+    ///   http://<httpProxy>/<полный-исходный-URL>
+    /// Например, для http_proxy "127.0.0.1:8080" и запроса
+    /// https://api.openai.com/v1/audio/transcriptions:
+    ///   http://127.0.0.1:8080/https://api.openai.com/v1/audio/transcriptions
+    /// Прокси разворачивает его и ходит на исходный хост. При заданных
+    /// proxy_user/proxy_password добавляется заголовок
+    /// `Proxy-Authorization: Basic base64("user:pass")`.
     private func send(request: URLRequest) async throws -> (status: Int, body: Data, headers: [String: String]) {
+        var request = request
+        if !httpProxy.isEmpty, let original = request.url?.absoluteString {
+            guard let proxiedURL = URL(string: "http://\(httpProxy)/\(original)") else {
+                throw URLError(.badURL)
+            }
+            request.url = proxiedURL
+            if !proxyUser.isEmpty {
+                let credentials = "\(proxyUser):\(proxyPassword)"
+                let encoded = Data(credentials.utf8).base64EncodedString()
+                request.setValue("Basic \(encoded)", forHTTPHeaderField: "Proxy-Authorization")
+            }
+        }
         if let transport = transport {
             return try await transport.send(request: request)
         }

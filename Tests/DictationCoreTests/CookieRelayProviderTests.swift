@@ -1,13 +1,13 @@
 import Foundation
 @testable import DictationCore
 
-// MARK: - ByetMockTransport
+// MARK: - CookieRelayMockTransport
 //
-// One transport pretending to be InfinityFree: any request without the __test
-// cookie gets the JS-challenge HTML; with the cookie (and honorCookie) gets a
-// normal JSON body. Mirrors the real proxy behavior for tests.
+// One transport pretending to be a cookie-challenge proxy: any request without
+// the __test cookie gets the JS-challenge HTML; with the cookie (and
+// honorCookie) gets a normal JSON body. Mirrors the real proxy behavior.
 
-final class ByetMockTransport: HTTPTransport, @unchecked Sendable {
+final class CookieRelayMockTransport: HTTPTransport, @unchecked Sendable {
 
     let challengeBody: String
     var honorCookie: Bool
@@ -71,18 +71,18 @@ final class ByetMockTransport: HTTPTransport, @unchecked Sendable {
     }
 }
 
-// MARK: - ByetCookieProviderTests
+// MARK: - CookieRelayProviderTests
 
-/// Реальный челлендж-фикстур (снят с https://kodmai.xo.je): константы a/b/c и
+/// Реальный челлендж-фикстур (снят с https://proxy.example.com): константы a/b/c и
 /// ожидаемый результат — эталон посчитан openssl (`-aes-128-cbc -nopad`).
 ///   a=f655ba9d09a112d4968c63579db590b4 (ключ AES-128)
 ///   b=98344c2eee86c3994890592585b49f80 (IV)
 ///   c=3e512bc3e42f39a757e79f4739c74138 (единственный 16-байтный блок)
 ///   d74696de7d49fcda5f03f4d247e07cf4 = slowAES.decrypt(c,2,a,b) = значение cookie.
-final class ByetCookieProviderTests: XCTestCase {
+final class CookieRelayProviderTests: XCTestCase {
 
     private let challengeHTML = """
-    <html><body><script type="text/javascript" src="/aes.js" ></script><script>function toNumbers(d){var e=[];d.replace(/(..)/g,function(d){e.push(parseInt(d,16))});return e}function toHex(){for(var d=[],d=1==arguments.length&&arguments[0].constructor==Array?arguments[0]:arguments,e="",f=0;f<d.length;f++)e+=(16>d[f]?"0":"")+d[f].toString(16);return e.toLowerCase()}var a=toNumbers("f655ba9d09a112d4968c63579db590b4"),b=toNumbers("98344c2eee86c3994890592585b49f80"),c=toNumbers("3e512bc3e42f39a757e79f4739c74138");document.cookie="__test="+toHex(slowAES.decrypt(c,2,a,b))+"; max-age=21600; expires=Thu, 31-Dec-37 23:55:55 GMT; path=/"; location.href="https://kodmai.xo.je/?i=1";</script><noscript>This site requires Javascript to work, please enable Javascript in your browser or use a browser with Javascript support</noscript></body></html>
+    <html><body><script type="text/javascript" src="/aes.js" ></script><script>function toNumbers(d){var e=[];d.replace(/(..)/g,function(d){e.push(parseInt(d,16))});return e}function toHex(){for(var d=[],d=1==arguments.length&&arguments[0].constructor==Array?arguments[0]:arguments,e="",f=0;f<d.length;f++)e+=(16>d[f]?"0":"")+d[f].toString(16);return e.toLowerCase()}var a=toNumbers("f655ba9d09a112d4968c63579db590b4"),b=toNumbers("98344c2eee86c3994890592585b49f80"),c=toNumbers("3e512bc3e42f39a757e79f4739c74138");document.cookie="__test="+toHex(slowAES.decrypt(c,2,a,b))+"; max-age=21600; expires=Thu, 31-Dec-37 23:55:55 GMT; path=/"; location.href="https://proxy.example.com/?i=1";</script><noscript>This site requires Javascript to work, please enable Javascript in your browser or use a browser with Javascript support</noscript></body></html>
     """
 
     private let expectedCookie = "d74696de7d49fcda5f03f4d247e07cf4"
@@ -107,16 +107,16 @@ final class ByetCookieProviderTests: XCTestCase {
     }
 
     /// Крутит event loop, пока mock не насчитает нужное число запросов.
-    private func waitForRequests(_ transport: ByetMockTransport, count: Int, timeout: TimeInterval = 3) async {
+    private func waitForRequests(_ transport: CookieRelayMockTransport, count: Int, timeout: TimeInterval = 3) async {
         let deadline = CFAbsoluteTimeGetCurrent() + timeout
         while transport.requestCount < count && CFAbsoluteTimeGetCurrent() < deadline {
             await Task.yield()
         }
     }
 
-    private func makeProvider(transport: ByetMockTransport, clock: TestClock? = nil) -> ByetCookieProvider {
-        ByetCookieProvider(
-            origin: "https://kodmai.xo.je",
+    private func makeProvider(transport: CookieRelayMockTransport, clock: TestClock? = nil) -> CookieRelayProvider {
+        CookieRelayProvider(
+            origin: "https://proxy.example.com",
             transport: transport,
             now: { clock?.value ?? Date() }
         )
@@ -125,7 +125,7 @@ final class ByetCookieProviderTests: XCTestCase {
     // MARK: - Разбор и дешифровка челленджа
 
     @objc func testExtractConstantsFromChallenge() {
-        let consts = ByetCookieProvider.extractConstants(from: challengeHTML)
+        let consts = CookieRelayProvider.extractConstants(from: challengeHTML)
         XCTAssertNotNil(consts)
         XCTAssertEqual(consts?.a, "f655ba9d09a112d4968c63579db590b4")
         XCTAssertEqual(consts?.b, "98344c2eee86c3994890592585b49f80")
@@ -133,7 +133,7 @@ final class ByetCookieProviderTests: XCTestCase {
     }
 
     @objc func testDecryptMatchesReferenceValue() {
-        let value = ByetCookieProvider.decrypt(
+        let value = CookieRelayProvider.decrypt(
             a: "f655ba9d09a112d4968c63579db590b4",
             b: "98344c2eee86c3994890592585b49f80",
             c: "3e512bc3e42f39a757e79f4739c74138"
@@ -142,15 +142,15 @@ final class ByetCookieProviderTests: XCTestCase {
     }
 
     @objc func testDecryptInvalidSizesReturnNil() {
-        XCTAssertNil(ByetCookieProvider.decrypt(a: "aa", b: "bb", c: "cc"))
-        XCTAssertNil(ByetCookieProvider.decrypt(a: "", b: "", c: ""))
+        XCTAssertNil(CookieRelayProvider.decrypt(a: "aa", b: "bb", c: "cc"))
+        XCTAssertNil(CookieRelayProvider.decrypt(a: "", b: "", c: ""))
     }
 
     @objc func testLooksLikeChallenge() {
-        XCTAssertTrue(ByetCookieProvider.looksLikeChallenge(challengeHTML))
-        XCTAssertTrue(ByetCookieProvider.looksLikeChallenge(Data(challengeHTML.utf8)))
-        XCTAssertFalse(ByetCookieProvider.looksLikeChallenge(#"{"text":"ok"}"#))
-        XCTAssertFalse(ByetCookieProvider.looksLikeChallenge(""))
+        XCTAssertTrue(CookieRelayProvider.looksLikeChallenge(challengeHTML))
+        XCTAssertTrue(CookieRelayProvider.looksLikeChallenge(Data(challengeHTML.utf8)))
+        XCTAssertFalse(CookieRelayProvider.looksLikeChallenge(#"{"text":"ok"}"#))
+        XCTAssertFalse(CookieRelayProvider.looksLikeChallenge(""))
     }
 
     @objc func testExtractConstantsToleratesSpacesAndUppercaseAndOrder() {
@@ -161,31 +161,31 @@ final class ByetCookieProviderTests: XCTestCase {
         b = toNumbers( "98344c2eee86c3994890592585b49f80" ) ,  a=toNumbers("F655BA9D09A112D4968C63579DB590B4");
         </script>
         """
-        let consts = ByetCookieProvider.extractConstants(from: page)
+        let consts = CookieRelayProvider.extractConstants(from: page)
         XCTAssertNotNil(consts, "пробелы/UPPER-HEX/порядок не должны ломать разбор")
         XCTAssertEqual(consts?.a.lowercased(), "f655ba9d09a112d4968c63579db590b4")
         XCTAssertEqual(consts?.b, "98344c2eee86c3994890592585b49f80")
         XCTAssertEqual(consts?.c.lowercased(), "3e512bc3e42f39a757e79f4739c74138")
         // Расшифровка uppercase-констант даёт ту же куку, что и lowercase.
         if let consts = consts {
-            let value = ByetCookieProvider.decrypt(a: consts.a, b: consts.b, c: consts.c)
+            let value = CookieRelayProvider.decrypt(a: consts.a, b: consts.b, c: consts.c)
             XCTAssertEqual(value, expectedCookie)
         }
     }
 
     @objc func testOriginFromBaseURL() {
         XCTAssertEqual(
-            ByetCookieProvider.origin(from: "https://kodmai.xo.je/go/https://api.openai.com/v1"),
-            "https://kodmai.xo.je"
+            CookieRelayProvider.origin(from: "https://proxy.example.com/go/https://api.openai.com/v1"),
+            "https://proxy.example.com"
         )
-        XCTAssertEqual(ByetCookieProvider.origin(from: "https://kodmai.xo.je:8443/go/x"), "https://kodmai.xo.je:8443")
-        XCTAssertNil(ByetCookieProvider.origin(from: "not a url"))
+        XCTAssertEqual(CookieRelayProvider.origin(from: "https://proxy.example.com:8443/go/x"), "https://proxy.example.com:8443")
+        XCTAssertNil(CookieRelayProvider.origin(from: "not a url"))
     }
 
     // MARK: - Полный цикл refresh
 
     @objc func testRefreshProducesCookie() {
-        let transport = ByetMockTransport(challengeBody: challengeHTML)
+        let transport = CookieRelayMockTransport(challengeBody: challengeHTML)
         let provider = makeProvider(transport: transport)
 
         runAsync("testRefresh") {
@@ -200,7 +200,7 @@ final class ByetCookieProviderTests: XCTestCase {
     }
 
     @objc func testFreshTokenEnsureFreshZeroNetwork() {
-        let transport = ByetMockTransport(challengeBody: challengeHTML)
+        let transport = CookieRelayMockTransport(challengeBody: challengeHTML)
         let provider = makeProvider(transport: transport)
 
         runAsync("testFreshZeroNetwork") {
@@ -214,14 +214,14 @@ final class ByetCookieProviderTests: XCTestCase {
 
     @objc func testStaleTokenRecomputesInBackground() {
         let clock = TestClock()
-        let transport = ByetMockTransport(challengeBody: challengeHTML)
+        let transport = CookieRelayMockTransport(challengeBody: challengeHTML)
         let provider = makeProvider(transport: transport, clock: clock)
 
         runAsync("testStaleBackground") {
             _ = await provider.refreshBlocking()
             XCTAssertEqual(transport.requestCount, 2)
 
-            clock.value = clock.value.addingTimeInterval(ByetCookieProvider.tokenTTL + 1)
+            clock.value = clock.value.addingTimeInterval(CookieRelayProvider.tokenTTL + 1)
             let cookie = await provider.ensureFresh()
             XCTAssertEqual(cookie, "__test=" + self.expectedCookie,
                            "возвращает ТЕКУЩИЙ токен сразу, не дожидаясь пересчёта")
@@ -233,12 +233,12 @@ final class ByetCookieProviderTests: XCTestCase {
 
     @objc func testConcurrentEnsureFreshSingleRefresh() {
         let clock = TestClock()
-        let transport = ByetMockTransport(challengeBody: challengeHTML)
+        let transport = CookieRelayMockTransport(challengeBody: challengeHTML)
         let provider = makeProvider(transport: transport, clock: clock)
 
         runAsync("testConcurrent") {
             _ = await provider.refreshBlocking()
-            clock.value = clock.value.addingTimeInterval(ByetCookieProvider.tokenTTL + 1)
+            clock.value = clock.value.addingTimeInterval(CookieRelayProvider.tokenTTL + 1)
 
             async let first = provider.ensureFresh()
             async let second = provider.ensureFresh()
@@ -252,7 +252,7 @@ final class ByetCookieProviderTests: XCTestCase {
 
     @objc func testFailedProbePreservesOldToken() {
         let clock = TestClock()
-        let transport = ByetMockTransport(challengeBody: challengeHTML, honorCookie: true)
+        let transport = CookieRelayMockTransport(challengeBody: challengeHTML, honorCookie: true)
         let provider = makeProvider(transport: transport, clock: clock)
 
         runAsync("testProbeFails") {
@@ -260,7 +260,7 @@ final class ByetCookieProviderTests: XCTestCase {
             XCTAssertEqual(transport.requestCount, 2)
 
             transport.honorCookie = false
-            clock.value = clock.value.addingTimeInterval(ByetCookieProvider.tokenTTL + 1)
+            clock.value = clock.value.addingTimeInterval(CookieRelayProvider.tokenTTL + 1)
 
             let cookie = await provider.ensureFresh()
             XCTAssertEqual(cookie, "__test=" + self.expectedCookie, "старый токен отдаётся мгновенно")
@@ -277,7 +277,7 @@ final class ByetCookieProviderTests: XCTestCase {
                 throw URLError(.cannotConnectToHost)
             }
         }
-        let provider = ByetCookieProvider(origin: "https://kodmai.xo.je", transport: FailingTransport())
+        let provider = CookieRelayProvider(origin: "https://proxy.example.com", transport: FailingTransport())
         runAsync("testNetworkFail") {
             let cookie = await provider.refreshBlocking()
             XCTAssertNil(cookie, "сбой сети → nil, токена нет")
@@ -291,7 +291,7 @@ final class ByetCookieProviderTests: XCTestCase {
         // а НЕ старый токен: челлендж-ретрай не должен уходить с заведомо
         // мёртвой кукой и тратить POST. Старый токен при этом остаётся доступен
         // для неблокирующего пути ensureFresh (пока не протух по TTL).
-        let transport = ByetMockTransport(challengeBody: challengeHTML)
+        let transport = CookieRelayMockTransport(challengeBody: challengeHTML)
         let provider = makeProvider(transport: transport)
 
         runAsync("testRefreshFailsKeepsOldButNil") {
@@ -307,14 +307,14 @@ final class ByetCookieProviderTests: XCTestCase {
         }
     }
 
-    @objc func testMakeForInfinityFreeFromBaseURL() {
-        let transport = ByetMockTransport(challengeBody: challengeHTML)
-        let provider = ByetCookieProvider.makeForInfinityFree(
-            baseURL: "https://kodmai.xo.je/go/https://api.openai.com/v1/audio/transcriptions",
+    @objc func testMakeForCookieRelayFromBaseURL() {
+        let transport = CookieRelayMockTransport(challengeBody: challengeHTML)
+        let provider = CookieRelayProvider.makeForCookieRelay(
+            baseURL: "https://proxy.example.com/go/https://api.openai.com/v1/audio/transcriptions",
             transport: transport
         )
         XCTAssertNotNil(provider, "parsable base_url → cookie-слой поднят")
-        XCTAssertNil(ByetCookieProvider.makeForInfinityFree(baseURL: "not a url"))
+        XCTAssertNil(CookieRelayProvider.makeForCookieRelay(baseURL: "not a url"))
 
         guard let provider = provider else { return }
         runAsync("testMakeFor") {

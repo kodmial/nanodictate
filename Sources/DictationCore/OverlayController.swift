@@ -431,14 +431,11 @@ public enum OverlayErrorText {
     /// Маппинг сообщения сетевой ошибки в короткий человечный текст.
     /// Неизвестные сетевые сообщения → nil (обычный путь «Ошибка: <текст>»).
     public static func networkText(_ message: String) -> String? {
-        switch message {
-        case Transcriber.noInternetMessage:
-            return "Нет интернета"
-        case Transcriber.sttTimeoutMessage:
-            return "Таймаут STT"
-        default:
-            return nil
-        }
+        // Значения локализованы и сравнимы только через статические константы
+        // (динамический результат L10n.tr нельзя использовать как case-паттерн).
+        if message == Transcriber.noInternetMessage { return message }
+        if message == Transcriber.sttTimeoutMessage { return message }
+        return nil
     }
 }
 

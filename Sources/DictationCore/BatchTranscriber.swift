@@ -314,8 +314,10 @@ public enum BatchTranscriber {
 
     /// Транскрибация ОДНОГО запроса (без ретраев); throws BatchHTTPError.
     /// Параметры: `attempt` (0-based, для диагностики), WAV-данные чанка,
-    /// 0-based индекс чанка (для имени multipart-файла).
-    public typealias SendOne = (Int, Data, Int) async throws -> String
+    /// 0-based индекс чанка (для имени multipart-файла), контекстный prompt
+    /// (хвост распознанного текста предыдущего чанка — chaining; nil — без
+    /// контекста; параллельный путь всегда nil).
+    public typealias SendOne = (Int, Data, Int, String?) async throws -> String
     /// Ретраябельная транскрибация одной попытки (`attempt` 0-based).
     public typealias SendRetryable = (Int) async throws -> String
     /// Прогресс: (i, N, bodyStartSec, bodyEndSec, elapsedSec, status) — 1-based i.
@@ -370,15 +372,21 @@ public enum BatchTranscriber {
     ///   - checkpointStore/resume: хранилище чекпоинта и флаг продолжения;
     ///     `store == nil` — чекпоинт не пишется.
     ///   - sendOne: ТРАНСПОРТ без ретраев (ретраи внутри). Принимает WAV-данные
-    ///     чанка и возвращает текст; ошибка — BatchHTTPError.
+    ///     чанка, его индекс и контекстный prompt (следующий чанк после
+    ///     успешно распознанного получает хвост его текста — chaining) и
+    ///     возвращает текст; ошибка — BatchHTTPError.
     ///   - delay: пауза между ретраями (в тестах — мгновенный).
     ///   - maxConcurrent: параллельных воркеров. 1 (по умолчанию) — строго
-    ///     последовательная отправка (один сервер). > 1 — пул воркеров:
-    ///     чанки распознаются по мере готовности, порядок результата и
-    ///     чекпоинт/resume не меняются (чекпоинт пишет подряд резолвленный
-    ///     префикс).
+    ///     последовательная отправка (один сервер): чанки идут по порядку и
+    ///     КАЖДЫЙ следующий получает контекстный prompt предыдущего. > 1 —
+    ///     пул воркеров: порядок воркеров произвольный, контекстная цепочка
+    ///     ломается, prompt = nil; порядок результата и чекпоинт/resume не
+    ///     меняются (чекпоинт пишет подряд резолвленный префикс).
     ///   - cutAtPauses/pauseDuration/maxDrift: выравнивание границ чанка на
-    ///     паузу речи (опционально, см. BatchSegmenter.plan).
+    ///     паузу речи (по умолчанию включено, пауза ≥ 0.3 с — см.
+    ///     BatchSegmenter.plan). При выравнивании на тишину дедуп на стыках
+    ///     не нужен (граница легла в паузу) — сшивка BatchTextJoiner всё равно
+    ///     дедуплицирует безопасно (максимальное совпадение суффикс/префикс).
     ///   - onProgress: прогресс-колбэк (первый вызов после первого чанка).
     public static func run(
         samples: [Int16],
@@ -394,8 +402,8 @@ public enum BatchTranscriber {
         sendOne: @escaping SendOne,
         delay: @escaping (TimeInterval) async throws -> Void,
         maxConcurrent: Int = 1,
-        cutAtPauses: Bool = false,
-        pauseDuration: TimeInterval = 1.0,
+        cutAtPauses: Bool = true,
+        pauseDuration: TimeInterval = 0.3,
         maxDrift: TimeInterval = 5.0,
         onProgress: ProgressHandler? = nil
     ) async throws -> BatchOutcome {
@@ -433,8 +441,8 @@ public enum BatchTranscriber {
         sendOne: @escaping SendOne,
         delay: @escaping (TimeInterval) async throws -> Void,
         maxConcurrent: Int = 1,
-        cutAtPauses: Bool = false,
-        pauseDuration: TimeInterval = 1.0,
+        cutAtPauses: Bool = true,
+        pauseDuration: TimeInterval = 0.3,
         maxDrift: TimeInterval = 5.0,
         onProgress: ProgressHandler? = nil
     ) async throws -> BatchOutcome {
@@ -560,11 +568,16 @@ public enum BatchTranscriber {
 
             let chunkSamples = try spec.samples(from: content)
             let wav = WAVEncoder.encode(samples: chunkSamples, sampleRate: sampleRate)
+            // Контекстная склейка (chaining): следующий чанк получает prompt'ом
+            // хвост текста последнего УСПЕШНО распознанного чанка (рекомендация
+            // «Практики длинной речи»). Плейсхолдеры "[…]" не цепляются; первый
+            // чанк/пустой префикс — nil (без контекста).
+            let prompt = contextPrompt(records: records, index: i)
             let text: String
             let status: String
             do {
                 text = try await transcribeChunk(send: { attempt in
-                    try await sendOne(attempt, wav, spec.index)
+                    try await sendOne(attempt, wav, spec.index, prompt)
                 }, delay: delay)
                 status = BatchSegmentRecord.statusOK
             } catch {
@@ -648,7 +661,9 @@ public enum BatchTranscriber {
                         let status: String
                         do {
                             text = try await transcribeChunk(send: { attempt in
-                                try await sendOne(attempt, wav, spec.index)
+                                // Параллельный путь контекст не шлёт: порядок
+                                // воркеров произвольный, цепочка не выстраивается.
+                                try await sendOne(attempt, wav, spec.index, nil)
                             }, delay: delay)
                             status = BatchSegmentRecord.statusOK
                         } catch {
@@ -700,6 +715,25 @@ public enum BatchTranscriber {
 
         let records = state.resolvedRecords()
         return makeOutcome(records: records, totalSegments: specs.count, started: started)
+    }
+
+    // MARK: Контекстный промпт (chaining между чанками)
+
+    /// Контекстный prompt для чанка `index`: хвост (BatchPromptChain.tail,
+    /// ~600 символов ≈ 224 токена) текста последнего УСПЕШНО распознанного
+    /// чанка перед ним, идя ВНИЗ от index-1 и пропуская плейсхолдеры "[…]".
+    /// Resume-сеяные записи входят — это настоящие распознанные тексты.
+    /// Первый чанк (index == 0) и пустой префикс → nil.
+    private static func contextPrompt(records: [BatchSegmentRecord?], index: Int) -> String? {
+        guard index > 0 else { return nil }
+        var i = index - 1
+        while i >= 0 {
+            if let record = records[i], record.status == BatchSegmentRecord.statusOK {
+                return BatchPromptChain.tail(record.text)
+            }
+            i -= 1
+        }
+        return nil
     }
 
     // MARK: Сборка итога
@@ -763,6 +797,10 @@ public enum BatchRequestBuilder {
     /// Таймаут — из конфига (`timeout_seconds`), без потолка
     /// Transcriber.networkRequestTimeout (чанки длинные, сервер — self-hosted).
     /// nil — не собрался (пустой/битый base_url).
+    ///   - batchParams: пакетные параметры устойчивой транскрибации
+    ///     (контекстный prompt chaining + temperature=0 + stable-поля после
+    ///     гейтинга в STTAdapter.plan); nil — prompt/stable-поля не шлются,
+    ///     тело запроса байт-в-байт как без пакетного пути.
     public static func makeRequest(
         provider: AppConfig.Provider,
         apiKey: String,
@@ -770,6 +808,7 @@ public enum BatchRequestBuilder {
         timeout: TimeInterval,
         wav: Data,
         chunkIndex: Int,
+        batchParams: BatchSTTParams? = nil,
         proxyKey: String = "",
         proxyKeyHeader: String = "X-Proxy-Key"
     ) -> BatchPreparedRequest? {
@@ -780,7 +819,8 @@ public enum BatchRequestBuilder {
             apiKey: apiKey.isEmpty ? "" : apiKey,
             language: language,
             wav: wav,
-            filename: "segment-\(chunkIndex + 1).wav"
+            filename: "segment-\(chunkIndex + 1).wav",
+            batchParams: batchParams
         )
         guard let url = spec.url else { return nil }
         var request = URLRequest(url: url)
@@ -793,7 +833,7 @@ public enum BatchRequestBuilder {
             if name == "Authorization" && apiKey.isEmpty { continue }
             request.setValue(value, forHTTPHeaderField: name)
         }
-        // Прокси-аутентификация (AlwaysData-прокси поверх API): только при
+        // Прокси-аутентификация (HTTP-прокси поверх API): только при
         // непустом proxyKey — пустой не должен уходить пустым заголовком.
         if !proxyKey.isEmpty {
             request.setValue(proxyKey, forHTTPHeaderField: proxyKeyHeader)

@@ -6,8 +6,8 @@
  *   - strict Zod input schemas, tool annotations, output schemas
  *   - both markdown (human) and JSON (machine) response formats
  *
- * The tools operate on the MAIN checkout at /Users/dima/projects/dictation
- * (swift build + codesign run there). See src/constants.ts for the layout.
+ * The tools operate on the MAIN checkout (the repo root — swift build +
+ * codesign run there). See src/constants.ts for the layout.
  */
 
 import { z } from "zod";

@@ -901,41 +901,41 @@ final class TranscriberTests: XCTestCase {
         XCTAssertFalse(NetworkReachability.isReachable(status: .satisfied, possibleExternalRoute: false))
     }
 
-    // MARK: - Byet-cookie-слой (transport == "infinityfree")
+    // MARK: - Cookie-relay (transport == "cookie-relay")
 
-    private let byetChallengeHTML = """
-    <html><body><script type="text/javascript" src="/aes.js" ></script><script>function toNumbers(d){var e=[];d.replace(/(..)/g,function(d){e.push(parseInt(d,16))});return e}function toHex(){for(var d=[],d=1==arguments.length&&arguments[0].constructor==Array?arguments[0]:arguments,e="",f=0;f<d.length;f++)e+=(16>d[f]?"0":"")+d[f].toString(16);return e.toLowerCase()}var a=toNumbers("f655ba9d09a112d4968c63579db590b4"),b=toNumbers("98344c2eee86c3994890592585b49f80"),c=toNumbers("3e512bc3e42f39a757e79f4739c74138");document.cookie="__test="+toHex(slowAES.decrypt(c,2,a,b))+"; max-age=21600; expires=Thu, 31-Dec-37 23:55:55 GMT; path=/"; location.href="https://kodmai.xo.je/?i=1";</script><noscript>This site requires Javascript to work, please enable Javascript in your browser or use a browser with Javascript support</noscript></body></html>
+    private let cookieRelayChallengeHTML = """
+    <html><body><script type="text/javascript" src="/aes.js" ></script><script>function toNumbers(d){var e=[];d.replace(/(..)/g,function(d){e.push(parseInt(d,16))});return e}function toHex(){for(var d=[],d=1==arguments.length&&arguments[0].constructor==Array?arguments[0]:arguments,e="",f=0;f<d.length;f++)e+=(16>d[f]?"0":"")+d[f].toString(16);return e.toLowerCase()}var a=toNumbers("f655ba9d09a112d4968c63579db590b4"),b=toNumbers("98344c2eee86c3994890592585b49f80"),c=toNumbers("3e512bc3e42f39a757e79f4739c74138");document.cookie="__test="+toHex(slowAES.decrypt(c,2,a,b))+"; max-age=21600; expires=Thu, 31-Dec-37 23:55:55 GMT; path=/"; location.href="https://proxy.example.com/?i=1";</script><noscript>This site requires Javascript to work, please enable Javascript in your browser or use a browser with Javascript support</noscript></body></html>
     """
 
-    private func makeByetTranscriber(
-        sttTransport: ByetMockTransport,
-        byetTransport: ByetMockTransport?
+    private func makeCookieRelayTranscriber(
+        sttTransport: CookieRelayMockTransport,
+        relayTransport: CookieRelayMockTransport?
     ) -> Transcriber {
-        let byet = byetTransport.map { ByetCookieProvider(origin: "https://kodmai.xo.je", transport: $0) }
-        return Transcriber(baseURL: "https://kodmai.xo.je/go/https://api.example/v1/audio/transcriptions",
+        let relay = relayTransport.map { CookieRelayProvider(origin: "https://proxy.example.com", transport: $0) }
+        return Transcriber(baseURL: "https://proxy.example.com/go/https://api.example/v1/audio/transcriptions",
                            model: "gigaam-v3",
                            apiKey: "test-key",
                            transport: sttTransport,
                            networkChecker: { true },
-                           byetCookieProvider: byet)
+                           cookieRelayProvider: relay)
     }
 
-    @objc func testByetTransportSetsCookieAndChromeUA() {
-        let stt = ByetMockTransport(challengeBody: byetChallengeHTML)
-        let byetTransport = ByetMockTransport(challengeBody: byetChallengeHTML)
-        let byet = ByetCookieProvider(origin: "https://kodmai.xo.je", transport: byetTransport)
+    @objc func testCookieRelaySetsCookieAndChromeUA() {
+        let stt = CookieRelayMockTransport(challengeBody: cookieRelayChallengeHTML)
+        let relayTransport = CookieRelayMockTransport(challengeBody: cookieRelayChallengeHTML)
+        let relay = CookieRelayProvider(origin: "https://proxy.example.com", transport: relayTransport)
 
-        runAsync("testByetHeaders") {
+        runAsync("testCookieRelayHeaders") {
             // Прогрев токена — первый запрос уходит уже с кукой (тот же
-            // ByetCookieProvider, что в Transcriber: токен живёт в памяти).
-            _ = await byet.refreshBlocking()
+            // CookieRelayProvider, что в Transcriber: токен живёт в памяти).
+            _ = await relay.refreshBlocking()
 
-            let transcriber = Transcriber(baseURL: "https://kodmai.xo.je/go/https://api.example/v1/audio/transcriptions",
+            let transcriber = Transcriber(baseURL: "https://proxy.example.com/go/https://api.example/v1/audio/transcriptions",
                                           model: "gigaam-v3",
                                           apiKey: "test-key",
                                           transport: stt,
                                           networkChecker: { true },
-                                          byetCookieProvider: byet)
+                                          cookieRelayProvider: relay)
             let result = try await transcriber.transcribe(wav: self.wavData)
             XCTAssertEqual(result.text, "ok")
             guard let req = stt.lastRequest else {
@@ -943,53 +943,53 @@ final class TranscriberTests: XCTestCase {
                 return
             }
             XCTAssertEqual(req.value(forHTTPHeaderField: "Cookie"), "__test=d74696de7d49fcda5f03f4d247e07cf4")
-            XCTAssertEqual(req.value(forHTTPHeaderField: "User-Agent"), ByetCookieProvider.chromeUA)
+            XCTAssertEqual(req.value(forHTTPHeaderField: "User-Agent"), CookieRelayProvider.chromeUA)
             XCTAssertEqual(stt.requestCount, 1, "cookie был свежий — челленджа и ретрая нет")
         }
     }
 
-    @objc func testNoByetNoCookieNoUA() {
+    @objc func testNoCookieRelayNoCookieNoUA() {
         let transport = MockTransport(status: 200, body: Data(#"{"text":"x"}"#.utf8))
         let transcriber = makeTranscriber(transport: transport)
 
-        runAsync("testNoByetHeaders") {
+        runAsync("testNoCookieRelayHeaders") {
             _ = try await transcriber.transcribe(wav: self.wavData)
             guard let req = transport.lastRequest else {
                 XCTFail("No request")
                 return
             }
             XCTAssertNil(req.value(forHTTPHeaderField: "Cookie"),
-                         "без Byet cookie-логики быть не должно")
+                         "без cookie-relay cookie-логики быть не должно")
             XCTAssertNil(req.value(forHTTPHeaderField: "User-Agent"),
-                         "без Byet фиксированный UA не подставляется (как раньше)")
+                         "без cookie-relay фиксированный UA не подставляется (как раньше)")
         }
     }
 
     @objc func testChallengeTriggersSingleRetryWithFreshCookie() {
-        let stt = ByetMockTransport(challengeBody: byetChallengeHTML, rejectPostCount: 1)
-        let byetTransport = ByetMockTransport(challengeBody: byetChallengeHTML)
-        let transcriber = makeByetTranscriber(sttTransport: stt, byetTransport: byetTransport)
+        let stt = CookieRelayMockTransport(challengeBody: cookieRelayChallengeHTML, rejectPostCount: 1)
+        let relayTransport = CookieRelayMockTransport(challengeBody: cookieRelayChallengeHTML)
+        let transcriber = makeCookieRelayTranscriber(sttTransport: stt, relayTransport: relayTransport)
 
         runAsync("testChallengeRetry") {
             let result = try await transcriber.transcribe(wav: self.wavData)
             XCTAssertEqual(result.text, "ok")
             XCTAssertEqual(stt.postCount, 2, "STT-попыток ровно 2 (мёртвая кука НЕ сжигает попытку)")
-            XCTAssertEqual(byetTransport.requestCount, 2, "refresh = GET челленджа + probe GET")
+            XCTAssertEqual(relayTransport.requestCount, 2, "refresh = GET челленджа + probe GET")
             guard let retry = stt.requests.first(where: { $0.httpMethod == "POST" && $0.value(forHTTPHeaderField: "Cookie") != nil }) else {
                 XCTFail("Ретрай должен идти со свежей кукой")
                 return
             }
             XCTAssertEqual(retry.value(forHTTPHeaderField: "Cookie"), "__test=d74696de7d49fcda5f03f4d247e07cf4")
-            XCTAssertEqual(retry.value(forHTTPHeaderField: "User-Agent"), ByetCookieProvider.chromeUA)
+            XCTAssertEqual(retry.value(forHTTPHeaderField: "User-Agent"), CookieRelayProvider.chromeUA)
         }
     }
 
     @objc func testAlwaysChallengeRetriesOnceThenInvalidResponse() {
         // Оба STT-POST получают челлендж даже со свежей кукой: refresh прошёл
         // (probe GET принял cookie), но STT-эндпоинт всё равно отвечает челленджем.
-        let stt = ByetMockTransport(challengeBody: byetChallengeHTML, rejectPostCount: 2)
-        let byetTransport = ByetMockTransport(challengeBody: byetChallengeHTML)
-        let transcriber = makeByetTranscriber(sttTransport: stt, byetTransport: byetTransport)
+        let stt = CookieRelayMockTransport(challengeBody: cookieRelayChallengeHTML, rejectPostCount: 2)
+        let relayTransport = CookieRelayMockTransport(challengeBody: cookieRelayChallengeHTML)
+        let transcriber = makeCookieRelayTranscriber(sttTransport: stt, relayTransport: relayTransport)
 
         runAsync("testAlwaysChallenge") {
             do {
@@ -1003,16 +1003,16 @@ final class TranscriberTests: XCTestCase {
                 }
             }
             XCTAssertEqual(stt.postCount, 2, "ровно 2 STT-POST: исходный + один ретрай со свежей кукой")
-            XCTAssertEqual(byetTransport.requestCount, 2, "cookie пересчитан один раз")
+            XCTAssertEqual(relayTransport.requestCount, 2, "cookie пересчитан один раз")
         }
     }
 
     @objc func testChallengeRefreshFailureThrowsInvalidResponse() {
         // Probe не принимает свежую куку (honorCookie=false) → refresh не дал
         // токена → ретрая нет, ошибка с признаком челленджа.
-        let stt = ByetMockTransport(challengeBody: byetChallengeHTML, rejectPostCount: 1)
-        let byetTransport = ByetMockTransport(challengeBody: byetChallengeHTML, honorCookie: false)
-        let transcriber = makeByetTranscriber(sttTransport: stt, byetTransport: byetTransport)
+        let stt = CookieRelayMockTransport(challengeBody: cookieRelayChallengeHTML, rejectPostCount: 1)
+        let relayTransport = CookieRelayMockTransport(challengeBody: cookieRelayChallengeHTML, honorCookie: false)
+        let transcriber = makeCookieRelayTranscriber(sttTransport: stt, relayTransport: relayTransport)
 
         runAsync("testChallengeRefreshFails") {
             do {
@@ -1026,7 +1026,86 @@ final class TranscriberTests: XCTestCase {
                 }
             }
             XCTAssertEqual(stt.postCount, 1, "без свежего токена ретрая нет")
-            XCTAssertEqual(byetTransport.requestCount, 2, "refresh всё же сходил за токеном")
+            XCTAssertEqual(relayTransport.requestCount, 2, "refresh всё же сходил за токеном")
+        }
+    }
+
+    // MARK: - HTTP-прокси (transport == "http")
+
+    @objc func testHTTPProxyRewritesURLAndAddsProxyAuthorization() {
+        let transport = MockTransport(status: 200, body: Data(#"{"text":"ok"}"#.utf8))
+        let transcriber = Transcriber(
+            baseURL: "https://api.example/v1/audio/transcriptions",
+            model: "gigaam-v3",
+            apiKey: "test-key",
+            transport: transport,
+            networkChecker: { true },
+            httpProxy: "proxy.example.com:8080",
+            proxyUser: "alice",
+            proxyPassword: "secret"
+        )
+
+        runAsync("testHTTPProxyRewrite") {
+            let result = try await transcriber.transcribe(wav: self.wavData)
+            XCTAssertEqual(result.text, "ok")
+            guard let req = transport.lastRequest else {
+                XCTFail("No STT request captured")
+                return
+            }
+            XCTAssertEqual(
+                req.url?.absoluteString,
+                "http://proxy.example.com:8080/https://api.example/v1/audio/transcriptions",
+                "URL переписан: http://<httpProxy>/<полный-исходный-URL>"
+            )
+            let expected = "Basic " + Data("alice:secret".utf8).base64EncodedString()
+            XCTAssertEqual(req.value(forHTTPHeaderField: "Proxy-Authorization"), expected)
+        }
+    }
+
+    @objc func testHTTPProxyWithoutCredentialsSkipsProxyAuthorization() {
+        let transport = MockTransport(status: 200, body: Data(#"{"text":"ok"}"#.utf8))
+        let transcriber = Transcriber(
+            baseURL: "https://api.example/v1/audio/transcriptions",
+            model: "gigaam-v3",
+            apiKey: "test-key",
+            transport: transport,
+            networkChecker: { true },
+            httpProxy: "proxy.example.com:8080"
+        )
+
+        runAsync("testHTTPProxyNoAuth") {
+            _ = try await transcriber.transcribe(wav: self.wavData)
+            guard let req = transport.lastRequest else {
+                XCTFail("No STT request captured")
+                return
+            }
+            XCTAssertEqual(
+                req.url?.absoluteString,
+                "http://proxy.example.com:8080/https://api.example/v1/audio/transcriptions",
+                "без кредов URL всё равно переписывается"
+            )
+            XCTAssertNil(
+                req.value(forHTTPHeaderField: "Proxy-Authorization"),
+                "без proxy_user заголовок не добавляется"
+            )
+        }
+    }
+
+    @objc func testWithoutHTTPProxyURLAintRewritten() {
+        let transport = MockTransport(status: 200, body: Data(#"{"text":"ok"}"#.utf8))
+        let transcriber = makeTranscriber(transport: transport)
+
+        runAsync("testNoHTTPProxy") {
+            _ = try await transcriber.transcribe(wav: self.wavData)
+            guard let req = transport.lastRequest else {
+                XCTFail("No STT request captured")
+                return
+            }
+            XCTAssertFalse(
+                req.url?.absoluteString.hasPrefix("http://proxy") ?? true,
+                "без http_proxy URL остаётся исходным"
+            )
+            XCTAssertNil(req.value(forHTTPHeaderField: "Proxy-Authorization"))
         }
     }
 

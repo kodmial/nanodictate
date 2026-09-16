@@ -49,54 +49,56 @@ public final class RetryProvider {
     }
 
     /// Дефолтная реализация: Transcriber из полей провайдера.
-    /// `transport` в секции провайдера равен "relay" (или legacy-алиасу
-    /// "infinityfree") — включается Byet-cookie-слой. Кэш Byet-провайдеров по
-    /// baseURL — ОДИН инстанс на origin (cookie-токен живёт в памяти инстанса):
-    /// иначе каждый retry/failover создавал бы новый провайдер без токена и
-    /// первый же запрос уходил бы без куки на лишний челлендж-раундтрип.
+    /// `transport` в секции провайдера равен "cookie-relay" (legacy-алиасы
+    /// канонизируются при парсинге) — включается
+    /// cookie-relay-слой. Кэш cookie-relay-провайдеров по baseURL — ОДИН
+    /// инстанс на origin (cookie-токен живёт в памяти инстанса): иначе каждый
+    /// retry/failover создавал бы новый провайдер без токена и первый же
+    /// запрос уходил бы без куки на лишний челлендж-раундтрип.
     /// Значения общие для всех экземпляров RetryProvider.
     private static func defaultTranscribe(
         _ wav: Data,
         _ provider: AppConfig.Provider
     ) async throws -> TranscriptionResult {
-        let byet = await Self.sharedByet(for: provider)
+        let relay = await Self.sharedCookieRelay(for: provider)
         let transcriber = Transcriber(
             baseURL: provider.baseURL,
             model: provider.model,
             apiKey: resolveAPIKey(for: provider),
             proxyKey: provider.proxyKey,
-            byetCookieProvider: byet,
+            cookieRelayProvider: relay,
+            httpProxy: provider.httpProxy,
+            proxyUser: provider.proxyUser,
+            proxyPassword: provider.proxyPassword,
             apiSecret: provider.apiSecret,
             adapterID: provider.id
         )
         return try await transcriber.transcribe(wav: wav)
     }
 
-    /// Общий кэш Byet-провайдеров (ключ — baseURL провайдера).
-    private static let byetLock = NSLock()
-    private static var byetByURL: [String: ByetCookieProvider] = [:]
+    /// Общий кэш cookie-relay-провайдеров (ключ — baseURL провайдера).
+    private static let cookieRelayLock = NSLock()
+    private static var cookieRelayByURL: [String: CookieRelayProvider] = [:]
 
-    /// Byet-провайдер провайдера: переиспользует инстанс из кэша, иначе создаёт
-    /// и кладёт в кэш. Синхронный доступ к кэшу — через хелперы (NSLock не
-    /// трогаем из async-контекста).
-    private static func sharedByet(for provider: AppConfig.Provider) async -> ByetCookieProvider? {
-        // Канонический id "relay" + legacy-алиас "infinityfree" (старые конфиги).
-        let isRelayTransport = provider.transport == "relay" || provider.transport == "infinityfree"
-        guard isRelayTransport else { return nil }
-        if let existing = cachedByet(provider.baseURL) { return existing }
-        guard let made = ByetCookieProvider.makeForInfinityFree(baseURL: provider.baseURL) else { return nil }
-        storeByet(provider.baseURL, made)
+    /// Cookie-relay-провайдер провайдера: переиспользует инстанс из кэша, иначе
+    /// создаёт и кладёт в кэш. Синхронный доступ к кэшу — через хелперы
+    /// (NSLock не трогаем из async-контекста).
+    private static func sharedCookieRelay(for provider: AppConfig.Provider) async -> CookieRelayProvider? {
+        guard provider.transport == "cookie-relay" else { return nil }
+        if let existing = cachedCookieRelay(provider.baseURL) { return existing }
+        guard let made = CookieRelayProvider.makeForCookieRelay(baseURL: provider.baseURL) else { return nil }
+        storeCookieRelay(provider.baseURL, made)
         return made
     }
 
-    private static func cachedByet(_ baseURL: String) -> ByetCookieProvider? {
-        byetLock.lock(); defer { byetLock.unlock() }
-        return byetByURL[baseURL]
+    private static func cachedCookieRelay(_ baseURL: String) -> CookieRelayProvider? {
+        cookieRelayLock.lock(); defer { cookieRelayLock.unlock() }
+        return cookieRelayByURL[baseURL]
     }
 
-    private static func storeByet(_ baseURL: String, _ provider: ByetCookieProvider) {
-        byetLock.lock(); defer { byetLock.unlock() }
-        byetByURL[baseURL] = provider
+    private static func storeCookieRelay(_ baseURL: String, _ provider: CookieRelayProvider) {
+        cookieRelayLock.lock(); defer { cookieRelayLock.unlock() }
+        cookieRelayByURL[baseURL] = provider
     }
 
     /// Ключ провайдера: env-переменная DICTATION_API_KEY (приоритет, никогда не

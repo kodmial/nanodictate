@@ -95,7 +95,7 @@ final class ConfigTests: XCTestCase {
         proxy_key_header = "X-Proxy-Key"
 
         [providers.groq]
-        base_url = "https://kodmai.alwaysdata.net/go/https://api.groq.com/openai/v1/audio/transcriptions"
+        base_url = "https://proxy.example.com/go/https://api.groq.com/openai/v1/audio/transcriptions"
         model = "whisper-large-v3"
         api_key = "gsk-test"
         proxy_key = "secret-1"
@@ -470,15 +470,28 @@ final class ConfigTests: XCTestCase {
         XCTAssertTrue(config.reviewBeforeInsert)
     }
 
-    // MARK: - transport (Byet-слой STT)
+    // MARK: - transport (какой STT-транспорт включён)
 
     @objc func testParseTransportRoot() throws {
+        // Легаси-алиас "infinityfree" канонизируется в "cookie-relay" при парсинге.
         let content = """
         base_url = "https://x"
         transport = "infinityfree"
         """
         let config = try AppConfig.parse(content)
-        XCTAssertEqual(config.transport, "infinityfree")
+        XCTAssertEqual(config.transport, "cookie-relay")
+    }
+
+    @objc func testCanonicalTransportAliases() {
+        // Прямое тестирование канонизации: и "relay", и "infinityfree" — это
+        // легаси-имена cookie-relay; всё остальное проходит как есть.
+        XCTAssertEqual(AppConfig.canonicalTransport("relay"), "cookie-relay")
+        XCTAssertEqual(AppConfig.canonicalTransport("infinityfree"), "cookie-relay")
+        XCTAssertEqual(AppConfig.canonicalTransport("cookie-relay"), "cookie-relay")
+        XCTAssertEqual(AppConfig.canonicalTransport("http"), "http")
+        XCTAssertEqual(AppConfig.canonicalTransport("gateway"), "gateway")
+        XCTAssertEqual(AppConfig.canonicalTransport("  relay  "), "cookie-relay", "пробелы обрезаются")
+        XCTAssertEqual(AppConfig.canonicalTransport(""), "")
     }
 
     @objc func testTransportDefaultEmpty() throws {
@@ -502,8 +515,9 @@ final class ConfigTests: XCTestCase {
         transport = "infinityfree"
         """
         let config = try AppConfig.parse(content)
-        XCTAssertEqual(config.providers.first?.transport, "infinityfree")
-        XCTAssertEqual(config.transport, "infinityfree",
+        XCTAssertEqual(config.providers.first?.transport, "cookie-relay",
+                       "легаси-алиас канонизирован в секции")
+        XCTAssertEqual(config.transport, "cookie-relay",
                        "transport активной секции попадает в effective-конфиг")
     }
 
@@ -519,7 +533,7 @@ final class ConfigTests: XCTestCase {
         transport = "infinityfree"
         """
         let config = try AppConfig.parse(content)
-        XCTAssertEqual(config.transport, "infinityfree",
+        XCTAssertEqual(config.transport, "cookie-relay",
                        "transport секции имеет приоритет над корневым")
     }
 
@@ -535,8 +549,63 @@ final class ConfigTests: XCTestCase {
         """
         let config = try AppConfig.parse(content)
         XCTAssertEqual(config.providers.first?.transport, "")
-        XCTAssertEqual(config.transport, "infinityfree",
-                       "без transport в секции корневой transport остаётся в силе")
+        XCTAssertEqual(config.transport, "cookie-relay",
+                       "без transport в секции корневой transport остаётся в силе (канонизирован)")
+    }
+
+    @objc func testParseHTTPProxyTransport() throws {
+        // transport = "http" + http_proxy/proxy_user/proxy_password парсятся и
+        // попадают в effective-конфиг из активной секции.
+        let content = """
+        active_provider = "groq"
+
+        [providers.groq]
+        base_url = "https://api.groq.com/openai/v1/audio/transcriptions"
+        model = "whisper-large-v3"
+        api_key = "k"
+        transport = "http"
+        http_proxy = "proxy.example.com:8080"
+        proxy_user = "alice"
+        proxy_password = "secret"
+        """
+        let config = try AppConfig.parse(content)
+        guard let provider = config.providers.first else {
+            XCTFail("Нет секции providers")
+            return
+        }
+        XCTAssertEqual(provider.transport, "http")
+        XCTAssertEqual(config.transport, "http")
+        XCTAssertEqual(provider.httpProxy, "proxy.example.com:8080")
+        XCTAssertEqual(config.httpProxy, "proxy.example.com:8080",
+                       "http_proxy секции попадает в effective-конфиг")
+        XCTAssertEqual(config.proxyUser, "alice")
+        XCTAssertEqual(config.proxyPassword, "secret")
+    }
+
+    @objc func testParseGatewayTransport() throws {
+        // transport = "gateway" + proxy_key/proxy_key_header — релейный маршрут
+        // через заголовок: секция парсится, креды остаются в провайдере.
+        let content = """
+        active_provider = "groq"
+
+        [providers.groq]
+        base_url = "https://api.groq.com/openai/v1/audio/transcriptions"
+        model = "whisper-large-v3"
+        api_key = "k"
+        transport = "gateway"
+        proxy_key = "gk-secret"
+        proxy_key_header = "X-Proxy-Key"
+        """
+        let config = try AppConfig.parse(content)
+        guard let provider = config.providers.first else {
+            XCTFail("Нет секции providers")
+            return
+        }
+        XCTAssertEqual(provider.transport, "gateway")
+        XCTAssertEqual(config.transport, "gateway")
+        XCTAssertEqual(provider.proxyKey, "gk-secret")
+        XCTAssertEqual(provider.proxyKeyHeader, "X-Proxy-Key",
+                       "proxy_key_header попадает в effective-конфиг")
     }
 
     // MARK: - Секция Cloudflare (JSON-base64 транспорт)
@@ -565,7 +634,7 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(provider.apiKey, "cfut-token")
         XCTAssertEqual(provider.transport, "cloudflare")
         XCTAssertEqual(config.transport, "cloudflare",
-                       "transport секции попадает в effective-конфиг (как infinityfree/relay)")
+                       "transport секции попадает в effective-конфиг (как cookie-relay)")
         XCTAssertEqual(config.activeProvider, "cloudflare")
     }
 
@@ -582,7 +651,8 @@ final class ConfigTests: XCTestCase {
         """
         let config = try AppConfig.parse(content)
         XCTAssertEqual(config.activeProvider, "")
-        XCTAssertEqual(config.transport, "infinityfree")
+        XCTAssertEqual(config.transport, "cookie-relay",
+                       "легаси-алиас канонизирован и на корневом уровне")
         XCTAssertEqual(config.baseURL, "https://g", "первый провайдер применён как active")
     }
 
@@ -611,12 +681,12 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.activeProvider, "openai")
         XCTAssertEqual(config.language, "ru")
         XCTAssertTrue(config.soundsEnabled)
-        // Семь секций: openai, groq, local, deepgram, giga-chat, relay, cloudflare.
-        XCTAssertEqual(config.providerNames, ["openai", "groq", "local", "deepgram", "giga-chat", "relay", "cloudflare"])
+        // Семь секций: openai, groq, local, deepgram, giga-chat, cookie-relay, cloudflare.
+        XCTAssertEqual(config.providerNames, ["openai", "groq", "local", "deepgram", "giga-chat", "cookie-relay", "cloudflare"])
         for provider in config.providers {
             XCTAssertEqual(provider.apiKey, "", "шаблон не содержит секретов")
         }
-        XCTAssertEqual(config.providers.first { $0.id == "relay" }?.transport, "relay")
+        XCTAssertEqual(config.providers.first { $0.id == "cookie-relay" }?.transport, "cookie-relay")
         XCTAssertEqual(config.providers.first { $0.id == "cloudflare" }?.transport, "cloudflare")
         XCTAssertEqual(config.providers.first { $0.id == "giga-chat" }?.apiSecret, "")
         XCTAssertTrue(

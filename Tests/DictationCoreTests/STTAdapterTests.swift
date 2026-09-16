@@ -268,6 +268,41 @@ final class STTAdapterTests: XCTestCase {
         XCTAssertTrue(text.hasSuffix("--Boundary-TEST--\r\n"))
     }
 
+    @objc func testMultipartBodyAppendsStableFieldsBeforeClosing() {
+        // Полный набор stable-полей (гейтинг уже прошёл — здесь только факт
+        // сборки): порядок строго prompt < temperature < vad_filter <
+        // no_speech_threshold < compression_ratio_threshold < logprob_threshold
+        // < закрывающий boundary. Числа — в локале-независимом виде
+        // (numberString: «0», «true», «0.6», «2.4», «-1»).
+        let boundary = "Boundary-TEST"
+        let stable = BatchStableMultipartFields(
+            temperature: 0,
+            vadFilter: true,
+            noSpeechThreshold: 0.6,
+            compressionRatioThreshold: 2.4,
+            logprobThreshold: -1.0
+        )
+        let body = ProviderRequestBuilder.multipartBody(
+            wav: wav, filename: "a.wav", model: "m", language: "ru",
+            prompt: "контекст", boundary: boundary, stable: stable)
+        let text = String(data: body, encoding: .utf8)!
+
+        let promptPos = text.range(of: "name=\"prompt\"")!.lowerBound
+        let tempPos = text.range(of: "name=\"temperature\"\r\n\r\n0")!.lowerBound
+        let vadPos = text.range(of: "name=\"vad_filter\"\r\n\r\ntrue")!.lowerBound
+        let noSpeechPos = text.range(of: "name=\"no_speech_threshold\"\r\n\r\n0.6")!.lowerBound
+        let ratioPos = text.range(of: "name=\"compression_ratio_threshold\"\r\n\r\n2.4")!.lowerBound
+        let logprobPos = text.range(of: "name=\"logprob_threshold\"\r\n\r\n-1")!.lowerBound
+        let closingPos = text.range(of: "--Boundary-TEST--\r\n")!.lowerBound
+
+        XCTAssertTrue(tempPos > promptPos, "temperature после prompt")
+        XCTAssertTrue(vadPos > tempPos, "vad_filter после temperature")
+        XCTAssertTrue(noSpeechPos > vadPos, "no_speech_threshold после vad_filter")
+        XCTAssertTrue(ratioPos > noSpeechPos, "compression_ratio_threshold после no_speech_threshold")
+        XCTAssertTrue(logprobPos > ratioPos, "logprob_threshold после compression_ratio_threshold")
+        XCTAssertTrue(closingPos > logprobPos, "закрывающий boundary ПОСЛЕ всех stable-полей")
+    }
+
     // MARK: - extractText
 
     @objc func testExtractTextFlat() throws {

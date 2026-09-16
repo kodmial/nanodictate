@@ -36,9 +36,10 @@ let suites: [XCTestCase.Type] = [
     InserterTests.self,
     WAVEncoderTests.self,
     RecordingLimitTests.self,
+    SilenceAutoStopTests.self,
     TranscriberTests.self,
     STTAdapterTests.self,
-    ByetCookieProviderTests.self,
+    CookieRelayProviderTests.self,
     DebugDumpTests.self,
     OverlayControllerTests.self,
     OverlayLifecycleTests.self,
@@ -53,6 +54,7 @@ let suites: [XCTestCase.Type] = [
     BatchSegmenterTests.self,
     BatchTextJoinerTests.self,
     BatchTranscriberTests.self,
+    BatchLongFormTests.self,
     WAVDecoderTests.self,
 ]
 

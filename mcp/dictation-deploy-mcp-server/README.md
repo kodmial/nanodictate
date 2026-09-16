@@ -21,8 +21,7 @@ user re-grants permissions in System Settings.
 The fix, applied by `dictation_sign` / `dictation_deploy`:
 
 1. a **fixed signing identity** — the self-signed "Dictation Code Signing"
-   certificate (create once via Keychain Access → Certificate Assistant →
-   "Sign to Run Locally");
+   certificate (create once via Keychain Access → Certificate Assistant);
 2. **fixed entitlements plists** (`Resources/com.dictation.agent.entitlements`,
    `Resources/com.dictation.dictatorctl.entitlements` in the repo root);
 3. `codesign --force --sign "Dictation Code Signing" --entitlements <file>
@@ -40,9 +39,9 @@ Same identity + same entitlements + same code → same cdhash → grants survive
 ## Layout
 
 ```
-repo root  /Users/dima/projects/dictation         — swift build & codesign run HERE
-             mcp/dictation-deploy-mcp-server/     — this server (same checkout)
-             Resources/*.entitlements             — signing entitlements
+repo root  $PROJECT_ROOT                              — swift build & codesign run HERE
+             mcp/dictation-deploy-mcp-server/          — this server (same checkout)
+             Resources/*.entitlements                  — signing entitlements
 ```
 
 `swift build` and `codesign` target the **repo root** (the running agent is
@@ -73,11 +72,14 @@ On a fresh clone `dist/` and `node_modules/` are absent (both gitignored);
   "mcpServers": {
     "dictation-deploy": {
       "command": "bash",
-      "args": ["/Users/dima/projects/dictation/mcp/dictation-deploy-mcp-server/start.sh"]
+      "args": ["$PROJECT_ROOT/mcp/dictation-deploy-mcp-server/start.sh"]
     }
   }
 }
 ```
+
+($PROJECT_ROOT is the repo root; use the absolute path to your checkout — the
+server resolves it from its own location, and `start.sh` needs no hardcoded paths.)
 
 ## Tools
 
@@ -127,6 +129,6 @@ therefore calls the exact mechanism `dictatorctl` itself uses internally
 
 | Symptom | Fix |
 | ------- | --- |
-| `dictation_sign`: identity not found | Create "Sign to Run Locally" certificate in Keychain Access, then re-check with `security find-identity -p codesigning -v`. |
+| `dictation_sign`: identity not found | Create "Dictation Code Signing" certificate in Keychain Access, then re-check with `security find-identity -p codesigning -v`. |
 | `signatureStable: false` in status | Agent was signed ad-hoc/other identity — run `dictation_sign`, re-grant Microphone/Accessibility once. |
-| `./build.sh` used manually | It signs with the *first* keychain identity (or ad-hoc). Prefer `dictation_deploy`; or run `SIGN_IDENTITY="Dictation Code Signing" ./build.sh` (still without entitlements). |
+| `build.sh` used manually (removed 2026-09-16) | Historical comparison: the old build script signed with the *first* keychain identity (or fell back to ad-hoc), without entitlements. `dictation_sign` is now the only signer — it has no ad-hoc fallback and requires the "Dictation Code Signing" identity. |

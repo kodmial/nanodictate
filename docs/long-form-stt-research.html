@@ -1,0 +1,264 @@
+<title>Практики длинной речи</title>
+<style>
+  :root {
+    --paper: #f7f5f0;
+    --ink: #1c1e1b;
+    --ink-soft: #4c4f49;
+    --line: #d8d3c8;
+    --accent: #0f6b5b;
+    --accent-ink: #0a4a3f;
+    --accent-soft: #e2efe9;
+    --warn: #9a4b12;
+    --warn-soft: #fbeadf;
+    --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    --body: "Spectral", Georgia, "Times New Roman", serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #141614;
+      --ink: #ecebe4;
+      --ink-soft: #a8aa9f;
+      --line: #3a3d36;
+      --accent: #4fc6ae;
+      --accent-ink: #9fe3d3;
+      --accent-soft: #17332c;
+      --warn: #e0a265;
+      --warn-soft: #33241a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #141614;
+    --ink: #ecebe4;
+    --ink-soft: #a8aa9f;
+    --line: #3a3d36;
+    --accent: #4fc6ae;
+    --accent-ink: #9fe3d3;
+    --accent-soft: #17332c;
+    --warn: #e0a265;
+    --warn-soft: #33241a;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 17px;
+    line-height: 1.62;
+  }
+  .shell { max-width: 760px; margin: 0 auto; padding: 56px 28px 96px; }
+  a { color: var(--accent); }
+  code, .mono {
+    font-family: var(--mono);
+    font-size: 0.82em;
+    background: var(--accent-soft);
+    color: var(--accent-ink);
+    padding: 0.1em 0.35em;
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+  header { margin-bottom: 48px; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 18px;
+  }
+  h1 {
+    font-size: 40px;
+    line-height: 1.08;
+    font-weight: 600;
+    margin: 0 0 20px;
+    text-wrap: balance;
+    max-width: 15em;
+  }
+  .lede {
+    font-size: 19px;
+    color: var(--ink-soft);
+    max-width: 38em;
+    margin: 0;
+  }
+  .verdict {
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--warn);
+    background: var(--warn-soft);
+    padding: 22px 24px;
+    margin: 0 0 56px;
+    border-radius: 4px;
+  }
+  .verdict h2 {
+    margin: 0 0 10px;
+    font-size: 17px;
+    font-weight: 600;
+  }
+  .verdict p:last-child { margin-bottom: 0; }
+  section { margin-bottom: 44px; }
+  .stage {
+    display: flex;
+    gap: 18px;
+    align-items: baseline;
+    border-top: 1px solid var(--line);
+    padding-top: 26px;
+  }
+  .stage-num {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--accent);
+    white-space: nowrap;
+  }
+  h3 {
+    margin: 0;
+    font-size: 23px;
+    font-weight: 600;
+    text-wrap: balance;
+  }
+  section > p { margin: 14px 0 0; max-width: 38em; }
+  ul { margin: 12px 0 0; padding: 0; list-style: none; }
+  li {
+    margin: 10px 0 0;
+    padding-left: 22px;
+    position: relative;
+    max-width: 40em;
+  }
+  li::before {
+    content: "";
+    position: absolute;
+    left: 2px;
+    top: 0.62em;
+    width: 9px;
+    height: 2px;
+    background: var(--accent);
+  }
+  .tablewrap { overflow-x: auto; margin-top: 16px; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 15px;
+  }
+  th, td {
+    text-align: left;
+    padding: 10px 14px 10px 0;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+  }
+  th {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    font-weight: 500;
+  }
+  td code { font-size: 0.85em; }
+  footer {
+    border-top: 1px solid var(--line);
+    margin-top: 64px;
+    padding-top: 22px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-soft);
+    line-height: 1.7;
+  }
+  @media (max-width: 560px) {
+    body { font-size: 16px; }
+    h1 { font-size: 30px; }
+    .shell { padding: 40px 20px 80px; }
+  }
+</style>
+
+<div class="shell">
+  <header>
+    <p class="eyebrow">Веб-исследование · длинное распознавание · 2025–2026</p>
+    <h1>Практики длинной речи</h1>
+    <p class="lede">Что индустрия делает со звуком длиннее минуты: чанкование по VAD, контекст предыдущего чанка, temperature=0 и стабильные параметры. И что из этого применить к батчу dictation.</p>
+  </header>
+
+  <div class="verdict">
+    <h2>Приговор для твоего батча</h2>
+    <p>Сейчас длинный файл режется без тишины-границ и без контекста между кусками — поэтому на стыках тексты разъезжаются, термины повторяются, а предложений нет. Минимальный рецепт из найденного: <b>VAD-границы</b> вместо таймера, <b>промпт = хвост прошлого чанка</b>, <b>temperature=0</b>, и <b>initial_prompt</b> со списком имён/терминов. У GigaAM hotwords-механизма нет — только промпт.</p>
+  </div>
+
+  <section>
+    <div class="stage">
+      <span class="stage-num">01</span>
+      <h3>Нарезка: по тишине, не по таймеру</h3>
+    </div>
+    <p>Оптимум чанка — <b>5–10 минут</b>; границы ставить по VAD-тишине, а не по фиксированным секундам, чтобы не резать слово. Оверлэп 0.1–2 с — только для защиты стыков, не для дедупликации.</p>
+    <ul>
+      <li>OpenAI: <code>chunking_strategy="auto"</code> + серверный <code>server_vad</code> с <code>prefix_padding_ms</code> / <code>silence_duration_ms</code> / <code>threshold</code>.</li>
+      <li>ChunkAudio — «split at silences, not at fixed seconds».</li>
+      <li>whisper.cpp: <code>--vad-max-speech-duration-s</code>.</li>
+      <li>Whisper всё равно слушает 30-секундные окна внутри чанка — чанк длиннее 30 с не даёт модели больше контекста сам по себе.</li>
+    </ul>
+  </section>
+
+  <section>
+    <div class="stage">
+      <span class="stage-num">02</span>
+      <h3>Контекст между чанками</h3>
+    </div>
+    <p>Промпт = текст предыдущего чанка — работает: вклейка <code>sot_prev</code>, усечение с хвоста до 224 токенов. <b>Критично:</b> при <code>temperature &gt; 0.5</code> промпт НЕ переносится — держать <code>temperature=0</code>.</p>
+    <ul>
+      <li><code>condition_on_previous_text</code> — по умолчанию включено; отключать при повторах и галлюцинациях хвоста.</li>
+      <li>Ловушка: слишком длинный накопленный промпт заставляет признавать чанки пустыми — промпт усекать с хвоста.</li>
+    </ul>
+  </section>
+
+  <section>
+    <div class="stage">
+      <span class="stage-num">03</span>
+      <h3>Термины и имена: hotwords — нет</h3>
+    </div>
+    <p>У GigaAM готового механизма hotwords НЕТ: это фича transducer-моделей sherpa (Aho-Corasick, только <code>modified_beam_search</code>, <code>hotwords-file</code> / <code>hotwords-score</code>). Практичный путь для Whisper-конвейера — <code>initial_prompt</code> со списком желаемых слов: имена, жаргон, аббревиатуры — на каждый чанк.</p>
+  </section>
+
+  <section>
+    <div class="stage">
+      <span class="stage-num">04</span>
+      <h3>Дедупликация и склейка</h3>
+    </div>
+    <p>Правильный конвейер (WhisperX и др.): нарезка БЕЗ оверлэпа, склейка по таймстампам, <code>condition_on_previous_text=False</code>. Дедуп на стыках не нужен, если граница попала в тишину. Оверлэп даёт boundary-repeats — следить за повторами слов на стыках.</p>
+  </section>
+
+  <section>
+    <div class="stage">
+      <span class="stage-num">05</span>
+      <h3>Параметры стабильности</h3>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <tr><th>Параметр</th><th>Значение</th><th>Зачем</th></tr>
+        <tr><td><code>temperature</code></td><td>0 (fallback 0.2–1.0)</td><td>воспроизводимость; выше 0.5 теряется промпт</td></tr>
+        <tr><td><code>vad_filter</code></td><td>true</td><td>убирает тишину до распознавания</td></tr>
+        <tr><td><code>no_speech_threshold</code></td><td>0.6</td><td>отсекает пустые чанки-галлюцинации</td></tr>
+        <tr><td><code>compression_ratio_threshold</code></td><td>2.4</td><td>фильтр дегенеративного повтора</td></tr>
+        <tr><td><code>logprob_threshold</code></td><td>−1.0</td><td>фильтр шумовых чанков</td></tr>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="stage">
+      <span class="stage-num">06</span>
+      <h3>Свежие сервисы 2025–2026</h3>
+    </div>
+    <ul>
+      <li><b>OpenAI gpt-transcribe / gpt-4o-transcribe</b> — серверный VAD-чанкинг, <code>keywords</code>, потоковый SSE.</li>
+      <li><b>Gemini 3.5 Transcribe</b> — нативная long-form, диризация, word timestamps, custom vocabulary.</li>
+      <li><b>Groq whisper-large-v3-turbo</b> — чанкируется только на клиенте (у нас уже так).</li>
+      <li><b>Cloudflare whisper-large-v3-turbo</b> — $0.000513/аудио-минута (уже подключён).</li>
+    </ul>
+  </section>
+
+  <div class="verdict">
+    <h2>Что меняем в dictation</h2>
+    <p>1) <b>VAD-границы</b> (тишина &ge; ~300 мс) вместо нарезки по секундам; 2) <b>промпт-чейнинг</b> — хвост прошлого сегмента в следующий запрос; 3) <b>temperature=0</b> + фильтры из таблицы 05; 4) <b>initial_prompt</b> с терминами в батч-конфиге. У GigaAM hotwords не будет — только через промпт, либо гнать грехом: groq/whisper-large-v3 и так расставляет пунктуацию.</p>
+  </div>
+
+  <footer>
+    Исследование агентов dictation · 2026-09-15 · мытые практики WhisperX, whisper.cpp, OpenAI, Groq, Cloudflare Workers AI
+  </footer>
+</div>

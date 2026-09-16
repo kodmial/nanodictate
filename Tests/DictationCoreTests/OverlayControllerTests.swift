@@ -330,27 +330,27 @@ final class OverlayControllerTests: XCTestCase {
     // MARK: - Маппинг сетевых ошибок на текст оверлея (OverlayErrorText)
 
     @objc func testOverlayErrorText_NoInternet() {
-        // Нет интернета → короткое сообщение «Нет интернета» (а не безликий текст ошибки).
+        // Нет интернета → короткое сообщение «No internet» (а не безликий текст ошибки).
         XCTAssertEqual(
             OverlayErrorText.text(for: TranscribeError.network(Transcriber.noInternetMessage)),
-            "Нет интернета"
+            "No internet"
         )
-        XCTAssertEqual(OverlayErrorText.networkText(Transcriber.noInternetMessage), "Нет интернета")
+        XCTAssertEqual(OverlayErrorText.networkText(Transcriber.noInternetMessage), "No internet")
     }
 
     @objc func testOverlayErrorText_SttTimeout() {
         XCTAssertEqual(
             OverlayErrorText.text(for: TranscribeError.network(Transcriber.sttTimeoutMessage)),
-            "Таймаут STT"
+            "STT timeout"
         )
-        XCTAssertEqual(OverlayErrorText.networkText(Transcriber.sttTimeoutMessage), "Таймаут STT")
+        XCTAssertEqual(OverlayErrorText.networkText(Transcriber.sttTimeoutMessage), "STT timeout")
     }
 
     @objc func testOverlayErrorText_NonNetworkErrorsAreNotMapped() {
         // HTTP/JSON-ошибки оверлей НЕ трогает — текст берётся из обычного message(for:).
         XCTAssertNil(OverlayErrorText.text(for: TranscribeError.http(500, "boom")))
         XCTAssertNil(OverlayErrorText.text(for: TranscribeError.invalidResponse("no text")))
-        XCTAssertNil(OverlayErrorText.networkText("произвольная сетевая ошибка"))
+        XCTAssertNil(OverlayErrorText.networkText("some arbitrary network error"))
         XCTAssertNil(OverlayErrorText.text(for: NSError(domain: "x", code: 1)))
     }
 

@@ -124,6 +124,17 @@ public final class AudioService {
     /// (хвост stop()/лимита); обработчик должен быть лёгким (не блокировать).
     public var onSpeechSegment: (([Int16], _ isTail: Bool) -> Void)?
 
+    /// Автоостановка по непрерывной тишине (~3 c): срабатывает, когда живая
+    /// запись накопила непрерывное молчание ≥ `autoStopConfig.requiredSilenceDuration`
+    /// (RMS каждого буфера строго ниже `silenceRMSThreshold`). Вызывается на
+    /// главной очереди с собранными сэмплами — тот же путь финализации, что и
+    /// у `onRecordingLimitReached` (эквивалент ручного повторного Alt+Alt, но
+    /// без нажатия). В live-диктовке «хвост» незакрытого уттеренса отдаётся
+    /// `onSpeechSegment` ДО этого колбэка — клиент успевает поставить его в
+    /// очередь раньше финализации всей записи. nil-безопасно: запись всё равно
+    /// останавливается, сэмплы отбрасываются.
+    public var onAutoStop: (([Int16]) -> Void)?
+
     private let engine: AudioEngineLike
     private let targetFormat: AVAudioFormat
     private var converter: AVAudioConverter?
@@ -140,6 +151,12 @@ public final class AudioService {
     /// Гарантирует, что принудительная остановка планируется ровно один раз.
     private let lock = NSLock()
     private var limitStopScheduled = false
+    /// Автоостановка по тишине: порог/длительность + рубильник `enabled`
+    /// (из init; Agent забирает их из окружения — см. AutoStopConfig.fromEnvironment)
+    /// и защёлка «финализация уже запланирована» — как у лимита, ровно один колбэк.
+    private let autoStopConfig: AutoStopConfig
+    private var autoStopDetector = SilenceAutoStopDetector()
+    private var autoStopScheduled = false
     /// Первый буфер сеанса логируется отдельно (debug): длительность и энергия
     /// показывают, пошёл ли реально звук в движок после старта.
     private var didLogFirstBuffer = false
@@ -193,10 +210,16 @@ public final class AudioService {
     public init(
         logLevel: String = "info",
         engine: AudioEngineLike? = nil,
-        segmenterConfig: AudioSegmenterConfig = .defaults
+        segmenterConfig: AudioSegmenterConfig = .defaults,
+        autoStopConfig: AutoStopConfig = .defaults
     ) {
         self.logLevel = logLevel
         self.engine = engine ?? AVAudioEngine()
+        self.autoStopConfig = autoStopConfig
+        self.autoStopDetector = SilenceAutoStopDetector(
+            silenceRMSThreshold: autoStopConfig.silenceRMSThreshold,
+            requiredSilenceDuration: autoStopConfig.requiredSilenceDuration
+        )
         // Live-VAD живёт на тех же порогах, что оффлайн-сегментация записи:
         // один и тот же `silenceRMS`, одна и та же пауза `pauseDuration`.
         self.liveSilenceRMS = segmenterConfig.silenceRMS
@@ -249,6 +272,8 @@ public final class AudioService {
         recordStartTime = CFAbsoluteTimeGetCurrent()
         lock.lock()
         limitStopScheduled = false
+        autoStopScheduled = false
+        autoStopDetector.reset()
         liveLastCutIndex = 0
         resetLiveVADLocked()
         lock.unlock()
@@ -274,6 +299,9 @@ public final class AudioService {
         let mic = MicrophoneAuth.statusText(AVCaptureDevice.authorizationStatus(for: .audio))
         Logger.log("mic permission: \(mic) (record start)", level: "info")
         Logger.log("record start: sampleRate=\(Int(targetFormat.sampleRate)) Hz, channels=\(targetFormat.channelCount), hwFormat=\(Int(hwFormat.sampleRate)) Hz", level: "info")
+        // Диагностика автоостановки: видно, включена ли фича и каким порогом
+        // (рубильник/длительность/порог из окружения — см. fromEnvironment).
+        Logger.log("record auto-stop: enabled=\(autoStopConfig.enabled), silence>=\(String(format: "%.1f", autoStopConfig.requiredSilenceDuration))s, rms<\(autoStopConfig.silenceRMSThreshold)", level: "info")
 
         // Хлебные крошки перед каждым шагом старта движка: если следующий вызов
         // AVFoundation крэшнет, последняя строка лога укажет точное место.
@@ -439,6 +467,8 @@ public final class AudioService {
         collectedSamples = []
         rmsHistory = []
         liveLastCutIndex = 0
+        autoStopScheduled = false
+        autoStopDetector.reset()
         resetLiveVADLocked()
         lock.unlock()
     }
@@ -541,9 +571,9 @@ public final class AudioService {
     }
 
     private func process(_ buffer: AVAudioPCMBuffer) {
-        // После принудительной остановки по лимиту «хвост» не записываем:
-        // буфер в памяти дальше не растёт.
-        guard !limit.isExhausted else { return }
+        // После принудительной остановки (лимит или автоостановка по тишине)
+        // «хвост» не записываем: буфер в памяти дальше не растёт.
+        guard !limit.isExhausted, !autoStopScheduled else { return }
         guard let converter = converter else {
             logDroppedBuffer(reason: "converter is nil (stopped?)", frames: buffer.frameLength)
             return
@@ -677,9 +707,24 @@ public final class AudioService {
         // стоп тем же путём, которым запись останавливается пользователем.
         let elapsed = CFAbsoluteTimeGetCurrent() - recordStartTime
         let shouldStop = limit.shouldStop(elapsed: elapsed, totalSamples: collectedSamples.count)
+        // Автоостановка по непрерывной тишине (~3 c): детектор кормим ТОЛЬКО
+        // если фича включена (`autoStopConfig.enabled` — рубильник из окружения,
+        // см. AutoStopConfig.fromEnvironment) и лимит в этом буфере не сработал
+        // (лимит имеет приоритет — запись в любом случае заканчивается, а тип
+        // финализации один). Длительность буфера — фактическая: конвертированные
+        // фреймы делим на целевую частоту 16 кГц. Накопление идёт по времени
+        // аудио, а не по числу буферов — частота колбэков зависит от частоты
+        // железа (~85 мс @ 48 кГц, ~93 мс @ 44.1 кГц), а «3 секунды тишины»
+        // меряются по звуку.
+        let autoStopFired = autoStopConfig.enabled && !shouldStop && autoStopDetector.feed(
+            rms: rms,
+            duration: Double(frameLength) / Double(targetFormat.sampleRate)
+        )
         lock.unlock()
         if shouldStop {
             scheduleLimitStop()
+        } else if autoStopFired {
+            scheduleAutoStop()
         }
         if let segment = deliveredSegment, !segment.isEmpty {
             onSpeechSegment?(segment, false)
@@ -712,15 +757,43 @@ public final class AudioService {
         // и повторного входа) — переносим на главную очередь, откуда teardown
         // уйдёт на engineQueue, как обычный stop().
         DispatchQueue.main.async { [weak self] in
-            self?.performLimitStop(samples: samples, tail: tail)
+            self?.performForcedStop(samples: samples, tail: tail, reason: .limit)
         }
+    }
+
+    /// Планирует автоостановку по тишине ровно один раз — тот же снимок под
+    /// блокировкой, что у `scheduleLimitStop`: «хвост» незакрытого уттеренса и
+    /// полные сэмплы записи берутся на аудиопотоке, teardown движка уходит на
+    /// главную очередь (из колбэка tap removeTap вызывать нельзя).
+    private func scheduleAutoStop() {
+        lock.lock()
+        guard !autoStopScheduled else {
+            lock.unlock()
+            return
+        }
+        autoStopScheduled = true
+        let tail = takeLiveTailLocked()
+        let samples = collectedSamples
+        lock.unlock()
+
+        DispatchQueue.main.async { [weak self] in
+            self?.performForcedStop(samples: samples, tail: tail, reason: .autoStopSilence)
+        }
+    }
+
+    /// Причина принудительной остановки: лимит длительности или автоостановка
+    /// по непрерывной тишине. Механика финализации одна — различается только
+    /// колбэк, который получает сэмплы.
+    private enum ForcedStopReason {
+        case limit
+        case autoStopSilence
     }
 
     /// Тех же путь, что и `stop()`: снятие tap, остановка движка, «drain»
     /// конвертера, доставка собранных сэмплов через колбэк финализации.
-    /// «Хвост» отдаётся ДО колбэка лимита — клиент успевает поставить его в
-    /// очередь распознавания раньше финализации всей записи.
-    private func performLimitStop(samples: [Int16], tail: [Int16]) {
+    /// «Хвост» отдаётся ДО колбэка — клиент успевает поставить его в очередь
+    /// распознавания раньше финализации всей записи.
+    private func performForcedStop(samples: [Int16], tail: [Int16], reason: ForcedStopReason) {
         lock.lock()
         // Пользователь уже остановил запись — не дублируем финализацию.
         guard isRecording else {
@@ -734,7 +807,7 @@ public final class AudioService {
         lock.unlock()
 
         if isDebug {
-            Logger.log("record limit stop: tearing engine down (samples=\(samples.count))", level: "debug")
+            Logger.log("record forced stop (\(reason == .limit ? "limit" : "silence auto-stop")): tearing engine down (samples=\(samples.count))", level: "debug")
         }
         engineQueue.async { [weak self] in
             self?.teardownOnEngineQueue()
@@ -743,7 +816,12 @@ public final class AudioService {
         if !tail.isEmpty {
             onSpeechSegment?(tail, true)
         }
-        onRecordingLimitReached?(samples)
+        switch reason {
+        case .limit:
+            onRecordingLimitReached?(samples)
+        case .autoStopSilence:
+            onAutoStop?(samples)
+        }
     }
 
     /// Единый финальный лог записи для `stop()` и принудительной остановки по
@@ -774,8 +852,8 @@ public enum AudioServiceError: Error, LocalizedError {
     case engineGone
     public var errorDescription: String? {
         switch self {
-        case .unsupportedFormat: return "Неподдерживаемый аудиоформат"
-        case .engineGone: return "Аудио-сервис недоступен"
+        case .unsupportedFormat: return L10n.tr("error.unsupportedAudioFormat")
+        case .engineGone: return L10n.tr("error.audioServiceUnavailable")
         }
     }
 }

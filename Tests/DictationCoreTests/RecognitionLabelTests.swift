@@ -57,7 +57,7 @@ final class RecognitionLabelTests: XCTestCase {
 
         XCTAssertEqual(config.activeProvider, "groq")
         XCTAssertEqual(config.model, "whisper-large-v3")
-        XCTAssertEqual(RecognitionLabel.forSession(config), "infinityfree→groq · whisper-large-v3",
+        XCTAssertEqual(RecognitionLabel.forSession(config), "cookie-relay→groq · whisper-large-v3",
                        "смена провайдера меняет и имя, и модель, и транспорт в метке")
     }
 
@@ -209,7 +209,7 @@ final class RecognitionLabelTests: XCTestCase {
         model = ""
         transport = "infinityfree"
         """)
-        XCTAssertEqual(RecognitionLabel.forSession(config), "infinityfree→groq")
+        XCTAssertEqual(RecognitionLabel.forSession(config), "cookie-relay→groq")
     }
 
     @objc func testLabelFallback_NoProviderResolvedShowsDash() throws {
@@ -240,7 +240,7 @@ final class RecognitionLabelTests: XCTestCase {
     @objc func testLabelUsesResolvedTransport_InheritedFromRoot() throws {
         // Транспорт секции не задан, но корневой задан — effective transport
         // наследует корневой (та же логика Config.apply, из которой агент
-        // решает про ByetCookieProvider). Метка показывает реальный маршрут.
+        // решает про CookieRelayProvider). Метка показывает реальный маршрут.
         let content = """
         transport = "infinityfree"
         active_provider = "gigaam"
@@ -250,8 +250,8 @@ final class RecognitionLabelTests: XCTestCase {
         model = "gigaam-v3"
         """
         let config = try AppConfig.parse(content)
-        XCTAssertEqual(config.transport, "infinityfree", "без transport в секции корневой остаётся в силе")
-        XCTAssertEqual(RecognitionLabel.forSession(config), "infinityfree→gigaam · gigaam-v3")
+        XCTAssertEqual(config.transport, "cookie-relay", "без transport в секции корневой остаётся в силе (канонизирован)")
+        XCTAssertEqual(RecognitionLabel.forSession(config), "cookie-relay→gigaam · gigaam-v3")
     }
 
     // MARK: - Примитивы построителя
@@ -269,8 +269,8 @@ final class RecognitionLabelTests: XCTestCase {
 
     @objc func testBuild_RelayRoute() {
         XCTAssertEqual(
-            RecognitionLabel.build(provider: "groq", model: "whisper-large-v3", route: .relay("infinityfree")),
-            "infinityfree→groq · whisper-large-v3"
+            RecognitionLabel.build(provider: "groq", model: "whisper-large-v3", route: .relay("cookie-relay")),
+            "cookie-relay→groq · whisper-large-v3"
         )
         XCTAssertEqual(
             RecognitionLabel.build(provider: "groq", model: "whisper-large-v3", route: .relay("")),
@@ -278,8 +278,8 @@ final class RecognitionLabelTests: XCTestCase {
             "пустое имя реле — как прямой запрос"
         )
         XCTAssertEqual(
-            RecognitionLabel.providerPart(provider: "groq", route: .relay("infinityfree")),
-            "infinityfree→groq"
+            RecognitionLabel.providerPart(provider: "groq", route: .relay("cookie-relay")),
+            "cookie-relay→groq"
         )
         XCTAssertEqual(
             RecognitionLabel.providerPart(provider: "groq", route: .direct),
@@ -295,8 +295,8 @@ final class RecognitionLabelTests: XCTestCase {
         XCTAssertEqual(controller.testState?.sttLabel, "gigaam · gigaam-v3")
 
         // Смена значения (новая сессия) — состояние обновляется, панель не трогается.
-        controller.setSTTLabel("infinityfree→groq · whisper-large-v3")
-        XCTAssertEqual(controller.testState?.sttLabel, "infinityfree→groq · whisper-large-v3")
+        controller.setSTTLabel("cookie-relay→groq · whisper-large-v3")
+        XCTAssertEqual(controller.testState?.sttLabel, "cookie-relay→groq · whisper-large-v3")
         controller.hide()
     }
 
@@ -341,7 +341,7 @@ final class RecognitionLabelTests: XCTestCase {
         )
         let config = try AppConfig.parse(content)
         let parts = RecognitionLabel.sessionParts(config)
-        XCTAssertEqual(parts.provider, "infinityfree→groq", "маршрут-префикс остаётся в части провайдера")
+        XCTAssertEqual(parts.provider, "cookie-relay→groq", "маршрут-префикс остаётся в части провайдера")
         XCTAssertEqual(parts.model, "whisper-large-v3")
     }
 
@@ -373,18 +373,18 @@ final class RecognitionLabelTests: XCTestCase {
         XCTAssertEqual(p1.provider, "gigaam")
         XCTAssertEqual(p1.model, "gigaam-v3")
 
-        let p2 = RecognitionLabel.parts(provider: "groq", model: "  whisper-large-v3  ", route: .relay("infinityfree"))
-        XCTAssertEqual(p2.provider, "infinityfree→groq")
+        let p2 = RecognitionLabel.parts(provider: "groq", model: "  whisper-large-v3  ", route: .relay("cookie-relay"))
+        XCTAssertEqual(p2.provider, "cookie-relay→groq")
         XCTAssertEqual(p2.model, "whisper-large-v3", "модель обрезается по краям")
     }
 
     @objc func testParts_FromSessionLabel() {
         // Рендер шапки идёт из строки сессии (setSTTLabel) — разбор обратно
         // на {provider, model} без потерь.
-        let label = RecognitionLabel.build(provider: "groq", model: "whisper-large-v3", route: .relay("infinityfree"))
-        XCTAssertEqual(label, "infinityfree→groq · whisper-large-v3")
+        let label = RecognitionLabel.build(provider: "groq", model: "whisper-large-v3", route: .relay("cookie-relay"))
+        XCTAssertEqual(label, "cookie-relay→groq · whisper-large-v3")
         let parts = RecognitionLabel.parts(fromLabel: label)
-        XCTAssertEqual(parts.provider, "infinityfree→groq")
+        XCTAssertEqual(parts.provider, "cookie-relay→groq")
         XCTAssertEqual(parts.model, "whisper-large-v3")
     }
 

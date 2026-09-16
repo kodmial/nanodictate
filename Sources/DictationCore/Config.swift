@@ -27,15 +27,28 @@ public struct AppConfig: Equatable {
     public var soundsEnabled: Bool
     public var logLevel: String
     public var language: String
+    public var uiLanguage: String
 
     /// Заголовок для передачи proxy_key (по умолчанию `X-Proxy-Key`).
-    /// `"X-Api-Key"` — для kodmai.alwaysdata.net (прокси принимает только его).
     public var proxyKeyHeader: String = "X-Proxy-Key"
 
     /// Транспорт STT (ключ `transport`, корневой или в секции активного
-    /// провайдера). Пусто — транспорт не задан, агент ходит как раньше.
-    /// `"infinityfree"` — Byet-прокси с вычисляемой `__test`-кукой в памяти.
+    /// провайдера). Значения: `direct` (пусто) — напрямую; `http` — HTTP-прокси
+    /// (`http_proxy` + опц. `proxy_user`/`proxy_password`); `gateway` — relay
+    /// секрета заголовком (`proxy_key` + `proxy_key_header`); `cookie-relay` —
+    /// прокси с JS-челленджем и вычисляемой `__test`-кукой в памяти.
+    /// Legacy-алиасы старого конфига канонизируются в `cookie-relay`
+    /// (см. `canonicalTransport`).
     public var transport: String = ""
+
+    /// HTTP-прокси (transport == "http"): URL запроса переписывается в
+    /// `http://<httpProxy>/<полный-исходный-URL>` (схема «URL-как-путь»),
+    /// при proxy_user/proxy_password — заголовок `Proxy-Authorization: Basic`.
+    public var httpProxy: String = ""
+    /// Логин HTTP-прокси (опционально; ключ `proxy_user`).
+    public var proxyUser: String = ""
+    /// Пароль HTTP-прокси (опционально; ключ `proxy_password`).
+    public var proxyPassword: String = ""
 
 // MARK: Быстрые UX-победы
 
@@ -166,7 +179,11 @@ public struct AppConfig: Equatable {
         soundsEnabled: true,
         logLevel: "info",
         language: "ru",
+        uiLanguage: "en",
         transport: "",
+        httpProxy: "",
+        proxyUser: "",
+        proxyPassword: "",
         undoMaxInterval: 2.0,
         undoSoundEnabled: true,
         chunked: false,
@@ -241,6 +258,12 @@ public struct AppConfig: Equatable {
         /// Транспорт этой секции (ключ `transport` внутри `[providers.X]`).
         /// Пусто — берётся корневой `transport` (поведение как раньше).
         public var transport: String = ""
+        /// HTTP-прокси секции (ключ `http_proxy`; пусто — корневой `httpProxy`).
+        public var httpProxy: String = ""
+        /// Логин HTTP-прокси секции (ключ `proxy_user`).
+        public var proxyUser: String = ""
+        /// Пароль HTTP-прокси секции (ключ `proxy_password`).
+        public var proxyPassword: String = ""
         /// Имя заголовка для proxy_key (ключ `proxy_key_header` в секции или
         /// корневой). Пусто — берётся корневой, затем дефолт `X-Proxy-Key`.
         public var proxyKeyHeader: String = ""
@@ -256,6 +279,9 @@ public struct AppConfig: Equatable {
                 proxyKey: "",
                 apiSecret: "",
                 transport: "",
+                httpProxy: "",
+                proxyUser: "",
+                proxyPassword: "",
                 proxyKeyHeader: ""
             )
         }
@@ -287,7 +313,7 @@ public struct AppConfig: Equatable {
             case .duplicateProvider(let id):
                 return "Duplicate provider section: [providers.\(id)]"
             case .activeProviderNotFound(let active, let available):
-                let list = available.isEmpty ? "(нет провайдеров)" : available.joined(separator: ", ")
+                let list = available.isEmpty ? L10n.tr("menu.noProviders") : available.joined(separator: ", ")
                 return "active_provider = \"\(active)\" not found. Available providers: \(list)"
             case .ambiguousLegacyAndProviders:
                 return "Ambiguous config: both legacy keys (base_url/model/api_key...) and [providers.X] sections are present, but active_provider is not set. Set active_provider."
@@ -335,7 +361,11 @@ public struct AppConfig: Equatable {
         var soundsEnabled: Bool = defaults.soundsEnabled
         var logLevel: String = defaults.logLevel
         var language: String = defaults.language
+        var uiLanguage: String = defaults.uiLanguage
         var transport: String = defaults.transport
+        var httpProxy: String = defaults.httpProxy
+        var proxyUser: String = defaults.proxyUser
+        var proxyPassword: String = defaults.proxyPassword
         var proxyKeyHeader: String = defaults.proxyKeyHeader
         var undoMaxInterval: Double = defaults.undoMaxInterval
         var undoSoundEnabled: Bool = defaults.undoSoundEnabled
@@ -445,7 +475,13 @@ public struct AppConfig: Equatable {
                 case "proxy_key_header":
                     providers[providerIndex].proxyKeyHeader = try parseString(valuePart, line: index + 1, rawLine: rawLine)
                 case "transport":
-                    providers[providerIndex].transport = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+                    providers[providerIndex].transport = Self.canonicalTransport(try parseString(valuePart, line: index + 1, rawLine: rawLine))
+                case "http_proxy":
+                    providers[providerIndex].httpProxy = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+                case "proxy_user":
+                    providers[providerIndex].proxyUser = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+                case "proxy_password":
+                    providers[providerIndex].proxyPassword = try parseString(valuePart, line: index + 1, rawLine: rawLine)
                 default:
                     // Неизвестный ключ внутри секции — игнорируем
                     break
@@ -486,7 +522,13 @@ public struct AppConfig: Equatable {
             case "proxy_key_header":
                 proxyKeyHeader = try parseString(valuePart, line: index + 1, rawLine: rawLine)
             case "transport":
-                transport = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+                transport = Self.canonicalTransport(try parseString(valuePart, line: index + 1, rawLine: rawLine))
+            case "http_proxy":
+                httpProxy = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+            case "proxy_user":
+                proxyUser = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+            case "proxy_password":
+                proxyPassword = try parseString(valuePart, line: index + 1, rawLine: rawLine)
             case "active_provider":
                 activeProvider = try parseString(valuePart, line: index + 1, rawLine: rawLine)
             case "timeout_seconds":
@@ -499,6 +541,8 @@ public struct AppConfig: Equatable {
                 logLevel = try parseString(valuePart, line: index + 1, rawLine: rawLine)
             case "language":
                 language = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+            case "ui_language":
+                uiLanguage = try parseString(valuePart, line: index + 1, rawLine: rawLine)
             case "undo_max_interval":
                 undoMaxInterval = try parseDouble(valuePart, line: index + 1, rawLine: rawLine)
             case "undo_sound_enabled":
@@ -539,8 +583,12 @@ public struct AppConfig: Equatable {
             soundsEnabled: soundsEnabled,
             logLevel: logLevel,
             language: language,
+            uiLanguage: uiLanguage,
             proxyKeyHeader: proxyKeyHeader,
             transport: transport,
+            httpProxy: httpProxy,
+            proxyUser: proxyUser,
+            proxyPassword: proxyPassword,
             undoMaxInterval: undoMaxInterval,
             undoSoundEnabled: undoSoundEnabled,
             chunked: chunked,
@@ -591,18 +639,42 @@ public struct AppConfig: Equatable {
         config.proxyKey = provider.proxyKey
         config.apiSecret = provider.apiSecret
         // Транспорт секции имеет приоритет над корневым. ВАЖНО: явный
-        // transport = "" в секции корневой transport = "relay" НЕ отменяет —
+        // transport = "" в секции корневой transport = "cookie-relay" НЕ отменяет —
         // пустое значение трактуется как «наследовать корневой», а не
         // «выключить». «Выключить» cookie-слой можно только не-special
         // значением (например transport = "direct"): агент распознаёт строго
-        // "relay" (и legacy-алиас "infinityfree") — для любого другого значения
-        // cookie-логику не поднимает.
+        // "cookie-relay" (legacy-алиасы канонизированы при
+        // парсинге) — для любого другого значения cookie-логику не поднимает.
         if !provider.transport.isEmpty {
             config.transport = provider.transport
+        }
+        // HTTP-прокси секции приоритетнее корневого; пустое — наследуется.
+        if !provider.httpProxy.isEmpty {
+            config.httpProxy = provider.httpProxy
+        }
+        if !provider.proxyUser.isEmpty {
+            config.proxyUser = provider.proxyUser
+        }
+        if !provider.proxyPassword.isEmpty {
+            config.proxyPassword = provider.proxyPassword
         }
         // Имя заголовка секции приоритетнее корневого; пустое — наследуется.
         if !provider.proxyKeyHeader.isEmpty {
             config.proxyKeyHeader = provider.proxyKeyHeader
+        }
+    }
+
+    /// Каноническое значение транспорта: legacy-алиасы старого конфига
+    /// приводятся к единому `cookie-relay` (лог-предупреждение о deprecation).
+    /// Любое другое значение — как есть (обрезка пробелов).
+    public static func canonicalTransport(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        switch trimmed {
+        case "relay", "infinityfree":
+            Logger.log("transport \"\(trimmed)\" is deprecated: use \"cookie-relay\"", level: "warn")
+            return "cookie-relay"
+        default:
+            return trimmed
         }
     }
 
@@ -900,11 +972,21 @@ public struct AppConfig: Equatable {
         # Пустые base_url/model в секциях — агент подставит дефолты адаптера
         # (например OpenAI → https://api.openai.com/v1/audio/transcriptions,
         # whisper-1; Groq → whisper-large-v3; Deepgram → nova-3). Для секций
-        # relay, cloudflare и открытого OpenAI-совместимого провайдера
+        # cookie-relay, cloudflare и открытого OpenAI-совместимого провайдера
         # base_url обязателен (cloudflare — полный URL, account_id и модель
         # в пути; например .../accounts/<ACCOUNT_ID>/ai/run/@cf/openai/whisper-large-v3-turbo).
+        #
+        # Транспорты (ключ transport):
+        #   direct         — прямой запрос к base_url (по умолчанию)
+        #   http           — HTTP-прокси: http_proxy = "host:port",
+        #                    proxy_user / proxy_password (опционально)
+        #   gateway        — шлюз-ретрансляция с API-ключом в заголовке:
+        #                    proxy_key + proxy_key_header
+        #   cookie-relay   — прокси с JS cookie-челленджем (автоматическая
+        #                    расшифровка AES-128-CBC, не требует ключа)
 
         language = "ru"
+        ui_language = "en"
         sounds_enabled = true
         timeout_seconds = 120
         log_level = "info"
@@ -941,12 +1023,14 @@ public struct AppConfig: Equatable {
         api_key = ""
         api_secret = ""
 
-        [providers.relay]
-        name = "Relay"
+        [providers.cookie-relay]
+        name = "Cookie Relay"
         base_url = ""
         model = ""
         api_key = ""
-        transport = "relay"
+        transport = "cookie-relay"
+        # proxy_key = ""
+        # proxy_key_header = "X-Proxy-Key"
 
         [providers.cloudflare]
         name = "Cloudflare Workers AI"
@@ -954,6 +1038,19 @@ public struct AppConfig: Equatable {
         model = ""
         api_key = ""
         transport = "cloudflare"
+
+        # Примеры транспортов для секций:
+        #
+        # [providers.http-proxy]
+        # transport = "http"
+        # http_proxy = "proxy.example.com:8080"
+        # proxy_user = ""
+        # proxy_password = ""
+        #
+        # [providers.gateway-provider]
+        # transport = "gateway"
+        # proxy_key = "your-api-key"
+        # proxy_key_header = "X-Custom-Auth"
 
         # Маршрутизация STT по ролям: final_provider применяется и в
         # чанковом пути (финальный проход по всей записи), и в не-чанковом
