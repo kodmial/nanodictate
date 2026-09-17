@@ -18,12 +18,6 @@ public protocol HotkeyDelegate: AnyObject {
     /// перевод строки в поле ввода), .idle — пропускает как обычно.
     /// Вызывается синхронно из event-тапа на main run loop — гонок нет.
     func shouldSwallowReturnKeyEvent() -> Bool
-    /// Синхронный запрос «сейчас постится СВОЙ синтетический Return?».
-    /// Синтетика постится через .cghidEventTap и повторно видна нашему
-    /// session-тапу: по этому флагу тап не глотает её и не дублирует
-    /// enterKeyPressed (иначе синтетика остановила бы новую запись).
-    /// Флаг виден ровно в момент постинга: пост и тап — на main run loop.
-    func isPostingSyntheticReturnKey() -> Bool
 }
 
 // MARK: - HotkeyService
@@ -121,11 +115,13 @@ public final class HotkeyService {
         // Физический Return/Keypad Enter вне .idle глотается: .defaultTap —
         // активный тап, возврат nil подавляет событие, перевод строки в поле
         // ввода не вставляется. Синтетический Return (постинг после
-        // Enter-останова) тап видит повторно, но предикат агента возвращает
-        // false (флаг isPostingSyntheticReturnKey) — он доходит до приложения.
+        // Enter-останова) тап видит повторно на следующей итерации run loop,
+        // но тот помечен маркером SyntheticReturnMarker — по нему событие
+        // исключается и доходит до приложения.
         if service.shouldSwallowEvent(
             type: type,
-            keyCode: event.getIntegerValueField(.keyboardEventKeycode)
+            keyCode: event.getIntegerValueField(.keyboardEventKeycode),
+            event: event
         ) {
             return nil
         }
@@ -151,17 +147,31 @@ public final class HotkeyService {
         let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
         handleKeyboardEvent(
             type: type, keyCode: keyCode, flags: event.flags,
-            isRepeat: isRepeat, at: CFAbsoluteTimeGetCurrent()
+            isRepeat: isRepeat, at: CFAbsoluteTimeGetCurrent(),
+            event: event
         )
     }
 
     /// Решение event-тапа «подавить ли событие»: сегодня — keyDown
     /// физического Return/Keypad Enter (36/76), когда делегат (агент) отвечает
-    /// «глотать» (состояние не .idle). Внутренний шов — юнит-тесты проверяют
-    /// предикат без живого CGEvent-тапа.
-    internal func shouldSwallowEvent(type: CGEventType, keyCode: Int64) -> Bool {
+    /// «глотать» (состояние не .idle). Свой синтетический Return (маркер
+    /// SyntheticReturnMarker в поле события) НЕ глотается — должен дойти до
+    /// приложения. Внутренний шов — юнит-тесты проверяют предикат без живого
+    /// CGEvent-тапа: `event` опционален, маркерная ветка проверяется по
+    /// реальному CGEvent.
+    internal func shouldSwallowEvent(type: CGEventType,
+                                     keyCode: Int64,
+                                     event: CGEvent? = nil) -> Bool {
         guard type == .keyDown, keyCode == 36 || keyCode == 76 else { return false }
+        if let event = event, isOwnSyntheticReturnEvent(event) { return false }
         return delegate?.shouldSwallowReturnKeyEvent() ?? false
+    }
+
+    /// Предикат «это СВОЙ синтетический Return?» — тест-хук: принимает
+    /// CGEvent, реальная реализация проверяет поле события
+    /// (SyntheticReturnMarker), тест гоняет это же поле через реальный CGEvent.
+    internal func isOwnSyntheticReturnEvent(_ event: CGEvent) -> Bool {
+        SyntheticReturnMarker.isOwnSyntheticReturn(event)
     }
 
     /// Внутренний шов без CGEvent: вся маршрутизация клавиш, вызывается из
@@ -181,7 +191,8 @@ public final class HotkeyService {
         keyCode: Int64,
         flags: CGEventFlags,
         isRepeat: Bool,
-        at time: TimeInterval = CFAbsoluteTimeGetCurrent()
+        at time: TimeInterval = CFAbsoluteTimeGetCurrent(),
+        event: CGEvent? = nil
     ) {
         let now = time
         // Дельта от ПРЕДЫДУЩЕГО события клавиатуры — период нажатий наглядно виден.
@@ -237,12 +248,14 @@ public final class HotkeyService {
                 if isDebug && optionDetector.lastTimestamp != nil {
                     Logger.log("enter key pressed keyCode=\(keyCode) — pending Alt tap cancelled", level: "debug")
                 }
-                optionDetector.cancelPendingTap()
                 // Свой синтетический Return (постинг после Enter-останова) тап
-                // видит повторно на том же run loop: enterKeyPressed не
-                // дублируем — иначе синтетика остановила бы новую запись.
-                // Флаг виден синхронно (пост и тап — на main run loop).
-                if delegate?.isPostingSyntheticReturnKey() == false {
+                // видит повторно на следующей итерации run loop — по маркеру в
+                // поле события исключаем его целиком: ни cancelPendingTap (иначе
+                // пере-просмотр между двумя Alt-тапами съел бы первый тап), ни
+                // enterKeyPressed (иначе синтетика остановила бы новую запись).
+                let isOwnSynthetic = event.map { isOwnSyntheticReturnEvent($0) } ?? false
+                if !isOwnSynthetic {
+                    optionDetector.cancelPendingTap()
                     delegate?.enterKeyPressed()
                 }
             default:

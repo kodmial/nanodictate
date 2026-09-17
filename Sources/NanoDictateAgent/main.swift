@@ -176,12 +176,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     /// Читается в точках вставки (postSyntheticReturnIfPending), гасится в
     /// handleEmptyResult / failTranscription / handleCancel / после постинга.
     private let enterSendLatch = EnterSendLatch()
-    /// Флаг «сейчас постится СВОЙ синтетический Return»: синтетика постится
-    /// через .cghidEventTap и повторно видна нашему session-тапу — флаг не
-    /// даёт тапу проглотить её (предикат глотания возвращает false) и не
-    /// даёт продублировать enterKeyPressed. Виден ровно в момент постинга:
-    /// пост и тап — на main run loop.
-    private var isPostingSyntheticReturn = false
+    /// Отменяемое планирование синтетического Enter: postSyntheticReturnIfPending
+    /// планирует пост через паузу ~250 мс, handleCancel (в ЛЮБОЙ ветке, включая
+    /// .idle) отменяет уже запланированный пост — Esc гасит не только латч,
+    /// но и запланированное срабатывание.
+    private let scheduledEnterPoster = ScheduledEnterPoster()
 
     /// Состояние undo: последняя УСПЕШНАЯ вставка (текст + момент времени).
     /// Двойной Alt в пределах undoMaxInterval после вставки стирает её.
@@ -457,19 +456,14 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     }
 
     /// Синхронный предикат глотания физического Return: вне .idle (запись
-    /// или распознавание) — глотать. Исключение — собственный синтетический
-    /// Return (isPostingSyntheticReturn): его тап видит повторно, глотать
-    /// нельзя — событие должно дойти до приложения. Вызывается из event-тапа
-    /// на main run loop — гонок с состоянием агента нет.
+    /// или распознавание) — глотать. Собственный синтетический Return
+    /// исключается НЕ здесь: постинг помечает событие маркером
+    /// SyntheticReturnMarker, и HotkeyService не глотает его по полю события —
+    /// синхронный флаг снялся бы к моменту повторного визита тапа (событие
+    /// доходит до .cgSessionEventTap на следующей итерации run loop).
+    /// Вызывается из event-тапа на main run loop — гонок с состоянием нет.
     func shouldSwallowReturnKeyEvent() -> Bool {
-        !isPostingSyntheticReturn && state != .idle
-    }
-
-    /// Синхронный ответ «сейчас постится СВОЙ синтетический Return». Виден
-    /// ровно в момент постинга (пост и тап — на main run loop): HotkeyService
-    /// по нему не дублирует enterKeyPressed и не глотает событие.
-    func isPostingSyntheticReturnKey() -> Bool {
-        isPostingSyntheticReturn
+        state != .idle
     }
 
     // MARK: - AudioLevelDelegate
@@ -552,23 +546,22 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     /// приложение успевает обработать вставленный текст) постить
     /// синтетический Return (keyDown + keyUp) в приложение в фокусе. После
     /// постинга латч снят. Автостоп по тишине и лимит длительности латч НЕ
-    /// ставят — сюда они не приходят с pending-латчем.
-    private static let syntheticEnterDelay: TimeInterval = 0.25
-
+    /// ставят — сюда они не приходят с pending-латчем. Планирование держится
+    /// в ScheduledEnterPoster: Esc отменяет УЖЕ запланированный пост.
     private func postSyntheticReturnIfPending() {
         guard enterSendLatch.consume() else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.syntheticEnterDelay) { [weak self] in
-            guard let self = self else { return }
-            // Страховка: наш session-тап видит синтетический Return повторно.
-            // Флаг заставляет предикат глотания вернуть false (событие не
-            // глотается, доходит до приложения) и гасит дубль enterKeyPressed
-            // (иначе синтетика остановила бы новую запись, начатую в окне
-            // паузы). Пост и тап — на main run loop, гонок нет.
-            self.isPostingSyntheticReturn = true
+        // self в замыкании не нужен: постинг и лог — статики. Агент живёт
+        // весь процесс, Poster свой — цикла удержания нет.
+        scheduledEnterPoster.action = {
+            // Событие помечается маркером SyntheticReturnMarker ДО постинга:
+            // наш session-тап видит синтетический Return повторно на следующей
+            // итерации run loop и по полю события не глотает его (доходит до
+            // приложения) и не дублирует enterKeyPressed (не остановит новую
+            // запись, начатую в окне паузы).
             Inserter.postReturnKeyDownUp()
-            self.isPostingSyntheticReturn = false
             Logger.log("synthetic Enter posted after Enter-stop insert", level: "info")
         }
+        scheduledEnterPoster.schedule()
     }
 
     // MARK: - Запись
@@ -1562,6 +1555,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     /// не ошибка), ровно один hide. Каждая терминальная точка планирует hide
     /// ровно один раз.
     private func handleCancel() {
+        // Esc отменяет УЖЕ ЗАПЛАНИРОВАННЫЙ синтетический Enter: латч снят ещё
+        // в момент вставки (consume), пост висит в операционной очереди —
+        // отменяем его до любой ветки (включая .idle, где ранний return
+        // произошёл бы раньше терминального хвоста).
+        scheduledEnterPoster.cancelScheduled()
         switch state {
         case .recording:
             audio.cancel()

@@ -10,13 +10,10 @@ private final class SpyDelegate: HotkeyDelegate {
     var enterPressedCount = 0
     /// Ответ предиката «глотать ли Return» (по умолчанию false — как .idle).
     var swallowReturnKey = false
-    /// Ответ «сейчас постится свой синтетический Return?».
-    var postingSyntheticReturn = false
     func altDoubleTapped() { altDoubleTapCount += 1 }
     func cancelKeyPressed() { cancelPressedCount += 1 }
     func enterKeyPressed() { enterPressedCount += 1 }
     func shouldSwallowReturnKeyEvent() -> Bool { swallowReturnKey }
-    func isPostingSyntheticReturnKey() -> Bool { postingSyntheticReturn }
 }
 
 final class HotkeyServiceTests: XCTestCase {
@@ -100,6 +97,20 @@ final class HotkeyServiceTests: XCTestCase {
         let service = HotkeyService() // maxInterval 0.4s, logLevel "info" — без debug-логов
         service.delegate = delegate
         return service
+    }
+
+    /// Реальный CGEvent Return (36) — с маркером SyntheticReturnMarker или без.
+    /// По нему тап отличает СВОЙ синтетический Return от физического нажатия
+    /// (событие доходит до session-тапа на следующей итерации run loop —
+    /// синхронный флаг к тому моменту уже снят, маркер переживает доставку).
+    private func makeReturnEvent(marked: Bool) -> CGEvent {
+        let event = CGEvent(keyboardEventSource: CGEventSource(stateID: .hidSystemState),
+                            virtualKey: 36,
+                            keyDown: true)!
+        if marked {
+            SyntheticReturnMarker.mark(event)
+        }
+        return event
     }
 
     /// Чистый Alt+Alt (down/up/down) — ЕДИНСТВЕННЫЙ сценарий, который должен
@@ -226,15 +237,40 @@ final class HotkeyServiceTests: XCTestCase {
         XCTAssertEqual(delegate.altDoubleTapCount, 0) // первый тап аннулирован Return
     }
 
-    /// Свой синтетический Return (агент постит после вставки): тап видит его
-    /// повторно, enterKeyPressed НЕ дублируется — иначе синтетика остановила
-    /// бы новую запись, начатую в окне паузы.
-    @objc func testRoutingReturnWhilePostingSyntheticIsIgnored() {
+    // MARK: - Маркер SyntheticReturnMarker: свой синтетический Return (реальный CGEvent)
+
+    /// Предикат-шов HotkeyService.isOwnSyntheticReturnEvent: событие с маркером
+    /// распознаётся как СВОЁ (по полю события, а не по синхронному флагу).
+    @objc func testIsOwnSyntheticReturnDetectsMarkedEvent() {
+        let service = makeService(delegate: SpyDelegate())
+        XCTAssertTrue(service.isOwnSyntheticReturnEvent(makeReturnEvent(marked: true)))
+        XCTAssertFalse(service.isOwnSyntheticReturnEvent(makeReturnEvent(marked: false)))
+    }
+
+    /// Свой синтетический Return (маркер) тап видит повторно: enterKeyPressed
+    /// НЕ дублируется — иначе синтетика остановила бы новую запись, начатую
+    /// в окне паузы.
+    @objc func testRoutingMarkedSyntheticReturnIsIgnored() {
         let delegate = SpyDelegate()
-        delegate.postingSyntheticReturn = true
         let service = makeService(delegate: delegate)
-        service.handleKeyboardEvent(type: .keyDown, keyCode: 36, flags: [], isRepeat: false, at: 1.0)
+        service.handleKeyboardEvent(type: .keyDown, keyCode: 36, flags: [], isRepeat: false, at: 1.0,
+                                    event: makeReturnEvent(marked: true))
         XCTAssertEqual(delegate.enterPressedCount, 0)
+        XCTAssertEqual(delegate.cancelPressedCount, 0)
+    }
+
+    /// Маркированный Return НЕ зовёт cancelPendingTap: пере-просмотр СВОЕГО
+    /// синтетического Return между двумя Alt-тапами не съедает первый тап —
+    /// двойной Alt срабатывает.
+    @objc func testRoutingMarkedSyntheticReturnDoesNotCancelPendingAltTap() {
+        let delegate = SpyDelegate()
+        let service = makeService(delegate: delegate)
+        service.handleKeyboardEvent(type: .flagsChanged, keyCode: 58, flags: [.maskAlternate], isRepeat: false, at: 1.0) // первый Alt-тап
+        service.handleKeyboardEvent(type: .keyDown, keyCode: 36, flags: [], isRepeat: false, at: 1.1,
+                                    event: makeReturnEvent(marked: true)) // пере-просмотр синтетики
+        XCTAssertEqual(delegate.enterPressedCount, 0)
+        service.handleKeyboardEvent(type: .flagsChanged, keyCode: 58, flags: [.maskAlternate], isRepeat: false, at: 1.2) // второй Alt-тап
+        XCTAssertEqual(delegate.altDoubleTapCount, 1) // первый тап жив → двойной Alt
     }
 
     /// Автоповтор зажатого Return — тоже enterKeyPressed (состояние уже
@@ -281,15 +317,25 @@ final class HotkeyServiceTests: XCTestCase {
         XCTAssertFalse(service.shouldSwallowEvent(type: .flagsChanged, keyCode: 36))
     }
 
-    /// Синтетический Return не глотается: предикат агента false во время
-    /// постинга (флаг isPostingSyntheticReturnKey) — контракт на уровне
-    /// делегата = false.
-    @objc func testSwallowDoesNotHoldDuringSyntheticPost() {
+    /// Синтетический Return (маркер SyntheticReturnMarker в поле события) НЕ
+/// глотается даже когда делегат отвечает «глотать» (вне .idle): маркер
+/// исключает событие ДО предиката — синтетика доходит до приложения.
+    @objc func testSwallowDoesNotHoldForMarkedSyntheticReturn() {
         let delegate = SpyDelegate()
-        delegate.swallowReturnKey = false
-        delegate.postingSyntheticReturn = true
+        delegate.swallowReturnKey = true // предикат «глотать» — как вне .idle
         let service = makeService(delegate: delegate)
-        XCTAssertFalse(service.shouldSwallowEvent(type: .keyDown, keyCode: 36))
+        XCTAssertFalse(service.shouldSwallowEvent(type: .keyDown, keyCode: 36,
+                                                  event: makeReturnEvent(marked: true)))
+    }
+
+    /// Немаркированный (физический) Return при том же предикате глотается —
+    /// маркер единственный знак отличия синтетики.
+    @objc func testSwallowStillHoldsForUnmarkedReturn() {
+        let delegate = SpyDelegate()
+        delegate.swallowReturnKey = true
+        let service = makeService(delegate: delegate)
+        XCTAssertTrue(service.shouldSwallowEvent(type: .keyDown, keyCode: 36,
+                                                 event: makeReturnEvent(marked: false)))
     }
 
     /// Делегат отсутствует — ничего не глотается (безопасный дефолт).

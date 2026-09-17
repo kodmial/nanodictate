@@ -43,6 +43,7 @@ let suites: [XCTestCase.Type] = [
     CookieRelayProviderTests.self,
     DebugDumpTests.self,
     EnterSendLatchTests.self,
+    ScheduledEnterPosterTests.self,
     OverlayControllerTests.self,
     OverlayLifecycleTests.self,
     NanoDictateFlowTests.self,

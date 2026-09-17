@@ -181,11 +181,16 @@ public enum Inserter {
         if let keyDown = CGEvent(keyboardEventSource: source,
                                  virtualKey: 36,
                                  keyDown: true) {
+            // Маркер СВОЕГО синтетического Return: наш session-тап видит
+            // событие повторно на следующей итерации run loop — по полю
+            // .eventSourceUserData он исключает его из роутинга и глотания.
+            SyntheticReturnMarker.mark(keyDown)
             post(keyDown, tap: .cghidEventTap)
         }
         if let keyUp = CGEvent(keyboardEventSource: source,
                                virtualKey: 36,
                                keyDown: false) {
+            SyntheticReturnMarker.mark(keyUp)
             post(keyUp, tap: .cghidEventTap)
         }
     }

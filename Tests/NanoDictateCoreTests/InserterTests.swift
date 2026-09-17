@@ -198,13 +198,16 @@ final class InserterTests: XCTestCase {
 
     /// Синтетический Enter (латч Enter-останова): ровно keyDown+keyUp клавиши
     /// Return (36) через общий post() — тестовый postHook считает события,
-    /// в активное приложение ничего не печатается.
+    /// в активное приложение ничего не печатается. Оба события помечены
+    /// маркером SyntheticReturnMarker: пере-просмотр тапом исключает их из
+    /// роутинга и глотания.
     @objc func testPostReturnKeyDownUpPostsKeyDownAndKeyUp() {
-        var posts: [(keyCode: Int64, isDown: Bool)] = []
+        var posts: [(keyCode: Int64, isDown: Bool, marker: Int64)] = []
         Inserter.postHook = { event, _ in
             posts.append((
                 event.getIntegerValueField(.keyboardEventKeycode),
-                event.type == .keyDown
+                event.type == .keyDown,
+                event.getIntegerValueField(.eventSourceUserData)
             ))
         }
         defer { Inserter.postHook = nil }
@@ -216,6 +219,7 @@ final class InserterTests: XCTestCase {
         XCTAssertTrue(posts[0].isDown)
         XCTAssertEqual(posts[1].keyCode, 36)
         XCTAssertFalse(posts[1].isDown)
+        XCTAssertTrue(posts.allSatisfy { $0.marker == SyntheticReturnMarker.token })
     }
 
     /// Постинг идёт через .cghidEventTap (общий post()) — тап-локация
