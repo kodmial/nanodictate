@@ -170,6 +170,31 @@ public enum Inserter {
         }
     }
 
+    /// Синтетический Enter (Return, kVK 36): keyDown + keyUp в .cghidEventTap.
+    /// Используется агентом ПОСЛЕ вставки текста, когда латч Enter-останова
+    /// стоит (Enter стопит запись → после распознавания и вставки постится
+    /// ровно один Enter). Идёт через общий post() — тестовый postHook и гейт
+    /// isTestRun применяются (в отличие от приватного postKey), так что
+    /// юнит-тесты считают события, не печатая в активное приложение.
+    public static func postReturnKeyDownUp() {
+        let source = CGEventSource(stateID: .hidSystemState)
+        if let keyDown = CGEvent(keyboardEventSource: source,
+                                 virtualKey: 36,
+                                 keyDown: true) {
+            // Маркер СВОЕГО синтетического Return: наш session-тап видит
+            // событие повторно на следующей итерации run loop — по полю
+            // .eventSourceUserData он исключает его из роутинга и глотания.
+            SyntheticReturnMarker.mark(keyDown)
+            post(keyDown, tap: .cghidEventTap)
+        }
+        if let keyUp = CGEvent(keyboardEventSource: source,
+                               virtualKey: 36,
+                               keyDown: false) {
+            SyntheticReturnMarker.mark(keyUp)
+            post(keyUp, tap: .cghidEventTap)
+        }
+    }
+
     private static func sendChunk(_ chunk: String, source: CGEventSource?) {
         let utf16 = Array(chunk.utf16)
 
