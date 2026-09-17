@@ -226,7 +226,11 @@ public final class AudioService {
         self.gain = InputGain(config: gainConfig)
         self.autoStopDetector = SilenceAutoStopDetector(
             silenceRMSThreshold: autoStopConfig.silenceRMSThreshold,
-            requiredSilenceDuration: autoStopConfig.requiredSilenceDuration
+            speechRMSThreshold: autoStopConfig.speechRMSThreshold,
+            requiredSilenceDuration: autoStopConfig.requiredSilenceDuration,
+            gracePeriod: autoStopConfig.gracePeriod,
+            minSpeechRun: autoStopConfig.minSpeechRun,
+            minRecordingDuration: autoStopConfig.minRecordingDuration
         )
         // Live-VAD живёт на тех же порогах, что оффлайн-сегментация записи:
         // один и тот же `silenceRMS`, одна и та же пауза `pauseDuration`.
@@ -308,9 +312,10 @@ public final class AudioService {
         let mic = MicrophoneAuth.statusText(AVCaptureDevice.authorizationStatus(for: .audio))
         Logger.log("mic permission: \(mic) (record start)", level: "info")
         Logger.log("record start: sampleRate=\(Int(targetFormat.sampleRate)) Hz, channels=\(targetFormat.channelCount), hwFormat=\(Int(hwFormat.sampleRate)) Hz", level: "info")
-        // Диагностика автоостановки: видно, включена ли фича и каким порогом
-        // (рубильник/длительность/порог из окружения — см. fromEnvironment).
-        Logger.log("record auto-stop: enabled=\(autoStopConfig.enabled), silence>=\(String(format: "%.1f", autoStopConfig.requiredSilenceDuration))s, rms<\(autoStopConfig.silenceRMSThreshold)", level: "info")
+        // Диагностика автоостановки: видно, включена ли фича, пара порогов
+        // гистерезиса, grace, гейт «речь была» и пол записи (все значения из
+        // окружения — см. fromEnvironment).
+        Logger.log("record auto-stop: enabled=\(autoStopConfig.enabled), speech>=\(autoStopConfig.speechRMSThreshold), silence<\(autoStopConfig.silenceRMSThreshold), silence>=\(String(format: "%.1f", autoStopConfig.requiredSilenceDuration))s, grace=\(String(format: "%.1f", autoStopConfig.gracePeriod))s, gate>=\(String(format: "%.1f", autoStopConfig.minSpeechRun))s, minRecord=\(String(format: "%.1f", autoStopConfig.minRecordingDuration))s", level: "info")
         // Диагностика AGC: видно, включено ли усиление и какими параметрами
         // (рубильник/цель/потолок из окружения — см. InputGainConfig.fromEnvironment).
         Logger.log("record input-gain: enabled=\(gain.config.enabled), target=\(String(format: "%.1f", gain.config.targetRmsDb)) dBFS, max=\(String(format: "%.1f", gain.config.maxGainDb)) dB", level: "info")
