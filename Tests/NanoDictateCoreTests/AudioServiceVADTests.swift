@@ -654,7 +654,7 @@ final class AudioServiceVADTests: XCTestCase {
         XCTAssertFalse(box.deliveries[1].isTail)
         let seg1 = box.deliveries[0].samples
         let seg2 = box.deliveries[1].samples
-        XCTAssertTrue(seg1.count > 7500 && seg1.count < 9100, "сегмент 1: речь + пост-ролл 0.25 c")
+        XCTAssertTrue(seg1.count > 7500 && seg1.count < 9100, "сегмент 1: речь + пост-ролл 0.25 c (count=\(seg1.count))")
         XCTAssertTrue(seg2.count > 10000 && seg2.count < 13000,
             "сегмент 2: свою речь + пост-ролл (замер 11889 с полным звоном)")
         XCTAssertTrue(seg2.contains { abs(Int($0)) >= 3000 },
