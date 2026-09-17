@@ -89,11 +89,12 @@ final class AudioServiceVADTests: XCTestCase {
     private func makeLiveService(
         engine: FakeEngine,
         pause: TimeInterval = 0.2,
-        autoStop: AutoStopConfig = .defaults
+        autoStop: AutoStopConfig = .defaults,
+        gain: InputGainConfig = .defaults
     ) -> AudioService {
         var config = AudioSegmenterConfig.defaults
         config.pauseDuration = pause
-        return AudioService(logLevel: "info", engine: engine, segmenterConfig: config, autoStopConfig: autoStop)
+        return AudioService(logLevel: "info", engine: engine, segmenterConfig: config, autoStopConfig: autoStop, gainConfig: gain)
     }
 
     private func runStart(_ service: AudioService) -> Bool {
@@ -633,7 +634,12 @@ final class AudioServiceVADTests: XCTestCase {
     /// сливается с первой (регресс: «сказал чуть-чуть ещё — и ничего»).
     @objc func testAfterLongPauseNewSpeechDeliversSeparateSegment() {
         let engine = FakeEngine()
-        let service = makeLiveService(engine: engine)
+        // AGC изолирован: тест проверяет СЕМАНТИКУ VAD (пауза ≥ порога рвёт
+        // уттеренс), а не усиление. Включённый AGC легитимно дотягивает звон
+        // конвертера на стыке «речь→тишина» (−37 dBFS) до речевого уровня —
+        // границы сегмента сдвигаются, и здесь это только шум для ассертов.
+        // Усиление покрыто отдельно в InputGainTests.
+        let service = makeLiveService(engine: engine, gain: InputGainConfig(enabled: false))
         let box = DeliveryBox()
         service.onSpeechSegment = { s, t in box.add(s, isTail: t) }
 
@@ -654,7 +660,7 @@ final class AudioServiceVADTests: XCTestCase {
         XCTAssertFalse(box.deliveries[1].isTail)
         let seg1 = box.deliveries[0].samples
         let seg2 = box.deliveries[1].samples
-        XCTAssertTrue(seg1.count > 7500 && seg1.count < 9100, "сегмент 1: речь + пост-ролл 0.25 c")
+        XCTAssertTrue(seg1.count > 7500 && seg1.count < 9100, "сегмент 1: речь + пост-ролл 0.25 c (count=\(seg1.count))")
         XCTAssertTrue(seg2.count > 10000 && seg2.count < 13000,
             "сегмент 2: свою речь + пост-ролл (замер 11889 с полным звоном)")
         XCTAssertTrue(seg2.contains { abs(Int($0)) >= 3000 },

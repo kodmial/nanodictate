@@ -18,6 +18,7 @@ setenv("DICTATION_TESTS", "1", 1)
 
 let suites: [XCTestCase.Type] = [
     HotkeyServiceTests.self,
+    InputGainTests.self,
     AudioMetricsTests.self,
     AudioCaptureTests.self,
     AudioServiceLifecycleTests.self,

@@ -160,6 +160,12 @@ public final class AudioService {
     /// Первый буфер сеанса логируется отдельно (debug): длительность и энергия
     /// показывают, пошёл ли реально звук в движок после старта.
     private var didLogFirstBuffer = false
+    /// Цифровое усиление входа (AGC): применяется к Float32-буферу ПОСЛЕ
+    /// конвертации в 16 кГц/моно и ДО Int16-конверсии/метрики уровня — все
+    /// потребители (анимация уровня, live-VAD, автостоп, запись) видят уже
+    /// усиленный сигнал. Конфиг из окружения (`DICTATION_GAIN_*`), рубильник
+    /// `DICTATION_GAIN_DISABLED=1` пропускает буфер без изменений.
+    private let gain: InputGain
 
     // MARK: - Live-VAD (пошаговая диктовка)
 
@@ -211,11 +217,13 @@ public final class AudioService {
         logLevel: String = "info",
         engine: AudioEngineLike? = nil,
         segmenterConfig: AudioSegmenterConfig = .defaults,
-        autoStopConfig: AutoStopConfig = .defaults
+        autoStopConfig: AutoStopConfig = .defaults,
+        gainConfig: InputGainConfig = .fromEnvironment()
     ) {
         self.logLevel = logLevel
         self.engine = engine ?? AVAudioEngine()
         self.autoStopConfig = autoStopConfig
+        self.gain = InputGain(config: gainConfig)
         self.autoStopDetector = SilenceAutoStopDetector(
             silenceRMSThreshold: autoStopConfig.silenceRMSThreshold,
             requiredSilenceDuration: autoStopConfig.requiredSilenceDuration
@@ -274,6 +282,7 @@ public final class AudioService {
         limitStopScheduled = false
         autoStopScheduled = false
         autoStopDetector.reset()
+        gain.reset() // новый сеанс — с нулевого усиления, без остатка прошлой записи
         liveLastCutIndex = 0
         resetLiveVADLocked()
         lock.unlock()
@@ -302,6 +311,9 @@ public final class AudioService {
         // Диагностика автоостановки: видно, включена ли фича и каким порогом
         // (рубильник/длительность/порог из окружения — см. fromEnvironment).
         Logger.log("record auto-stop: enabled=\(autoStopConfig.enabled), silence>=\(String(format: "%.1f", autoStopConfig.requiredSilenceDuration))s, rms<\(autoStopConfig.silenceRMSThreshold)", level: "info")
+        // Диагностика AGC: видно, включено ли усиление и какими параметрами
+        // (рубильник/цель/потолок из окружения — см. InputGainConfig.fromEnvironment).
+        Logger.log("record input-gain: enabled=\(gain.config.enabled), target=\(String(format: "%.1f", gain.config.targetRmsDb)) dBFS, max=\(String(format: "%.1f", gain.config.maxGainDb)) dB", level: "info")
 
         // Хлебные крошки перед каждым шагом старта движка: если следующий вызов
         // AVFoundation крэшнет, последняя строка лога укажет точное место.
@@ -594,14 +606,26 @@ public final class AudioService {
         let converted = result.converted
         let frameLength = Int(converted.frameLength)
 
-        // RMS для анимации
+        // RMS ДО усиления — вход AGC: «сколько дБ не хватает до целевого
+        // уровня речи» (метеорология по сырому сигналу тапа).
         var sum: Float = 0
         for i in 0..<frameLength {
             let s = channel[i]
             sum += s * s
         }
         let rms = frameLength > 0 ? sqrt(sum / Float(frameLength)) : 0
-        levelDelegate?.audioLevelChanged(rms: rms)
+        // Цифровое усиление (AGC) — здесь, изменением буфера на месте: все
+        // потребители ниже (метрика уровня, live-VAD, автостоп, запись в Int16)
+        // видят уже усиленный сигнал. Уровень для метрик пересчитывается из
+        // усиленного буфера (с учётом клампа пиков); при выключенном AGC
+        // (`DICTATION_GAIN_DISABLED=1`) буфер проходит без изменений, метрика = rms.
+        let meteredRms = gain.apply(
+            to: channel,
+            frameLength: frameLength,
+            rms: rms,
+            sampleRate: Int(targetFormat.sampleRate)
+        )
+        levelDelegate?.audioLevelChanged(rms: meteredRms)
 
         // Вся общая память (isRecording, collectedSamples, rmsHistory, лимит,
         // live-VAD) — под блокировкой: stop()/cancel() снимают снимок на
@@ -614,7 +638,7 @@ public final class AudioService {
         }
         // История RMS по буферам — для сводных метрик уровня в конце записи.
         // 60 c при буфере 4096 фреймов и 48 кГц ≈ 700 значений — памятью не жертвуем.
-        rmsHistory.append(rms)
+        rmsHistory.append(meteredRms)
 
         // Первый буфер сеанса — доказательство, что звук реально пошёл в движок
         // (длительность куска и его энергия; при сломанном микрофоне rms ≈ 0).
@@ -624,8 +648,8 @@ public final class AudioService {
                 Logger.log(String(
                     format: "record first buffer: inFrames=%d (%.3f s @ %.0f Hz), outFrames=%d, rms=%.4f (%.1f dBFS)",
                     buffer.frameLength, Double(buffer.frameLength) / buffer.format.sampleRate,
-                    buffer.format.sampleRate, frameLength, rms,
-                    AudioMetrics.dbfs(rms)
+                    buffer.format.sampleRate, frameLength, meteredRms,
+                    AudioMetrics.dbfs(meteredRms)
                 ), level: "debug")
             }
         }
@@ -673,7 +697,7 @@ public final class AudioService {
             self.resetLiveVADLocked()
         }
 
-        if rms < liveSilenceRMS {
+        if meteredRms < liveSilenceRMS {
             if liveUtteranceStart != nil {
                 // Пауза внутри уттеренса: открываем. Уттеренс закрывается
                 // ПОЛНОЙ паузой pauseDuration (как раньше) — либо микро-паузой
@@ -717,7 +741,7 @@ public final class AudioService {
         // железа (~85 мс @ 48 кГц, ~93 мс @ 44.1 кГц), а «3 секунды тишины»
         // меряются по звуку.
         let autoStopFired = autoStopConfig.enabled && !shouldStop && autoStopDetector.feed(
-            rms: rms,
+            rms: meteredRms,
             duration: Double(frameLength) / Double(targetFormat.sampleRate)
         )
         lock.unlock()
