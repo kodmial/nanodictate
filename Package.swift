@@ -2,14 +2,14 @@
 import PackageDescription
 
 let package = Package(
-    name: "AltDictation",
+    name: "NanoDictate",
     platforms: [
         .macOS(.v12)
     ],
     products: [
-        .library(name: "DictationCore", targets: ["DictationCore"]),
-        .executable(name: "DictatorAgent", targets: ["DictatorAgent"]),
-        .executable(name: "dictatorctl", targets: ["dictatorctl"])
+        .library(name: "NanoDictateCore", targets: ["NanoDictateCore"]),
+        .executable(name: "NanoDictateAgent", targets: ["NanoDictateAgent"]),
+        .executable(name: "nanodictate", targets: ["nanodictate"])
     ],
     targets: [
         // ObjC-шлюз NSException AVFAudio: SPM 5.7 не допускает подмешивание
@@ -19,25 +19,25 @@ let package = Package(
             publicHeadersPath: "include"
         ),
         .target(
-            name: "DictationCore",
+            name: "NanoDictateCore",
             dependencies: ["AudioEngineGuard"]
         ),
         .executableTarget(
-            name: "DictatorAgent",
-            dependencies: ["DictationCore"]
+            name: "NanoDictateAgent",
+            dependencies: ["NanoDictateCore"]
         ),
         .executableTarget(
-            name: "dictatorctl",
-            dependencies: ["DictationCore"]
+            name: "nanodictate",
+            dependencies: ["NanoDictateCore"]
         ),
         // Компактный раннер тестов: на этой машине нет Xcode / XCTest.framework,
         // поэтому `swift test` физически не работает ("XCTest not available").
         // Исполняемый таргет прогоняет те же проверки и завершается с ненулевым
-        // кодом при первом упавшем тесте: `swift run DictationCoreTests`.
+        // кодом при первом упавшем тесте: `swift run NanoDictateCoreTests`.
         .executableTarget(
-            name: "DictationCoreTests",
-            dependencies: ["DictationCore", "AudioEngineGuard"],
-            path: "Tests/DictationCoreTests"
+            name: "NanoDictateCoreTests",
+            dependencies: ["NanoDictateCore", "AudioEngineGuard"],
+            path: "Tests/NanoDictateCoreTests"
         )
     ]
 )

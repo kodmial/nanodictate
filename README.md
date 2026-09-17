@@ -1,4 +1,4 @@
-# AltDictation
+# NanoDictate
 
 On-screen dictation for macOS, triggered by a double-tap of the **Alt** key.
 Press **Alt** twice, speak, press **Alt** twice again — the recognized text is
@@ -8,19 +8,19 @@ Built as a Swift Package Manager package (`swift-tools-version:5.7`, macOS 12+).
 
 ## Components
 
-- **DictationCore** — shared library with the core dictation logic (recording,
+- **NanoDictateCore** — shared library with the core dictation logic (recording,
   STT, overlay, text insertion, provider adapters, silence auto-stop, batch
   transcription).
-- **DictatorAgent** — background LaunchAgent daemon that listens for the
+- **NanoDictateAgent** — background LaunchAgent daemon that listens for the
   trigger, shows the overlay, and performs the dictation work.
-- **dictatorctl** — command-line control utility and interactive TUI status
+- **nanodictate** — command-line control utility and interactive TUI status
   menu (start/stop the agent, inspect config, pick providers, transcribe
   files, show logs).
 
 ## Features
 
 - Double-**Alt** start/stop dictation; **Esc** cancels.
-- Interactive TUI status menu (`dictatorctl`) with agent state, provider list,
+- Interactive TUI status menu (`nanodictate`) with agent state, provider list,
   log viewer, and language toggle as the first menu item.
 - Bilingual UI (English and Russian); set `ui_language = "en"` or `"ru"` in
   config (default: `"en"`).
@@ -30,8 +30,8 @@ Built as a Swift Package Manager package (`swift-tools-version:5.7`, macOS 12+).
 - Undo window: a double-**Alt** shortly after an insertion removes it.
 - Silence auto-stop (~3 s of quiet) with configurable duration and RMS
   threshold; environment variables
-  `DICTATION_AUTOSTOP_DISABLED`, `DICTATION_AUTOSTOP_DURATION`,
-  `DICTATION_AUTOSTOP_RMS`.
+  `NANODICTATE_AUTOSTOP_DISABLED`, `NANODICTATE_AUTOSTOP_DURATION`,
+  `NANODICTATE_AUTOSTOP_RMS`.
 - Push-to-talk mode (external script: `ptt.sh`).
 - Batch file transcription with chunked segments, parallel workers, pause
   cutting, checkpoint/resume, and a progress bar.
@@ -52,8 +52,8 @@ Built as a Swift Package Manager package (`swift-tools-version:5.7`, macOS 12+).
 - Optional review gate (`review_before_insert`) — confirm the text in the
   terminal before it is typed.
 - Auto-failover between providers (`auto_failover`) and manual retry
-  (`dictatorctl retry <provider>`).
-- TOML configuration at `~/.config/dictation/config.toml`.
+  (`nanodictate retry <provider>`).
+- TOML configuration at `~/.config/nanodictate/config.toml`.
 
 ## Build & Test
 
@@ -69,46 +69,46 @@ Run the test suite (659 tests):
 zsh /private/tmp/dct-verify/build_all.sh
 ```
 
-The test runner is a standalone executable target (`DictationCoreTests`) that
+The test runner is a standalone executable target (`NanoDictateCoreTests`) that
 replaces `swift test` (which does not work without XCTest in this project
 layout). Individual tests can also be run with
-`swift run DictationCoreTests`.
+`swift run NanoDictateCoreTests`.
 
 ## Install & Run
 
-### LaunchAgent (DictatorAgent)
+### LaunchAgent (NanoDictateAgent)
 
 ```sh
 # Install and start the LaunchAgent
-dictatorctl start
+nanodictate start
 
 # Check status
-dictatorctl status
+nanodictate status
 
 # Stop the agent
-dictatorctl stop
+nanodictate stop
 ```
 
-The agent installs a plist template (`Resources/dictation-agent.plist.template`)
-as `~/Library/LaunchAgents/com.dictation.agent.plist` and bootstraps it into
+The agent installs a plist template (`Resources/nanodictate-agent.plist.template`)
+as `~/Library/LaunchAgents/com.nanodictate.agent.plist` and bootstraps it into
 `launchd`. The `start` command is idempotent.
 
-### CLI & TUI (dictatorctl)
+### CLI & TUI (nanodictate)
 
 ```sh
-dictatorctl start | stop | status
-dictatorctl config init [--force]         # create default config.toml
-dictatorctl config path                   # show config path
-dictatorctl config set-key <provider>     # set API key interactively
-dictatorctl provider list                 # list configured providers
-dictatorctl provider use <name>           # set active provider
-dictatorctl routing show                  # show routing roles
-dictatorctl routing set segment <name>    # set segment provider
-dictatorctl routing set final <name>      # set final provider
-dictatorctl transcribe FILE [--json]      # one-shot file transcription
-dictatorctl retry <provider>              # retry last recording
-dictatorctl last                          # show last transcription
-dictatorctl logs                          # last 50 log lines
+nanodictate start | stop | status
+nanodictate config init [--force]         # create default config.toml
+nanodictate config path                   # show config path
+nanodictate config set-key <provider>     # set API key interactively
+nanodictate provider list                 # list configured providers
+nanodictate provider use <name>           # set active provider
+nanodictate routing show                  # show routing roles
+nanodictate routing set segment <name>    # set segment provider
+nanodictate routing set final <name>      # set final provider
+nanodictate transcribe FILE [--json]      # one-shot file transcription
+nanodictate retry <provider>              # retry last recording
+nanodictate last                          # show last transcription
+nanodictate logs                          # last 50 log lines
 ```
 
 The TUI status menu launches automatically when stdout is a TTY. It shows
@@ -117,9 +117,9 @@ agent state, provider info, log tail, and supports keyboard navigation
 
 ### Configuration
 
-Config path: `~/.config/dictation/config.toml` (chmod 600, atomic writes).
+Config path: `~/.config/nanodictate/config.toml` (chmod 600, atomic writes).
 
-Example template (created by `dictatorctl config init`):
+Example template (created by `nanodictate config init`):
 
 ```toml
 # active_provider = "openai"
@@ -128,25 +128,25 @@ Example template (created by `dictatorctl config init`):
 name = "OpenAI"
 base_url = "https://api.openai.com/v1/audio/transcriptions"
 model = "whisper-1"
-api_key_file = "~/.config/dictation/keys/openai.txt"
+api_key_file = "~/.config/nanodictate/keys/openai.txt"
 
 [providers.groq]
 name = "Groq"
 base_url = "https://api.groq.com/openai/v1/audio/transcriptions"
 model = "whisper-large-v3"
-api_key_file = "~/.config/dictation/keys/groq.txt"
+api_key_file = "~/.config/nanodictate/keys/groq.txt"
 
 [providers.deepgram]
 name = "Deepgram"
 base_url = "https://api.deepgram.com/v1/listen"
 model = "nova-3"
-api_key_file = "~/.config/dictation/keys/deepgram.txt"
+api_key_file = "~/.config/nanodictate/keys/deepgram.txt"
 
 [providers.giga-chat]
 name = "GigaChat"
 base_url = "https://your-gigachat-endpoint.example.com/api/v1/audio/transcriptions"
 model = "GigaChat"
-api_key_file = "~/.config/dictation/keys/giga-chat.txt"
+api_key_file = "~/.config/nanodictate/keys/giga-chat.txt"
 api_secret = ""
 
 [providers.local]
@@ -195,7 +195,7 @@ Top-level options:
 
 **Secrets.** API keys go in `api_key` (inline) or `api_key_file` (file
 path; first non-empty line is used; `chmod 600`). The environment variable
-`DICTATION_API_KEY` overrides both and is never written to the config file.
+`NANODICTATE_API_KEY` overrides both and is never written to the config file.
 Provider-specific: `api_secret` is used for GigaChat OAuth.
 
 ### Permissions
@@ -205,10 +205,10 @@ Privacy & Security**:
 
 - **Microphone** — required for audio capture.
 - **Accessibility** — required for the global hotkey and text insertion.
-- **Input Monitoring** — keyboard-event monitoring (add `DictatorAgent` if
+- **Input Monitoring** — keyboard-event monitoring (add `NanoDictateAgent` if
   the hotkey does not fire).
 
-Add the *signed* binary (`.build/debug/DictatorAgent`) to each list. The
+Add the *signed* binary (`.build/debug/NanoDictateAgent`) to each list. The
 path changes after a rebuild with a different signature — see
 [Code Signing](#code-signing).
 
@@ -246,11 +246,11 @@ runtime.
 Package.swift                        # swift-tools-version:5.7, macOS 12+
 Sources/
   AudioEngineGuard/                  # ObjC clang target (NSException + AVFAudio bridge)
-  DictationCore/                     # Core library (Config, STT, AudioService, BatchTranscriber, L10n, …)
-  DictatorAgent/                     # LaunchAgent executable
-  dictatorctl/                       # CLI + TUI executable
+  NanoDictateCore/                     # Core library (Config, STT, AudioService, BatchTranscriber, L10n, …)
+  NanoDictateAgent/                     # LaunchAgent executable
+  nanodictate/                       # CLI + TUI executable
 Tests/
-  DictationCoreTests/                # Standalone test runner (659 tests)
+  NanoDictateCoreTests/                # Standalone test runner (659 tests)
 Resources/
   *.entitlements                     # Code signing entitlements
   *.plist.template                   # LaunchAgent plist template
@@ -265,12 +265,12 @@ zsh /private/tmp/dct-verify/build_all.sh
 Or run the test executable directly:
 
 ```sh
-swift run DictationCoreTests
+swift run NanoDictateCoreTests
 ```
 
 ## Deploy (MCP Server)
 
-The `mcp/dictation-deploy-mcp-server/` directory contains an MCP server
+The `mcp/nanodictate-deploy-mcp-server/` directory contains an MCP server
 (Model Context Protocol, stdio transport) that automates build, code signing,
 and agent restart. It preserves TCC (Microphone/Accessibility) grants by
 using a fixed signing identity and fixed entitlements across rebuilds.
@@ -285,7 +285,7 @@ Tools provided:
 | `dictation_restart` | Restart the LaunchAgent (`launchctl kickstart -k`).                  |
 | `dictation_status`  | Process state, launchd state, code signature details.                |
 
-See [`mcp/dictation-deploy-mcp-server/README.md`](mcp/dictation-deploy-mcp-server/README.md)
+See [`mcp/nanodictate-deploy-mcp-server/README.md`](mcp/nanodictate-deploy-mcp-server/README.md)
 for setup and usage details.
 
 ### Code Signing
@@ -294,7 +294,7 @@ macOS TCC grants (Microphone, Accessibility, Input Monitoring) are keyed to
 the binary's code signature (cdhash). Ad-hoc signing on every rebuild
 produces a new signature and resets all grants.
 
-The MCP server uses a fixed identity **"Dictation Code Signing"** (a
+The MCP server uses a fixed identity **"NanoDictate Code Signing"** (a
 self-signed certificate created once via Keychain Access > Certificate
 Assistant) with fixed entitlements files (`Resources/*.entitlements`) and
 `codesign --force --options runtime`. Same identity + same entitlements +
@@ -304,7 +304,7 @@ To create the signing certificate:
 
 1. Open **Keychain Access** > **Certificate Assistant** > **Create a
    Certificate...**
-2. Name: `Dictation Code Signing`
+2. Name: `NanoDictate Code Signing`
 3. Identity Type: **Self-Signed Root**
 4. Certificate Type: **Code Signing**
 5. Create, then sign/redeploy via the MCP server.
@@ -315,36 +315,36 @@ above.
 
 ## Troubleshooting
 
-- **Agent not running / hotkey dead** — check with `dictatorctl status`;
-  restart with `dictatorctl stop && dictatorctl start`. Or use launchctl
+- **Agent not running / hotkey dead** — check with `nanodictate status`;
+  restart with `nanodictate stop && nanodictate start`. Or use launchctl
   directly:
   ```sh
-  launchctl print gui/$(id -u)/com.dictation.agent
-  launchctl kickstart -k gui/$(id -u)/com.dictation.agent
+  launchctl print gui/$(id -u)/com.nanodictate.agent
+  launchctl kickstart -k gui/$(id -u)/com.nanodictate.agent
   ```
-- **Logs** — `~/Library/Logs/Dictation/agent.log`
-  (`dictatorctl logs` prints the last 50 lines; `tail -f` for live).
+- **Logs** — `~/Library/Logs/NanoDictate/agent.log`
+  (`nanodictate logs` prints the last 50 lines; `tail -f` for live).
   Set `log_level = "debug"` for verbose output; STT request/response
-  dumps go to `~/Library/Logs/Dictation/transcriber-debug.log`.
+  dumps go to `~/Library/Logs/NanoDictate/transcriber-debug.log`.
 - **Permissions re-requested after every rebuild** — binary was re-signed
   with a different identity; use a stable signing certificate (see
   [Code Signing](#code-signing)) and re-grant once.
 - **STT timeout / no internet** — check `base_url`, `model`, network
   connection, and proxy transport settings.
 - **Config errors** — the agent logs the offending file and line;
-  `dictatorctl config --show-file` prints parsed config with secrets
+  `nanodictate config --show-file` prints parsed config with secrets
   masked.
 
 ## Uninstall
 
 ```sh
-dictatorctl stop
-rm ~/Library/LaunchAgents/com.dictation.agent.plist
-rm -rf ~/.config/dictation           # config and key files
-rm -rf ~/Library/Logs/Dictation
-rm -f /usr/local/bin/dictatorctl     # symlink (if created by the MCP server)
+nanodictate stop
+rm ~/Library/LaunchAgents/com.nanodictate.agent.plist
+rm -rf ~/.config/nanodictate           # config and key files
+rm -rf ~/Library/Logs/NanoDictate
+rm -f /usr/local/bin/nanodictate     # symlink (if created by the MCP server)
 ```
 
 ## License
 
-[MIT](LICENSE) — Copyright (c) 2026 AltDictation contributors.
+[MIT](LICENSE) — Copyright (c) 2026 NanoDictate contributors.

@@ -5,7 +5,7 @@
 
 #import "AudioEngineExceptionGuard.h"
 
-NSError *DictationRunAudioEngineBlockGuarded(void (^block)(void)) {
+NSError *NanoDictateRunAudioEngineBlockGuarded(void (^block)(void)) {
     @try {
         block();
         return nil;
@@ -17,14 +17,14 @@ NSError *DictationRunAudioEngineBlockGuarded(void (^block)(void)) {
         if (exception.reason) {
             userInfo[@"NSExceptionReason"] = exception.reason;
         }
-        return [NSError errorWithDomain:@"Domain.Dictation.AudioEngine"
+        return [NSError errorWithDomain:@"Domain.NanoDictate.AudioEngine"
                                    code:1
                                userInfo:userInfo];
     }
 }
 
-void DictationRaiseAudioEngineTestException(void) {
-    @throw [NSException exceptionWithName:@"DictationTestException"
+void NanoDictateRaiseAudioEngineTestException(void) {
+    @throw [NSException exceptionWithName:@"NanoDictateTestException"
                                    reason:@"intentional raise for unit test"
                                  userInfo:nil];
 }

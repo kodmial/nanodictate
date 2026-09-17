@@ -15,9 +15,9 @@ config.local.toml
 *.local.toml
 
 # Copies of the LaunchAgent plist (original lives in Resources/)
-com.dictation.*.plist
-com.dictation.agent.plist
-Resources/dictation-agent.plist
+com.nanodictate.*.plist
+com.nanodictate.agent.plist
+Resources/nanodictate-agent.plist
 
 # Local secrets / temp credentials (never commit)
 *.keys

@@ -30,7 +30,7 @@ jobs:
 
       # The tests are a plain executable product (no .xctest bundle): without
       # Xcode, `swift test` is unavailable, so `swift run` executes the custom
-      # runner (Tests/DictationCoreTests/main.swift), which exits non-zero if
+      # runner (Tests/NanoDictateCoreTests/main.swift), which exits non-zero if
       # any test fails.
       - name: Run tests
-        run: swift run DictationCoreTests
+        run: swift run NanoDictateCoreTests
