@@ -238,6 +238,7 @@ final class BatchTranscriberTests: XCTestCase {
         // цепочка не выстраивается — prompt всегда nil.
         let samples = tone(4, sampleRate: 1000)
         var prompts: [String?] = []
+        let lock = NSLock()
         let outcome = try runAsync {
             try await BatchTranscriber.run(
                 samples: samples,
@@ -247,7 +248,9 @@ final class BatchTranscriberTests: XCTestCase {
                 providerID: "gigaam",
                 sourceFile: "x.wav",
                 sendOne: { _, _, index, prompt in
+                    lock.lock()
                     prompts.append(prompt)
+                    lock.unlock()
                     return "текст \(index)"
                 },
                 delay: { try await self.instantDelay($0) },
