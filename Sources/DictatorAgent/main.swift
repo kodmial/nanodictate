@@ -1520,6 +1520,50 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
 
 // MARK: - Main
 
+/// Исключительный flock-лок синглтона: <tmp>/dictation-agent-<uid>.lock.
+/// fd живёт в глобальной переменной весь процесс — лок снимается только при
+/// завершении процесса. Второй инстанс (дубль launchd-старта) НЕ выходит из
+/// процесса: оба LaunchAgent держат KeepAlive=true, и чистый exit ушёл бы в
+/// бесконечный респавн. Вместо выхода — пассивное ожидание на главном run loop.
+var instanceLockFD: Int32 = -1
+
+/// Пытается занять singleton-лок. true — лок взят, сервисы можно стартовать;
+/// false — уже работает другой инстанс (залогировано), процесс должен
+/// простаивать, ничего не запуская.
+@discardableResult
+func ensureSingleInstance() -> Bool {
+    let lockPath = FileManager.default.temporaryDirectory
+        .appendingPathComponent("dictation-agent-\(getuid()).lock").path
+    let fd = lockPath.withCString { Darwin.open($0, O_CREAT | O_RDWR, mode_t(0o600)) }
+    guard fd >= 0 else {
+        let error = errno
+        Logger.log("single-instance lock open failed (errno \(error)): \(String(cString: strerror(error)))", level: "error")
+        exit(1)
+    }
+    guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+        let error = errno
+        guard error == EWOULDBLOCK else {
+            Logger.log("single-instance lock failed (errno \(error)): \(String(cString: strerror(error)))", level: "error")
+            close(fd)
+            exit(1)
+        }
+        Logger.log("another dictation agent instance already running — entering idle wait", level: "info")
+        close(fd)
+        return false
+    }
+    instanceLockFD = fd
+    return true
+}
+
+// Singleton-гейт — первый исполняемый код, ДО загрузки конфига и ДО любых
+// сервисов (HotkeyService, микрофон, STT, CGEvent-тап, observer'ы).
+guard ensureSingleInstance() else {
+    // Второй инстанс уже работает — пассивно ждём на главной dispatch queue.
+    // dispatchMain() не требует run loop source и никогда не возвращается.
+    dispatchMain()
+    fatalError("unreachable: dispatchMain() returned")
+}
+
 let config: AppConfig
 do {
     config = try AppConfig.load(from: nil)
