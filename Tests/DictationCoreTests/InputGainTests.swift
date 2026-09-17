@@ -291,6 +291,19 @@ final class InputGainTests: XCTestCase {
         XCTAssertEqual(config, .defaults, "некорректные значения — конфигурация по умолчанию")
     }
 
+    /// Значения из env, формально прошедшие валидацию, всё равно проходят
+    /// init-кламп (−120…−1 и 1…60): env не нарушает инварианты конфига
+    /// (`MAX_DB=0.5` — потолок ниже init-минимума, `TARGET_DB=-0.5` — цель
+    /// почти у полной шкалы, постоянный клип).
+    @objc func testFromEnvironmentValuesAreClampedByInit() {
+        let config = InputGainConfig.fromEnvironment([
+            "DICTATION_GAIN_TARGET_DB": "-0.5",
+            "DICTATION_GAIN_MAX_DB": "0.5",
+        ])
+        XCTAssertEqual(config.targetRmsDb, -1, accuracy: 0.000001, "init-кламп цели")
+        XCTAssertEqual(config.maxGainDb, 1, accuracy: 0.000001, "init-кламп потолка")
+    }
+
     // MARK: - Отключённая фича: буфер проходит без изменений
 
     /// DICTATION_GAIN_DISABLED → InputGain с enabled=false: apply не трогает

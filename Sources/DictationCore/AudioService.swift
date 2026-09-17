@@ -583,6 +583,11 @@ public final class AudioService {
     }
 
     private func process(_ buffer: AVAudioPCMBuffer) {
+        // Ранний гард «идёт ли запись» ДО конвертации и AGC: после stop()/start()
+        // поздний буфер старого тапа не должен трогать state InputGain — reset()
+        // нового сеанса (engineQueue, под lock) и apply (аудио-поток) не
+        // пересекаются (гард ниже на 635 остаётся — защита задублирована).
+        guard isRecording else { return }
         // После принудительной остановки (лимит или автоостановка по тишине)
         // «хвост» не записываем: буфер в памяти дальше не растёт.
         guard !limit.isExhausted, !autoStopScheduled else { return }

@@ -72,19 +72,32 @@ public struct InputGainConfig: Equatable {
     public static func fromEnvironment(
         _ env: [String: String] = ProcessInfo.processInfo.environment
     ) -> InputGainConfig {
-        var config = InputGainConfig.defaults
+        var enabled = InputGainConfig.defaults.enabled
+        var target = InputGainConfig.defaults.targetRmsDb
+        var maxGain = InputGainConfig.defaults.maxGainDb
         if env["DICTATION_GAIN_DISABLED"].map(parseDisabledFlag) ?? false {
-            config.enabled = false
+            enabled = false
         }
         if let raw = env["DICTATION_GAIN_TARGET_DB"],
-           let d = Double(raw), d < 0, d > -120 {
-            config.targetRmsDb = Float(d)
+           let d = Double(raw), d.isFinite, d < 0, d > -120 {
+            target = Float(d)
         }
         if let raw = env["DICTATION_GAIN_MAX_DB"],
-           let d = Double(raw), d > 0, d <= 60 {
-            config.maxGainDb = Float(d)
+           let d = Double(raw), d.isFinite, d > 0, d <= 60 {
+            maxGain = Float(d)
         }
-        return config
+        // Итог строится через init — НАСТОЯЩИЙ кламп (−120…−1 и 1…60) тот же,
+        // что у прямых вызовов init: env не может нарушить инварианты конфига
+        // (например `DICTATION_GAIN_MAX_DB=0.5` не задаст потолок ниже init-минимума).
+        var base = InputGainConfig.defaults
+        base.enabled = enabled
+        return InputGainConfig(
+            enabled: enabled,
+            targetRmsDb: target,
+            maxGainDb: maxGain,
+            attackTime: base.attackTime,
+            releaseTime: base.releaseTime
+        )
     }
 
     /// Признак «AGC выключен» для `DICTATION_GAIN_DISABLED`.

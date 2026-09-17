@@ -1,6 +1,21 @@
 import Foundation
 @testable import DictationCore
 
+// Потокобезопасный коллектор для параллельных воркеров: append из TaskGroup
+// без синхронизации гоняется и теряет записи (см. testParallelPassesNilPrompt).
+final class LockedPrompts {
+    private let lock = NSLock()
+    private var storage: [String?] = []
+    func append(_ value: String?) {
+        lock.lock(); defer { lock.unlock() }
+        storage.append(value)
+    }
+    var values: [String?] {
+        lock.lock(); defer { lock.unlock() }
+        return storage
+    }
+}
+
 // MARK: - Тесты BatchTranscriber (ретраи, плейсхолдеры, чекпоинт/resume)
 //
 // Сеть и сон инъецируются: sendOne/delay — замыкания, чекпоинт — реальный
@@ -237,7 +252,10 @@ final class BatchTranscriberTests: XCTestCase {
         // Параллельный путь (maxConcurrent > 1): порядок воркеров произвольный,
         // цепочка не выстраивается — prompt всегда nil.
         let samples = tone(4, sampleRate: 1000)
-        var prompts: [String?] = []
+        // Коллектор защёлкой: sendOne вызывается из параллельных воркеров,
+        // несинхронизированный append гоняется и теряет записи (пре-экзистентный
+        // флейк: prompts.count == 1 вместо 2).
+        let prompts = LockedPrompts()
         let outcome = try runAsync {
             try await BatchTranscriber.run(
                 samples: samples,
@@ -254,9 +272,10 @@ final class BatchTranscriberTests: XCTestCase {
                 maxConcurrent: 2
             )
         }
+        let collected = prompts.values
         XCTAssertEqual(outcome.okCount, 2)
-        XCTAssertEqual(prompts.count, 2)
-        XCTAssertTrue(prompts.allSatisfy { $0 == nil }, "параллельный путь — контекст не шлётся")
+        XCTAssertEqual(collected.count, 2)
+        XCTAssertTrue(collected.allSatisfy { $0 == nil }, "параллельный путь — контекст не шлётся")
         XCTAssertEqual(outcome.text, "текст 0 текст 1", "порядок итога сохраняется")
     }
 

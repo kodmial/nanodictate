@@ -89,12 +89,11 @@ final class AudioServiceVADTests: XCTestCase {
     private func makeLiveService(
         engine: FakeEngine,
         pause: TimeInterval = 0.2,
-        autoStop: AutoStopConfig = .defaults,
-        gain: InputGainConfig = .defaults
+        autoStop: AutoStopConfig = .defaults
     ) -> AudioService {
         var config = AudioSegmenterConfig.defaults
         config.pauseDuration = pause
-        return AudioService(logLevel: "info", engine: engine, segmenterConfig: config, autoStopConfig: autoStop, gainConfig: gain)
+        return AudioService(logLevel: "info", engine: engine, segmenterConfig: config, autoStopConfig: autoStop)
     }
 
     private func runStart(_ service: AudioService) -> Bool {
@@ -634,12 +633,7 @@ final class AudioServiceVADTests: XCTestCase {
     /// сливается с первой (регресс: «сказал чуть-чуть ещё — и ничего»).
     @objc func testAfterLongPauseNewSpeechDeliversSeparateSegment() {
         let engine = FakeEngine()
-        // AGC изолирован: тест проверяет СЕМАНТИКУ VAD (пауза ≥ порога рвёт
-        // уттеренс), а не усиление. Включённый AGC легитимно дотягивает звон
-        // конвертера на стыке «речь→тишина» (−37 dBFS) до речевого уровня —
-        // границы сегмента сдвигаются, и здесь это только шум для ассертов.
-        // Усиление покрыто отдельно в InputGainTests.
-        let service = makeLiveService(engine: engine, gain: InputGainConfig(enabled: false))
+        let service = makeLiveService(engine: engine)
         let box = DeliveryBox()
         service.onSpeechSegment = { s, t in box.add(s, isTail: t) }
 
