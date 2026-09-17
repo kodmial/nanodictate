@@ -170,6 +170,19 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     /// при каждом новом цикле (processSamples).
     private var cancelRecognition = false
 
+    /// Латч синтетического Enter после Enter-останова записи: Enter во время
+    /// .recording останавливает запись, запускает распознавание и ставит латч;
+    /// после успешной вставки текста постится РОВНО ОДИН синтетический Enter.
+    /// Читается в точках вставки (postSyntheticReturnIfPending), гасится в
+    /// handleEmptyResult / failTranscription / handleCancel / после постинга.
+    private let enterSendLatch = EnterSendLatch()
+    /// Флаг «сейчас постится СВОЙ синтетический Return»: синтетика постится
+    /// через .cghidEventTap и повторно видна нашему session-тапу — флаг не
+    /// даёт тапу проглотить её (предикат глотания возвращает false) и не
+    /// даёт продублировать enterKeyPressed. Виден ровно в момент постинга:
+    /// пост и тап — на main run loop.
+    private var isPostingSyntheticReturn = false
+
     /// Состояние undo: последняя УСПЕШНАЯ вставка (текст + момент времени).
     /// Двойной Alt в пределах undoMaxInterval после вставки стирает её.
     private var lastInsertedText: String?
@@ -437,6 +450,28 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         }
     }
 
+    func enterKeyPressed() {
+        DispatchQueue.main.async {
+            self.handleEnterKeyPressed()
+        }
+    }
+
+    /// Синхронный предикат глотания физического Return: вне .idle (запись
+    /// или распознавание) — глотать. Исключение — собственный синтетический
+    /// Return (isPostingSyntheticReturn): его тап видит повторно, глотать
+    /// нельзя — событие должно дойти до приложения. Вызывается из event-тапа
+    /// на main run loop — гонок с состоянием агента нет.
+    func shouldSwallowReturnKeyEvent() -> Bool {
+        !isPostingSyntheticReturn && state != .idle
+    }
+
+    /// Синхронный ответ «сейчас постится СВОЙ синтетический Return». Виден
+    /// ровно в момент постинга (пост и тап — на main run loop): HotkeyService
+    /// по нему не дублирует enterKeyPressed и не глотает событие.
+    func isPostingSyntheticReturnKey() -> Bool {
+        isPostingSyntheticReturn
+    }
+
     // MARK: - AudioLevelDelegate
 
     func audioLevelChanged(rms: Float) {
@@ -481,6 +516,58 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         case .transcribing:
             // Заняты отправкой — игнорируем.
             break
+        }
+    }
+
+    /// Enter/Keypad Enter: во время .recording — останов записи и запуск
+    /// распознавания (как второй Alt в .recording: chunked → liveFinalize,
+    /// иначе sendRecording) + латч РОВНО одного синтетического Enter после
+    /// вставки текста. Во время .transcribing — no-op (спека: повторный Enter
+    /// не инкрементирует латч, второй Enter не постится). В .idle сюда не
+    /// попадает: тап пропускает физический Enter насквозь (предикат
+    /// глотания = false), ветка .idle — страховка.
+    private func handleEnterKeyPressed() {
+        if isDebug {
+            Logger.log("Enter handled: state=\(String(describing: state))", level: "debug")
+        }
+        switch state {
+        case .recording:
+            enterSendLatch.arm()
+            if chunked {
+                liveFinalize()
+            } else {
+                sendRecording()
+            }
+        case .transcribing:
+            // Спека п.3: Enter во время распознавания не реагирует.
+            break
+        case .idle:
+            break
+        }
+    }
+
+    /// Точка синтетического Enter: вызывается ПОСЛЕ успешной вставки текста
+    /// (completeInsertion / completeChunkedInsertion / retryInsertion). Если
+    /// латч стоит — снять его (одноразово) и через паузу ~250 мс (целевое
+    /// приложение успевает обработать вставленный текст) постить
+    /// синтетический Return (keyDown + keyUp) в приложение в фокусе. После
+    /// постинга латч снят. Автостоп по тишине и лимит длительности латч НЕ
+    /// ставят — сюда они не приходят с pending-латчем.
+    private static let syntheticEnterDelay: TimeInterval = 0.25
+
+    private func postSyntheticReturnIfPending() {
+        guard enterSendLatch.consume() else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.syntheticEnterDelay) { [weak self] in
+            guard let self = self else { return }
+            // Страховка: наш session-тап видит синтетический Return повторно.
+            // Флаг заставляет предикат глотания вернуть false (событие не
+            // глотается, доходит до приложения) и гасит дубль enterKeyPressed
+            // (иначе синтетика остановила бы новую запись, начатую в окне
+            // паузы). Пост и тап — на main run loop, гонок нет.
+            self.isPostingSyntheticReturn = true
+            Inserter.postReturnKeyDownUp()
+            self.isPostingSyntheticReturn = false
+            Logger.log("synthetic Enter posted after Enter-stop insert", level: "info")
         }
     }
 
@@ -861,6 +948,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             case .insert:
                 break
             case .cancel:
+                // Напечатанное стёрто, вставки нет — латч синтетического Enter
+                // гасим (см. completeInsertion review-cancel).
+                enterSendLatch.cancel()
                 Inserter.delete(characters: text)
                 overlay.resetPhase()
                 overlay.setStatus(L10n.tr("overlay.cancelled"))
@@ -889,6 +979,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         )
         // Маркер для `nanodictate last` — финальный текст чанковой сессии.
         Logger.log("LAST_TEXT: \(text.replacingOccurrences(of: "\n", with: " "))")
+        // Финальный кусок вставлен и финализирован — только теперь синтетический
+        // Enter (не посреди потока кусков).
+        postSyntheticReturnIfPending()
     }
 
     /// Запись остановлена по жёсткому лимиту (60 с / 960 000 сэмплов) —
@@ -1227,6 +1320,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             case .insert:
                 break
             case .cancel:
+                // Вставки не было — латч синтетического Enter (Enter-останов)
+                // гасим: свежий Enter-останов ждать не должен зависнуть.
+                enterSendLatch.cancel()
                 overlay.resetPhase()
                 overlay.setStatus(L10n.tr("overlay.cancelled"))
                 hideAfter(0.8, reason: "review cancelled")
@@ -1254,6 +1350,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         // Маркер для `nanodictate last` (последний распознанный текст); переводы
         // строк заменяем, чтобы маркер остался одной строкой лога.
         Logger.log("LAST_TEXT: \(text.replacingOccurrences(of: "\n", with: " "))")
+        // Латч Enter-останова: ровно один синтетический Enter после вставки.
+        // state уже .idle — к моменту постинга (~250 мс) предикат глотания
+        // вернёт false, синтетический Return дойдёт до приложения.
+        postSyntheticReturnIfPending()
     }
 
     /// Транскрайбер роли маршрутизации (segment/final). Возвращает nil, когда роль
@@ -1370,6 +1470,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             case .insert:
                 break
             case .cancel:
+                enterSendLatch.cancel()
                 overlay.setStatus(L10n.tr("overlay.retryCancelled"))
                 hideAfter(0.8, reason: "retry review cancelled")
                 Logger.log("retry cancelled by review gate")
@@ -1384,12 +1485,16 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         hideAfter(1.0, reason: "retry inserted")
         Logger.log("retry transcription inserted (\(text.count) chars)")
         Logger.log("LAST_TEXT: \(text.replacingOccurrences(of: "\n", with: " "))")
+        postSyntheticReturnIfPending()
     }
 
     /// «Пустая» диктовка: STT вернул <2 слов (или тишину). Текст не вставляем,
     /// звук успеха не играем. Отдельный звук Funk вместо Basso — пустая
     /// диктовка это НЕ ошибка микрофона; cooldown пустых результатов отдельный.
     private func handleEmptyResult() {
+        // Вставки не было — латч синтетического Enter (Enter-останов) гасим:
+        // пустой результат не постит Enter.
+        enterSendLatch.cancel()
         if emptyResultCooldown.allow(at: CFAbsoluteTimeGetCurrent()) {
             sounds.playEmptyResult()
         } else if isDebug {
@@ -1437,6 +1542,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     /// играем системный звук ошибки (Basso), чтобы пользователь понял сбой
     /// даже не глядя на оверлей.
     private func failTranscription(_ message: String, isNetworkFailure: Bool) {
+        // Распознавание не удалось — синтетический Enter не постится,
+        // латч Enter-останова гасим.
+        enterSendLatch.cancel()
         if isNetworkFailure {
             sounds.playError()
         }
@@ -1468,6 +1576,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         case .idle:
             return
         }
+        // Спека: Esc гасит латч синтетического Enter — отменённая запись/
+        // распознавание не постит Enter. В .idle возвращаемся выше (латч в
+        // .idle не стоит — arm() только в .recording).
+        enterSendLatch.cancel()
         overlay.resetPhase()
         overlay.setStatus(L10n.tr("overlay.cancelled"))
         sounds.playCancel()

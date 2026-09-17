@@ -7,8 +7,16 @@ import CoreGraphics
 private final class SpyDelegate: HotkeyDelegate {
     var altDoubleTapCount = 0
     var cancelPressedCount = 0
+    var enterPressedCount = 0
+    /// Ответ предиката «глотать ли Return» (по умолчанию false — как .idle).
+    var swallowReturnKey = false
+    /// Ответ «сейчас постится свой синтетический Return?».
+    var postingSyntheticReturn = false
     func altDoubleTapped() { altDoubleTapCount += 1 }
     func cancelKeyPressed() { cancelPressedCount += 1 }
+    func enterKeyPressed() { enterPressedCount += 1 }
+    func shouldSwallowReturnKeyEvent() -> Bool { swallowReturnKey }
+    func isPostingSyntheticReturnKey() -> Bool { postingSyntheticReturn }
 }
 
 final class HotkeyServiceTests: XCTestCase {
@@ -182,6 +190,112 @@ final class HotkeyServiceTests: XCTestCase {
         XCTAssertEqual(delegate.cancelPressedCount, 1)
         service.handleKeyboardEvent(type: .flagsChanged, keyCode: 58, flags: [.maskAlternate], isRepeat: false, at: 1.2)
         XCTAssertEqual(delegate.altDoubleTapCount, 0) // первый тап аннулирован Escape
+    }
+
+    // MARK: - Enter (36) / Keypad Enter (76) — НЕ клавиша отмены
+
+    /// Return (36) больше НЕ зовёт cancelKeyPressed: отдельный колбэк
+    /// enterKeyPressed (агент решает по состоянию — стоп записи + латч
+    /// синтетического Enter).
+    @objc func testRoutingReturnFiresEnterNotCancel() {
+        let delegate = SpyDelegate()
+        let service = makeService(delegate: delegate)
+        service.handleKeyboardEvent(type: .keyDown, keyCode: 36, flags: [], isRepeat: false, at: 1.0)
+        XCTAssertEqual(delegate.enterPressedCount, 1)
+        XCTAssertEqual(delegate.cancelPressedCount, 0)
+    }
+
+    /// Keypad Enter (76) — тот же путь: enterKeyPressed, НЕ cancel.
+    @objc func testRoutingKeypadEnterFiresEnterNotCancel() {
+        let delegate = SpyDelegate()
+        let service = makeService(delegate: delegate)
+        service.handleKeyboardEvent(type: .keyDown, keyCode: 76, flags: [], isRepeat: false, at: 1.0)
+        XCTAssertEqual(delegate.enterPressedCount, 1)
+        XCTAssertEqual(delegate.cancelPressedCount, 0)
+    }
+
+    /// Return рвёт незавершённый первый Alt-тап, как любая другая клавиша
+    /// между двумя нажатиями Option (это «Alt + что угодно ещё», не двойной Alt).
+    @objc func testRoutingReturnBreaksPendingAltTap() {
+        let delegate = SpyDelegate()
+        let service = makeService(delegate: delegate)
+        service.handleKeyboardEvent(type: .flagsChanged, keyCode: 58, flags: [.maskAlternate], isRepeat: false, at: 1.0)
+        service.handleKeyboardEvent(type: .keyDown, keyCode: 36, flags: [], isRepeat: false, at: 1.1) // Return
+        XCTAssertEqual(delegate.enterPressedCount, 1)
+        service.handleKeyboardEvent(type: .flagsChanged, keyCode: 58, flags: [.maskAlternate], isRepeat: false, at: 1.2)
+        XCTAssertEqual(delegate.altDoubleTapCount, 0) // первый тап аннулирован Return
+    }
+
+    /// Свой синтетический Return (агент постит после вставки): тап видит его
+    /// повторно, enterKeyPressed НЕ дублируется — иначе синтетика остановила
+    /// бы новую запись, начатую в окне паузы.
+    @objc func testRoutingReturnWhilePostingSyntheticIsIgnored() {
+        let delegate = SpyDelegate()
+        delegate.postingSyntheticReturn = true
+        let service = makeService(delegate: delegate)
+        service.handleKeyboardEvent(type: .keyDown, keyCode: 36, flags: [], isRepeat: false, at: 1.0)
+        XCTAssertEqual(delegate.enterPressedCount, 0)
+    }
+
+    /// Автоповтор зажатого Return — тоже enterKeyPressed (состояние уже
+    /// .transcribing после первого нажатия → агент сам делает no-op; латч
+    /// идемпотентный — Enter всегда ровно один).
+    @objc func testRoutingReturnAutorepeatStillFiresEnter() {
+        let delegate = SpyDelegate()
+        let service = makeService(delegate: delegate)
+        service.handleKeyboardEvent(type: .keyDown, keyCode: 36, flags: [], isRepeat: true, at: 1.0)
+        XCTAssertEqual(delegate.enterPressedCount, 1)
+        XCTAssertEqual(delegate.cancelPressedCount, 0)
+    }
+
+    // MARK: - Предикат глотания физического Return (shouldSwallowEvent)
+
+    /// Делегат отвечает «глотать» (состояние не .idle) → keyDown Return/
+    /// Keypad Enter подавляется.
+    @objc func testSwallowHoldsReturnInActiveState() {
+        let delegate = SpyDelegate()
+        delegate.swallowReturnKey = true
+        let service = makeService(delegate: delegate)
+        XCTAssertTrue(service.shouldSwallowEvent(type: .keyDown, keyCode: 36))
+        XCTAssertTrue(service.shouldSwallowEvent(type: .keyDown, keyCode: 76))
+    }
+
+    /// Делегат отвечает «не глотать» (.idle) → Return проходит насквозь.
+    @objc func testSwallowAllowsReturnInIdle() {
+        let delegate = SpyDelegate()
+        delegate.swallowReturnKey = false
+        let service = makeService(delegate: delegate)
+        XCTAssertFalse(service.shouldSwallowEvent(type: .keyDown, keyCode: 36))
+        XCTAssertFalse(service.shouldSwallowEvent(type: .keyDown, keyCode: 76))
+    }
+
+    /// Глотается ТОЛЬКО keyDown Return/Keypad Enter: другие клавиши и
+    /// flagsChanged не трогаем.
+    @objc func testSwallowOnlyKeyDownOfReturnKeys() {
+        let delegate = SpyDelegate()
+        delegate.swallowReturnKey = true
+        let service = makeService(delegate: delegate)
+        XCTAssertFalse(service.shouldSwallowEvent(type: .keyDown, keyCode: 0)) // 'A'
+        XCTAssertFalse(service.shouldSwallowEvent(type: .keyDown, keyCode: 53)) // Escape
+        XCTAssertFalse(service.shouldSwallowEvent(type: .keyDown, keyCode: 58)) // Option
+        XCTAssertFalse(service.shouldSwallowEvent(type: .flagsChanged, keyCode: 36))
+    }
+
+    /// Синтетический Return не глотается: предикат агента false во время
+    /// постинга (флаг isPostingSyntheticReturnKey) — контракт на уровне
+    /// делегата = false.
+    @objc func testSwallowDoesNotHoldDuringSyntheticPost() {
+        let delegate = SpyDelegate()
+        delegate.swallowReturnKey = false
+        delegate.postingSyntheticReturn = true
+        let service = makeService(delegate: delegate)
+        XCTAssertFalse(service.shouldSwallowEvent(type: .keyDown, keyCode: 36))
+    }
+
+    /// Делегат отсутствует — ничего не глотается (безопасный дефолт).
+    @objc func testSwallowWithNoDelegateIsFalse() {
+        let service = HotkeyService() // delegate не назначен
+        XCTAssertFalse(service.shouldSwallowEvent(type: .keyDown, keyCode: 36))
     }
 
     /// Левая и правая Option (58/61) образуют пару симметрично.

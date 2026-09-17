@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 @testable import NanoDictateCore
 
 final class InserterTests: XCTestCase {
@@ -193,5 +194,40 @@ final class InserterTests: XCTestCase {
         Inserter.delete(characters: "привет")
 
         XCTAssertEqual(posts, 6 * 2) // 6 графем → 6 backspace'ов (keyDown+keyUp)
+    }
+
+    /// Синтетический Enter (латч Enter-останова): ровно keyDown+keyUp клавиши
+    /// Return (36) через общий post() — тестовый postHook считает события,
+    /// в активное приложение ничего не печатается.
+    @objc func testPostReturnKeyDownUpPostsKeyDownAndKeyUp() {
+        var posts: [(keyCode: Int64, isDown: Bool)] = []
+        Inserter.postHook = { event, _ in
+            posts.append((
+                event.getIntegerValueField(.keyboardEventKeycode),
+                event.type == .keyDown
+            ))
+        }
+        defer { Inserter.postHook = nil }
+
+        Inserter.postReturnKeyDownUp()
+
+        XCTAssertEqual(posts.count, 2)
+        XCTAssertEqual(posts[0].keyCode, 36)
+        XCTAssertTrue(posts[0].isDown)
+        XCTAssertEqual(posts[1].keyCode, 36)
+        XCTAssertFalse(posts[1].isDown)
+    }
+
+    /// Постинг идёт через .cghidEventTap (общий post()) — тап-локация
+    /// совпадает с типовой эмуляцией клавиатуры Inserter.
+    @objc func testPostReturnKeyDownUpUsesHidTap() {
+        var taps: [CGEventTapLocation] = []
+        Inserter.postHook = { _, tap in taps.append(tap) }
+        defer { Inserter.postHook = nil }
+
+        Inserter.postReturnKeyDownUp()
+
+        XCTAssertEqual(taps.count, 2)
+        XCTAssertTrue(taps.allSatisfy { $0 == .cghidEventTap })
     }
 }
