@@ -19,9 +19,6 @@ public struct AppConfig: Equatable {
     public var apiKey: String
     public var apiKeyFile: String?
     public var proxyKey: String
-    /// Дополнительный секрет провайдера (для giga-chat — client_secret в OAuth).
-    /// Парсится только внутри `[providers.X]` и копируется из активной секции.
-    public var apiSecret: String = ""
     public var timeoutSeconds: Double
     public var doubleAltMaxInterval: Double
     public var soundsEnabled: Bool
@@ -173,7 +170,6 @@ public struct AppConfig: Equatable {
         apiKey: "",
         apiKeyFile: nil,
         proxyKey: "",
-        apiSecret: "",
         timeoutSeconds: 120,
         doubleAltMaxInterval: 0.4,
         soundsEnabled: true,
@@ -256,9 +252,6 @@ public struct AppConfig: Equatable {
         public var apiKey: String
         public var apiKeyFile: String?
         public var proxyKey: String
-        /// Дополнительный секрет провайдера (ключ `api_secret` в секции;
-        /// для giga-chat — client_secret в OAuth).
-        public var apiSecret: String = ""
         /// Транспорт этой секции (ключ `transport` внутри `[providers.X]`).
         /// Пусто — берётся корневой `transport` (поведение как раньше).
         public var transport: String = ""
@@ -281,7 +274,6 @@ public struct AppConfig: Equatable {
                 apiKey: "",
                 apiKeyFile: nil,
                 proxyKey: "",
-                apiSecret: "",
                 transport: "",
                 httpProxy: "",
                 proxyUser: "",
@@ -359,7 +351,6 @@ public struct AppConfig: Equatable {
         var apiKey: String = defaults.apiKey
         var apiKeyFile: String? = defaults.apiKeyFile
         var proxyKey: String = defaults.proxyKey
-        let apiSecret: String = defaults.apiSecret
         var timeoutSeconds: Double = defaults.timeoutSeconds
         var doubleAltMaxInterval: Double = defaults.doubleAltMaxInterval
         var soundsEnabled: Bool = defaults.soundsEnabled
@@ -472,8 +463,6 @@ public struct AppConfig: Equatable {
                     providers[providerIndex].apiKey = try parseString(valuePart, line: index + 1, rawLine: rawLine)
                 case "api_key_file":
                     providers[providerIndex].apiKeyFile = try parseStringOptional(valuePart, line: index + 1, rawLine: rawLine)
-                case "api_secret":
-                    providers[providerIndex].apiSecret = try parseString(valuePart, line: index + 1, rawLine: rawLine)
                 case "proxy_key":
                     providers[providerIndex].proxyKey = try parseString(valuePart, line: index + 1, rawLine: rawLine)
                 case "proxy_key_header":
@@ -581,7 +570,6 @@ public struct AppConfig: Equatable {
             apiKey: apiKey,
             apiKeyFile: apiKeyFile,
             proxyKey: proxyKey,
-            apiSecret: apiSecret,
             timeoutSeconds: timeoutSeconds,
             doubleAltMaxInterval: doubleAltMaxInterval,
             soundsEnabled: soundsEnabled,
@@ -641,7 +629,6 @@ public struct AppConfig: Equatable {
         config.apiKey = provider.apiKey
         config.apiKeyFile = provider.apiKeyFile
         config.proxyKey = provider.proxyKey
-        config.apiSecret = provider.apiSecret
         // Транспорт секции имеет приоритет над корневым. ВАЖНО: явный
         // transport = "" в секции корневой transport = "cookie-relay" НЕ отменяет —
         // пустое значение трактуется как «наследовать корневой», а не
@@ -975,7 +962,7 @@ public struct AppConfig: Equatable {
         #
         # Пустые base_url/model в секциях — агент подставит дефолты адаптера
         # (например OpenAI → https://api.openai.com/v1/audio/transcriptions,
-        # whisper-1; Groq → whisper-large-v3; Deepgram → nova-3). Для секций
+        # whisper-1; Groq → whisper-large-v3). Для секций
         # cookie-relay, cloudflare и открытого OpenAI-совместимого провайдера
         # base_url обязателен (cloudflare — полный URL, account_id и модель
         # в пути; например .../accounts/<ACCOUNT_ID>/ai/run/@cf/openai/whisper-large-v3-turbo).
@@ -1015,19 +1002,6 @@ public struct AppConfig: Equatable {
         base_url = ""
         model = ""
         api_key = ""
-
-        [providers.deepgram]
-        name = "Deepgram"
-        base_url = ""
-        model = ""
-        api_key = ""
-
-        [providers.giga-chat]
-        name = "GigaChat"
-        base_url = ""
-        model = ""
-        api_key = ""
-        api_secret = ""
 
         [providers.cookie-relay]
         name = "Cookie Relay"

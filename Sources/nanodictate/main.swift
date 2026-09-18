@@ -193,15 +193,15 @@ func cmdStatus() -> Int32 {
     return running ? 0 : 1
 }
 
-/// Маскировка секретов в сыром тексте конфиг-файла: api_key / proxy_key /
-/// api_secret — значения в кавычках заменяются на maskSecret (первые 4 + "***" +
+/// Маскировка секретов в сыром тексте конфиг-файла: api_key / proxy_key —
+/// значения в кавычках заменяются на maskSecret (первые 4 + "***" +
 /// последние 4). Пустые значения остаются пустыми.
 func maskFileSecrets(in content: String) -> String {
     var lines: [String] = []
     for line in content.components(separatedBy: .newlines) {
         let key = line.split(separator: "=", maxSplits: 1).first
             .map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
-        if key == "api_key" || key == "proxy_key" || key == "api_secret",
+        if key == "api_key" || key == "proxy_key",
            let eqIndex = line.firstIndex(of: "="),
            let open = line[line.index(after: eqIndex)...].firstIndex(of: "\""),
            let close = line[line.index(after: open)...].firstIndex(of: "\"") {
@@ -363,9 +363,6 @@ func cmdConfig(_ args: [String]) -> Int32 {
         print("language: \(config.language)")
         print("api_key: \(secretDisplay(config.apiKey))")
         print("proxy_key: \(secretDisplay(config.proxyKey))")
-        if !config.apiSecret.isEmpty {
-            print("api_secret: \(secretDisplay(config.apiSecret))")
-        }
         return 0
     } catch {
         eprint(String(format: L10n.tr("cli.flag.configload"), "\(error)"))
@@ -393,9 +390,6 @@ func providerList() -> Int32 {
                 print("    api_key_file: \(keyFile)")
             }
             print("    proxy_key: \(secretDisplay(p.proxyKey))")
-            if !p.apiSecret.isEmpty {
-                print("    api_secret: \(secretDisplay(p.apiSecret))")
-            }
         }
         print(L10n.tr("cli.provider.activeMarker"))
         return 0
@@ -489,11 +483,6 @@ func providerShow(_ name: String) -> Int32 {
             print("proxy_key: \(L10n.tr("cli.config.noset"))")
         } else {
             print("proxy_key: \(secretDisplay(p.proxyKey))")
-        }
-        if p.apiSecret.isEmpty {
-            print("api_secret: \(L10n.tr("cli.config.noset"))")
-        } else {
-            print("api_secret: \(secretDisplay(p.apiSecret))")
         }
         return 0
     } catch {
@@ -1094,7 +1083,6 @@ func cmdTranscribeLegacy(_ file: String, json: Bool) -> Int32 {
         httpProxy: config.httpProxy,
         proxyUser: config.proxyUser,
         proxyPassword: config.proxyPassword,
-        apiSecret: config.apiSecret,
         adapterID: activeAdapterID
     )
     // Данные всегда WAV (не-WAV конвертируется выше); сервер строг к расширению,

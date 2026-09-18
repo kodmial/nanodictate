@@ -279,7 +279,6 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(d.model, "")
         XCTAssertEqual(d.apiKey, "")
         XCTAssertNil(d.apiKeyFile)
-        XCTAssertEqual(d.apiSecret, "")
         XCTAssertEqual(d.timeoutSeconds, 120)
         XCTAssertEqual(d.doubleAltMaxInterval, 0.4)
         XCTAssertTrue(d.soundsEnabled)
@@ -313,20 +312,22 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.uiLanguage, "en")
     }
 
-    // MARK: - api_secret в секции провайдера
+    // MARK: - api_secret в секции провайдера игнорируется
 
-    @objc func testParseProviderApiSecret() throws {
+    @objc func testParseProviderIgnoresUnknownApiSecretKey() throws {
+        // api_secret снесён: ключ в секции ничего не ломает (default: break),
+        // остальные поля парсятся как обычно. Тест живёт и при текущем коде,
+        // и после удаления обработки api_secret.
         let content = """
-        [providers.giga-chat]
-        name = "GigaChat"
-        api_key = "client-id"
+        [providers.groq]
+        name = "Groq"
+        api_key = "gk-123"
         api_secret = "client-secret"
-        model = ""
         """
         let config = try AppConfig.parse(content)
         XCTAssertEqual(config.providers.count, 1)
-        XCTAssertEqual(config.providers.first?.apiSecret, "client-secret")
-        XCTAssertEqual(config.providers.first?.apiKey, "client-id")
+        XCTAssertEqual(config.providers.first?.id, "groq")
+        XCTAssertEqual(config.providers.first?.apiKey, "gk-123", "api_key остаётся")
     }
 
     // MARK: - NANODICTATE_API_KEY env — приоритет над ключами из файла
@@ -706,14 +707,13 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.activeProvider, "openai")
         XCTAssertEqual(config.language, "")
         XCTAssertTrue(config.soundsEnabled)
-        // Семь секций: openai, groq, local, deepgram, giga-chat, cookie-relay, cloudflare.
-        XCTAssertEqual(config.providerNames, ["openai", "groq", "local", "deepgram", "giga-chat", "cookie-relay", "cloudflare"])
+        // Пять секций: openai, groq, local, cookie-relay, cloudflare.
+        XCTAssertEqual(config.providerNames, ["openai", "groq", "local", "cookie-relay", "cloudflare"])
         for provider in config.providers {
             XCTAssertEqual(provider.apiKey, "", "шаблон не содержит секретов")
         }
         XCTAssertEqual(config.providers.first { $0.id == "cookie-relay" }?.transport, "cookie-relay")
         XCTAssertEqual(config.providers.first { $0.id == "cloudflare" }?.transport, "cloudflare")
-        XCTAssertEqual(config.providers.first { $0.id == "giga-chat" }?.apiSecret, "")
         XCTAssertTrue(
             content.contains("auto_failover"),
             "шаблон предупреждает о поведении ролей при auto_failover"
@@ -727,7 +727,7 @@ final class ConfigTests: XCTestCase {
         try AppConfig.initTemplate().data(using: .utf8)!.write(to: file)
         let config = try AppConfig.load(from: file.path)
         XCTAssertEqual(config.activeProvider, "openai")
-        XCTAssertEqual(config.providerNames.count, 7)
+        XCTAssertEqual(config.providerNames.count, 5)
     }
 
     // MARK: - writeProviderKeyValue (config set-key)
@@ -764,9 +764,9 @@ final class ConfigTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: file) }
         try "language = \"ru\"\n".data(using: .utf8)!.write(to: file)
 
-        try AppConfig.writeProviderKeyValue(providerID: "deepgram", key: "api_key", value: "\"dg-123\"", to: file.path)
+        try AppConfig.writeProviderKeyValue(providerID: "cloudflare", key: "api_key", value: "\"cf-123\"", to: file.path)
         let config = try AppConfig.parse(String(contentsOf: file, encoding: .utf8))
-        XCTAssertEqual(config.providers.first { $0.id == "deepgram" }?.apiKey, "dg-123")
+        XCTAssertEqual(config.providers.first { $0.id == "cloudflare" }?.apiKey, "cf-123")
     }
 
     @objc func testWriteProviderKeyValueAddsKeyToNewFile() throws {
@@ -855,8 +855,8 @@ final class ConfigTests: XCTestCase {
         segment_provider = "cloudflare"
         final_provider = "groq"
         unknown_routing_key = "ignored"
-        [providers.deepgram]
-        name = "Deepgram"
+        [providers.selfhosted]
+        name = "Selfhosted"
         """
         let config = try AppConfig.parse(content)
         XCTAssertEqual(config.routing.segmentProvider, "cloudflare")
@@ -865,7 +865,7 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.finalProviderID(), "groq")
         // Неизвестный ключ внутри [routing] игнорируется, секция кончилась —
         // следующая [providers.X] читается как обычно.
-        XCTAssertEqual(config.providers.map { $0.id }, ["groq", "cloudflare", "deepgram"])
+        XCTAssertEqual(config.providers.map { $0.id }, ["groq", "cloudflare", "selfhosted"])
     }
 
     @objc func testRoutingKeysOutsideSectionDoNotLeak() throws {

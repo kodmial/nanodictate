@@ -63,8 +63,6 @@ public enum L10n {
         // error.*
         "error.noInternet": "No internet",
         "error.sttTimeout": "STT timeout",
-        "error.sttMissingSecret": "giga-chat: api_secret (provider client_secret) is not set",
-        "error.oauthMissingToken": "OAuth: missing '%@' in response",
         "error.micPermission": "Allow microphone access: System Settings → Privacy",
         "error.micPermissionUnhandled": "Microphone access request timed out: System Settings → Privacy",
         "error.micEnableFailed": "Failed to enable microphone",
@@ -279,8 +277,6 @@ public enum L10n {
         // error.*
         "error.noInternet": "Нет интернета",
         "error.sttTimeout": "Таймаут STT",
-        "error.sttMissingSecret": "giga-chat: не задан api_secret (client_secret провайдера)",
-        "error.oauthMissingToken": "OAuth: отсутствует '%@' в ответе",
         "error.micPermission": "Разрешите доступ к микрофону: System Settings → Конфиденциальность",
         "error.micPermissionUnhandled": "Запрос доступа к микрофону не обработан: System Settings → Конфиденциальность",
         "error.micEnableFailed": "Не удалось включить микрофон",

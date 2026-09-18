@@ -85,6 +85,7 @@ final class TranscriberTests: XCTestCase {
                     apiKey: "test-key",
                     transport: transport,
                     networkChecker: { true },
+                    adapterID: "gigaam",
                     retrySleep: retrySleep ?? { _ in })
     }
 
@@ -484,7 +485,8 @@ final class TranscriberTests: XCTestCase {
                                       model: "gigaam-v3",
                                       apiKey: "test-key",
                                       transport: transport,
-                                      networkChecker: { true })
+                                      networkChecker: { true },
+                                      adapterID: "gigaam")
         let done = expectation(description: "cancelled transcribe finished")
         let task = Task {
             _ = try? await transcriber.transcribe(wav: self.wavData)
@@ -510,6 +512,7 @@ final class TranscriberTests: XCTestCase {
                                       apiKey: "test-key",
                                       transport: transport,
                                       networkChecker: { true },
+                                      adapterID: "gigaam",
                                       retrySleep: { _ in })
 
         runAsync("test500Retried") {
@@ -526,6 +529,7 @@ final class TranscriberTests: XCTestCase {
                                       apiKey: "test-key",
                                       transport: transport,
                                       networkChecker: { true },
+                                      adapterID: "gigaam",
                                       retrySleep: { _ in })
 
         runAsync("test400Terminal") {
@@ -607,7 +611,8 @@ final class TranscriberTests: XCTestCase {
                                       model: "m",
                                       apiKey: "my-secret-token",
                                       transport: transport,
-                                      networkChecker: { true })
+                                      networkChecker: { true },
+                                      adapterID: "gigaam")
 
         runAsync("testAuthHeader") {
             _ = try await transcriber.transcribe(wav: self.wavData)
@@ -628,7 +633,8 @@ final class TranscriberTests: XCTestCase {
                                       apiKey: "k",
                                       proxyKey: "proxy-secret",
                                       transport: transport,
-                                      networkChecker: { true })
+                                      networkChecker: { true },
+                                      adapterID: "gigaam")
 
         runAsync("testProxyKeySet") {
             _ = try await transcriber.transcribe(wav: self.wavData)
@@ -646,7 +652,8 @@ final class TranscriberTests: XCTestCase {
                                       model: "m",
                                       apiKey: "k",
                                       transport: transport,
-                                      networkChecker: { true })
+                                      networkChecker: { true },
+                                      adapterID: "gigaam")
 
         runAsync("testProxyKeyEmpty") {
             _ = try await transcriber.transcribe(wav: self.wavData)
@@ -705,7 +712,8 @@ final class TranscriberTests: XCTestCase {
                                       apiKey: "k",
                                       language: "ru",
                                       transport: transport,
-                                      networkChecker: { true })
+                                      networkChecker: { true },
+                                      adapterID: "gigaam")
 
         runAsync("testLanguageField") {
             _ = try await transcriber.transcribe(wav: self.wavData, filename: "audio.wav")
@@ -729,7 +737,8 @@ final class TranscriberTests: XCTestCase {
                                       apiKey: "k",
                                       language: "",
                                       transport: transport,
-                                      networkChecker: { true })
+                                      networkChecker: { true },
+                                      adapterID: "gigaam")
 
         runAsync("testLanguageEmpty") {
             _ = try await transcriber.transcribe(wav: self.wavData, filename: "audio.wav")
@@ -750,7 +759,8 @@ final class TranscriberTests: XCTestCase {
                                       model: "gigaam-v3",
                                       apiKey: "test-key",
                                       transport: transport,
-                                      networkChecker: { false })
+                                      networkChecker: { false },
+                                      adapterID: "gigaam")
 
         runAsync("testPreflightBlocked") {
             do {
@@ -779,7 +789,8 @@ final class TranscriberTests: XCTestCase {
                                       apiKey: "k",
                                       logLevel: "debug",
                                       transport: transport,
-                                      networkChecker: { false })
+                                      networkChecker: { false },
+                                      adapterID: "gigaam")
 
         runAsync("testNoNetworkInDebugNoRequestSent") {
             do {
@@ -802,7 +813,8 @@ final class TranscriberTests: XCTestCase {
                                       model: "gigaam-v3",
                                       apiKey: "test-key",
                                       transport: transport,
-                                      networkChecker: { true })
+                                      networkChecker: { true },
+                                      adapterID: "gigaam")
 
         runAsync("testPreflightAllowed") {
             let result = try await transcriber.transcribe(wav: self.wavData)
@@ -821,7 +833,8 @@ final class TranscriberTests: XCTestCase {
                                       apiKey: "k",
                                       timeout: 120,
                                       transport: transport,
-                                      networkChecker: { true })
+                                      networkChecker: { true },
+                                      adapterID: "gigaam")
 
         runAsync("testTimeoutCap") {
             _ = try await transcriber.transcribe(wav: self.wavData)
@@ -842,7 +855,8 @@ final class TranscriberTests: XCTestCase {
                                       apiKey: "k",
                                       timeout: 5,
                                       transport: transport,
-                                      networkChecker: { true })
+                                      networkChecker: { true },
+                                      adapterID: "gigaam")
 
         runAsync("testTimeoutConfigLower") {
             _ = try await transcriber.transcribe(wav: self.wavData)
@@ -939,7 +953,8 @@ final class TranscriberTests: XCTestCase {
                            apiKey: "test-key",
                            transport: sttTransport,
                            networkChecker: { true },
-                           cookieRelayProvider: relay)
+                           cookieRelayProvider: relay,
+                           adapterID: "gigaam")
     }
 
     @objc func testCookieRelaySetsCookieAndChromeUA() {
@@ -957,7 +972,8 @@ final class TranscriberTests: XCTestCase {
                                           apiKey: "test-key",
                                           transport: stt,
                                           networkChecker: { true },
-                                          cookieRelayProvider: relay)
+                                          cookieRelayProvider: relay,
+                                          adapterID: "gigaam")
             let result = try await transcriber.transcribe(wav: self.wavData)
             XCTAssertEqual(result.text, "ok")
             guard let req = stt.lastRequest else {
@@ -1064,7 +1080,8 @@ final class TranscriberTests: XCTestCase {
             networkChecker: { true },
             httpProxy: "proxy.example.com:8080",
             proxyUser: "alice",
-            proxyPassword: "secret"
+            proxyPassword: "secret",
+            adapterID: "gigaam"
         )
 
         runAsync("testHTTPProxyRewrite") {
@@ -1092,10 +1109,11 @@ final class TranscriberTests: XCTestCase {
             apiKey: "test-key",
             transport: transport,
             networkChecker: { true },
-            httpProxy: "proxy.example.com:8080"
+            httpProxy: "proxy.example.com:8080",
+            adapterID: "gigaam"
         )
 
-        runAsync("testHTTPProxyNoAuth") {
+        runAsync("testHTTPProxyNoCreds") {
             _ = try await transcriber.transcribe(wav: self.wavData)
             guard let req = transport.lastRequest else {
                 XCTFail("No STT request captured")
@@ -1158,28 +1176,84 @@ final class TranscriberTests: XCTestCase {
         XCTAssertTrue(bodyText.contains("name=\"language\""))
     }
 
-    @objc func testAdapterDeepgramRawAudioAndTranscriptPath() {
-        // deepgram: сырое аудио, заголовок Token, дефолты nova-3/endpoint,
-        // текст извлекается по transcriptPath из ответа.
-        let deepgramJSON = #"{"results":{"channels":[{"alternatives":[{"transcript":"привет тайге"}]}]}}"#
-        let transport = MockTransport(status: 200, body: Data(deepgramJSON.utf8))
+    @objc func testAdapterCloudflareRawAudioAndTranscriptPath() {
+        // cloudflare: сырое аудио + Content-Type audio/wav, Bearer,
+        // baseURL как есть (модель зашита в URL), текст извлекается по
+        // transcriptPath ["result","text"] из ответа Workers AI.
+        let cfJSON = #"{"result":{"text":"привет тайге"}}"#
+        let transport = MockTransport(status: 200, body: Data(cfJSON.utf8))
         let transcriber = Transcriber(
-            baseURL: "", model: "", apiKey: "dg-key",
+            baseURL: "https://api.cloudflare.com/client/v4/accounts/acct/ai/run/@cf/openai/whisper-large-v3-turbo",
+            model: "", apiKey: "cf-key",
             language: "ru", transport: transport, networkChecker: { true },
-            adapterID: "deepgram"
+            adapterID: "cloudflare"
         )
 
-        runAsync("testAdapterDeepgram") {
+        runAsync("testAdapterCloudflare") {
             let result = try await transcriber.transcribe(wav: self.wavData)
             XCTAssertEqual(result.text, "привет тайге")
         }
         XCTAssertEqual(transport.requestCount, 1)
-        XCTAssertEqual(transport.lastRequest?.url?.host, "api.deepgram.com")
-        XCTAssertEqual(transport.lastRequest?.url?.path, "/v1/listen")
-        XCTAssertTrue(transport.lastRequest?.url?.query?.contains("model=nova-3") ?? false)
-        XCTAssertTrue(transport.lastRequest?.url?.query?.contains("language=ru") ?? false)
-        XCTAssertEqual(transport.lastRequest?.value(forHTTPHeaderField: "Authorization"), "Token dg-key")
+        XCTAssertEqual(
+            transport.lastRequest?.url?.absoluteString,
+            "https://api.cloudflare.com/client/v4/accounts/acct/ai/run/@cf/openai/whisper-large-v3-turbo",
+            "baseURL используется как есть"
+        )
+        XCTAssertEqual(transport.lastRequest?.value(forHTTPHeaderField: "Authorization"), "Bearer cf-key")
         XCTAssertEqual(transport.lastRequest?.value(forHTTPHeaderField: "Content-Type"), "audio/wav")
         XCTAssertEqual(transport.lastRequest?.httpBody, wavData, "тело = сырое аудио, не multipart")
+    }
+
+    /// Cloudflare-адаптер с пустым baseURL: запрос не строится (нет дефолтного
+    /// endpoint) — до HTTP дело не доходит, падает с ошибкой запроса.
+    @objc func testAdapterCloudflareNegativeMissingBaseURL() {
+        let transport = MockTransport(status: 200, body: Data(#"{"result":{"text":"x"}}"#.utf8))
+        let transcriber = Transcriber(
+            baseURL: "", model: "", apiKey: "cf-key",
+            transport: transport, networkChecker: { true },
+            adapterID: "cloudflare"
+        )
+
+        runAsync("testAdapterCloudflareNoURL") {
+            do {
+                _ = try await transcriber.transcribe(wav: self.wavData)
+                XCTFail("Expected .network (нет baseURL)")
+            } catch let error as TranscribeError {
+                guard case .network(let msg) = error else {
+                    XCTFail("Expected .network, got \(error)")
+                    return
+                }
+                XCTAssertEqual(msg, "Invalid base URL")
+            }
+        }
+        XCTAssertEqual(transport.requestCount, 0, "запрос не строится — HTTP-вызовов нет")
+    }
+
+    /// adapterID == nil (провайдер не настроен): transcribe() падает сразу, до
+    /// preflight и построения запроса — HTTP-вызовов нет вовсе.
+    @objc func testTranscribeWithoutAdapterIDThrows() {
+        let transport = MockTransport(status: 200, body: Data(#"{"text":"x"}"#.utf8))
+        let transcriber = Transcriber(
+            baseURL: "https://example.test/v1/audio/transcriptions",
+            model: "gigaam-v3",
+            apiKey: "test-key",
+            transport: transport,
+            networkChecker: { true },
+            adapterID: nil
+        )
+
+        runAsync("testTranscribeNoAdapterID") {
+            do {
+                _ = try await transcriber.transcribe(wav: self.wavData)
+                XCTFail("Expected .network (нет провайдера)")
+            } catch let error as TranscribeError {
+                guard case .network(let msg) = error else {
+                    XCTFail("Expected .network, got \(error)")
+                    return
+                }
+                XCTAssertEqual(msg, "No STT provider configured")
+            }
+        }
+        XCTAssertEqual(transport.requestCount, 0, "без провайдера запрос не строится — HTTP-вызовов нет")
     }
 }

@@ -108,8 +108,9 @@ final class BatchLongFormTests: XCTestCase {
     }
 
     @objc func testGatingOpenAICompatibleTemperatureOnly() {
-        // local/relay/gigaam (selfhosted whisper/GigaAM) — все openAICompatible
-        for adapter in ["gigaam", "local", "relay", "openai-compatible", "giga-chat"] {
+        // gigaam/selfhosted (openAICompatible) + известные openai-совместимые —
+        // шлём только temperature
+        for adapter in ["gigaam", "local", "openai-compatible", "selfhosted"] {
             let f = fields(for: adapter)
             XCTAssertEqual(f?.temperature, 0, "\(adapter): temperature шлётся")
             XCTAssertNil(f?.vadFilter, "\(adapter): vad_filter не шлём")
@@ -119,9 +120,8 @@ final class BatchLongFormTests: XCTestCase {
         }
     }
 
-    @objc func testGatingCloudflareAndDeepgramNil() {
+    @objc func testGatingCloudflareNil() {
         XCTAssertNil(fields(for: "cloudflare"), "raw WAV body — multipart невозможен")
-        XCTAssertNil(fields(for: "deepgram"), "только query-параметры")
     }
 
     @objc func testGatingNilParamsYieldsNil() {

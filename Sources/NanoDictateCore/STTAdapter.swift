@@ -10,9 +10,6 @@ public enum STTAdapterID: String, Equatable {
     case openai
     case groq
     case local
-    case deepgram
-    case gigaChat = "giga-chat"
-    case relay
     /// Cloudflare Workers AI Whisper: сырые WAV-байты + `Authorization: Bearer` +
     /// `Content-Type: audio/wav` (multipart эта сторона отвергает: 400 code 8001).
     /// base_url обязателен (модель зашита в URL), дефолтов нет.
@@ -32,10 +29,8 @@ public enum STTAdapterID: String, Equatable {
         case .openai:   return "https://api.openai.com/v1/audio/transcriptions"
         case .groq:     return "https://api.groq.com/openai/v1/audio/transcriptions"
         case .local:    return "http://127.0.0.1:8080/v1/audio/transcriptions"
-        case .deepgram: return "https://api.deepgram.com/v1/listen"
-        case .gigaChat: return "https://gigachat.devices.sberbank.ru/api/v1/audio/transcriptions"
-        // relay — личный транспорт (cookie-relay), cloudflare/openAICompatible — ручные: base_url обязателен.
-        case .relay, .cloudflare, .openAICompatible: return ""
+        // cloudflare/openAICompatible — ручные: base_url обязателен.
+        case .cloudflare, .openAICompatible: return ""
         }
     }
 
@@ -45,72 +40,40 @@ public enum STTAdapterID: String, Equatable {
         case .openai:   return "whisper-1"
         case .groq:     return "whisper-large-v3"
         case .local:    return "whisper-1"
-        case .deepgram: return "nova-3"
-        // GigaChat-модель задаётся в конфиге (GigaAM и т.п.) — устойчивого
-        // публичного дефолта нет, пустое значение убирает поле model из запроса.
         // Cloudflare: модель в URL Workers AI, отдельной дефолтной нет.
-        case .gigaChat: return ""
-        case .relay, .cloudflare, .openAICompatible: return ""
+        case .cloudflare, .openAICompatible: return ""
         }
-    }
-}
-
-// MARK: - OAuth step (giga-chat)
-
-/// OAuth-шаг перед основным запросом распознавания. Transcriber исполняет его
-/// ДО сборки основного запроса: шлёт `POST url` с заголовками, извлекает токен
-/// по `tokenJSONKey` из JSON-ответа и добавляет заголовок
-/// `Authorization: Bearer <токен>` к основному запросу.
-///
-/// Equatable не синтезируется (поле `[(String, String)]`), сравнение шагов нигде
-/// не требуется — сверка в тестах по полям.
-public struct STTOAuthStep {
-    public var url: URL
-    public var headers: [(String, String)]
-    /// Уже url-encoded тело формы (например `grant_type=client_credentials&scope=...`).
-    public var body: String
-    /// Ключ в JSON-ответе, где лежит токен.
-    public var tokenJSONKey: String
-
-    public init(url: URL, headers: [(String, String)], body: String, tokenJSONKey: String) {
-        self.url = url
-        self.headers = headers
-        self.body = body
-        self.tokenJSONKey = tokenJSONKey
     }
 }
 
 // MARK: - STTRequestSpec
 
 /// Полная спецификация HTTP-запроса распознавания, которую собирает адаптер
-/// (`ProviderRequestBuilder.plan`). Transcriber исполняет её: oauth-шаг (если
-/// есть) → URLRequest из полей поступает в `send`; транспорт, cookie-relay-слой,
-/// preflight сети и ретраи остаются в Transcriber.
+/// (`ProviderRequestBuilder.plan`). Transcriber исполняет её: URLRequest из
+/// полей поступает в `send`; транспорт, cookie-relay-слой, preflight сети и
+/// ретраи остаются в Transcriber.
 public struct STTRequestSpec {
     /// Конечный URL (включая query-параметры). nil — не собрался («Invalid base URL»).
     public var url: URL?
-    /// Дополнительные заголовки (Authorization, RqUID, …) — готовые к установке.
+    /// Дополнительные заголовки (Authorization, …) — готовые к установке.
     public var headers: [(String, String)]
     public var body: STTRequestBody
     /// JSON-путь к тексту распознавания в ответе; nil — плоский ключ "text"
     /// (OpenAI-совместимый формат).
     public var transcriptPath: [String]?
-    /// OAuth-шаг перед основным запросом (giga-chat); nil — без OAuth.
-    public var oauth: STTOAuthStep?
 
     public enum STTRequestBody: Equatable {
         /// OpenAI-совместимый multipart/form-data: file первым, затем поля.
         case multipart(data: Data, contentType: String)
-        /// Сырое аудио (deepgram): тело = WAV целиком, Content-Type задаёт формат.
+        /// Сырое аудио (cloudflare): тело = WAV целиком, Content-Type задаёт формат.
         case rawAudio(data: Data, contentType: String)
     }
 
-    public init(url: URL?, headers: [(String, String)], body: STTRequestBody, transcriptPath: [String]? = nil, oauth: STTOAuthStep? = nil) {
+    public init(url: URL?, headers: [(String, String)], body: STTRequestBody, transcriptPath: [String]? = nil) {
         self.url = url
         self.headers = headers
         self.body = body
         self.transcriptPath = transcriptPath
-        self.oauth = oauth
     }
 
     /// Значение Content-Type для URLRequest («multipart/form-data; boundary=…»,
@@ -138,14 +101,14 @@ public struct STTRequestSpec {
 /// cookie-relay-слой, preflight сети и ретраи — тоже зона Transcriber.
 ///
 /// baseURL/model перед вызовом `plan` уже разрешены в дефолты адаптера
-/// (пусто в конфиге → свой дефолт адаптера). Для relay/openAICompatible
+/// (пусто в конфиге → свой дефолт адаптера). Для cloudflare/openAICompatible
 /// дефолтов нет — пустое base_url даёт spec.url == nil, Transcriber отвечает
 /// понятной ошибкой «Invalid base URL».
 public enum ProviderRequestBuilder {
 
     /// Имена известных адаптеров в каноническом порядке (справочник CLI).
     public static let knownProviderIDs: [String] =
-        ["openai", "groq", "local", "deepgram", "giga-chat", "cloudflare", "relay"]
+        ["openai", "groq", "local", "cloudflare"]
 
     /// «Human name» провайдера для подписи оверлея/логов; неизвестный id —
     /// сам id.
@@ -154,10 +117,7 @@ public enum ProviderRequestBuilder {
         case .openai:   return "OpenAI"
         case .groq:     return "Groq"
         case .local:    return "Local"
-        case .deepgram: return "Deepgram"
-        case .gigaChat: return "GigaChat"
         case .cloudflare: return "Cloudflare"
-        case .relay:    return "Relay"
         case .openAICompatible: return id
         }
     }
@@ -165,12 +125,11 @@ public enum ProviderRequestBuilder {
     /// Собирает спецификацию запроса под известный адаптер.
     ///
     /// - Parameters:
-    ///   - adapterID: id провайдера («openai», «giga-chat», …). Неизвестный —
+    ///   - adapterID: id провайдера («openai», «groq», …). Неизвестный —
     ///     OpenAI-совместимый формат.
-    ///   - baseURL/model/apiKey/apiSecret: поля секции; пустые baseURL/model
+    ///   - baseURL/model/apiKey: поля секции; пустые baseURL/model
     ///     разрешаются в дефолты адаптера здесь же (единая точка).
-    ///   - language: код языка (для OpenAI-совместимых — form-поле language,
-    ///     для deepgram — query-параметр language).
+    ///   - language: код языка (для OpenAI-совместимых — form-поле language).
     ///   - wav/filename/prompt: аудио и опциональный контекст (multipart-поля).
     ///   - batchParams: пакетные параметры устойчивой транскрибации
     ///     (контекстный prompt chaining + temperature + stable-поля). nil —
@@ -181,7 +140,6 @@ public enum ProviderRequestBuilder {
         baseURL: String,
         model: String,
         apiKey: String,
-        apiSecret: String = "",
         language: String,
         wav: Data,
         filename: String = "audio.wav",
@@ -194,17 +152,13 @@ public enum ProviderRequestBuilder {
         let resolvedBaseURL = resolveBaseURL(baseURL, for: adapterID)
         let resolvedModel = resolveModel(model, for: adapterID)
         // Пакетный контекстный prompt (chaining) имеет приоритет над явным;
-        // stable-поля — гейтинг по провайдеру (cloudflare/deepgram = nil).
+        // stable-поля — гейтинг по провайдеру (cloudflare = nil).
         let effectivePrompt = batchParams?.prompt ?? prompt
         let stable = BatchStableMultipartFields.stableFields(for: adapterID, params: batchParams)
         switch STTAdapterID.from(adapterID) {
-        case .deepgram:
-            return planDeepgram(baseURL: resolvedBaseURL, model: resolvedModel, apiKey: apiKey, language: language, wav: wav)
-        case .gigaChat:
-            return planGigaChat(baseURL: resolvedBaseURL, model: resolvedModel, apiKey: apiKey, apiSecret: apiSecret, language: language, wav: wav, filename: filename, prompt: effectivePrompt, stable: stable)
         case .cloudflare:
             return planCloudflare(baseURL: resolvedBaseURL, apiKey: apiKey, wav: wav)
-        case .openai, .groq, .local, .relay, .openAICompatible:
+        case .openai, .groq, .local, .openAICompatible:
             return planOpenAICompatible(adapterID: adapterID, baseURL: resolvedBaseURL, model: resolvedModel, apiKey: apiKey, language: language, wav: wav, filename: filename, prompt: effectivePrompt, stable: stable)
         }
     }
@@ -222,8 +176,7 @@ public enum ProviderRequestBuilder {
 
     /// Извлечение текста распознавания из тела ответа.
     /// - `path == nil` — плоский JSON `{"text": "…"}` (OpenAI-совместимый);
-    /// - `path == ["results","channels","0","alternatives","0","transcript"]` —
-    ///   deepgram; числовые сегменты индексируют массивы.
+    /// - `path == ["result","text"]` — cloudflare (часть JSON-пути адаптера).
     public static func extractText(from body: Data, path: [String]?) throws -> String {
         guard body.count > 0,
               let json = try? JSONSerialization.jsonObject(with: body) else {
@@ -259,9 +212,6 @@ public enum ProviderRequestBuilder {
     /// вернул, и это НЕ ошибка: сшивка сегментов деградирует к по-словному diff).
     /// - `path == nil` — OpenAI-совместимый `verbose_json`: массив `words` на
     ///   верхнем уровне (`[{"word":…,"start":…,"end":…}]`).
-    /// - `path == ["results","channels","0","alternatives","0","transcript"]` —
-    ///   deepgram: слова в `results.channels[0].alternatives[0].words`, слово
-    ///   из `word` (fallback — `punctuated_word`).
     /// Битые/частичные записи в массиве пропускаются, битый JSON — пустой
     /// результат.
     public static func extractWords(from body: Data, path: [String]?) -> [TimedWord] {
@@ -308,9 +258,9 @@ public enum ProviderRequestBuilder {
     /// response_format/timestamp_granularities[] (word-таймстампы), затем
     /// stable-поля устойчивой транскрибации (температура/vad_filter/пороги —
     /// только не-nil, после гейтинга), закрывающий boundary. Это ЕДИНЫЙ
-    /// источник правды о формате тела — legacy-путь Transcriber (adapterID ==
-    /// nil) и адаптеры openai/groq/local/relay дают байт-в-байт те же данные
-    /// (поля таймстампов и stable добавляются только явными параметрами).
+    /// источник правды о формате тела — адаптеры openai/groq/local дают
+    /// байт-в-байт те же данные (поля таймстампов и stable добавляются только
+    /// явными параметрами).
     public static func multipartBody(wav: Data, filename: String, model: String, language: String, prompt: String?, boundary: String,
                                      responseFormat: String? = nil, timestampGranularities: [String] = [],
                                      stable: BatchStableMultipartFields? = nil) -> Data {
@@ -419,7 +369,7 @@ public enum ProviderRequestBuilder {
 
     // MARK: - Адаптеры
 
-    /// OpenAI / Groq / Local / Relay / openAI-compatible: мультипарт + Bearer.
+    /// OpenAI / Groq / Local / openAI-compatible: мультипарт + Bearer.
     private static func planOpenAICompatible(
         adapterID: String,
         baseURL: String,
@@ -449,14 +399,13 @@ public enum ProviderRequestBuilder {
     }
 
     /// Провайдеры, у которых включаем word-таймстампы (verbose_json +
-    /// timestamp_granularities[]=word). local/giga-chat/relay не включаем:
-    /// whisper.cpp/sherpa/GigaAM поддержку не гарантируют, личный relay
-    /// консервативен (пусть вернёт базовый текст). deepgram ходит своим
-    /// query-параметром `words=true` (см. planDeepgram).
+    /// timestamp_granularities[]=word). local/cloudflare не включаем:
+    /// whisper.cpp/sherpa поддержку не гарантируют, cloudflare ходит сырым
+    /// WAV-телом (см. planCloudflare).
     private static func supportsWordTimestamps(_ adapterID: String) -> Bool {
         switch STTAdapterID.from(adapterID) {
         case .openai, .openAICompatible: return true
-        case .groq, .local, .deepgram, .gigaChat, .cloudflare, .relay: return false
+        case .groq, .local, .cloudflare: return false
         }
     }
 
@@ -466,41 +415,8 @@ public enum ProviderRequestBuilder {
     private static func supportsVerboseJSON(_ adapterID: String) -> Bool {
         switch STTAdapterID.from(adapterID) {
         case .openai, .groq, .openAICompatible: return true
-        case .local, .deepgram, .gigaChat, .cloudflare, .relay: return false
+        case .local, .cloudflare: return false
         }
-    }
-
-    /// Deepgram (проверено по докам): `Authorization: Token <key>`, тело — сырой
-    /// WAV c `Content-Type: audio/wav`, параметры в query (model/language/
-    /// smart_format). Текст ответа — `results.channels[0].alternatives[0].transcript`.
-    private static func planDeepgram(
-        baseURL: String,
-        model: String,
-        apiKey: String,
-        language: String,
-        wav: Data
-    ) -> STTRequestSpec {
-        guard var components = URLComponents(string: baseURL) else {
-            return STTRequestSpec(url: nil, headers: [], body: .rawAudio(data: wav, contentType: "audio/wav"))
-        }
-        var items = components.queryItems ?? []
-        items.append(URLQueryItem(name: "model", value: model))
-        if !language.isEmpty {
-            items.append(URLQueryItem(name: "language", value: language))
-        }
-        items.append(URLQueryItem(name: "smart_format", value: "true"))
-        // Word-таймстампы native: `words=true` (временнáя сшивка сегментов).
-        items.append(URLQueryItem(name: "words", value: "true"))
-        components.queryItems = items
-        return STTRequestSpec(
-            url: components.url,
-            headers: [
-                ("Authorization", "Token \(apiKey)"),
-                ("Content-Type", "audio/wav"),
-            ],
-            body: .rawAudio(data: wav, contentType: "audio/wav"),
-            transcriptPath: ["results", "channels", "0", "alternatives", "0", "transcript"]
-        )
     }
 
     /// Cloudflare Workers AI Whisper: тело — сырые WAV-байты (мультипарт эта
@@ -520,44 +436,6 @@ public enum ProviderRequestBuilder {
             ],
             body: .rawAudio(data: wav, contentType: "audio/wav"),
             transcriptPath: ["result", "text"]
-        )
-    }
-
-    /// GigaChat: OAuth (client_credentials) → второй запрос с Bearer-токеном.
-    /// OAuth: POST https://ngw.devices.sberbank.ru:9443/api/v2/oauth,
-    /// `Authorization: Basic base64(client_id:client_secret)`, заголовок RqUID
-    /// (uuid4), тело `grant_type=client_credentials&scope=GIGACHAT_API_PERS`,
-    /// токен в `access_token`. Основной запрос — OpenAI-совместимый мультипарт
-    /// с `RqUID` и `Authorization: Bearer <токен>`.
-    private static func planGigaChat(
-        baseURL: String,
-        model: String,
-        apiKey: String,
-        apiSecret: String,
-        language: String,
-        wav: Data,
-        filename: String,
-        prompt: String?,
-        stable: BatchStableMultipartFields? = nil
-    ) -> STTRequestSpec {
-        let rqUID = UUID().uuidString.uppercased()
-        let basic = Data("\(apiKey):\(apiSecret)".utf8).base64EncodedString()
-        let boundary = "Boundary-\(UUID().uuidString)"
-        let multipart = multipartBody(wav: wav, filename: filename, model: model, language: language, prompt: prompt, boundary: boundary, stable: stable)
-        return STTRequestSpec(
-            url: URL(string: baseURL),
-            headers: [("RqUID", rqUID)],
-            body: .multipart(data: multipart, contentType: "multipart/form-data; boundary=\(boundary)"),
-            oauth: STTOAuthStep(
-                url: URL(string: "https://ngw.devices.sberbank.ru:9443/api/v2/oauth")!,
-                headers: [
-                    ("Authorization", "Basic \(basic)"),
-                    ("RqUID", rqUID),
-                    ("Content-Type", "application/x-www-form-urlencoded"),
-                ],
-                body: "grant_type=client_credentials&scope=GIGACHAT_API_PERS",
-                tokenJSONKey: "access_token"
-            )
         )
     }
 }

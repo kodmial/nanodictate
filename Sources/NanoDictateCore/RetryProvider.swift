@@ -70,7 +70,6 @@ public final class RetryProvider {
             httpProxy: provider.httpProxy,
             proxyUser: provider.proxyUser,
             proxyPassword: provider.proxyPassword,
-            apiSecret: provider.apiSecret,
             adapterID: provider.id
         )
         return try await transcriber.transcribe(wav: wav)

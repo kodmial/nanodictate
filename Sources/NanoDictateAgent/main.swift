@@ -304,8 +304,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         // настроек конфига (language/timeout/log_level/корневой proxyKeyHeader):
         // активный путь, failover/retry и роли маршрутизации ходят через него —
         // повторы и роли ведут себя как основной путь (тот же язык, таймаут и
-        // уровень лога). id провайдера уходит в adapterID — известный провайдер
-        // получает свой формат запроса (deepgram/giga-chat/…), неизвестный —
+        // уровень лога).
+        // id провайдера уходит в adapterID — известный провайдер
+        // получает свой формат запроса (groq/cloudflare), неизвестный —
         // OpenAI-совместимый с собственными base_url/model из секции.
         let makeTranscriber = { (provider: AppConfig.Provider) -> Transcriber in
             Transcriber(
@@ -321,7 +322,6 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
                 httpProxy: provider.httpProxy.isEmpty ? config.httpProxy : provider.httpProxy,
                 proxyUser: provider.proxyUser.isEmpty ? config.proxyUser : provider.proxyUser,
                 proxyPassword: provider.proxyPassword.isEmpty ? config.proxyPassword : provider.proxyPassword,
-                apiSecret: provider.apiSecret,
                 adapterID: provider.id
             )
         }
@@ -345,7 +345,6 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
                 httpProxy: config.httpProxy,
                 proxyUser: config.proxyUser,
                 proxyPassword: config.proxyPassword,
-                apiSecret: config.apiSecret,
                 adapterID: self.activeProviderID
             )
         }

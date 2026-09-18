@@ -161,7 +161,8 @@ final class DebugDumpTests: XCTestCase {
             proxyKeyHeader: "X-Api-Key",
             logLevel: "debug",
             transport: transport,
-            networkChecker: { true }
+            networkChecker: { true },
+            adapterID: "gigaam"
         )
 
         runAsync("transcribeCustomProxyHeaderDebug") {
@@ -228,7 +229,8 @@ final class DebugDumpTests: XCTestCase {
             apiKey: "k",
             logLevel: "info",
             transport: transport,
-            networkChecker: { true }
+            networkChecker: { true },
+            adapterID: "gigaam"
         )
 
         runAsync("transcribeInfo") {
@@ -253,7 +255,8 @@ final class DebugDumpTests: XCTestCase {
             proxyKey: "proxy-key-123",
             logLevel: "debug",
             transport: transport,
-            networkChecker: { true }
+            networkChecker: { true },
+            adapterID: "gigaam"
         )
 
         runAsync("transcribeDebug") {
@@ -321,7 +324,8 @@ final class DebugDumpTests: XCTestCase {
             apiKey: "k",
             logLevel: "debug",
             transport: transport,
-            networkChecker: { true }
+            networkChecker: { true },
+            adapterID: "gigaam"
         )
 
         runAsync("transcribeDebugSavesAudio") {
@@ -349,7 +353,8 @@ final class DebugDumpTests: XCTestCase {
             apiKey: "k",
             logLevel: "info",
             transport: transport,
-            networkChecker: { true }
+            networkChecker: { true },
+            adapterID: "gigaam"
         )
 
         runAsync("transcribeInfoNoAudio") {
@@ -373,7 +378,8 @@ final class DebugDumpTests: XCTestCase {
             apiKey: "k",
             logLevel: "debug",
             transport: transport,
-            networkChecker: { true }
+            networkChecker: { true },
+            adapterID: "gigaam"
         )
 
         runAsync("transcribeDebugDumpRecording") {
@@ -404,7 +410,8 @@ final class DebugDumpTests: XCTestCase {
             apiKey: "k",
             logLevel: "debug",
             transport: transport,
-            networkChecker: { true }
+            networkChecker: { true },
+            adapterID: "gigaam"
         )
 
         // runAsync грохает тест, если transcribe бросит исключение.

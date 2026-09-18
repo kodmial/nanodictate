@@ -3,7 +3,7 @@ import Network
 
 // MARK: - TimedWord
 
-/// Слово с таймстампами из ответа STT (verbose_json / deepgram words).
+/// Слово с таймстампами из ответа STT (verbose_json).
 /// Относительное время внутри распознанного аудио, секунды.
 public struct TimedWord: Equatable {
     public let word: String
@@ -187,7 +187,6 @@ public final class Transcriber {
     private let baseURL: String
     private let model: String
     private let apiKey: String
-    private let apiSecret: String
     private let proxyKey: String
     /// Имя заголовка для proxy-ключа (по умолчанию `X-Proxy-Key`); из конфига
     /// (`proxy_key_header`) менять можно, чтобы прокси-слой не конфликтовал.
@@ -210,9 +209,9 @@ public final class Transcriber {
     private let httpProxy: String
     private let proxyUser: String
     private let proxyPassword: String
-    /// ID адаптера запроса («openai», «groq», «deepgram», «giga-chat», …).
-    /// nil — legacy-путь: OpenAI-совместимый мультипарт ровно как раньше
-    /// (byte-identical запросы, тесты не меняются).
+    /// ID адаптера запроса («openai», «groq», …, известный из секции
+    /// `[providers.<id>]`). Пустой — провайдер не сконфигурирован (ошибка);
+    /// неизвестный — OpenAI-совместимый запрос с собственными baseURL/model.
     private let adapterID: String?
 
     /// Кандидат в ретрай (см. `shouldRetry`): HTTP 429/5xx и транспортные
@@ -290,23 +289,15 @@ public final class Transcriber {
         httpProxy: String = "",
         proxyUser: String = "",
         proxyPassword: String = "",
-        apiSecret: String = "",
         adapterID: String? = nil,
         retrySleep: ((TimeInterval) async -> Void)? = nil
     ) {
-        if let adapterID = adapterID, !adapterID.isEmpty {
-            // Адаптер известного провайдера: пустые baseURL/model из конфига
-            // (шаблон `config init`) разрешаются в дефолты адаптера.
-            let resolvedBaseURL = ProviderRequestBuilder.resolveBaseURL(baseURL, for: adapterID)
-            let resolvedModel = ProviderRequestBuilder.resolveModel(model, for: adapterID)
-            self.baseURL = resolvedBaseURL
-            self.model = resolvedModel
-        } else {
-            self.baseURL = baseURL
-            self.model = model
-        }
+        // Пустые baseURL/model из конфига (шаблон `config init`) разрешаются
+        // в дефолты адаптера (ProviderRequestBuilder.resolve*); повторный
+        // вызов resolve для уже непустых значений — no-op.
+        self.baseURL = ProviderRequestBuilder.resolveBaseURL(baseURL, for: adapterID ?? "")
+        self.model = ProviderRequestBuilder.resolveModel(model, for: adapterID ?? "")
         self.apiKey = apiKey
-        self.apiSecret = apiSecret
         self.proxyKey = proxyKey
         self.proxyKeyHeader = proxyKeyHeader
         self.language = language
@@ -343,47 +334,19 @@ public final class Transcriber {
             ), level: "debug")
         }
 
-        // Адаптерный путь (известный провайдер): спецификацию запроса строит
-        // ProviderRequestBuilder, OAuth (giga-chat) исполняется до основного запроса.
-        if let adapterID = adapterID, !adapterID.isEmpty {
-            return try await transcribeViaAdapter(adapterID: adapterID, wav: wav, filename: filename, prompt: prompt)
+        // Адаптерный путь: спецификацию запроса строит ProviderRequestBuilder
+        // (известный провайдер — свой формат, неизвестный — OpenAI-совместимый).
+        guard let adapterID = adapterID, !adapterID.isEmpty else {
+            Logger.log("STT error: empty adapterID — transcribe требует провайдер", level: "error")
+            throw TranscribeError.network("No STT provider configured")
         }
-
-        // Legacy-путь (adapterID == nil): byte-identical поведение, что было
-        // всегда — мультипарт, Bearer, cookie-relay UA/кука, таймаут, ретраи.
-        guard let url = URL(string: baseURL) else {
-            Logger.log("STT error: invalid base URL", level: "error")
-            throw TranscribeError.network("Invalid base URL")
-        }
-
-        let boundary = "Boundary-\(UUID().uuidString)"
-        let body = ProviderRequestBuilder.multipartBody(wav: wav, filename: filename, model: model, language: language, prompt: prompt, boundary: boundary)
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.httpBody = body
-        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        if !proxyKey.isEmpty {
-            request.setValue(proxyKey, forHTTPHeaderField: proxyKeyHeader)
-        }
-        await applyCookieRelayHeaders(to: &request)
-        request.timeoutInterval = min(timeout, Self.networkRequestTimeout)
-
-        return try await sendWithRetry(
-            request: request,
-            transcriptPath: nil,
-            wav: wav,
-            filename: filename,
-            prompt: prompt,
-            skipPreflight: false
-        )
+        return try await transcribeViaAdapter(adapterID: adapterID, wav: wav, filename: filename, prompt: prompt)
     }
 
     // MARK: - Адаптерный путь
 
     private func transcribeViaAdapter(adapterID: String, wav: Data, filename: String, prompt: String?) async throws -> TranscriptionResult {
-        // Preflight ДО OAuth: без сети не тратим запрос на заведомо мёртвый OAuth.
+        // Preflight ДО запроса: без сети не тратим запрос на заведомо мёртвый STT.
         if !(await networkChecker()) {
             Logger.log("STT not sent: no internet (preflight)", level: "error")
             throw TranscribeError.network(Self.noInternetMessage)
@@ -394,7 +357,6 @@ public final class Transcriber {
             baseURL: baseURL,
             model: model,
             apiKey: apiKey,
-            apiSecret: apiSecret,
             language: language,
             wav: wav,
             filename: filename,
@@ -405,20 +367,11 @@ public final class Transcriber {
             throw TranscribeError.network("Invalid base URL")
         }
 
-        var headers = spec.headers
-        if let oauth = spec.oauth {
-            guard !apiSecret.isEmpty else {
-                Logger.log("STT error: giga-chat требует api_secret (client_secret)", level: "error")
-                throw TranscribeError.network(L10n.tr("error.sttMissingSecret"))
-            }
-            headers.append(("Authorization", try await performOAuth(oauth)))
-        }
-
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.httpBody = spec.bodyData
         request.setValue(spec.contentType, forHTTPHeaderField: "Content-Type")
-        for (name, value) in headers {
+        for (name, value) in spec.headers {
             request.setValue(value, forHTTPHeaderField: name)
         }
         if !proxyKey.isEmpty {
@@ -437,43 +390,7 @@ public final class Transcriber {
         )
     }
 
-    /// OAuth-шаг (giga-chat): POST на oauth.url c заголовками из спецификации,
-    /// извлекает токен по `tokenJSONKey`. Токен вставляется в основной запрос
-    /// заголовком `Authorization: Bearer <токен>` (вызывающий код).
-    private func performOAuth(_ oauth: STTOAuthStep) async throws -> String {
-        var request = URLRequest(url: oauth.url)
-        request.httpMethod = "POST"
-        request.httpBody = Data(oauth.body.utf8)
-        for (name, value) in oauth.headers {
-            request.setValue(value, forHTTPHeaderField: name)
-        }
-        request.timeoutInterval = min(timeout, Self.networkRequestTimeout)
-
-        let response: (status: Int, body: Data, headers: [String: String])
-        do {
-            response = try await send(request: request)
-        } catch is CancellationError {
-            throw TranscribeError.network("Request cancelled")
-        } catch let error as URLError where error.code == .cancelled {
-            throw TranscribeError.network("Request cancelled")
-        } catch {
-            // OAuth вне retry-цикла: транспортный сбой здесь ≈ «нет интернета»
-            // (preflight уже прошёл, но сеть могла отвалиться за миллисекунды).
-            Logger.log("STT OAuth network error: \(error.localizedDescription)", level: "error")
-            throw TranscribeError.network(Self.noInternetMessage)
-        }
-        guard (200...299).contains(response.status) else {
-            let text = String(data: response.body, encoding: .utf8) ?? ""
-            throw TranscribeError.http(response.status, String(text.prefix(500)))
-        }
-        guard let json = try? JSONSerialization.jsonObject(with: response.body) as? [String: Any],
-              let token = json[oauth.tokenJSONKey] as? String, !token.isEmpty else {
-            throw TranscribeError.invalidResponse(String(format: L10n.tr("error.oauthMissingToken"), oauth.tokenJSONKey))
-        }
-        return token
-    }
-
-    // MARK: - Общий цикл отправки (legacy и адаптерный пути)
+    // MARK: - Общий цикл отправки (адаптерный путь)
 
     /// Cookie-relay-слой (transport == "cookie-relay"): единый
     /// браузерный UA + cookie-заголовок. `ensureFresh()` неблокирующий: свежий
@@ -494,8 +411,8 @@ public final class Transcriber {
     ///   транспортные не-таймаутные); HTTP 429 ждёт Retry-After (потолок 10 с);
     /// - cookie-челлендж ретраится один раз со свежей кукой (attempt не сжигается);
     /// - `transcriptPath == nil` — плоский ключ "text"; иначе извлекается по
-    ///   JSON-пути адаптера (deepgram).
-    /// - `skipPreflight: true` — адаптерный путь уже сделал preflight до OAuth.
+    ///   JSON-пути адаптера (cloudflare).
+    /// - `skipPreflight: true` — адаптерный путь уже сделал preflight до запроса.
     private func sendWithRetry(
         request inputRequest: URLRequest,
         transcriptPath: [String]?,
@@ -644,7 +561,7 @@ public final class Transcriber {
 
     // MARK: - Send
 
-    /// Единая точка отправки всех путей (legacy, адаптерный, OAuth).
+    /// Единая точка отправки всех путей (адаптерный, cloudflare).
     ///
     /// HTTP-прокси (transport == "http", `http_proxy` в конфиге): URL запроса
     /// переписывается по схеме «URL-как-путь» — исходный URL целиком
@@ -746,10 +663,10 @@ public final class Transcriber {
 
     /// Разбор HTTP-ответа в результат распознавания.
     /// - `transcriptPath == nil` — OpenAI-совместимый плоский `{"text": "…"}`;
-    /// - иначе текст извлекается по JSON-пути адаптера (deepgram).
+    /// - иначе текст извлекается по JSON-пути адаптера (cloudflare).
     /// Word-таймстампы (если вернул провайдер) кладутся в `result.words`;
     /// битый/пустой массив — не ошибка (пусто).
-    /// Ошибки и их строки — ровно те же, что были в legacy-пути (см. тесты).
+    /// Ошибки и их строки — ровно те же, что были в адаптерном пути (см. тесты).
     private static func parseResponse(_ response: (status: Int, body: Data, headers: [String: String]), transcriptPath: [String]? = nil) throws -> TranscriptionResult {
         let status = response.status
         let body = response.body
@@ -768,6 +685,6 @@ public final class Transcriber {
     // MARK: - Multipart body
 
     // Единый источник правды о multipart-формате — ProviderRequestBuilder
-    // (STTAdapter.swift): legacy-путь и все OpenAI-совместимые адаптеры дают
+    // (STTAdapter.swift): все OpenAI-совместимые адаптеры дают
     // байт-в-байт одинаковое тело (см. ProviderRequestBuilder.multipartBody).
 }

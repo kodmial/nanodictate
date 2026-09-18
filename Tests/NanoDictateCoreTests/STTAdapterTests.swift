@@ -4,7 +4,7 @@ import Foundation
 // MARK: - STTAdapterTests
 //
 // Без сети: проверяется только ПОСТРОЕНИЕ запроса (url, заголовки, тело,
-// contentType, transcriptPath, oauth-шаг) и парсинг текста ответа
+// contentType, transcriptPath) и парсинг текста ответа
 // (extractText + multipartBody байт-в-байт).
 
 final class STTAdapterTests: XCTestCase {
@@ -18,29 +18,30 @@ final class STTAdapterTests: XCTestCase {
         XCTAssertTrue(known.contains("openai"))
         XCTAssertTrue(known.contains("groq"))
         XCTAssertTrue(known.contains("local"))
-        XCTAssertTrue(known.contains("deepgram"))
-        XCTAssertTrue(known.contains("giga-chat"))
         XCTAssertTrue(known.contains("cloudflare"))
-        XCTAssertTrue(known.contains("relay"))
         XCTAssertFalse(known.contains("custom"))
+        // Мёртвые адаптеры снесены: deepgram/giga-chat/relay не числятся в
+        // справочнике (защита от регрессии — fallback в openAICompatible).
+        XCTAssertFalse(known.contains("deepgram"))
+        XCTAssertFalse(known.contains("giga-chat"))
+        XCTAssertFalse(known.contains("relay"))
+        XCTAssertEqual(known, ["openai", "groq", "local", "cloudflare"])
     }
 
     @objc func testAdapterFromMapping() {
         XCTAssertEqual(STTAdapterID.from("openai"), .openai)
         XCTAssertEqual(STTAdapterID.from("groq"), .groq)
         XCTAssertEqual(STTAdapterID.from("local"), .local)
-        XCTAssertEqual(STTAdapterID.from("deepgram"), .deepgram)
-        XCTAssertEqual(STTAdapterID.from("giga-chat"), .gigaChat)
         XCTAssertEqual(STTAdapterID.from("cloudflare"), .cloudflare)
-        XCTAssertEqual(STTAdapterID.from("relay"), .relay)
         XCTAssertEqual(STTAdapterID.from("whatever"), .openAICompatible)
+        // Живые selfhosted-провайдеры (GigaAM и т.п.) — неизвестный id → openAICompatible.
+        XCTAssertEqual(STTAdapterID.from("gigaam"), .openAICompatible)
+        XCTAssertEqual(STTAdapterID.from("selfhosted"), .openAICompatible)
     }
 
     @objc func testDisplayName() {
         XCTAssertEqual(ProviderRequestBuilder.displayName(for: "openai"), "OpenAI")
         XCTAssertEqual(ProviderRequestBuilder.displayName(for: "groq"), "Groq")
-        XCTAssertEqual(ProviderRequestBuilder.displayName(for: "deepgram"), "Deepgram")
-        XCTAssertEqual(ProviderRequestBuilder.displayName(for: "giga-chat"), "GigaChat")
         XCTAssertEqual(ProviderRequestBuilder.displayName(for: "cloudflare"), "Cloudflare")
         XCTAssertEqual(ProviderRequestBuilder.displayName(for: "custom"), "custom")
     }
@@ -49,26 +50,31 @@ final class STTAdapterTests: XCTestCase {
         XCTAssertEqual(STTAdapterID.openai.defaultBaseURL, "https://api.openai.com/v1/audio/transcriptions")
         XCTAssertEqual(STTAdapterID.groq.defaultBaseURL, "https://api.groq.com/openai/v1/audio/transcriptions")
         XCTAssertEqual(STTAdapterID.local.defaultBaseURL, "http://127.0.0.1:8080/v1/audio/transcriptions")
-        XCTAssertEqual(STTAdapterID.deepgram.defaultBaseURL, "https://api.deepgram.com/v1/listen")
-        XCTAssertEqual(STTAdapterID.gigaChat.defaultBaseURL, "https://gigachat.devices.sberbank.ru/api/v1/audio/transcriptions")
-        XCTAssertEqual(STTAdapterID.relay.defaultBaseURL, "")
         XCTAssertEqual(STTAdapterID.cloudflare.defaultBaseURL, "")
+        XCTAssertEqual(STTAdapterID.openAICompatible.defaultBaseURL, "",
+                       "ручные провайдеры без дефолтного endpoint — base_url обязателен")
         XCTAssertEqual(STTAdapterID.openai.defaultModel, "whisper-1")
         XCTAssertEqual(STTAdapterID.groq.defaultModel, "whisper-large-v3")
-        XCTAssertEqual(STTAdapterID.deepgram.defaultModel, "nova-3")
         XCTAssertEqual(STTAdapterID.local.defaultModel, "whisper-1")
         XCTAssertEqual(STTAdapterID.cloudflare.defaultModel, "")
+        XCTAssertEqual(STTAdapterID.openAICompatible.defaultModel, "")
     }
 
     @objc func testResolveBaseURLAndModel() {
         XCTAssertEqual(ProviderRequestBuilder.resolveBaseURL("", for: "groq"),
                        "https://api.groq.com/openai/v1/audio/transcriptions")
         XCTAssertEqual(ProviderRequestBuilder.resolveBaseURL("https://my.api/v1", for: "groq"), "https://my.api/v1")
-        XCTAssertEqual(ProviderRequestBuilder.resolveModel("", for: "deepgram"), "nova-3")
-        XCTAssertEqual(ProviderRequestBuilder.resolveModel("my-model", for: "deepgram"), "my-model")
+        XCTAssertEqual(ProviderRequestBuilder.resolveModel("", for: "openai"), "whisper-1")
+        XCTAssertEqual(ProviderRequestBuilder.resolveModel("my-model", for: "groq"), "my-model")
+        // Cloudflare: дефолта нет — пустая модель остаётся пустой (модель в URL).
+        XCTAssertEqual(ProviderRequestBuilder.resolveModel("", for: "cloudflare"), "")
+        // gigaam/selfhosted (openAICompatible): пустая base_url НЕ резолвится в
+        // локальный дефолт — никакой личный endpoint не подставляется.
+        XCTAssertEqual(ProviderRequestBuilder.resolveBaseURL("", for: "gigaam"), "")
+        XCTAssertEqual(ProviderRequestBuilder.resolveBaseURL("", for: "selfhosted"), "")
     }
 
-    // MARK: - OpenAI-совместимые адаптеры (openai/groq/local/relay)
+    // MARK: - OpenAI-совместимые адаптеры (openai/groq/local)
 
     @objc func testOpenAIPlan() {
         let spec = ProviderRequestBuilder.plan(
@@ -77,7 +83,6 @@ final class STTAdapterTests: XCTestCase {
         XCTAssertEqual(spec.url?.absoluteString, "https://api.openai.com/v1/audio/transcriptions")
         XCTAssertEqual(spec.headers.first(where: { $0.0 == "Authorization" })?.1, "Bearer sk-openai")
         XCTAssertTrue(spec.transcriptPath == nil)
-        XCTAssertNil(spec.oauth)
         switch spec.body {
         case .multipart(let data, let contentType):
             XCTAssertTrue(contentType.hasPrefix("multipart/form-data; boundary=Boundary-"))
@@ -152,19 +157,50 @@ final class STTAdapterTests: XCTestCase {
         XCTAssertEqual(spec.headers.first(where: { $0.0 == "Authorization" })?.1, "Bearer ")
     }
 
-    @objc func testRelayRequiresExplicitBaseURL() {
-        // relay не имеет дефолтного baseURL: пустой → url nil (нет запроса),
-        // заданный — OpenAI-совместимый multipart с Bearer.
-        let empty = ProviderRequestBuilder.plan(
-            adapterID: "relay", baseURL: "", model: "", apiKey: "k",
-            language: "ru", wav: wav)
-        XCTAssertNil(empty.url)
+    // MARK: - Selfhosted (gigaam / selfhosted → openAICompatible)
 
-        let set = ProviderRequestBuilder.plan(
-            adapterID: "relay", baseURL: "https://relay.example.com/transcribe", model: "m", apiKey: "k",
+    @objc func testGigaAMPlanEndToEnd() {
+        // Живой конфиг GigaAM: кастомный base_url + модель gigaam-v3.
+        // Неизвестный id "gigaam" → openAICompatible → multipart + Bearer,
+        // verbose_json + timestamp_granularities[]=word (word-таймстампы),
+        // language форвардится. Дополнительных шагов авторизации не планируется.
+        let url = "https://gpt.mwsapis.ru/projects/proj/openai/v1/audio/transcriptions"
+        let spec = ProviderRequestBuilder.plan(
+            adapterID: "gigaam", baseURL: url, model: "gigaam-v3", apiKey: "gigaam-key",
+            language: "ru", wav: wav, filename: "file.wav")
+        XCTAssertEqual(spec.url?.absoluteString, url, "base_url используется как есть")
+        XCTAssertEqual(spec.headers.first(where: { $0.0 == "Authorization" })?.1, "Bearer gigaam-key")
+        switch spec.body {
+        case .multipart(let data, let contentType):
+            XCTAssertTrue(contentType.hasPrefix("multipart/form-data; boundary=Boundary-"))
+            let text = String(data: data, encoding: .utf8)!
+            XCTAssertTrue(text.contains("name=\"file\"; filename=\"file.wav\""))
+            XCTAssertTrue(text.contains("name=\"model\"\r\n\r\ngigaam-v3\r\n"))
+            XCTAssertTrue(text.contains("name=\"language\"\r\n\r\nru\r\n"),
+                          "language форвардится как у любого openai-совместимого")
+            XCTAssertTrue(text.contains("response_format"),
+                          "supportsVerboseJSON=true у openAICompatible — просим verbose_json")
+            XCTAssertTrue(text.contains("timestamp_granularities"),
+                          "supportsWordTimestamps=true у openAICompatible — просим word-таймстампы")
+        case .rawAudio:
+            XCTFail("gigaam — multipart, не raw")
+        }
+    }
+
+    @objc func testSelfhostedPlanWithoutKey() {
+        // Самописный selfhosted-провайдер без api_key: Authorization остаётся
+        // "Bearer " (пустой токен), base_url как есть. Пустая base_url НЕ
+        // резолвится в локальный 8080-дефолт — url nil (нет запроса).
+        let spec = ProviderRequestBuilder.plan(
+            adapterID: "selfhosted", baseURL: "https://stt.example.net/v1", model: "gigaam-v3",
+            apiKey: "", language: "ru", wav: wav)
+        XCTAssertEqual(spec.url?.absoluteString, "https://stt.example.net/v1")
+        XCTAssertEqual(spec.headers.first(where: { $0.0 == "Authorization" })?.1, "Bearer ")
+
+        let empty = ProviderRequestBuilder.plan(
+            adapterID: "selfhosted", baseURL: "", model: "m", apiKey: "",
             language: "ru", wav: wav)
-        XCTAssertEqual(set.url?.absoluteString, "https://relay.example.com/transcribe")
-        XCTAssertEqual(set.headers.first(where: { $0.0 == "Authorization" })?.1, "Bearer k")
+        XCTAssertNil(empty.url, "у openAICompatible нет дефолтного base_url — пустой → nil")
     }
 
     @objc func testUnknownAdapterFallsBackToOpenAICompatible() {
@@ -179,29 +215,7 @@ final class STTAdapterTests: XCTestCase {
         }
     }
 
-    // MARK: - Deepgram
-
-    @objc func testDeepgramPlan() {
-        let spec = ProviderRequestBuilder.plan(
-            adapterID: "deepgram", baseURL: "", model: "", apiKey: "dg-key",
-            language: "ru", wav: wav)
-        XCTAssertEqual(spec.url?.host, "api.deepgram.com")
-        XCTAssertEqual(spec.url?.path, "/v1/listen")
-        let query = spec.url?.query ?? ""
-        XCTAssertTrue(query.contains("model=nova-3"))
-        XCTAssertTrue(query.contains("language=ru"))
-        XCTAssertTrue(query.contains("smart_format=true"))
-        XCTAssertEqual(spec.transcriptPath ?? [], ["results", "channels", "0", "alternatives", "0", "transcript"])
-        XCTAssertEqual(spec.headers.first(where: { $0.0 == "Authorization" })?.1, "Token dg-key")
-        XCTAssertEqual(spec.headers.first(where: { $0.0 == "Content-Type" })?.1, "audio/wav")
-        switch spec.body {
-        case .rawAudio(let data, let contentType):
-            XCTAssertEqual(data, wav)
-            XCTAssertEqual(contentType, "audio/wav")
-        case .multipart:
-            XCTFail("deepgram — сырое аудио, не multipart")
-        }
-    }
+    // MARK: - Cloudflare
 
     @objc func testCloudflarePlan() {
         let url = "https://api.cloudflare.com/client/v4/accounts/acct/ai/run/@cf/openai/whisper-large-v3-turbo"
@@ -211,7 +225,6 @@ final class STTAdapterTests: XCTestCase {
         XCTAssertEqual(spec.url?.absoluteString, url)
         XCTAssertEqual(spec.transcriptPath ?? [], ["result", "text"],
                        "Cloudflare Workers AI отвечает {\"result\":{\"text\":…}}")
-        XCTAssertNil(spec.oauth)
         XCTAssertEqual(spec.headers.first(where: { $0.0 == "Authorization" })?.1, "Bearer cf-key")
         XCTAssertEqual(spec.headers.first(where: { $0.0 == "Content-Type" })?.1, "audio/wav")
         switch spec.body {
@@ -230,38 +243,6 @@ final class STTAdapterTests: XCTestCase {
             adapterID: "cloudflare", baseURL: "", model: "", apiKey: "k",
             language: "ru", wav: wav)
         XCTAssertNil(spec.url)
-    }
-
-    @objc func testDeepgramQueryBareModelStillGoesThrough() {
-        // Даже без модели адаптер ставит дефолт nova-3.
-        let spec = ProviderRequestBuilder.plan(
-            adapterID: "deepgram", baseURL: "https://custom.dg/v1", model: "", apiKey: "k",
-            language: "", wav: wav)
-        XCTAssertEqual(spec.url?.query?.contains("model=nova-3"), true)
-        XCTAssertFalse(spec.url?.query?.contains("language") ?? true)
-    }
-
-    // MARK: - GigaChat
-
-    @objc func testGigaChatPlan() {
-        let spec = ProviderRequestBuilder.plan(
-            adapterID: "giga-chat", baseURL: "", model: "", apiKey: "client-id", apiSecret: "client-secret",
-            language: "ru", wav: wav)
-        XCTAssertEqual(spec.url?.absoluteString, "https://gigachat.devices.sberbank.ru/api/v1/audio/transcriptions")
-        let rqUID = spec.headers.first(where: { $0.0 == "RqUID" })?.1
-        XCTAssertNotNil(rqUID)
-        XCTAssertTrue((rqUID?.count ?? 0) > 8)
-
-        guard let oauth = spec.oauth else {
-            XCTFail("giga-chat требует oauth-шаг")
-            return
-        }
-        XCTAssertEqual(oauth.url.absoluteString, "https://ngw.devices.sberbank.ru:9443/api/v2/oauth")
-        let basic = Data("client-id:client-secret".utf8).base64EncodedString()
-        XCTAssertEqual(oauth.headers.first(where: { $0.0 == "Authorization" })?.1, "Basic \(basic)")
-        XCTAssertEqual(oauth.headers.first(where: { $0.0 == "RqUID" })?.1, rqUID)
-        XCTAssertEqual(oauth.body, "grant_type=client_credentials&scope=GIGACHAT_API_PERS")
-        XCTAssertEqual(oauth.tokenJSONKey, "access_token")
     }
 
     // MARK: - Multipart байт-в-байт
@@ -365,16 +346,17 @@ final class STTAdapterTests: XCTestCase {
         }
     }
 
-    @objc func testExtractTextDeepgramPath() throws {
-        let body = Data(#"{"results":{"channels":[{"alternatives":[{"transcript":"текст из deepgram"}]}]}}"#.utf8)
-        let path = ["results", "channels", "0", "alternatives", "0", "transcript"]
+    @objc func testExtractTextCloudflarePath() throws {
+        // Cloudflare Workers AI: {"result":{"text":…}} — ходим по transcriptPath.
+        let body = Data(#"{"result":{"text":"текст из cloudflare"}}"#.utf8)
+        let path = ["result", "text"]
         let text = try ProviderRequestBuilder.extractText(from: body, path: path)
-        XCTAssertEqual(text, "текст из deepgram")
+        XCTAssertEqual(text, "текст из cloudflare")
     }
 
-    @objc func testExtractTextMissingDeepgramPath() {
-        let body = Data(#"{"results":{}}"#.utf8)
-        let path = ["results", "channels", "0", "alternatives", "0", "transcript"]
+    @objc func testExtractTextMissingCloudflarePath() {
+        let body = Data(#"{"result":{}}"#.utf8)
+        let path = ["result", "text"]
         XCTAssertThrowsError(try ProviderRequestBuilder.extractText(from: body, path: path)) { _ in }
     }
 
@@ -382,7 +364,7 @@ final class STTAdapterTests: XCTestCase {
         XCTAssertThrowsError(try ProviderRequestBuilder.extractText(from: Data(), path: nil)) { _ in }
     }
 
-    // MARK: - Word-таймстампы (verbose_json / deepgram words)
+    // MARK: - Word-таймстампы (verbose_json / cloudflare words)
 
     /// openai план: multipart просит verbose_json + timestamp_granularities[]=word.
     @objc func testOpenAIPlanRequestsVerboseJSON() {
@@ -419,51 +401,6 @@ final class STTAdapterTests: XCTestCase {
         XCTAssertFalse(text.contains("timestamp_granularities"))
     }
 
-    /// relay (GigaAM proxy/прокси-план): таймстампов НЕ просим — только
-    /// плоский OpenAI-совместимый multipart.
-    @objc func testRelayPlanOmitsTimestampFields() {
-        let spec = ProviderRequestBuilder.plan(
-            adapterID: "relay", baseURL: "https://relay.example.com/transcribe", model: "m", apiKey: "k",
-            language: "ru", wav: wav, filename: "file.wav")
-        // relay не имеет дефолтного baseURL — задан явно, url должен быть.
-        XCTAssertEqual(spec.url?.absoluteString, "https://relay.example.com/transcribe")
-        guard case .multipart(let data, _) = spec.body else {
-            XCTFail("relay — multipart")
-            return
-        }
-        let text = String(data: data, encoding: .utf8)!
-        XCTAssertFalse(text.contains("response_format"))
-        XCTAssertFalse(text.contains("timestamp_granularities"))
-    }
-
-    /// giga-chat: таймстампов НЕ просим (scheme не поддерживает), несмотря на
-    /// OAuth-шаг — тело остаётся плоским multipart.
-    @objc func testGigaChatPlanOmitsTimestampFields() {
-        let spec = ProviderRequestBuilder.plan(
-            adapterID: "giga-chat", baseURL: "", model: "", apiKey: "client-id", apiSecret: "client-secret",
-            language: "ru", wav: wav, filename: "file.wav")
-        XCTAssertNotNil(spec.oauth, "giga-chat идёт через OAuth-шаг")
-        guard case .multipart(let data, _) = spec.body else {
-            XCTFail("giga-chat — multipart")
-            return
-        }
-        let text = String(data: data, encoding: .utf8)!
-        XCTAssertFalse(text.contains("response_format"))
-        XCTAssertFalse(text.contains("timestamp_granularities"))
-    }
-
-    /// deepgram: таймстампы запрашиваются query-параметром words=true.
-    @objc func testDeepgramPlanRequestsWords() {
-        let spec = ProviderRequestBuilder.plan(
-            adapterID: "deepgram", baseURL: "", model: "", apiKey: "dg-key",
-            language: "ru", wav: wav)
-        XCTAssertTrue(spec.url?.query?.contains("words=true") ?? false,
-                      "deepgram: word-таймстампы — параметром words")
-        let wordsPos = spec.url!.query!.range(of: "words=true")!.lowerBound
-        let smartPos = spec.url!.query!.range(of: "smart_format=true")!.lowerBound
-        XCTAssertTrue(wordsPos > smartPos)
-    }
-
     /// multipartBody напрямую: явный emission response_format + granularities[].
     @objc func testMultipartBodyEmitsTimestampFields() {
         let boundary = "Boundary-TEST"
@@ -488,11 +425,12 @@ final class STTAdapterTests: XCTestCase {
         XCTAssertEqual(words[1].end, 1.0, accuracy: 0.0001)
     }
 
-    /// Deepgram-ответ: слова в конце transcriptPath-пути; слово — word с
-    /// fallback на punctuated_word.
-    @objc func testExtractWordsDeepgramPath() {
-        let body = Data(#"{"results":{"channels":[{"alternatives":[{"transcript":"один два","words":[{"word":"один","start":0.0,"end":0.4},{"punctuated_word":"два.","start":0.5,"end":0.9}]}]}]}}"#.utf8)
-        let path = ["results", "channels", "0", "alternatives", "0", "transcript"]
+    /// Cloudflare-ответ: слова под transcriptPath-путем (путь без последнего
+    /// сегмента ["result"] → ключ "words"); слово — word с fallback на
+    /// punctuated_word.
+    @objc func testExtractWordsCloudflarePath() {
+        let body = Data(#"{"result":{"words":[{"word":"один","start":0.0,"end":0.4},{"punctuated_word":"два.","start":0.5,"end":0.9}]}}"#.utf8)
+        let path = ["result", "text"]
         let words = ProviderRequestBuilder.extractWords(from: body, path: path)
         XCTAssertEqual(words.count, 2)
         XCTAssertEqual(words[0].word, "один")
@@ -512,9 +450,9 @@ final class STTAdapterTests: XCTestCase {
         // words нет вовсе.
         let noWords = Data(#"{"text":"просто текст"}"#.utf8)
         XCTAssertTrue(ProviderRequestBuilder.extractWords(from: noWords, path: nil).isEmpty)
-        // Deepgram без words в альтернативе.
-        let dg = Data(#"{"results":{"channels":[{"alternatives":[{"transcript":"т"}]}]}}"#.utf8)
-        let path = ["results", "channels", "0", "alternatives", "0", "transcript"]
-        XCTAssertTrue(ProviderRequestBuilder.extractWords(from: dg, path: path).isEmpty)
+        // Cloudflare без words в result.
+        let cf = Data(#"{"result":{"text":"т"}}"#.utf8)
+        let path = ["result", "text"]
+        XCTAssertTrue(ProviderRequestBuilder.extractWords(from: cf, path: path).isEmpty)
     }
 }

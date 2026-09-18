@@ -39,8 +39,6 @@ Built as a Swift Package Manager package (`swift-tools-version:5.7`, macOS 12+).
   `/audio/transcriptions` protocol:
   - **OpenAI** (`openai`)
   - **Groq** (`groq`)
-  - **Deepgram** (`deepgram`)
-  - **GigaChat** (`giga-chat`, OAuth with `api_secret`)
   - **GigaAM** (`gigaam`, default batch provider)
   - **Local** (`local`, local whisper/llama.cpp/faster-whisper server)
   - **Cloudflare Workers AI** (`cloudflare`, raw WAV + Bearer token, full URL
@@ -166,19 +164,6 @@ base_url = "https://api.groq.com/openai/v1/audio/transcriptions"
 model = "whisper-large-v3"
 api_key_file = "~/.config/nanodictate/keys/groq.txt"
 
-[providers.deepgram]
-name = "Deepgram"
-base_url = "https://api.deepgram.com/v1/listen"
-model = "nova-3"
-api_key_file = "~/.config/nanodictate/keys/deepgram.txt"
-
-[providers.giga-chat]
-name = "GigaChat"
-base_url = "https://your-gigachat-endpoint.example.com/api/v1/audio/transcriptions"
-model = "GigaChat"
-api_key_file = "~/.config/nanodictate/keys/giga-chat.txt"
-api_secret = ""
-
 [providers.local]
 name = "Local whisper"
 base_url = "http://127.0.0.1:8080/v1/audio/transcriptions"
@@ -226,7 +211,6 @@ Top-level options:
 **Secrets.** API keys go in `api_key` (inline) or `api_key_file` (file
 path; first non-empty line is used; `chmod 600`). The environment variable
 `NANODICTATE_API_KEY` overrides both and is never written to the config file.
-Provider-specific: `api_secret` is used for GigaChat OAuth.
 
 ### Permissions
 

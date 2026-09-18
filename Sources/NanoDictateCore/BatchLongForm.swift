@@ -12,7 +12,7 @@ import Foundation
 
 /// Контекстная склейка чанков: хвост распознанного текста предыдущего чанка
 /// передаётся следующему чанку как prompt (там, где провайдер prompt
-/// принимает — Groq/OpenAI/selfhosted whisper/GigaAM; Cloudflare/Deepgram —
+/// принимает — Groq/OpenAI/selfhosted whisper/GigaAM; Cloudflare —
 /// нет). Порядок работы: текст последнего УСПЕШНОГО чанка обрезается до
 /// ~600 символов (≈ 224 токена русского текста — верхняя полезная граница
 /// контекста Whisper по рекомендации отчёта) и нормируется к целым словам.
@@ -134,10 +134,8 @@ public struct BatchStableMultipartFields: Equatable {
     /// |--------------------|--------|-------------|------------|
     /// | openai             | ✓      | ✓           | ✗ (нет в API Create transcription) |
     /// | groq               | ✓      | ✓           | ✓ (задача: поддерживает; groq строгий к неизвестным полям) |
-    /// | local/relay/gigaam | ✓      | ✓           | ✗ (sherpa/GigaAM не гарантируют) |
-    /// | giga-chat          | ✓      | ✓           | ✗ (консервативно) |
+    /// | local/gigaam       | ✓      | ✓           | ✗ (sherpa/GigaAM не гарантируют) |
     /// | cloudflare         | ✗      | ✗           | ✗ (тело = сырые WAV-байты, multipart невозможен) |
-    /// | deepgram           | ✗      | ✗           | ✗ (только query-параметры) |
     ///
     /// no_speech_threshold / compression_ratio_threshold / logprob_threshold
     /// — параметры whisper-сэмплера (дефолты Whisper 0.6/2.4/-1.0):
@@ -148,9 +146,9 @@ public struct BatchStableMultipartFields: Equatable {
                                     params: BatchSTTParams?) -> BatchStableMultipartFields? {
         guard let params = params else { return nil }
         switch STTAdapterID.from(adapterID) {
-        case .cloudflare, .deepgram:
+        case .cloudflare:
             return nil
-        case .openai, .groq, .local, .relay, .openAICompatible, .gigaChat:
+        case .openai, .groq, .local, .openAICompatible:
             return BatchStableMultipartFields(
                 temperature: params.temperature,
                 vadFilter: (STTAdapterID.from(adapterID) == .groq) ? params.vadFilter : nil,
