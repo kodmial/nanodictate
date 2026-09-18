@@ -1,0 +1,95 @@
+# NanoDictate — пример конфига
+# Скопируй в ~/.config/nanodictate/config.toml и заполни секреты.
+# Секреты — только плейсхолдеры: api_key / api_key_file в секциях провайдеров
+# либо env-переменная NANODICTATE_API_KEY (приоритет над файлом, в файл не пишется).
+# Пустые base_url/model — агент подставит дефолты адаптера.
+# См. Sources/NanoDictateCore/Config.swift (AppConfig.initTemplate) и README.md.
+
+# Язык STT-подсказки (пусто = авто-детект Whisper, параметр не шлётся).
+# Явное значение (language = "ru") форвардится в запрос.
+language = ""
+ui_language = "en"
+sounds_enabled = true
+timeout_seconds = 120
+log_level = "info"
+active_provider = "openai"
+
+[providers.openai]
+name = "OpenAI"
+base_url = ""
+model = ""
+api_key = ""
+# api_key_file = "~/.config/nanodictate/keys/openai.txt"
+
+[providers.groq]
+name = "Groq"
+base_url = ""
+model = ""
+api_key = ""
+# api_key_file = "~/.config/nanodictate/keys/groq.txt"
+
+[providers.local]
+name = "Local"
+base_url = ""
+model = ""
+api_key = ""
+
+[providers.cookie-relay]
+name = "Cookie Relay"
+base_url = ""
+model = ""
+api_key = ""
+transport = "cookie-relay"
+# proxy_key = ""
+# proxy_key_header = "X-Proxy-Key"
+
+[providers.cloudflare]
+name = "Cloudflare Workers AI"
+# base_url для Cloudflare — полный URL с account_id и моделью в пути, например:
+# base_url = "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run/@cf/openai/whisper-large-v3-turbo"
+model = ""
+api_key = ""
+# transport у cloudflare не указывается: "cloudflare" — это id секции
+# (адаптер STT), а не HTTPTransport. Транспорт задают только для
+# http/gateway/cookie-relay.
+
+# Примеры транспортов для секций (раскомментируй нужный):
+#
+# [providers.http-proxy]
+# name = "HTTP Proxy example"
+# base_url = ""
+# model = ""
+# api_key = ""
+# transport = "http"
+# http_proxy = "proxy.example.com:8080"
+# proxy_user = ""
+# proxy_password = ""
+#
+# [providers.gateway-provider]
+# name = "Gateway example"
+# base_url = ""
+# model = ""
+# api_key = ""
+# transport = "gateway"
+# proxy_key = ""
+# proxy_key_header = "X-Custom-Auth"
+
+# Маршрутизация STT по ролям (см. [routing] в Config.swift):
+# final_provider — финальный проход (чанковый и не-чанковый путь),
+# segment_provider — только сегменты чанковой диктовки.
+# Не задано — роль играет active_provider. auto_failover на ролях не действует.
+# Чтобы включить — раскомментируй секцию:
+#
+# [routing]
+# segment_provider = "cloudflare"
+# final_provider = "groq"
+
+# Дополнительные top-level опции (значения по умолчанию):
+# double_alt_max_interval = 0.4
+# undo_max_interval = 2.0
+# undo_sound_enabled = true
+# chunked = false
+# providers = ["groq", "cloudflare"]
+# auto_failover = false
+# insert_method = "cgevent"
+# review_before_insert = false

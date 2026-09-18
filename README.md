@@ -55,17 +55,31 @@ Built as a Swift Package Manager package (`swift-tools-version:5.7`, macOS 12+).
 
 ## Build & Test
 
-Requirements: macOS 12+, Swift toolchain (Xcode CLT or standalone Swift).
+Requirements: macOS 12+, Swift toolchain, Node.js ≥ 22 (for the deploy MCP server).
+
+### Swift toolchain — `SWIFT_TOOLCHAIN`
+
+The Command Line Tools SwiftPM Manifest API on this machine is broken: there
+is no `PackageDescription.swiftmodule`, so plain `swift build` cannot parse
+`Package.swift`. Use the full toolchain at `/Users/dima/.swift-toolchain`:
 
 ```sh
-swift build -c release
-```
-
-Run the test suite:
-
-```sh
+export SWIFT_TOOLCHAIN=/Users/dima/.swift-toolchain
+# optional but recommended — persisted in ~/.zshrc or ~/.claude.json env
+swift build -c debug      # or -c release
 swift run NanoDictateCoreTests
 ```
+
+`mcp/nanodictate-deploy-mcp-server/start.sh` does the same automatically: it
+prefers `SWIFT_TOOLCHAIN` from the environment, falls back to auto-detection
+via `xcrun --find swift`, and exports `SWIFT_EXEC_MANIFEST` /
+`SWIFTPM_CUSTOM_LIBS_DIR` so every `swift build` the MCP server spawns inherits
+them. The same variables are set by `/private/tmp/dct-verify/build_all.sh`
+used by CI/local verification (480 tests). Never run bare `swift build` or
+`swift test` without the toolchain — use the env var or the MCP tools
+(`dictation_build` / `dictation_deploy`).
+
+### Tests
 
 The tests are packaged as a standalone executable target
 (`NanoDictateCoreTests`) rather than XCTest test targets, so they are run with
@@ -74,15 +88,54 @@ The tests are packaged as a standalone executable target
 summary, and exits non-zero if any test fails. The same commands are used by
 the CI workflow (`.github/workflows/ci.yml`).
 
-## MCP Server: Build, Run & Test
+```sh
+export SWIFT_TOOLCHAIN=/Users/dima/.swift-toolchain
+swift run NanoDictateCoreTests
+```
 
-The deploy MCP server is optional tooling for building, code-signing, and
-restarting the agent. It lives in `mcp/nanodictate-deploy-mcp-server/` — the
-`mcp/dictation-deploy-mcp-server` entry is a symlink to the same directory.
+### Code signing — `NanoDictate Code Signing`
 
-Requires Node.js ≥ 22 (`engines` in `package.json`). Its tools shell out to
-`swift build` / `codesign`, so a Swift toolchain must be available too (Xcode
-CLT, or set `SWIFT_TOOLCHAIN` to a toolchain directory).
+macOS TCC grants (Microphone, Accessibility) are keyed to the binary's cdhash.
+Ad-hoc signing on every rebuild produces a new cdhash and resets all grants —
+the agent stops reacting to Alt+Alt until permissions are re-granted. Builds
+must use the fixed identity **NanoDictate Code Signing** (see
+[Code Signing](#code-signing) below). The only supported path is the MCP
+deploy server (`dictation_sign` / `dictation_deploy`) — it runs
+`codesign --force --sign "NanoDictate Code Signing" --entitlements
+Resources/*.entitlements --options runtime --identifier <bundle-id>` and then
+`codesign --verify --strict`. It has no ad-hoc fallback: if the identity is
+missing, it fails with instructions. Raw `swift build` + `codesign` / manual
+`security` calls from scripts or subagents break TCC — do not use them.
+
+Create the identity once in **Keychain Access > Certificate Assistant >
+Create a Certificate...** — Name `NanoDictate Code Signing`, Identity Type
+Self-Signed Root, Certificate Type Code Signing — then verify with
+`security find-identity -p codesigning -v`.
+
+### Permissions — Микрофон + Универсальный доступ
+
+After the first signed build, grant two permissions in **System Settings >
+Privacy & Security**:
+
+- **Микрофон (Microphone)** — audio capture (`com.apple.security.device.audio-input`).
+- **Универсальный доступ (Accessibility)** — global Alt+Alt hotkey and text
+  insertion via `CGEvent` (TCC grant, not an entitlement).
+
+Add the *signed* binary (`.build/debug/NanoDictateAgent`) to each list. The
+path is bound to the cdhash of that exact signed binary — after an ad-hoc
+rebuild the checkbox resets and the hotkey goes dead; re-sign with the stable
+identity and re-grant once. **Input Monitoring** may also be required on some
+macOS versions if the hotkey does not fire — add the same binary there if
+needed. See [Code Signing](#code-signing) and
+[Permissions](#permissions) for details.
+
+### MCP server — Node.js ≥ 22
+
+The deploy MCP server (`mcp/nanodictate-deploy-mcp-server/`, symlink
+`mcp/dictation-deploy-mcp-server` → same directory) automates build + sign +
+restart with a stable signature. Requires **Node.js ≥ 22** (`engines` in
+`package.json`) and the Swift toolchain above (its tools shell out to
+`swift build` / `codesign`).
 
 ```sh
 cd mcp/nanodictate-deploy-mcp-server
@@ -92,15 +145,19 @@ npm test               # npm run build && node --test
 npm start              # node dist/index.js (stdio MCP transport)
 ```
 
-`start.sh` is a one-shot launcher: it installs dependencies and runs the build
-when `dist/index.js` is missing, then `exec`s the compiled server — useful as
-the server command in your MCP client config. `dist/` and `node_modules/` are
-gitignored and absent on a fresh clone.
+`dist/` and `node_modules/` are gitignored and **absent on a fresh clone**
+— running `dist/index.js` directly would fail with `ENOENT`. `start.sh`
+is the entry point for MCP clients: when `dist/index.js` is missing it
+installs dependencies (`npm ci` → fallback `npm install`) and builds (`tsc`),
+then `exec`s the compiled server (build log → `.start-build.log`, errors →
+stderr, never stdout — that would corrupt MCP JSON-RPC). Register it in
+`~/.claude.json` as `bash $PROJECT_ROOT/mcp/nanodictate-deploy-mcp-server/start.sh`
+(not in project `settings.json`).
 
 Other scripts: `npm run typecheck` (`tsc --noEmit`), `npm run test:coverage`
 (`npm run build && node --test --experimental-test-coverage`), `npm run clean`
-(`rm -rf dist`). See [Deploy (MCP Server)](#deploy-mcp-server) below for the
-exposed tools and code-signing details.
+(`rm -rf dist`). See [Deploy (MCP Server)](#deploy-mcp-server) for the
+exposed tools.
 
 ## Install & Run
 

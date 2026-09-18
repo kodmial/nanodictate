@@ -29,3 +29,6 @@ Resources/nanodictate-agent.plist
 
 # Temporary files
 *.tmp
+*.log
+*.bak
+*~

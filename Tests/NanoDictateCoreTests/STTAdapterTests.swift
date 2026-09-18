@@ -164,7 +164,7 @@ final class STTAdapterTests: XCTestCase {
         // Неизвестный id "gigaam" → openAICompatible → multipart + Bearer,
         // verbose_json + timestamp_granularities[]=word (word-таймстампы),
         // language форвардится. Дополнительных шагов авторизации не планируется.
-        let url = "https://gpt.mwsapis.ru/projects/proj/openai/v1/audio/transcriptions"
+        let url = "https://example.com/projects/proj/openai/v1/audio/transcriptions"
         let spec = ProviderRequestBuilder.plan(
             adapterID: "gigaam", baseURL: url, model: "gigaam-v3", apiKey: "gigaam-key",
             language: "ru", wav: wav, filename: "file.wav")
