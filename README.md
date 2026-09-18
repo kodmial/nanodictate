@@ -57,22 +57,52 @@ Built as a Swift Package Manager package (`swift-tools-version:5.7`, macOS 12+).
 
 ## Build & Test
 
-Requirements: macOS 12+, Swift toolchain (Xcode CLT or standalone).
+Requirements: macOS 12+, Swift toolchain (Xcode CLT or standalone Swift).
 
 ```sh
 swift build -c release
 ```
 
-Run the test suite (659 tests):
+Run the test suite:
 
 ```sh
-zsh /private/tmp/dct-verify/build_all.sh
+swift run NanoDictateCoreTests
 ```
 
-The test runner is a standalone executable target (`NanoDictateCoreTests`) that
-replaces `swift test` (which does not work without XCTest in this project
-layout). Individual tests can also be run with
-`swift run NanoDictateCoreTests`.
+The tests are packaged as a standalone executable target
+(`NanoDictateCoreTests`) rather than XCTest test targets, so they are run with
+`swift run` instead of `swift test` (the package declares no test targets for
+`swift test` to discover). The runner executes every `test*` method, prints a
+summary, and exits non-zero if any test fails. The same commands are used by
+the CI workflow (`.github/workflows/ci.yml`).
+
+## MCP Server: Build, Run & Test
+
+The deploy MCP server is optional tooling for building, code-signing, and
+restarting the agent. It lives in `mcp/nanodictate-deploy-mcp-server/` — the
+`mcp/dictation-deploy-mcp-server` entry is a symlink to the same directory.
+
+Requires Node.js ≥ 22 (`engines` in `package.json`). Its tools shell out to
+`swift build` / `codesign`, so a Swift toolchain must be available too (Xcode
+CLT, or set `SWIFT_TOOLCHAIN` to a toolchain directory).
+
+```sh
+cd mcp/nanodictate-deploy-mcp-server
+npm install            # or: npm ci (package-lock.json is committed)
+npm run build          # tsc → dist/
+npm test               # npm run build && node --test
+npm start              # node dist/index.js (stdio MCP transport)
+```
+
+`start.sh` is a one-shot launcher: it installs dependencies and runs the build
+when `dist/index.js` is missing, then `exec`s the compiled server — useful as
+the server command in your MCP client config. `dist/` and `node_modules/` are
+gitignored and absent on a fresh clone.
+
+Other scripts: `npm run typecheck` (`tsc --noEmit`), `npm run test:coverage`
+(`npm run build && node --test --experimental-test-coverage`), `npm run clean`
+(`rm -rf dist`). See [Deploy (MCP Server)](#deploy-mcp-server) below for the
+exposed tools and code-signing details.
 
 ## Install & Run
 
@@ -234,7 +264,7 @@ Legacy aliases `"relay"` and `"infinityfree"` are automatically converted to
 ## UI Language
 
 The TUI and agent UI strings support English and Russian. Set
-`ui_language = "en"` or `"ui_language = "ru"` in `config.toml` (default:
+`ui_language = "en"` or `ui_language = "ru"` in `config.toml` (default:
 `"en"`). The first item in the TUI status menu toggles the language at
 runtime.
 
@@ -250,7 +280,7 @@ Sources/
   NanoDictateAgent/                     # LaunchAgent executable
   nanodictate/                       # CLI + TUI executable
 Tests/
-  NanoDictateCoreTests/                # Standalone test runner (659 tests)
+  NanoDictateCoreTests/                # Standalone test runner (no XCTest required)
 Resources/
   *.entitlements                     # Code signing entitlements
   *.plist.template                   # LaunchAgent plist template
@@ -259,14 +289,12 @@ Resources/
 ### Running tests
 
 ```sh
-zsh /private/tmp/dct-verify/build_all.sh
-```
-
-Or run the test executable directly:
-
-```sh
 swift run NanoDictateCoreTests
 ```
+
+The executable runner enumerates the suite classes in
+`Tests/NanoDictateCoreTests/`, runs every `test*` method, prints a summary,
+and exits non-zero if any test fails.
 
 ## Deploy (MCP Server)
 
