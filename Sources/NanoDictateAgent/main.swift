@@ -155,9 +155,14 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     /// срабатывании сторожа подъёма — аннулирует устаревшие completion-колбэки.
     private var startSession = 0
     /// Сессионный токен запроса доступа к микрофону (TCC-диалог).
-    private var micRequestSession = 0
-    /// Системный диалог TCC уже висит — повторный Alt+Alt не открывает второй.
-    private var micPermissionRequestInFlight = false
+    /// Координатор запроса доступа к микрофону: сессионный токен + сторож +
+    /// анти-шторм MicRequestPolicy (см. MicRequestPolicy: после 3 таймаутов
+    /// запроса в окне 6 ч новый системный диалог НЕ открывается — повторные
+    /// диалоги у фонового агента без бандла клинят tccd и замораживают
+    /// систему). Состояние политики персистентно между рестартами агента
+    /// (файл в Application Support). Вынесен в Core, чтобы поведение сторожа
+    /// при позднем granted покрывалось мини-XCTest (NanoDictateCoreTests).
+    private let micAccessRequester: MicAccessRequester
     /// Cooldown терминальных микрофонных ошибок (showMicrophoneError): пока
     /// доступ к микрофону не выдан / движок не поднялся, каждый Alt+Alt не
     /// должен снова играть Basso и мигать оверлеем — сообщение один раз в 3 с.
@@ -212,6 +217,13 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     /// Retain-свойство для таймера автоподхвата права Accessibility
     /// (Timer.scheduledTimer с repeats:true не должен попадать под ARC/GC).
     private var accessibilityPollTimer: Timer?
+    /// Rate-limit открытия панели «Доступность»: серия нажатий/стартов без
+    /// гранта не должна плодить окна настроек (не чаще раза в 10 минут).
+    /// Метка последнего открытия хранится в UserDefaults, а не в памяти
+    /// процесса: фоновый респавн агента (KeepAlive) память обнуляет, и без
+    /// персистентности панель открывалась бы при КАЖДОМ респавне.
+    private static let accessibilityPanelCooldown: TimeInterval = 10 * 60
+    private static let lastAccessibilityPanelOpenAtKey = "NanoDictate.lastAccessibilityPanelOpenAt"
 
     init(config: AppConfig) {
         self.logLevel = config.logLevel
@@ -230,6 +242,18 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             // ровно по задаче (включено, ~3 c, −50 dBFS). Спасательный люк —
             // NANODICTATE_AUTOSTOP_DISABLED / _DURATION / _RMS, см. AutoStopConfig.
             autoStopConfig: AutoStopConfig.fromEnvironment()
+        )
+        // Координатор TCC-запроса микрофона: сторож таймаута + анти-шторм
+        // (MicRequestPolicy). Токены и флаги запроса живут внутри него —
+        // устаревшие колбэки (поздний granted после таймаута) отбрасываются
+        // по сессионному токену, запись из-под показанной ошибки не начнётся.
+        self.micAccessRequester = MicAccessRequester(
+            status: { AVCaptureDevice.authorizationStatus(for: .audio) },
+            requestAccess: { completion in
+                AVCaptureDevice.requestAccess(for: .audio, completionHandler: completion)
+            },
+            policy: MicRequestPolicy(fileURL: MicRequestPolicy.defaultFileURL()),
+            timeout: Self.micRequestTimeout
         )
         self.hotkeys = HotkeyService(
             doubleTapMaxInterval: config.doubleAltMaxInterval,
@@ -395,10 +419,12 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
 
     // MARK: - Accessibility (право «Доступность»)
 
-    /// Запускает hotkey, если право Accessibility уже выдано; иначе сам открывает
-    /// системную панель «Приватность и безопасность → Доступность» и каждые 2
+    /// Запускает hotkey, если право Accessibility уже выдано; иначе каждые 2
     /// секунды опрашивает AXIsProcessTrusted(), пока пользователь не включит
-    /// право — затем стартует hotkey и останавливает опрос.
+    /// право — затем стартует hotkey и останавливает опрос. Без гранта —
+    /// тихий статус и открытие системной панели с rate-limit'ом
+    /// (openAccessibilitySettingsIfDue, не чаще раза в 10 минут; метка
+    /// персистентна в UserDefaults — фоновый респавн панель не открывает).
     func startWithAccessibilityRequest() throws {
         if AXIsProcessTrusted() {
             try start()
@@ -406,12 +432,15 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             return
         }
 
-        // Панель открывается так же, как это делают Karabiner и подобные приложения.
-        // Статическая строка-литерал гарантированно валидна на macOS 12+.
-        NSWorkspace.shared.open(
-            URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
-        )
+        // Без звука ошибки: отсутствие гранта на старте/респавне — не поломка
+        // микрофона, а ожидание действия пользователя (KeepAlive-респавны не
+        // должны играть Basso). Статус оверлея подсказывает, что нужно
+        // включить «Доступность»; панель открывается сама (не чаще раза в 10
+        // минут), и явное Alt+Alt нужно только при отзыве гранта на ходу.
         Logger.log(L10n.tr("error.accessibilityRequired"), level: "info")
+        overlay.setStatus(L10n.tr("error.accessibilityRequired"))
+        hideAfter(2.0, reason: "accessibility required")
+        openAccessibilitySettingsIfDue()
 
         // Автоподхват права: опрос каждые 2 секунды на главном потоке.
         accessibilityPollTimer?.invalidate()
@@ -433,6 +462,33 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             }
         }
         RunLoop.main.add(accessibilityPollTimer!, forMode: .common)
+    }
+
+    /// Открытие системной панели «Приватность и безопасность → Доступность» —
+    /// при старте/респавне без гранта (см. startWithAccessibilityRequest) и по
+    /// явному Alt+Alt, не чаще раза в accessibilityPanelCooldown. Метка
+    /// последнего открытия хранится в UserDefaults: респавн агента (KeepAlive)
+    /// память обнуляет, и без персистентности панель открывалась бы при
+    /// КАЖДОМ респавне — спам окнами при отсутствующем гранте.
+    private func openAccessibilitySettingsIfDue() {
+        let now = CFAbsoluteTimeGetCurrent()
+        let defaults = UserDefaults.standard
+        // Отсутствующая метка (double == 0) трактуется как «не открывали»:
+        // now - 0 заведомо больше cooldown.
+        let lastOpen = defaults.double(forKey: Self.lastAccessibilityPanelOpenAtKey)
+        guard now - lastOpen >= Self.accessibilityPanelCooldown else {
+            if isDebug {
+                Logger.log("accessibility settings panel suppressed (shown recently)", level: "debug")
+            }
+            return
+        }
+        defaults.set(now, forKey: Self.lastAccessibilityPanelOpenAtKey)
+        // Панель открывается так же, как это делают Karabiner и подобные
+        // приложения. Статическая строка-литерал гарантированно валидна на
+        // macOS 12+.
+        NSWorkspace.shared.open(
+            URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+        )
     }
 
     // MARK: - HotkeyDelegate
@@ -481,6 +537,17 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     private var isDebug: Bool { logLevel.lowercased() == "debug" }
 
     private func handleAltDoubleTap() {
+        // Без права «Доступность» агент не может ни слушать Alt+Alt, ни постить
+        // клавиши — запись бесполезна. Явное действие пользователя (нажатие
+        // хоткея при отсутствующем гранте) открывает панель настроек — с
+        // rate-limit'ом (openAccessibilitySettingsIfDue, не чаще раза в 10 мин)
+        // и понятным сообщением; при старте/респавне панель открывается тем же
+        // путём (см. startWithAccessibilityRequest).
+        guard AXIsProcessTrusted() else {
+            openAccessibilitySettingsIfDue()
+            showMicrophoneError(L10n.tr("error.accessibilityRequired"))
+            return
+        }
         if isDebug {
             Logger.log("Alt+Alt handled: state=\(String(describing: state))", level: "debug")
         }
@@ -570,49 +637,48 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     /// Не запрашиваем доступ принудительно из-под launchd (окно запроса может
     /// не отобразиться): только проверяем статус, а для .notDetermined пробуем
     /// запросить — и при granted начинаем запись.
-    /// Три защиты от «просит разрешение → вылетает сообщение → зависает»:
+    /// Вся механика «просит разрешение → вылетает сообщение → зависает» —
+    /// в Core (MicAccessRequester), здесь только логирование и реакция на исход:
     /// 1) повторный Alt+Alt, пока системный диалог TCC уже висит, не открывает
-    ///    второй запрос (micPermissionRequestInFlight);
+    ///    второй запрос (isInFlight в координаторе);
     /// 2) сторож micRequestTimeout: если колбэк requestAccess не пришёл (окно
     ///    у фонового агента без бандла могло не отобразиться) — терминальная
-    ///    ошибка в оверлее вместо вечного ожидания; следующий Alt+Alt снова
-    ///    попробует запросить доступ;
-    /// 3) ветки .denied/.restricted дают понятное сообщение и НЕ трогают движок.
+    ///    ошибка в оверлее вместо вечного ожидания; поздний granted после
+    ///    таймаута отбрасывается по сессионному токену (запись не начнётся
+    ///    из-под уже показанной ошибки, штормовой счётчик не сбросится);
+    /// 3) ветки .denied/.restricted дают понятное сообщение и НЕ трогают движок;
+    /// 4) анти-шторм MicRequestPolicy: после 3 таймаутов в окне 6 ч запрос
+    ///    доступа не открывается вовсе (серия повторов не плодит диалоги,
+    ///    клинящие tccd) — вместо запроса понятная инструкция, следующий
+    ///    Alt+Alt снова пробует, пока грант не появится вручную.
     private func requestMicrophoneAndStart() {
         let status = AVCaptureDevice.authorizationStatus(for: .audio)
         // Каждый запрос доступа к микрофону фиксируется в логе: сам факт проверки,
         // текущий статус TCC и результат системного диалога (granted/denied).
         Logger.log("mic permission check: \(MicrophoneAuth.statusText(status))", level: "info")
-        switch status {
-        case .authorized:
-            startRecording()
-        case .denied, .restricted:
-            showMicrophoneError(L10n.tr("error.micPermission"))
-        case .notDetermined:
-            guard !micPermissionRequestInFlight else {
-                Logger.log("mic permission request already in flight — ignoring Alt+Alt", level: "info")
-                return
-            }
-            micPermissionRequestInFlight = true
-            micRequestSession += 1
-            let session = micRequestSession
-            DispatchQueue.main.asyncAfter(deadline: .now() + Self.micRequestTimeout) { [weak self] in
-                guard let self = self, self.micRequestSession == session else { return }
+        // Повторный Alt+Alt, пока диалог висит, — только лог, без второго
+        // запроса (внутренний guard координатора делает то же самое; здесь —
+        // ради читаемого сообщения).
+        guard !micAccessRequester.isInFlight else {
+            Logger.log("mic permission request already in flight — ignoring Alt+Alt", level: "info")
+            return
+        }
+        micAccessRequester.requestIfNeeded { [weak self] outcome in
+            guard let self = self else { return }
+            switch outcome {
+            case .granted:
+                Logger.log("mic permission request result: granted", level: "info")
+                self.startRecording()
+            case .denied:
+                Logger.log("mic permission request result: denied", level: "info")
+                self.showMicrophoneError(L10n.tr("error.micPermission"))
+            case .timedOut:
                 Logger.log("mic permission request timed out after \(Int(Self.micRequestTimeout)) s", level: "error")
-                self.micPermissionRequestInFlight = false
+                self.showMicrophoneError(L10n.tr("error.micPermissionUnhandled"))
+            case .suppressedByPolicy:
+                Logger.log("mic permission request suppressed: \(MicRequestPolicy.maxTimeoutsInWindow) timeouts within \(Int(MicRequestPolicy.windowDuration / 3600)) h", level: "error")
                 self.showMicrophoneError(L10n.tr("error.micPermissionUnhandled"))
             }
-            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
-                DispatchQueue.main.async {
-                    guard let self = self, self.micRequestSession == session else { return }
-                    self.micPermissionRequestInFlight = false
-                    Logger.log("mic permission request result: \(granted ? "granted" : "denied")", level: "info")
-                    granted ? self.startRecording()
-                        : self.showMicrophoneError(L10n.tr("error.micPermission"))
-                }
-            }
-        @unknown default:
-            showMicrophoneError(L10n.tr("error.micPermission"))
         }
     }
 
@@ -645,14 +711,25 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         // Сторож подъёма движка: если за recordStartTimeout движок не стартовал
         // — терминальная ошибка (оверлей гаснет, следующий Alt+Alt работает).
         // startSession инкрементируется здесь же: отложенный completion старта
-        // (если движок всё же поднялся позже) увидит расхождение токенов и
-        // снимет движок через audio.cancel() — «глухой» записи не остаётся.
+        // (если движок всё же поднялся позже) увидит расхождение токенов.
+        // audio.cancel() здесь НЕ вызывается намеренно: его teardown ушёл бы на
+        // очередь зависшего движка (заблокирована навсегда), и разблокировавшийся
+        // ПОСЛЕ подмены старт дотянул бы его БЕЗ гарда поколения — setRecording(
+        // false)/сброс буферов/tapInstalled=false убили бы живую новую сессию на
+        // свежем движке. Старый движок разбирают wedge (stop на глобальной
+        // очереди) и сам устаревший старт (терминальная ветка teardownEngineOnly,
+        // .failure(.engineSuperseded)); state новой сессии (isRecording/буферы)
+        // переинициализирует старт нового сеанса.
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.recordStartTimeout) { [weak self] in
             guard let self = self, self.startSession == session, self.isStarting else { return }
             Logger.log("record start timed out after \(Int(Self.recordStartTimeout)) s", level: "error")
             self.startSession += 1
             self.isStarting = false
-            self.audio.cancel()
+            // Зависший движок подменяется свежим: engine.start() мог вообще не
+            // вернуться (HAL заблокирован сменой устройства) — старый экземпляр
+            // непригоден, следующий Alt+Alt стартует с чистого движка.
+            self.audio.replaceEngineAfterWedge()
+            Logger.log("record start recovery: wedged engine replaced", level: "info")
             self.showMicrophoneError(L10n.tr("error.micNoResponse"))
         }
 
@@ -661,6 +738,12 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             guard self.startSession == session else {
                 // Старт завершился позже сторожа (или начался новый цикл).
                 // Если движок успели поднять — не оставляем запись висеть.
+                // cancel() здесь выполняется ТОЛЬКО когда движок, начавший
+                // запись, всё ещё текущий: старты, разблокировавшиеся ПОСЛЕ
+                // wedge-подмены, AudioService помечает сам (.failure(
+                // .engineSuperseded), см. AudioService.startOnEngineQueue) и до
+                // .success они не доходят — иначе cancel() убил бы живую новую
+                // сессию на свежем движке.
                 if case .success = result {
                     self.audio.cancel()
                 }
@@ -1671,7 +1754,6 @@ guard ensureSingleInstance() else {
     // Второй инстанс уже работает — пассивно ждём на главной dispatch queue.
     // dispatchMain() не требует run loop source и никогда не возвращается.
     dispatchMain()
-    fatalError("unreachable: dispatchMain() returned")
 }
 
 let config: AppConfig
@@ -1690,8 +1772,11 @@ let app = NSApplication.shared
 let agent = Agent(config: config)
 
 do {
-    // Проверяет AXIsProcessTrusted(); если права нет — сам открывает системную
-    // панель «Доступность» и опрашивает раз в 2 сек до выдачи права (автоподхват).
+    // Проверяет AXIsProcessTrusted(); если права нет — показывает понятное
+    // сообщение и опрашивает раз в 2 сек до выдачи права (автоподхват).
+    // Панель «Доступность» при отсутствии гранта открывается САМА при старте
+    // (rate-limit 10 минут, см. openAccessibilitySettingsIfDue); явное Alt+Alt
+    // нужно для повторного открытия при отзыве гранта на ходу.
     try agent.startWithAccessibilityRequest()
 } catch {
     Logger.log("hotkey service failed to start: \(error.localizedDescription)", level: "error")

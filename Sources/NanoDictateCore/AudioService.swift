@@ -135,12 +135,21 @@ public final class AudioService {
     /// останавливается, сэмплы отбрасываются.
     public var onAutoStop: (([Int16]) -> Void)?
 
-    private let engine: AudioEngineLike
+    // var, а не let: replaceEngineAfterWedge() подменяет «зависший» движок
+    // свежим экземпляром (восстановление после record-start таймаута).
+    private var engine: AudioEngineLike
     private let targetFormat: AVAudioFormat
     private var converter: AVAudioConverter?
     private var collectedSamples: [Int16] = []
     private var isRecording = false
     private var tapInstalled = false
+    /// Поколение движка: инкрементируется при КАЖДОЙ подмене «зависшего» движка
+    /// (replaceEngineAfterWedge). Вместе с (engine, queue) образует атомарный
+    /// слот: старты захватывают поколение при диспетчеризации, tap-блок и
+    /// терминальные ветки старта сверяют «я — всё ещё текущее поколение?».
+    /// Устаревшие движки (отброшенные подменой) молча дропают буферы и не
+    /// трогают state нового сеанса.
+    private var generation = 0
     /// Жёсткий лимит: 60.0 c, 960 000 сэмплов. Ни при каких условиях запись не
     /// может превысить эти значения (см. `process` и `scheduleLimitStop`).
     private var limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
@@ -208,7 +217,14 @@ public final class AudioService {
     /// Серийная очередь ВСЕХ операций движка: installTap/removeTap/prepare/start/
     /// stop. Вне очереди их вызывать нельзя — это и есть гарантия отсутствия
     /// гонок teardown↔start и блокировок главного потока.
-    private let engineQueue = DispatchQueue(label: "nanodictate.audio.engine", qos: .userInitiated)
+    /// НЕ `let`: вместе с зависшим движком подменяется и ЕГО очередь
+    /// (replaceEngineAfterWedge) — заблокированный engine.start() держит только
+    /// свою очередь, операции для свежего движка уходят на свежую очередь.
+    private var engineQueue: DispatchQueue
+    /// Фабрика свежих движков при подмене после зависания (см.
+    /// replaceEngineAfterWedge). Инъекция тестов; по умолчанию — настоящий
+    /// AVAudioEngine.
+    private let engineFactory: () -> AudioEngineLike
     /// Фоновая очередь движка или главная — определяется движком, не потоком
     /// вызова. Используется только для диагностики.
     private var isDebug: Bool { logLevel.lowercased() == "debug" }
@@ -216,12 +232,19 @@ public final class AudioService {
     public init(
         logLevel: String = "info",
         engine: AudioEngineLike? = nil,
+        makeEngine: (() -> AudioEngineLike)? = nil,
         segmenterConfig: AudioSegmenterConfig = .defaults,
         autoStopConfig: AutoStopConfig = .defaults,
         gainConfig: InputGainConfig = .fromEnvironment()
     ) {
         self.logLevel = logLevel
-        self.engine = engine ?? AVAudioEngine()
+        // Фабрика движков: начальный экземпляр (если не инъектирован) и замена
+        // зависшего создаются ЕЮ — тесты подменяют её и получают контроль над
+        // «свежим» движком после подмены.
+        let factory = makeEngine ?? { AVAudioEngine() }
+        self.engineFactory = factory
+        self.engine = engine ?? factory()
+        self.engineQueue = DispatchQueue(label: "nanodictate.audio.engine", qos: .userInitiated)
         self.autoStopConfig = autoStopConfig
         self.gain = InputGain(config: gainConfig)
         self.autoStopDetector = SilenceAutoStopDetector(
@@ -263,18 +286,47 @@ public final class AudioService {
     /// микрофона или сбое движка — `.failure` (движок при этом разобран и готов
     /// к повторному старту, см. `startOnEngineQueue`).
     public func start(completion: @escaping (Result<Void, Error>) -> Void) {
-        engineQueue.async { [weak self] in
+        // Снимок пары (движок, очередь, поколение) под lock, ДО постановки в
+        // очередь: блок уходит на очередь ЭТОГО движка и работает с НИМ. Зависший
+        // старт блокирует только свою пару — после подмены (replaceEngineAfterWedge)
+        // свежая пара работает, не дожидаясь заблокированной очереди. Поколение,
+        // захваченное здесь, — «метка» этого старта: tap-блок и терминальные
+        // ветки сверяют по ней, что движок всё ещё текущий (см. startOnEngineQueue).
+        let slot = captureEngineSlot()
+        slot.queue.async { [weak self, engine = slot.engine, startGeneration = slot.generation] in
             guard let self = self else {
                 DispatchQueue.main.async { completion(.failure(AudioServiceError.engineGone)) }
                 return
             }
-            let result = self.startOnEngineQueue()
+            let result = self.startOnEngineQueue(using: engine, startGeneration: startGeneration)
             DispatchQueue.main.async { completion(result) }
         }
     }
 
-    /// Весь подъём движка — строго на engineQueue.
-    private func startOnEngineQueue() -> Result<Void, Error> {
+    /// Атомарный снимок «движок + его серийная очередь + поколение» в момент
+    /// диспетчеризации операции. Пара меняется только целиком
+    /// (replaceEngineAfterWedge), поэтому операция всегда попадает на очередь
+    /// СВОЕГО движка: серийность installTap/removeTap/prepare/start/stop на
+    /// одном экземпляре сохраняется, а заблокированная очередь зависшего
+    /// движка никого больше не держит. Поколение — «метка» старта: по ней
+    /// tap-блок и терминальные ветки отличают текущий движок от отброшенного.
+    private struct EngineSlot {
+        var engine: AudioEngineLike
+        var queue: DispatchQueue
+        var generation: Int
+    }
+
+    private func captureEngineSlot() -> EngineSlot {
+        lock.lock()
+        defer { lock.unlock() }
+        return EngineSlot(engine: engine, queue: engineQueue, generation: generation)
+    }
+
+    /// Весь подъём движка — строго на очереди этого движка. `startGeneration` —
+    /// поколение слота на момент диспетчеризации старта: терминальные ветки
+    /// разбирают движок и трогают state сеанса ТОЛЬКО если движок, что начал,
+    /// всё ещё текущий (не подменён wedge'ом после таймаута сторожа).
+    private func startOnEngineQueue(using engine: AudioEngineLike, startGeneration: Int) -> Result<Void, Error> {
         // Новый сеанс: чистые буферы, чистый лимит (после принудительной
         // остановки или аварийной ветки).
         collectedSamples = []
@@ -295,12 +347,49 @@ public final class AudioService {
         // установленным tap (аварийная ветка), снимаем его ДО installTap —
         // повторный installTap на тот же bus поднимает NSException (краш).
         if isTapInstalled {
-            teardownOnEngineQueue()
+            teardownOnEngineQueue(using: engine)
         }
 
-        let input = engine.makeInputNode()
-        let hwFormat = input.outputFormat(forBus: 0)
-        guard let converter = AVAudioConverter(from: hwFormat, to: targetFormat) else {
+        // Подъём входного узла и формата — под тем же ObjC-шлюзом, что и весь
+        // движок ниже: makeInputNode/outputFormat(forBus:)/AVAudioConverter могут
+        // поднять NSException (SetOutputFormat при рассинхронизации формата после
+        // смены аудио-устройства или TCC-гранта — в Swift его нельзя поймать
+        // try, голый вызов уронил бы процесс SIGABRT). Результаты собираются
+        // во внешние capture-переменные (тело шлюза Void-возвращающее),
+        // исключение превращается в NSError и идёт в терминальную ветку ниже.
+        var capturedInput: AudioInputNodeLike?
+        var capturedHWFormat: AVAudioFormat?
+        var capturedConverter: AVAudioConverter?
+        var setupFailure = guardedEngineCall {
+            capturedInput = engine.makeInputNode()
+            capturedHWFormat = capturedInput?.outputFormat(forBus: 0)
+        }
+        if setupFailure == nil, let fmt = capturedHWFormat {
+            setupFailure = guardedEngineCall {
+                capturedConverter = AVAudioConverter(from: fmt, to: self.targetFormat)
+            }
+        }
+        if let setupFailure = setupFailure {
+            // Терминальная ветка — как у engine.start() ниже: движок обязан быть
+            // разобран, иначе следующий Alt+Alt упадёт на повторном installTap.
+            // Но сначала гард поколения: если движок, что начал, уже подменён
+            // (wedge) — state нового сеанса (setRecording(false)/сброс буферов)
+            // трогать нельзя, разбираем только сам устаревший движок.
+            guard isCurrentGeneration(startGeneration) else {
+                teardownEngineOnly(using: engine)
+                return .failure(setupFailure)
+            }
+            setRecording(false)
+            teardownOnEngineQueue(using: engine)
+            Logger.log("record engine: input setup failed: \(setupFailure.localizedDescription)", level: "error")
+            return .failure(setupFailure)
+        }
+        guard let input = capturedInput, let hwFormat = capturedHWFormat else {
+            // Недостижимо (makeInputNode не возвращает nil) — страховка компайлеру.
+            Logger.log("record engine: input node unavailable", level: "error")
+            return .failure(AudioServiceError.unsupportedFormat)
+        }
+        guard let converter = capturedConverter else {
             Logger.log("record engine: AVAudioConverter init failed (hw=\(Int(hwFormat.sampleRate)) Hz -> target=\(Int(targetFormat.sampleRate)) Hz)", level: "error")
             return .failure(AudioServiceError.unsupportedFormat)
         }
@@ -320,16 +409,11 @@ public final class AudioService {
         // (рубильник/цель/потолок из окружения — см. InputGainConfig.fromEnvironment).
         Logger.log("record input-gain: enabled=\(gain.config.enabled), target=\(String(format: "%.1f", gain.config.targetRmsDb)) dBFS, max=\(String(format: "%.1f", gain.config.maxGainDb)) dB", level: "info")
 
-        // Хлебные крошки перед каждым шагом старта движка: если следующий вызов
-        // AVFoundation крэшнет, последняя строка лога укажет точное место.
+        // Хлебная крошка перед installTap: если следующий вызов AVFoundation
+        // крэшнет, последняя строка лога укажет точное место. Повторный опрос
+        // аппаратного формата здесь НЕ делается — тот же вызов уже снят под
+        // ObjC-шлюзом в подъёме выше (дублирование не давало новой информации).
         if isDebug {
-            let inFmt = input.outputFormat(forBus: 0)
-            Logger.log(String(
-                format: "record engine: inputNode format=%.0f Hz, %d ch, commonFormat=%@, interleaved=%@; target=%.0f Hz, %d ch",
-                inFmt.sampleRate, inFmt.channelCount,
-                String(describing: inFmt.commonFormat), inFmt.isInterleaved ? "yes" : "no",
-                targetFormat.sampleRate, targetFormat.channelCount
-            ), level: "debug")
             Logger.log("record engine: installing tap (bus 0, bufferSize 4096, hwFormat=\(Int(hwFormat.sampleRate)) Hz)", level: "debug")
         }
 
@@ -339,8 +423,14 @@ public final class AudioService {
                 onBus: 0,
                 bufferSize: 4096,
                 format: hwFormat
-            ) { [weak self] buffer, _ in
-                self?.process(buffer)
+            ) { [weak self, tapGeneration = startGeneration] buffer, _ in
+                guard let self = self else { return }
+                // Tap отброшенного поколения (движок подменён wedge'ом ПОСЛЕ
+                // установки tap) молча дропает буферы: чужой аудио-поток не
+                // должен кормить новую сессию. Сам по себе старый tap не снять
+                // (его движок мог зависнуть) — гард поколения дешевле и надёжнее.
+                guard self.isCurrentGeneration(tapGeneration) else { return }
+                self.process(buffer)
             }
         }
         if failure == nil {
@@ -351,7 +441,7 @@ public final class AudioService {
         }
         if failure == nil {
             failure = guardedEngineCall {
-                self.engine.prepare()
+                engine.prepare()
             }
         }
         if failure == nil, isDebug {
@@ -362,17 +452,34 @@ public final class AudioService {
         if failure == nil {
             setRecording(true)
             failure = guardedEngineCall {
-                try self.engine.start()
+                try engine.start()
             }
         }
         if let failure = failure {
             // Терминальная ветка: движок обязан быть разобран (tap снят, движок
             // остановлен, буферы очищены) — иначе следующий Alt+Alt упадёт на
-            // повторном installTap на занятом bus.
+            // повторном installTap на занятом bus. Гард поколения, как в ветке
+            // setup-сбоя: разблокировавшийся ПОСЛЕ подмены старт не трогает
+            // state новой сессии — только разбирает сам устаревший движок.
+            guard isCurrentGeneration(startGeneration) else {
+                teardownEngineOnly(using: engine)
+                return .failure(failure)
+            }
             setRecording(false)
-            teardownOnEngineQueue()
+            teardownOnEngineQueue(using: engine)
             Logger.log("record engine: start failed: \(failure.localizedDescription)", level: "error")
             return .failure(failure)
+        }
+        // Гард поколения успешной ветки: если движок, что НАЧАЛ запись, уже не
+        // текущий (его start() разблокировался после wedge-подмены) — вернуть
+        // .success нельзя: агент вызвал бы audio.cancel() на ТЕКУЩЕЙ (возможно,
+        // живой) свежей паре. Разбираем только устаревший движок и помечаем
+        // старт .failure(.engineSuperseded) — сторожевой completion агента его
+        // игнорирует, к cancel() не приводит.
+        guard isCurrentGeneration(startGeneration) else {
+            Logger.log("record engine: stale start completed after wedge — discarded", level: "info")
+            teardownEngineOnly(using: engine)
+            return .failure(AudioServiceError.engineSuperseded)
         }
         if isDebug {
             Logger.log("record engine: started OK", level: "debug")
@@ -402,8 +509,14 @@ public final class AudioService {
         rmsHistory = []
         lock.unlock()
 
-        engineQueue.async { [weak self] in
-            self?.teardownOnEngineQueue()
+        // Разборка — на очереди ТОГО движка, с которым шла эта запись (снимок
+        // пары под lock): серийность с уже стоящими там операциями сохраняется,
+        // а после подмены зависшего движка конкретный teardown уходит на очередь
+        // своего (уже отброшенного) экземпляра и никого больше не держит.
+        let slot = captureEngineSlot()
+        slot.queue.async { [weak self, engine = slot.engine] in
+            guard let self = self else { return }
+            self.teardownOnEngineQueue(using: engine)
         }
         logRecordingFinale(samples: samples, duration: duration, rmsHistory: rms)
         // Незакрытый уттеренс распознаётся как последний сегмент: к моменту
@@ -432,8 +545,12 @@ public final class AudioService {
         resetLiveVADLocked()
         lock.unlock()
 
-        engineQueue.async { [weak self] in
-            self?.teardownOnEngineQueue()
+        // Разборка — на очереди того же движка (снимок пары под lock), см.
+        // комментарий в stop().
+        let cancelSlot = captureEngineSlot()
+        cancelSlot.queue.async { [weak self, engine = cancelSlot.engine] in
+            guard let self = self else { return }
+            self.teardownOnEngineQueue(using: engine)
         }
         // Отмена тоже завершает запись — без отправки в STT; длительность и
         // объём помогают отличать «пустую» отмену от отмены после реальной речи.
@@ -442,6 +559,51 @@ public final class AudioService {
                 format: "record cancel: duration=%.2f s, frames=%d, bytes=%d",
                 duration, frames, frames * 2
             ), level: "debug")
+        }
+    }
+
+    // MARK: - Восстановление после зависания
+
+    /// Замена «зависшего» движка — восстановление после record-start таймаута
+    /// (сторож подъёма в Agent зовёт её, когда engine.start() не вернулся за
+    /// отведённое время; типичный сценарий — смена аудио-устройства после
+    /// TCC-гранта блокирует старт в HAL навсегда). Старый экземпляр
+    /// отбрасывается, в свойство встаёт СВЕЖИЙ AVAudioEngine — следующий
+    /// start() переустановит tap/формат/конвертер с нуля.
+    /// Подмена идёт СИНХРОННО на вызывающем потоке (не через очередь движка!):
+    /// очередь зависшего экземпляра может быть заблокирована навсегда его
+    /// engine.start() — постановка подмены в ту же очередь означала бы, что
+    /// восстановление не наступит НИКОГДА (ровно та дефектная схема, ради
+    /// которой метод и существует). Под lock меняется вся пара
+    /// (движок + его очередь): свежий движок из фабрики получает СВОЮ очередь,
+    /// старая пара отбрасывается целиком. Разборка и отпускание СТАРОГО движка —
+    /// на отдельной глобальной очереди: его stop() может застрять на том же
+    /// HAL, что завис в start(), и не должен держать ничью очередь.
+    /// Безопасен в любом состоянии, идемпотентен: повторный вызов просто
+    /// заменяет уже свежий движок ещё раз.
+    public func replaceEngineAfterWedge() {
+        let oldEngine: AudioEngineLike
+        lock.lock()
+        oldEngine = engine
+        engine = engineFactory()
+        engineQueue = DispatchQueue(label: "nanodictate.audio.engine", qos: .userInitiated)
+        // Новое поколение: операции и tap-блоки старого движка (если его start()
+        // разблокируется позже) видят расхождение поколений и не трогают state,
+        // а новые старты получают свежую метку.
+        generation += 1
+        // tap и конвертер принадлежали старому движку — свежий старт ставит их
+        // с нуля (повторный installTap на занятом bus = NSException).
+        tapInstalled = false
+        converter = nil
+        lock.unlock()
+        Logger.log("record engine: wedged engine replaced — fresh AVAudioEngine installed", level: "info")
+        // Разборка старого движка вне очередей движка (см. комментарий метода).
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+            let _ = self.guardedEngineCall {
+                oldEngine.stop()
+            }
+            // oldEngine отпускается по выходу из блока — dealloc вдали от очередей движка.
         }
     }
 
@@ -465,18 +627,20 @@ public final class AudioService {
         return nsError ?? box.captured
     }
 
-    /// Разборка движка — строго на engineQueue. Идемпотентна: снять не
-    /// установленный tap / остановить не запущенный движок безопасно (все
-    /// вызовы под шлюзом NSException).
-    private func teardownOnEngineQueue() {
+    /// Разборка движка — строго на очереди ЭТОГО движка. Идемпотентна: снять
+    /// не установленный tap / остановить не запущенный движок безопасно (все
+    /// вызовы под шлюзом NSException). Движок передаётся явно (снимок пары), а
+    /// не берётся из свойства: teardown может выполняться для экземпляра, уже
+    /// отброшенного подменой.
+    private func teardownOnEngineQueue(using engine: AudioEngineLike) {
         if isTapInstalled {
             let _ = guardedEngineCall {
-                self.engine.makeInputNode().removeTap(onBus: 0)
+                engine.makeInputNode().removeTap(onBus: 0)
             }
             setTapInstalled(false)
         }
         let _ = guardedEngineCall {
-            self.engine.stop()
+            engine.stop()
         }
         setRecording(false)
         converter = nil
@@ -488,6 +652,20 @@ public final class AudioService {
         autoStopDetector.reset()
         resetLiveVADLocked()
         lock.unlock()
+    }
+
+    /// Разборка ТОЛЬКО устаревшего движка (снять его tap, остановить его) —
+    /// без трогания глобального состояния сеанса (isRecording, буферы,
+    /// конвертер). Для стартов, завершившихся после подмены поколения: полная
+    /// разборка (teardownOnEngineQueue) сбросила бы живую новую сессию на
+    /// свежем движке.
+    private func teardownEngineOnly(using engine: AudioEngineLike) {
+        let _ = guardedEngineCall {
+            engine.makeInputNode().removeTap(onBus: 0)
+        }
+        let _ = guardedEngineCall {
+            engine.stop()
+        }
     }
 
     /// Сброс live-VAD — строго под блокировкой (начало сеанса, teardown,
@@ -534,6 +712,15 @@ public final class AudioService {
         lock.lock()
         defer { lock.unlock() }
         return tapInstalled
+    }
+
+    /// «Движок поколения `generation` — всё ещё текущий?» (не подменён
+    /// wedge'ом). Проверка из tap-блока (аудио-поток) и терминальных веток
+    /// старта (очередь движка) — короткий захват lock, без вложенности.
+    private func isCurrentGeneration(_ generation: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return self.generation == generation
     }
 
     /// Реальный объём выхода при ресемплинге пропорционален частотам:
@@ -843,8 +1030,12 @@ public final class AudioService {
         if isDebug {
             Logger.log("record forced stop (\(reason == .limit ? "limit" : "silence auto-stop")): tearing engine down (samples=\(samples.count))", level: "debug")
         }
-        engineQueue.async { [weak self] in
-            self?.teardownOnEngineQueue()
+        // Разборка — на очереди того же движка (снимок пары под lock), см.
+        // комментарий в stop().
+        let forcedSlot = captureEngineSlot()
+        forcedSlot.queue.async { [weak self, engine = forcedSlot.engine] in
+            guard let self = self else { return }
+            self.teardownOnEngineQueue(using: engine)
         }
         logRecordingFinale(samples: samples, duration: duration, rmsHistory: rms)
         if !tail.isEmpty {
@@ -884,10 +1075,16 @@ public enum AudioServiceError: Error, LocalizedError {
     case unsupportedFormat
     /// Экземпляр AudioService уничтожен до завершения старта (в проде недостижимо).
     case engineGone
+    /// Старт завершился, когда движок уже подменён (wedge после таймаута
+    /// сторожа): сессия устарела. Пользователю НЕ показывается — completion
+    /// устаревшего старта агент игнорирует. Главное: такой старт не приводит
+    /// к audio.cancel()/переходу в .recording на живой свежей паре.
+    case engineSuperseded
     public var errorDescription: String? {
         switch self {
         case .unsupportedFormat: return L10n.tr("error.unsupportedAudioFormat")
         case .engineGone: return L10n.tr("error.audioServiceUnavailable")
+        case .engineSuperseded: return L10n.tr("error.audioServiceUnavailable")
         }
     }
 }

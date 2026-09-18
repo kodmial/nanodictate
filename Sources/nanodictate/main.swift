@@ -994,14 +994,14 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
                     try content.write(to: URL(fileURLWithPath: out), atomically: true, encoding: .utf8)
                 } catch {
                     eprint(String(format: L10n.tr("cli.transcribe.writeError"), out, "\(error)"))
-                    if let t = tempWavForCleanup { try? fm.removeItem(at: t) }
+                    if let t = tempWavForCleanup { try? FileManager.default.removeItem(at: t) }
                     exit(1)
                 }
             } else {
                 print(outcome.text)
             }
 
-            if let t = tempWavForCleanup { try? fm.removeItem(at: t) } // read-окна отработали
+            if let t = tempWavForCleanup { try? FileManager.default.removeItem(at: t) } // read-окна отработали
 
             // 6. Итог в stderr.
             let duration = Double(batchSampleCount) / Double(batchSampleRate)
