@@ -233,7 +233,7 @@ public struct AgentInstallResult: Equatable {
 }
 
 /// Регистрация/рестарт канонического plist. Manager-смена (другой бинарь,
-/// другой способ установки) = takeover: bootout старого → запись нового →
+/// другой способ установки) = takeover: запись нового plist → bootout старого →
 /// bootstrap. Идемпотентно: повторный start уже загруженной службы меняет
 /// владельца и путь корректно (launchd держит в памяти план из plist НА
 /// МОМЕНТ bootstrap — перезапись файла сама по себе живой службы не трогает).
@@ -260,8 +260,10 @@ public struct AgentInstaller {
     return "\(AgentService.guiDomain())/\(AgentService.name)"
   }
 
-  /// Полная установка (start): bootout (терпимо к отсутствию службы) → запись
-  /// канонического plist (realpath агента) → bootstrap, фолбэк load.
+  /// Полная установка (start): запись канонического plist (realpath агента)
+  /// СНАЧАЛА → bootout (терпимо к отсутствию службы) → bootstrap, фолбэк load.
+  /// Порядок важен: при ошибке записи работающий агент НЕ останавливается —
+  /// bootout идёт только после успешной записи нового плана.
   /// binaryPathChanged = true, если старый plist указывал на другой бинарь
   /// (смена менеджера/обновление) — CLI печатает TCC-подсказку.
   @discardableResult
@@ -273,8 +275,6 @@ public struct AgentInstaller {
     var result = AgentInstallResult(
       binaryPathChanged: previous != nil && previous != agentBinary)
 
-    let bootout = launchctl.bootout(target: serviceTarget)
-    result.bootoutSucceeded = bootout.status == 0
     do {
       try AgentPlist.writePlist(
         agentBinary: agentBinary, flags: flags, logPath: logPath, to: plistURL,
@@ -284,6 +284,8 @@ public struct AgentInstaller {
       return result
     }
 
+    let bootout = launchctl.bootout(target: serviceTarget)
+    result.bootoutSucceeded = bootout.status == 0
     let bootstrap = launchctl.bootstrap(plistPath: plistURL.path, domain: AgentService.guiDomain())
     if bootstrap.status == 0 {
       result.registered = true
@@ -297,7 +299,10 @@ public struct AgentInstaller {
   }
 
   /// Рестарт (Provider-смена, config-опции, меню): канонический plist
-  /// перезаписывается (путь не протухает после обновления), затем kickstart -k.
+  /// перезаписывается, затем kickstart -k. ВАЖНО: kickstart перезапускает
+  /// службу по СТАРОМУ плану из памяти launchd (ProgramArguments не
+  /// перечитывается) — реальная смена пути бинаря применится через
+  /// фолбэк-установку в этом методе, полный `nanodictate start` или перелогин.
   /// Если служба не загружена (kickstart упал) — полная установка.
   @discardableResult
   public func restart(agentBinary: String, flags: [String] = [], logPath: String)

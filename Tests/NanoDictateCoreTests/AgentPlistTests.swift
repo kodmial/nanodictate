@@ -152,12 +152,33 @@ final class AgentPlistTests: XCTestCase {
   }
 
   @objc func testPlistContentEscapesXmlSpecials() throws {
-    let binary = "/tmp/agent & co<NanoDictateAgent>"
+    let binary = "/tmp/agent & co<Nano>Dictate\"Agent"
     let content = AgentPlist.plistContent(agentBinary: binary, logPath: "/tmp/l.log")
     XCTAssertFalse(content.contains("& co<"))  // сырые спецсимволы не проходят
     XCTAssertTrue(content.contains("&amp; co&lt;"))
+    XCTAssertTrue(content.contains("&gt;"))  // ">" → &gt;
+    XCTAssertTrue(content.contains("&quot;"))  // "\"" → &quot;
+    XCTAssertFalse(content.contains("Nano>Dictate"))
+    XCTAssertFalse(content.contains("Dictate\"Agent"))
     let args = AgentPlist.programArguments(fromPlistData: Data(content.utf8))
     XCTAssertEqual(args, [binary])  // roundtrip возвращает исходный путь
+  }
+
+  @objc func testResolveEmptyEnvBinFallsThroughToSibling() throws {
+    let dir = try tmpDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let binDir = dir.appendingPathComponent("bin")
+    try FileManager.default.createDirectory(at: binDir, withIntermediateDirectories: true)
+    let cli = binDir.appendingPathComponent("nanodictate")
+    let agent = binDir.appendingPathComponent("NanoDictateAgent")
+    try makeFile(cli)
+    try makeFile(agent)
+    // NANODICTATE_AGENT_BIN задан ПУСТЫМ — трактуется как «не задан»,
+    // разрешение идёт через sibling у realpath вызванного CLI.
+    let resolved = resolveAgentBinaryPath(
+      invokedBinary: cli.path, environment: ["NANODICTATE_AGENT_BIN": ""])
+    XCTAssertEqual(resolved, agent.path)
+    XCTAssertFalse(resolved.isEmpty)
   }
 
   @objc func testProgramArgumentsFromMissingOrInvalidPlist() {
@@ -204,7 +225,7 @@ final class AgentPlistTests: XCTestCase {
 
   // MARK: - install: полный takeover
 
-  @objc func testInstallBootoutThenWriteThenBootstrap() throws {
+  @objc func testInstallWriteThenBootoutThenBootstrap() throws {
     let dir = try tmpDir()
     defer { try? FileManager.default.removeItem(at: dir) }
     let mock = MockLaunchctl()
@@ -215,7 +236,7 @@ final class AgentPlistTests: XCTestCase {
     XCTAssertTrue(result.registered)
     XCTAssertTrue(result.bootoutSucceeded)
     XCTAssertFalse(result.binaryPathChanged)
-    // Порядок: bootout → bootstrap; plist записан на диск.
+    // Порядок launchctl: bootout → bootstrap; plist записан на диск ДО bootout.
     XCTAssertEqual(mock.commandNames(), ["bootout", "bootstrap"])
     XCTAssertTrue(FileManager.default.fileExists(atPath: inst.plistURL.path))
     XCTAssertEqual(AgentPlist.programArguments(fromPlistAt: inst.plistURL.path), ["/bin/agent"])
@@ -305,7 +326,10 @@ final class AgentPlistTests: XCTestCase {
 
     XCTAssertFalse(result.registered)
     XCTAssertNotNil(result.writeError)
-    XCTAssertTrue(mock.calls.isEmpty)  // после ошибки записи launchctl не дёргаем
+    // Запись идёт ДО bootout: при ошибке записи launchctl не дёргается ВООБЩЕ
+    // (bootout в т.ч.) — работавшая служба не останавливается.
+    XCTAssertTrue(mock.calls.isEmpty)
+    XCTAssertFalse(result.bootoutSucceeded)
   }
 
   // MARK: - restart: переписать plist + kickstart (фолбэк на полную установку)
