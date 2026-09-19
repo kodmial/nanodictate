@@ -19,7 +19,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Undo window: a double-**Alt** shortly after an insertion removes the text.
 - Silence auto-stop (~3 s of quiet) with configurable duration and RMS
   threshold (`NANODICTATE_AUTOSTOP_DURATION`, `NANODICTATE_AUTOSTOP_RMS`).
-- Push-to-talk mode (external `ptt.sh` script).
 - Multi-provider STT via OpenAI-compatible `/audio/transcriptions` adapters:
   OpenAI, Groq, GigaAM (default batch provider), local whisper/llama.cpp/
   faster-whisper, Cloudflare Workers AI, Cookie Relay, and any generic
