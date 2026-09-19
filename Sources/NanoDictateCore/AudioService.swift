@@ -237,11 +237,19 @@ public final class AudioService {
   /// replaceEngineAfterWedge). Инъекция тестов; по умолчанию — настоящий
   /// AVAudioEngine.
   private let engineFactory: () -> AudioEngineLike
+  /// Наблюдатель смены аудио-устройства + движок, на который он подписан.
+  /// Сам токен (NSObjectProtocol) не хранит объект подписки, поэтому вместе с
+  /// ним держим движок: устаревший старт снимает ТОЛЬКО СВОЮ подписку (по
+  /// идентичности движка), не трогая наблюдатель живой сессии на свежей паре.
+  private struct ConfigurationChangeObserver {
+    var token: NSObjectProtocol
+    var engine: AudioEngineLike
+  }
   /// Наблюдатель `AVAudioEngineConfigurationChangeNotification`: смена
   /// аудио-устройства во время записи делает живой tap-конвертер невалидным
-  /// (входной формат движка изменился). Храним токен, чтобы снять подписку в
-  /// teardown — иначе колбэк бьёт в освобождённый state.
-  private var configChangeObserver: NSObjectProtocol?
+  /// (входной формат движка изменился). Храним токен (+ движок), чтобы снять
+  /// подписку в teardown — иначе колбэк бьёт в освобождённый state.
+  private var configChangeObserver: ConfigurationChangeObserver?
   /// Фоновая очередь движка или главная — определяется движком, не потоком
   /// вызова. Используется только для диагностики.
   private var isDebug: Bool {
@@ -441,6 +449,15 @@ public final class AudioService {
     lock.lock()
     self.converter = converter
     lock.unlock()
+    // Устаревший старт (разблокировался ПОСЛЕ wedge-подмены) не должен
+    // подписываться: его движок уже отброшен, а токен перетёр бы наблюдатель
+    // свежей сессии, оставив живое устройство без реакции на смену. Гард
+    // поколения здесь — ДО подписки; терминальные гарды ниже остаются для
+    // стадий tap/prepare/start.
+    guard isCurrentGeneration(startGeneration) else {
+      teardownEngineOnly(using: engine)
+      return .failure(AudioServiceError.engineSuperseded)
+    }
     // Подписка на смену аудио-устройства — после того как конвертер лёг в
     // state: уведомление может прийти сразу после регистрации.
     observeConfigurationChanges(for: engine)
@@ -740,7 +757,9 @@ public final class AudioService {
   /// без трогания глобального состояния сеанса (isRecording, буферы,
   /// конвертер). Для стартов, завершившихся после подмены поколения: полная
   /// разборка (teardownOnEngineQueue) сбросила бы живую новую сессию на
-  /// свежем движке.
+  /// свежем движке. Подписку на смену устройства снимаем только для СВОЕГО
+  /// движка: наблюдатель живой сессии принадлежит другому экземпляру и
+  /// остаётся на месте.
   private func teardownEngineOnly(using engine: AudioEngineLike) {
     _ = guardedEngineCall {
       engine.makeInputNode().removeTap(onBus: 0)
@@ -748,6 +767,7 @@ public final class AudioService {
     _ = guardedEngineCall {
       engine.stop()
     }
+    removeConfigurationObserver(for: engine)
   }
 
   /// Подписка на смену аудиоустройства для сеанса записи. В заголовках AVFAudio
@@ -769,11 +789,11 @@ public final class AudioService {
     }
     lock.lock()
     let stale = configChangeObserver
-    configChangeObserver = token
+    configChangeObserver = ConfigurationChangeObserver(token: token, engine: engine)
     lock.unlock()
     // Снятие старого токена — вне lock: NotificationCenter чужой код, под
     // блокировкой state ему делать нечего.
-    if let stale = stale { NotificationCenter.default.removeObserver(stale) }
+    if let stale = stale { NotificationCenter.default.removeObserver(stale.token) }
   }
 
   /// Снятие подписки на смену устройства. Вызывают: точки разборки
@@ -781,8 +801,23 @@ public final class AudioService {
   /// сеанса (через observeConfigurationChanges).
   private func removeConfigurationObserver() {
     lock.lock()
-    let token = configChangeObserver
+    let observer = configChangeObserver
     configChangeObserver = nil
+    lock.unlock()
+    if let observer = observer { NotificationCenter.default.removeObserver(observer.token) }
+  }
+
+  /// Снятие подписки ТОЛЬКО для конкретного движка (устаревшие ветки старта):
+  /// токен live-сессии на свежем движке не трогается.
+  private func removeConfigurationObserver(for engine: AudioEngineLike) {
+    lock.lock()
+    let token: NSObjectProtocol?
+    if let observer = configChangeObserver, observer.engine === engine {
+      token = observer.token
+      configChangeObserver = nil
+    } else {
+      token = nil
+    }
     lock.unlock()
     if let token = token { NotificationCenter.default.removeObserver(token) }
   }
@@ -802,9 +837,16 @@ public final class AudioService {
     // очереди, а регистр `session` не удерживает блокировку state.
     guard isRecordingLocked else { return }
     Logger.log("record engine: configuration changed — stopping, user must restart", level: "warn")
-    // Сэмплы сеанса отдаёт сам stop() (его путь финализации) — здесь они не нужны.
-    _ = stop()
-    onDeviceChange?(AudioServiceError.deviceChanged)
+    // Весь финал — на главной очереди: уведомление приходит на потоке постера
+    // (системная нить AVFAudio), а контракт stop()/onSpeechSegment/onDeviceChange
+    // требует «хвост и колбэки на главном». Повторная проверка флага внутри —
+    // если пользователь уже остановил запись, ничего не делаем. Сэмплы сеанса
+    // отдаёт сам stop() (его путь финализации) — здесь они не нужны.
+    DispatchQueue.main.async { [weak self] in
+      guard let self, self.isRecordingLocked else { return }
+      _ = self.stop()
+      self.onDeviceChange?(AudioServiceError.deviceChanged)
+    }
   }
 
   /// Сброс live-VAD — строго под блокировкой (начало сеанса, teardown,
@@ -829,11 +871,12 @@ public final class AudioService {
     return Array(collectedSamples[start..<end])
   }
 
-  /// Значение фактически принадлежит записи (взводится `begin`), параметр
-  /// оставлен ради симметрии вызовов на точках старта.
+  /// Значение фактически принадлежит записи: `begin` взводит бит записи в
+  /// регистре одной атомарной операцией (поколение не трогает — его меняет
+  /// только advanceGeneration подмены wedge), `end` — гасит запись и автостоп.
   private func setRecording(_ value: Bool) {
     if value {
-      session.begin(generation: session.snapshot.generation)
+      session.begin()
     } else {
       session.end()
     }
@@ -898,9 +941,15 @@ public final class AudioService {
   /// в пакете нет). Слово состояния упаковывает тройку
   /// (generation/isRecording/autoStopScheduled): поколение — в старшем слове,
   /// флаги — в младших двух битах; снимается пакетно под одним захватом.
-  /// Захваты короткие (несколько инструкций), вложенности нет, порядок всегда
-  /// ledger→NSLock (обратного не бывает — дедлока нет). Полновесные снимки
-  /// буферов/конвертера — по-прежнему NSLock в `takeBufferedSnapshot`.
+  /// Захваты короткие (несколько инструкций). Вложение допускается ТОЛЬКО в
+  /// одну сторону: NSLock→unfair — NSLock берётся и, пока удерживается,
+  /// берётся unfair (так идут все обращения к регистру из-под `lock`:
+  /// вложенные вызовы stop/start/разборок и их тел). Обратное вложение
+  /// (взять NSLock, удерживая unfair) в коде не встречается и запрещено.
+  /// Цикл невозможен: unfair никогда не удерживается при взятии NSLock
+  /// (захваты unfair — короткие, без блокирующих вызовов и чужих очередей).
+  /// Полновесные снимки буферов/конвертера — по-прежнему NSLock в
+  /// `takeBufferedSnapshot`.
   final class SessionLedger: @unchecked Sendable {
     private var unfair = os_unfair_lock()
     private var word: UInt64 = 0
@@ -937,15 +986,18 @@ public final class AudioService {
       return Int(word >> Self.generationShift) == generation
     }
 
-    /// Переход старта: поколение + флаг recording. Флаг записи читается из
+    /// Переход старта: взводит ТОЛЬКО бит recording, одним атомарным OR.
+    /// Поколение НЕ пишется: его меняет единственная операция
+    /// `advanceGeneration` (подмена wedge), а чтение-модификация-запись
+    /// поколения двумя отдельными захватами unfair (взять снимок, вернуть
+    /// поколение обратно) была бы TOCTOU — параллельный advanceGeneration
+    /// между ними откатил бы поколение назад. Флаг записи читается из
     /// регистра без блокировки — `begin` вызывается на потоке, который уже
     /// владеет сеансом (очередь движка либо main).
-    func begin(generation: Int) {
+    func begin() {
       os_unfair_lock_lock(&unfair)
       defer { os_unfair_lock_unlock(&unfair) }
-      word =
-        (UInt64(clamping: generation) << Self.generationShift)
-        | (word & Self.autoStopBit) | Self.recordingBit
+      word |= Self.recordingBit
     }
 
     /// Переход останова: сброс recording + autoStop, поколение сохранить.
