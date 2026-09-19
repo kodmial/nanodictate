@@ -162,12 +162,26 @@ public final class InputGain {
     let attackAlpha = 1 - exp(-1 / max(1, config.attackTime * Double(rate)))
     let releaseAlpha = 1 - exp(-1 / max(1, config.releaseTime * Double(rate)))
 
+    // powf (транcцендент) выносится из per-sample цикла: коэффициент
+    // пересчитывается раз в `gainFactorRefreshSamples` сэмплов, между
+    // пересчётами плавающий gainDb догоняет его линейным one-pole — расхождение
+    // с точным per-sample вариантом ограничено ΔgainDb за ≤64 сэмпла (~4 мс
+    // на 16 кГц), на слух и для RMS-метрики неотличимо. Первый сэмпл считает
+    // коэффициент сразу (sinceUpdate == лимит) — стартовая амплитуда точная.
+    let gainFactorRefreshSamples = 64
+
     var sum: Float = 0
+    var factor = powf(10, currentGainDb / 20)
+    var sinceFactorUpdate = gainFactorRefreshSamples
     for i in 0..<frameLength {
       // Smoothing direction: rise — fast attack, fall — slow release; 0 diff moves nothing.
       let alpha = Float(target > currentGainDb ? attackAlpha : releaseAlpha)
       currentGainDb += alpha * (target - currentGainDb)
-      let factor = powf(10, currentGainDb / 20)
+      if sinceFactorUpdate >= gainFactorRefreshSamples {
+        factor = powf(10, currentGainDb / 20)
+        sinceFactorUpdate = 0
+      }
+      sinceFactorUpdate += 1
       let amplified = channel[i] * factor
       // Peak clamp: amplified sample stays in [−1.0, 1.0] — Int16 conversion below never clips.
       let clamped = min(max(amplified, -1), 1)
