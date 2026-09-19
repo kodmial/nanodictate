@@ -339,12 +339,12 @@ final class ConfigTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: dir) }
         let path = dir.appendingPathComponent("config.toml").path
         let content = """
+        active_provider = "openai"
+
         [providers.openai]
         base_url = "https://api.openai.com/v1/audio/transcriptions"
         model = "whisper-1"
         api_key = "file-key"
-
-        active_provider = "openai"
         """
         try content.write(toFile: path, atomically: true, encoding: .utf8)
         setenv("NANODICTATE_API_KEY", "env-key", 1)
@@ -371,6 +371,42 @@ final class ConfigTests: XCTestCase {
         try content.write(toFile: path, atomically: true, encoding: .utf8)
         let config = try AppConfig.load(from: path)
         XCTAssertEqual(config.apiKey, "file-key")
+    }
+
+    @objc func testLoadEnvAPIKeyScopesToActiveProviderOnly() throws {
+        // env-ключ пишется ТОЛЬКО в секцию активного провайдера (и effective);
+        // неактивные секции сохраняют собственные api_key / api_key_file.
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nanodictate-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let path = dir.appendingPathComponent("config.toml").path
+        let content = """
+        active_provider = "openai"
+
+        [providers.openai]
+        api_key = "openai-file-key"
+
+        [providers.groq]
+        api_key = "groq-file-key"
+
+        [providers.local]
+        api_key_file = "~/.config/nanodictate/keys/local.key"
+        """
+        try content.write(toFile: path, atomically: true, encoding: .utf8)
+        setenv("NANODICTATE_API_KEY", "env-key", 1)
+        defer { unsetenv("NANODICTATE_API_KEY") }
+        let config = try AppConfig.load(from: path)
+        XCTAssertEqual(config.apiKey, "env-key", "env-ключ применяется к effective-полю")
+        XCTAssertEqual(config.providers.first(where: { $0.id == "openai" })?.apiKey, "env-key",
+                       "активной секции env-ключ перезаписывает file-ключ")
+        XCTAssertEqual(config.providers.first(where: { $0.id == "groq" })?.apiKey, "groq-file-key",
+                       "неактивная секция хранит СВОЙ api_key — env её не перезатирает")
+        XCTAssertEqual(config.providers.first(where: { $0.id == "local" })?.apiKey, "",
+                       "неактивная секция с api_key_file не получает env-ключ в api_key")
+        XCTAssertEqual(config.providers.first(where: { $0.id == "local" })?.apiKeyFile,
+                       "~/.config/nanodictate/keys/local.key",
+                       "неактивная секция сохраняет СВОЙ api_key_file нетронутым")
     }
 
     // MARK: - Новые UX-ключи: providers / auto_failover / insert_method / review_before_insert

@@ -1,7 +1,9 @@
 # NanoDictate — пример конфига
 # Скопируй в ~/.config/nanodictate/config.toml и заполни секреты.
 # Секреты — только плейсхолдеры: api_key / api_key_file в секциях провайдеров
-# либо env-переменная NANODICTATE_API_KEY (приоритет над файлом, в файл не пишется).
+# либо env-переменная NANODICTATE_API_KEY (приоритет над файлом — только у
+# активного провайдера; failover-кандидаты и роли сохраняют свои api_key/
+# api_key_file; в файл не пишется).
 # Пустые base_url/model — агент подставит дефолты адаптера.
 # См. Sources/NanoDictateCore/Config.swift (AppConfig.initTemplate) и README.md.
 

@@ -66,7 +66,10 @@ public final class RetryProvider {
     let transcriber = Transcriber(
       baseURL: provider.baseURL,
       model: provider.model,
-      apiKey: resolveAPIKey(for: provider),
+      // Дефолт не знает активного провайдера конфига (init вызывается без
+      // конфиг-контекста): env-ключ НЕ выдаётся (fail-closed) — провайдер
+      // работает собственным api_key/api_key_file либо запрос падает штатно.
+      apiKey: resolveAPIKey(for: provider, activeProviderID: nil),
       proxyKey: provider.proxyKey,
       cookieRelayProvider: relay,
       httpProxy: provider.httpProxy,
@@ -110,14 +113,25 @@ public final class RetryProvider {
     cookieRelayByURL[baseURL] = provider
   }
 
-  /// Ключ провайдера: env-переменная NANODICTATE_API_KEY (приоритет, никогда не
-  /// пишется в файл) → явный api_key из конфига → чтение api_key_file (с
-  /// раскрытием ~). public — агент переиспользует её в конфиг-зависимой
+  /// Ключ провайдера для ЗАПРОСА. Env-переменная NANODICTATE_API_KEY (высший
+  /// приоритет, никогда не пишется в файл) отдаётся ТОЛЬКО активному
+  /// провайдеру — тому, чей `id` совпадает с `activeProviderID` (см.
+  /// applyEnvAPIKey в Config). Неактивным провайдерам (failover-кандидаты,
+  /// retry, роли маршрутизации) env-ключ НЕ утекает: они получают собственный
+  /// ключ (api_key из конфига → api_key_file), а без ключа — пустую строку
+  /// (запрос падает штатно).
+  /// `activeProviderID` — id активной секции из конфига; nil (активный не
+  /// задан / legacy-конфиг / нет конфиг-контекста) — env не выдаётся никому
+  /// (fail-closed). public — агент переиспользует её в конфиг-зависимой
   /// функции распознавания.
-  public static func resolveAPIKey(for provider: AppConfig.Provider) -> String {
-    // Env-ключ — высший приоритет (AppConfig.load применяет его к конфигу;
-    // здесь тот же источник на случай, если конфиг читался без env).
-    if let envKey = ProcessInfo.processInfo.environment["NANODICTATE_API_KEY"], !envKey.isEmpty {
+  public static func resolveAPIKey(
+    for provider: AppConfig.Provider,
+    activeProviderID: String?
+  ) -> String {
+    // Env-ключ — только активному провайдеру (тот же источник, что
+    // applyEnvAPIKey; здесь — на случай, если конфиг читался без env).
+    let envKey = ProcessInfo.processInfo.environment["NANODICTATE_API_KEY"]
+    if provider.id == activeProviderID, let envKey, !envKey.isEmpty {
       return envKey
     }
     if !provider.apiKey.isEmpty {

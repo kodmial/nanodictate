@@ -998,8 +998,16 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
   }
 
   // 4. Реальный транспорт чанка: запрос по полям провайдера + Retry-After.
+  // Env-ключ скоуплен на АКТИВНОГО провайдера (та же конвенция активного id,
+  // что в NanoDictateAgent: пустой active_provider → первый по порядку):
+  // явный --provider с собственным ключом получает свой ключ, без ключа —
+  // пусто (запрос падает штатно), env-ключ чужим секциям не утекает.
   let transport = URLSessionBatchTransport()
-  let apiKey = RetryProvider.resolveAPIKey(for: provider)  // env > api_key > api_key_file
+  let activeAdapterID: String? =
+    config.activeProvider.isEmpty
+    ? config.providers.first?.id
+    : config.activeProvider
+  let apiKey = RetryProvider.resolveAPIKey(for: provider, activeProviderID: activeAdapterID)
   let language = config.language
   let sendOne: BatchTranscriber.SendOne = { _, wav, chunkIndex, prompt in
     guard

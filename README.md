@@ -361,7 +361,9 @@ Top-level options:
 
 **Secrets.** API keys go in `api_key` (inline) or `api_key_file` (file
 path; first non-empty line is used; `chmod 600`). The environment variable
-`NANODICTATE_API_KEY` overrides both and is never written to the config file.
+`NANODICTATE_API_KEY` overrides the file key for the **active provider only**;
+failover candidates and routing roles keep their own `api_key`/`api_key_file`.
+It is never written to the config file.
 
 ### Permissions
 

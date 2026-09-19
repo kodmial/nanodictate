@@ -315,11 +315,21 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     // id провайдера уходит в adapterID — известный провайдер
     // получает свой формат запроса (groq/cloudflare), неизвестный —
     // OpenAI-совместимый с собственными base_url/model из секции.
+    // Env-ключ NANODICTATE_API_KEY скоуплен на АКТИВНОГО провайдера
+    // (resolveAPIKey + activeProviderID): failover-кандидаты и роли
+    // маршрутизации ходят через этот же построитель и получают СВОЙ ключ
+    // (api_key/api_key_file); ролевый/кандидатный провайдер без своего ключа
+    // получает пусто — запрос падает штатно, а не уходит с env-ключом.
+    // Локальная копия активного id для замыкания: ссылаться на
+    // self.activeProviderID внутри замыкания нельзя — self до super.init ещё
+    // не полностью инициализирован (retryProvider/роли присваиваются ниже),
+    // а замыкание захватывается свойством makeTranscriber.
+    let builderActiveID = activeProviderID
     let makeTranscriber = { (provider: AppConfig.Provider) -> Transcriber in
       Transcriber(
         baseURL: provider.baseURL,
         model: provider.model,
-        apiKey: RetryProvider.resolveAPIKey(for: provider),
+        apiKey: RetryProvider.resolveAPIKey(for: provider, activeProviderID: builderActiveID),
         proxyKey: provider.proxyKey,
         proxyKeyHeader: provider.proxyKeyHeader.isEmpty
           ? config.proxyKeyHeader : provider.proxyKeyHeader,

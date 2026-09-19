@@ -170,9 +170,11 @@ extension L10n {
     "cli.setkey.empty": "Value is empty — key not written (pass as argument or via stdin)",
     "cli.setkey.invalid": "ERROR: value contains invalid characters (\", \\, newline)",
     "cli.setkey.envwarn":
-      "WARNING: NANODICTATE_API_KEY env var is set — it takes priority over file api_key;",
+      "WARNING: NANODICTATE_API_KEY env var is set — it takes priority over file api_key"
+      + " for the ACTIVE provider only;",
     "cli.setkey.envnote":
-      "the written key will not be used while it is set (see `nanodictate config show`).",
+      "the written key will not be used by the active provider while it is set (failover/"
+      + "role providers keep their own file keys; see `nanodictate config show`).",
     "cli.setkey.updated": "api_key for provider '%@' updated: %@ (chmod 600)",
     "cli.provider.nosections": "No [providers.X] sections in config (using legacy config).",
     "cli.provider.active": "Active provider: %@",
@@ -416,10 +418,11 @@ extension L10n {
     "cli.setkey.cancelled": "Отменено",
     "cli.setkey.empty": "Значение пусто — ключ не записан (передайте аргументом или через stdin)",
     "cli.setkey.invalid": "ОШИБКА: значение содержит запрещённые символы (\", \\, перенос строки)",
-    "cli.setkey.envwarn": "ПРЕДУПРЕЖДЕНИЕ: задана переменная окружения NANODICTATE_API_KEY — она"
-      + " имеет приоритет над файловым api_key;",
-    "cli.setkey.envnote": "записанный ключ не будет использоваться, пока задана переменная"
-      + " (см. `nanodictate config show`).",
+    "cli.setkey.envwarn": "ПРЕДУПРЕЖДЕНИЕ: задана переменная окружения NANODICTATE_API_KEY —"
+      + " она имеет приоритет над файловым api_key ТОЛЬКО у активного провайдера;",
+    "cli.setkey.envnote": "записанный ключ не будет использоваться активным провайдером,"
+      + " пока задана переменная (failover/роли сохраняют свои файловые ключи;"
+      + " см. `nanodictate config show`).",
     "cli.setkey.updated": "api_key провайдера '%@' обновлён: %@ (chmod 600)",
     "cli.provider.nosections": "Нет секций [providers.X] в конфиге (legacy-конфиг).",
     "cli.provider.active": "Активный провайдер: %@",

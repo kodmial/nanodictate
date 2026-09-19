@@ -227,19 +227,25 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
     return applyEnvAPIKey(to: config)
   }
 
-  /// Приоритет env-ключа NANODICTATE_API_KEY над ключами из файла. Применяется
-  /// и к effective-полю, и ко всем секциям провайдеров — единый ключ для всех
-  /// (в т.ч. failover-кандидатов); никогда не записывается в файл.
+  /// Приоритет env-ключа NANODICTATE_API_KEY над ключом из файла. Применяется
+  /// ТОЛЬКО к активному провайдеру (и к effective-полю) — остальные секции
+  /// провайдеров (failover-кандидаты, роли маршрутизации) env не трогает:
+  /// они сохраняют собственные api_key/api_key_file, а запросный путь
+  /// (RetryProvider.resolveAPIKey) тоже отдаёт env только активной секции.
+  /// Пустой active_provider — штатный прод-сценарий → первый провайдер по
+  /// порядку (та же конвенция, что в агенте/CLI). Env-ключ никогда не
+  /// записывается в файл.
   private static func applyEnvAPIKey(to config: AppConfig) -> AppConfig {
     guard let envKey = ProcessInfo.processInfo.environment["NANODICTATE_API_KEY"],
       !envKey.isEmpty
     else { return config }
     var result = config
     result.apiKey = envKey
-    if !result.providers.isEmpty {
-      for i in result.providers.indices {
-        result.providers[i].apiKey = envKey
-      }
+    let activeID = result.activeProvider.isEmpty ? result.providers.first?.id : result.activeProvider
+    if let activeID = activeID,
+      let index = result.providers.firstIndex(where: { $0.id == activeID })
+    {
+      result.providers[index].apiKey = envKey
     }
     return result
   }
@@ -1003,7 +1009,8 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
 
   /// Шаблон конфига для `nanodictate config init` (затем `config set-key`).
   /// Пустые base_url/model — агент подставляет дефолты адаптера; секрет —
-  /// api_key/api_key_file или env NANODICTATE_API_KEY (в файл никогда не пишется).
+  /// api_key/api_key_file или env NANODICTATE_API_KEY (перекрывает файловый
+  /// ключ только у активного провайдера; в файл никогда не пишется).
   /// Файл шаблона обязан парситься существующим парсером (все ключи известны).
   // swiftlint:disable:next function_body_length
   public static func initTemplate() -> String {
@@ -1012,8 +1019,9 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
     #
     # Секреты:
     #   - api_key / api_key_file в секции провайдера,
-    #   - либо env-переменная NANODICTATE_API_KEY (приоритет над файлом,
-    #     в конфиг никогда не пишется).
+    #   - либо env-переменная NANODICTATE_API_KEY (приоритет над файлом —
+    #     только у активного провайдера; failover-кандидаты и роли сохраняют
+    #     свои api_key/api_key_file; в конфиг никогда не пишется).
     #
     # Пустые base_url/model в секциях — агент подставит дефолты адаптера
     # (например OpenAI → https://api.openai.com/v1/audio/transcriptions,

@@ -363,7 +363,7 @@ final class RetryProviderTests: XCTestCase {
         }
     }
 
-    // MARK: - resolveAPIKey: env > api_key > api_key_file
+    // MARK: - resolveAPIKey: env активному > собственный api_key > api_key_file
 
     @objc func testResolveAPIKeyEnvWinsOverInlineAndFile() {
         let file = FileManager.default.temporaryDirectory
@@ -374,8 +374,8 @@ final class RetryProviderTests: XCTestCase {
 
         setenv("NANODICTATE_API_KEY", "env-key", 1)
         defer { unsetenv("NANODICTATE_API_KEY") }
-        XCTAssertEqual(RetryProvider.resolveAPIKey(for: provider), "env-key",
-                       "env-ключ приоритетнее inline-ключа и файла")
+        XCTAssertEqual(RetryProvider.resolveAPIKey(for: provider, activeProviderID: "a"), "env-key",
+                       "активному провайдеру env-ключ приоритетнее inline-ключа и файла")
     }
 
     @objc func testResolveAPIKeyInlineBeatsFile() {
@@ -385,7 +385,7 @@ final class RetryProviderTests: XCTestCase {
         try? "file-key".data(using: .utf8)?.write(to: file)
         defer { try? FileManager.default.removeItem(at: file) }
         let provider = AppConfig.Provider(id: "a", name: "A", baseURL: "", model: "", apiKey: "inline", apiKeyFile: file.path, proxyKey: "")
-        XCTAssertEqual(RetryProvider.resolveAPIKey(for: provider), "inline")
+        XCTAssertEqual(RetryProvider.resolveAPIKey(for: provider, activeProviderID: nil), "inline")
     }
 
     @objc func testResolveAPIKeyFileReadsQuotedContent() {
@@ -395,13 +395,67 @@ final class RetryProviderTests: XCTestCase {
         try? "# комментарий\n\"file-key\"\n".data(using: .utf8)?.write(to: file)
         defer { try? FileManager.default.removeItem(at: file) }
         let provider = AppConfig.Provider(id: "a", name: "A", baseURL: "", model: "", apiKey: "", apiKeyFile: file.path, proxyKey: "")
-        XCTAssertEqual(RetryProvider.resolveAPIKey(for: provider), "file-key",
+        XCTAssertEqual(RetryProvider.resolveAPIKey(for: provider, activeProviderID: nil), "file-key",
                        "из файла берётся строка без кавычек (комментарии пропускаются)")
     }
 
     @objc func testResolveAPIKeyMissingReturnsEmpty() {
         unsetenv("NANODICTATE_API_KEY")
         let provider = AppConfig.Provider(id: "a", name: "A", baseURL: "", model: "", apiKey: "", apiKeyFile: nil, proxyKey: "")
-        XCTAssertEqual(RetryProvider.resolveAPIKey(for: provider), "")
+        XCTAssertEqual(RetryProvider.resolveAPIKey(for: provider, activeProviderID: nil), "")
+    }
+
+    // MARK: - resolveAPIKey: env-ключ НЕ утекает неактивным провайдерам
+
+    @objc func testResolveAPIKeyEnvNotGivenToInactiveProviderWithOwnInlineKey() {
+        setenv("NANODICTATE_API_KEY", "env-key", 1)
+        defer { unsetenv("NANODICTATE_API_KEY") }
+        let provider = AppConfig.Provider(id: "b", name: "B", baseURL: "", model: "", apiKey: "keyB", apiKeyFile: nil, proxyKey: "")
+        XCTAssertEqual(RetryProvider.resolveAPIKey(for: provider, activeProviderID: "a"), "keyB",
+                       "неактивный провайдер получает СВОЙ api_key, а не env-ключ")
+    }
+
+    @objc func testResolveAPIKeyEnvNotGivenToInactiveProviderWithFileKey() {
+        setenv("NANODICTATE_API_KEY", "env-key", 1)
+        defer { unsetenv("NANODICTATE_API_KEY") }
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("resolve_api_key_inactive_\(UUID().uuidString).txt")
+        try? "fileB".data(using: .utf8)?.write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let provider = AppConfig.Provider(id: "b", name: "B", baseURL: "", model: "", apiKey: "", apiKeyFile: file.path, proxyKey: "")
+        XCTAssertEqual(RetryProvider.resolveAPIKey(for: provider, activeProviderID: "a"), "fileB",
+                       "неактивный провайдер получает ключ из СВОЕГО api_key_file, а не env-ключ")
+    }
+
+    @objc func testResolveAPIKeyEnvNotGivenToInactiveProviderWithoutKey() {
+        setenv("NANODICTATE_API_KEY", "env-key", 1)
+        defer { unsetenv("NANODICTATE_API_KEY") }
+        let provider = AppConfig.Provider(id: "b", name: "B", baseURL: "", model: "", apiKey: "", apiKeyFile: nil, proxyKey: "")
+        XCTAssertEqual(RetryProvider.resolveAPIKey(for: provider, activeProviderID: "a"), "",
+                       "неактивный провайдер без собственного ключа получает пусто — env-ключ не утекает, запрос падает штатно")
+    }
+
+    @objc func testResolveAPIKeyEnvNotGivenToProviderWithStaleActiveID() {
+        setenv("NANODICTATE_API_KEY", "env-key", 1)
+        defer { unsetenv("NANODICTATE_API_KEY") }
+        let provider = AppConfig.Provider(id: "a", name: "A", baseURL: "", model: "", apiKey: "keyA", apiKeyFile: nil, proxyKey: "")
+        XCTAssertEqual(RetryProvider.resolveAPIKey(for: provider, activeProviderID: "unknown"), "keyA",
+                       "при неизвестном activeProviderID env не выдаётся — fail-closed, свой ключ остаётся")
+    }
+
+    @objc func testResolveAPIKeyEnvNotGivenWithoutActiveContext() {
+        setenv("NANODICTATE_API_KEY", "env-key", 1)
+        defer { unsetenv("NANODICTATE_API_KEY") }
+        let provider = AppConfig.Provider(id: "a", name: "A", baseURL: "", model: "", apiKey: "keyA", apiKeyFile: nil, proxyKey: "")
+        XCTAssertEqual(RetryProvider.resolveAPIKey(for: provider, activeProviderID: nil), "keyA",
+                       "nil-активный (нет конфиг-контекста) — env не выдаётся, свой ключ остаётся")
+    }
+
+    @objc func testResolveAPIKeyEnvGivenToActiveProviderEvenWithoutOwnKey() {
+        setenv("NANODICTATE_API_KEY", "env-key", 1)
+        defer { unsetenv("NANODICTATE_API_KEY") }
+        let provider = AppConfig.Provider(id: "a", name: "A", baseURL: "", model: "", apiKey: "", apiKeyFile: nil, proxyKey: "")
+        XCTAssertEqual(RetryProvider.resolveAPIKey(for: provider, activeProviderID: "a"), "env-key",
+                       "активному провайдеру env-ключ отдаётся даже без собственного ключа")
     }
 }
