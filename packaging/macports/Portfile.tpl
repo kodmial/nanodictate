@@ -128,6 +128,14 @@ post-destroot {
                 # повторном install — норма; служба всё равно стартует при
                 # входе в систему (RunAtLoad).
                 set uid [exec /usr/bin/id -u ${real_user}]
+                # Установка поверх УЖЕ работающей службы (например, переустановка
+                # вторым менеджером): новый plist уже на диске (записан выше) —
+                # сперва терпимо выгружаем старую копию (bootout), и bootstrap
+                # ниже применяет замену мгновенно, без перезахода в систему.
+                # Симметрия с brew post_install. Службы может не быть — это
+                # норма: catch молча пропускает ошибку выгрузки (та же идиома,
+                # что у bootstrap ниже), установку не роняет.
+                catch {exec /bin/launchctl asuser ${uid} /bin/launchctl bootout gui/${uid}/com.nanodictate.agent}
                 catch {exec /bin/launchctl asuser ${uid} /bin/launchctl bootstrap gui/${uid} ${plist_path}}
             }
         }
