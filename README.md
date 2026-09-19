@@ -146,10 +146,10 @@ any STT provider's section.
 
 ## Code Signing & TCC
 
-macOS TCC grants are keyed to the binary's signature (cdhash). The stable
-identity **NanoDictate Code Signing** keeps the cdhash stable across dev
-rebuilds, so grants survive — this applies only to binaries deployed via the
-MCP server (`mcp/nanodictate-deploy-mcp-server`, `dictation_sign` /
+macOS uses the binary's code-signing identity and designated requirement to
+recognize updated code. The stable identity **NanoDictate Code Signing** can
+preserve grants across dev rebuilds — this applies only to binaries deployed
+via the MCP server (`mcp/nanodictate-deploy-mcp-server`, `dictation_sign` /
 `dictation_deploy`); raw `swift build` + ad-hoc `codesign` changes the
 signature and drops Microphone/Accessibility grants. Release binaries are
 ad-hoc signed: after an update replaces the binary, macOS may ask for
