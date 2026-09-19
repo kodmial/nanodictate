@@ -32,7 +32,6 @@ Built as a Swift Package Manager package (`swift-tools-version:5.7`, macOS 12+).
   threshold; environment variables
   `NANODICTATE_AUTOSTOP_DISABLED`, `NANODICTATE_AUTOSTOP_DURATION`,
   `NANODICTATE_AUTOSTOP_RMS`.
-- Push-to-talk mode (external script: `ptt.sh`).
 - Batch file transcription with chunked segments, parallel workers, pause
   cutting, checkpoint/resume, and a progress bar.
 - Multi-provider STT via adapters implementing the OpenAI-compatible
@@ -149,29 +148,24 @@ LaunchAgent, CLI and configuration details.
 
 ## Build & Test
 
-Requirements: macOS 12+, Swift toolchain, Node.js ≥ 22 (for the deploy MCP server).
+Requirements: macOS 12+ and a Swift **5.7+** toolchain (below); Node.js ≥ 22
+is needed only for the deploy MCP server.
 
-### Swift toolchain — `SWIFT_TOOLCHAIN`
+### Build requirements
 
-The Command Line Tools SwiftPM Manifest API on this machine is broken: there
-is no `PackageDescription.swiftmodule`, so plain `swift build` cannot parse
-`Package.swift`. Use the full toolchain at `/Users/dima/.swift-toolchain`:
+The package uses `swift-tools-version:5.7`, so it builds with any **Swift 5.7+**
+toolchain — Xcode 14+ or the Command Line Tools with SwiftPM. Use the standard
+SwiftPM commands:
 
 ```sh
-export SWIFT_TOOLCHAIN=/Users/dima/.swift-toolchain
-# optional but recommended — persisted in ~/.zshrc or ~/.claude.json env
 swift build -c debug      # or -c release
-swift run NanoDictateCoreTests
+swift run nanodictate --help
 ```
 
-`mcp/nanodictate-deploy-mcp-server/start.sh` does the same automatically: it
-prefers `SWIFT_TOOLCHAIN` from the environment, falls back to auto-detection
-via `xcrun --find swift`, and exports `SWIFT_EXEC_MANIFEST` /
-`SWIFTPM_CUSTOM_LIBS_DIR` so every `swift build` the MCP server spawns inherits
-them. The same variables are set by `/private/tmp/dct-verify/build_all.sh`
-used by CI/local verification (480 tests). Never run bare `swift build` or
-`swift test` without the toolchain — use the env var or the MCP tools
-(`dictation_build` / `dictation_deploy`).
+`mcp/nanodictate-deploy-mcp-server/start.sh` (deploy MCP server) runs the same
+`swift build` internally; it auto-detects the toolchain via `xcrun --find
+swift` unless the `SWIFT_TOOLCHAIN` environment variable points at a specific
+toolchain.
 
 ### Tests
 
@@ -179,11 +173,11 @@ The tests are packaged as a standalone executable target
 (`NanoDictateCoreTests`) rather than XCTest test targets, so they are run with
 `swift run` instead of `swift test` (the package declares no test targets for
 `swift test` to discover). The runner executes every `test*` method, prints a
-summary, and exits non-zero if any test fails. The same commands are used by
-the CI workflow (`.github/workflows/ci.yml`).
+summary, and exits non-zero if any test fails. The current suite runs
+**771 tests**. The same commands are used by the CI workflow
+(`.github/workflows/ci.yml`).
 
 ```sh
-export SWIFT_TOOLCHAIN=/Users/dima/.swift-toolchain
 swift run NanoDictateCoreTests
 ```
 
@@ -301,44 +295,97 @@ Config path: `~/.config/nanodictate/config.toml` (chmod 600, atomic writes).
 Example template (created by `nanodictate config init`):
 
 ```toml
-# active_provider = "openai"
+# Диктовка — конфиг STT-провайдера (создан `nanodictate config init`)
+#
+# Секреты:
+#   - api_key / api_key_file в секции провайдера,
+#   - либо env-переменная NANODICTATE_API_KEY (приоритет над файлом —
+#     только у активного провайдера; failover-кандидаты и роли сохраняют
+#     свои api_key/api_key_file; в конфиг никогда не пишется).
+#
+# Пустые base_url/model в секциях — агент подставит дефолты адаптера
+# (например OpenAI → https://api.openai.com/v1/audio/transcriptions,
+# whisper-1; Groq → whisper-large-v3). Для секций
+# cookie-relay, cloudflare и открытого OpenAI-совместимого провайдера
+# base_url обязателен (cloudflare — полный URL, account_id и модель
+# в пути; например .../accounts/<ACCOUNT_ID>/ai/run/@cf/openai/whisper-large-v3-turbo).
+#
+# Транспорты (ключ transport):
+#   direct         — прямой запрос к base_url (по умолчанию)
+#   http           — HTTP-прокси: http_proxy = "host:port",
+#                    proxy_user / proxy_password (опционально)
+#   gateway        — шлюз-ретрансляция с API-ключом в заголовке:
+#                    proxy_key + proxy_key_header
+#   cookie-relay   — прокси с JS cookie-челленджем (автоматическая
+#                    расшифровка AES-128-CBC, не требует ключа)
+
+# Язык STT-подсказки (пусто = авто-детект Whisper, языковой параметр
+# в запрос НЕ шлётся). Явное значение (language = "ru") форвардится.
+language = ""
+ui_language = "en"
+sounds_enabled = true
+timeout_seconds = 120
+log_level = "info"
+active_provider = "openai"
 
 [providers.openai]
 name = "OpenAI"
-base_url = "https://api.openai.com/v1/audio/transcriptions"
-model = "whisper-1"
-api_key_file = "~/.config/nanodictate/keys/openai.txt"
+base_url = ""
+model = ""
+api_key = ""
 
 [providers.groq]
 name = "Groq"
-base_url = "https://api.groq.com/openai/v1/audio/transcriptions"
-model = "whisper-large-v3"
-api_key_file = "~/.config/nanodictate/keys/groq.txt"
+base_url = ""
+model = ""
+api_key = ""
 
 [providers.local]
-name = "Local whisper"
-base_url = "http://127.0.0.1:8080/v1/audio/transcriptions"
-model = "whisper-1"
+name = "Local"
+base_url = ""
+model = ""
 api_key = ""
 
 [providers.cookie-relay]
 name = "Cookie Relay"
-base_url = "https://proxy.example.com/audio/transcriptions"
-model = "whisper-large-v3"
+base_url = ""
+model = ""
+api_key = ""
 transport = "cookie-relay"
-proxy_key = ""
-proxy_key_header = "X-Proxy-Key"
+# proxy_key = ""
+# proxy_key_header = "X-Proxy-Key"
 
 [providers.cloudflare]
-name = "Cloudflare"
-base_url = "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run/@cf/openai/whisper-large-v3-turbo"
+name = "Cloudflare Workers AI"
+base_url = ""
 model = ""
-# transport = "cloudflare"
-# api_key = ""
+api_key = ""
+transport = "cloudflare"
 
+# Примеры транспортов для секций:
+#
+# [providers.http-proxy]
+# transport = "http"
+# http_proxy = "proxy.example.com:8080"
+# proxy_user = ""
+# proxy_password = ""
+#
+# [providers.gateway-provider]
+# transport = "gateway"
+# proxy_key = "your-api-key"
+# proxy_key_header = "X-Custom-Auth"
+
+# Маршрутизация STT по ролям: final_provider применяется и в
+# чанковом пути (финальный проход по всей записи), и в не-чанковом
+# (одиночный прогон). segment_provider — только в чанковом пути
+# (сегменты речи), в не-чанковом segment не используется.
+# Не задано — роль играет active_provider. Роли (segment/final)
+# используют провайдер напрямую — auto_failover на ролях не действует.
+# Чтобы включить — раскомментируйте секцию:
+#
 # [routing]
-# segment_provider = ""
-# final_provider = ""
+# segment_provider = "cloudflare"
+# final_provider = "groq"
 ```
 
 Top-level options:
