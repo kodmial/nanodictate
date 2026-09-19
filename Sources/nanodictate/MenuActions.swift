@@ -1,7 +1,7 @@
 import Foundation
 import NanoDictateCore
 
-// MARK: - Действия
+// MARK: - Actions
 
 /// Runs a subcommand through this same binary (reuses cmdStart/cmdStop
 /// without duplication), returning its printable output in one line.

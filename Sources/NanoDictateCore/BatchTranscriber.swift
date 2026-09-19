@@ -187,13 +187,13 @@ public struct BatchCheckpoint: Codable, Equatable {
 
 // MARK: - Outcome
 
-/// Итог прогона пакетного распознавания.
+/// Result of a batch recognition run.
 public struct BatchOutcome: Equatable {
   public let text: String
   public let totalSegments: Int
   public let okCount: Int
   public let skippedCount: Int
-  /// Порядковые номера (1-based) пропущенных (placeholder) чанков.
+  /// 1-based indexes of skipped (placeholder) chunk indexes.
   public let skippedIndexes: [Int]
   public let elapsed: TimeInterval
 
@@ -214,9 +214,9 @@ public struct BatchOutcome: Equatable {
   }
 }
 
-// MARK: - Параллельное состояние прогона
+// MARK: - Parallel run state
 
-/// Потокобезопасное состояние параллельного прогона (maxConcurrent > 1).
+/// Thread-safe state of a parallel run (maxConcurrent > 1).
 /// Все изменяемые поля под NSLock; методы короткие, I/O (чекпоинт, прогресс)
 /// выполняется вызвавшим воркером ПОСЛЕ возврата из метода. Поля доступны
 /// только через методы — поэтому класс помечен @unchecked Sendable.
@@ -312,25 +312,25 @@ private final class BatchRunState: @unchecked Sendable {
   }
 }
 
-/// Сериализованный писатель чекпоинта для ПАРАЛЛЕЛЬНОГО прохода.
+/// Serialized checkpoint writer for the PARALLEL pass.
 ///
-/// Проблема, которую он решает: воркеры параллельно зовут
-/// `saveCheckpoint(cp, path)` (атомарная запись в тот же файл). Даже
-/// `.atomic`-запись в один и тот же URL не сериализуется: две записи могут
-/// пересечься на временном файле (обрыв/пустой файл) или финальный rename
-/// старого (меньшего) префикса может лечь ПОСЛЕ rename нового (бОльшего) —
-/// файл в момент resume окажется пустым или устаревшим, и разрешённые из
-/// чекпоинта чанки приходится распознавать заново.
+/// The problem it solves: workers call `saveCheckpoint(cp, path)` in parallel
+/// (atomic writes to the same file). Even an `.atomic` write to one URL is not
+/// serialized: two writes can collide on the temp file (torn/empty file), or
+/// the final rename of an older (shorter) prefix can land AFTER the rename of
+/// a newer (longer) one — the file is empty or stale at resume time, and the
+/// chunks already admitted by the checkpoint have to be recognized again.
 ///
-/// Здесь запись идёт строго по одному воркеру и только когда новый префикс
-/// строго длиннее уже сохранённого: файл монотонно растёт, всегда валиден.
+/// Here the write goes strictly one worker at a time and only when the new
+/// prefix is strictly longer than what is already saved: the file grows
+/// monotonically and is always valid.
 final class CheckpointWriter: @unchecked Sendable {
   private let lock = NSLock()
   private var savedEnd = 0
 
-  /// Сохраняет префикс [0..<end], если он длиннее уже записанного.
-  /// `makeCheckpoint(end)` строит чекпоинт ПОД lock — длина и содержимое
-  /// не успевают разойтись с уже сохранённым префиксом.
+  /// Saves the prefix [0..<end] when longer than what is already written.
+  /// `makeCheckpoint(end)` builds the checkpoint UNDER the lock — the length
+  /// and the content cannot diverge from the already-saved prefix.
   func saveIfLonger(
     end: Int,
     path: String,
@@ -346,7 +346,7 @@ final class CheckpointWriter: @unchecked Sendable {
   }
 }
 
-// MARK: - Пайплайн
+// MARK: - Pipeline
 
 // Тело enum 401 строка: 6 public-функций запуска с общим ядром. Вынос в
 // расширения разорвёт доступ к private-состоянию — точечное отключение.
@@ -649,6 +649,7 @@ public enum BatchTranscriber {
     onProgress: ProgressHandler?
   ) async throws -> BatchOutcome {
     var records = slots
+    var lastError: String?
     for (i, spec) in specs.enumerated() {
       if let resolved = records[i] {
         onProgress?(
@@ -683,6 +684,7 @@ public enum BatchTranscriber {
         }
         text = Self.placeholder
         status = BatchSegmentRecord.statusSkipped
+        lastError = error.localizedDescription
       }
       records[i] = BatchSegmentRecord(
         index: i,
@@ -713,7 +715,11 @@ public enum BatchTranscriber {
     }
 
     return makeOutcome(
-      records: records.compactMap { $0 }, totalSegments: specs.count, started: started)
+      records: records.compactMap { $0 },
+      totalSegments: specs.count,
+      lastError: lastError,
+      started: started
+    )
   }
 
   // MARK: Параллельный проход (maxConcurrent > 1)
@@ -761,6 +767,7 @@ public enum BatchTranscriber {
       return makeOutcome(records: records, totalSegments: specs.count, started: started)
     }
 
+    let lastError = LastErrorBox()
     let workers = min(maxConcurrent, specs.count - completedCount)
     let ckWriter = CheckpointWriter()
     try await withThrowingTaskGroup(of: Void.self) { group in
@@ -786,6 +793,7 @@ public enum BatchTranscriber {
               }
               text = Self.placeholder
               status = BatchSegmentRecord.statusSkipped
+              lastError.set(error.localizedDescription)
             }
             let record = BatchSegmentRecord(
               index: job,
@@ -836,7 +844,12 @@ public enum BatchTranscriber {
     }
 
     let records = state.resolvedRecords()
-    return makeOutcome(records: records, totalSegments: specs.count, started: started)
+    return makeOutcome(
+      records: records,
+      totalSegments: specs.count,
+      lastError: lastError.current,
+      started: started
+    )
   }
 
   // MARK: Контекстный промпт (chaining между чанками)
@@ -861,7 +874,10 @@ public enum BatchTranscriber {
   // MARK: Сборка итога
 
   private static func makeOutcome(
-    records: [BatchSegmentRecord], totalSegments: Int, started: TimeInterval
+    records: [BatchSegmentRecord],
+    totalSegments: Int,
+    lastError: String? = nil,
+    started: TimeInterval
   ) -> BatchOutcome {
     let joined = BatchTextJoiner.join(records.map(\.text))
     let skippedIndexes = records.enumerated()
@@ -873,6 +889,7 @@ public enum BatchTranscriber {
       okCount: records.filter { $0.status == BatchSegmentRecord.statusOK }.count,
       skippedCount: skippedIndexes.count,
       skippedIndexes: skippedIndexes,
+      lastError: lastError,
       elapsed: CFAbsoluteTimeGetCurrent() - started
     )
   }

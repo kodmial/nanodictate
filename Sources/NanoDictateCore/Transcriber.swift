@@ -41,7 +41,7 @@ public enum TranscribeError: Error, Equatable {
   case invalidResponse(String)  // not JSON or missing "text" field
 }
 
-// MARK: - Сетевая доступность (preflight)
+// MARK: - Network availability (preflight)
 
 /// Quick network check before an STT request via Network framework.
 ///
@@ -161,7 +161,7 @@ public protocol HTTPTransport: AnyObject {
   )
 }
 
-// MARK: - Внутренние типы запроса/ответа
+// MARK: - Internal request/response types
 
 /// HTTP response of an STT request (status + body + headers) — internal
 /// transcriber type; the public contract (HTTPTransport.send) stays a tuple.
@@ -185,7 +185,7 @@ private struct SendContext {
 // MARK: - Transcriber
 
 public final class Transcriber {
-  // MARK: - Константы
+  // MARK: - Constants
 
   /// Hard network timeout of the STT HTTP request (s), ~15–20 s. Separate
   /// from config `timeout_seconds` (Transcriber.timeout): config may only
@@ -387,7 +387,7 @@ public final class Transcriber {
       adapterID: adapterID, wav: wav, filename: filename, prompt: prompt)
   }
 
-  // MARK: - Адаптерный путь
+  // MARK: - Adapter path
 
   private func transcribeViaAdapter(adapterID: String, wav: Data, filename: String, prompt: String?)
     async throws -> TranscriptionResult
@@ -455,9 +455,9 @@ public final class Transcriber {
   private func send(request: URLRequest) async throws -> STTHTTPResponse {
     var request = request
     if !httpProxy.isEmpty, let original = request.url?.absoluteString {
-      // Учётные данные (Authorization/Proxy-Authorization/Cookie) уходят этим
-      // хопом: plaintext допустим только до loopback-форвардера, иначе оператор
-      // обязан дать явную https-схему в http_proxy.
+      // Credentials (Authorization/Proxy-Authorization/Cookie) travel this
+      // hop: plaintext only allowed up to a loopback forwarder, otherwise the
+      // operator must give an explicit https scheme in http_proxy.
       let scheme = httpProxy.contains("://") ? "" : "http://"
       guard let proxiedURL = URL(string: "\(scheme)\(httpProxy)/\(original)") else {
         throw URLError(.badURL)
@@ -584,7 +584,7 @@ extension Transcriber {
 }
 
 extension Transcriber {
-  // MARK: - Общий цикл отправки (адаптерный путь)
+  // MARK: - Shared send loop (adapter path)
 
   /// Cookie relay layer (transport == "cookie-relay"): unified browser UA +
   /// cookie header. `ensureFresh()` is non-blocking: a fresh token

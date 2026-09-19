@@ -350,7 +350,7 @@ func cmdConfig(_ args: [String]) -> Int32 {
   }
 }
 
-// MARK: - Providers (несколько STT-провайдеров)
+// MARK: - Providers (multiple STT providers)
 
 func providerList() -> Int32 {
   do {

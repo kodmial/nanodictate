@@ -38,7 +38,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// Active provider id (nil — legacy config without sections).
   private let activeProviderID: String?
 
-  // MARK: Маршрутизация STT по ролям ([routing])
+  // MARK: STT routing by role ([routing])
 
   /// Segment-role provider id ([routing]); nil — unset, fallback active; resolved in init from config.
   private let segmentRoleProviderID: String?

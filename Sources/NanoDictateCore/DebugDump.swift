@@ -1,6 +1,6 @@
 import Foundation
 
-// MARK: - Отладочный дамп STT-запросов
+// MARK: - STT request debug dump
 
 /// Debug transcription log (`transcriber-debug.log`), enabled at log level debug.
 /// Entry built by pure `summarize`; `append` only writes. At debug, raw audio
@@ -48,7 +48,7 @@ public enum DebugDump {
     }
   }
 
-  // MARK: - Маскирование
+  // MARK: - Masking
 
   /// Mask header value by name (case-insensitive). Authorization whole → "Bearer ***",
   /// X-Proxy-Key → "***". Anything outside `safeDumpHeaders` masked — secret
@@ -97,7 +97,7 @@ public enum DebugDump {
     return result
   }
 
-  // MARK: - Имена файлов аудиозаписей (чистые функции, без I/O)
+  // MARK: - Recording file names (pure functions, no I/O)
 
   /// Recording filename: `recording-<yyyyMMdd-HHmmss-SSS>.wav`; milliseconds
   /// avoid collisions within one second.
@@ -113,7 +113,7 @@ public enum DebugDump {
     return (dir as NSString).appendingPathComponent(recordingFileName(for: date))
   }
 
-  // MARK: - Сборка записи (чистая функция, без I/O)
+  // MARK: - Recording assembly (pure function, no I/O)
 
   /// One log entry: request (method/url/masked headers/fields/file meta) and
   /// response (status + masked body). No response → "(no response — transport error)".
@@ -181,7 +181,7 @@ public enum DebugDump {
     return lines.joined(separator: "\n") + "\n"
   }
 
-  // MARK: - Запись в файл (враппер)
+  // MARK: - File writing (wrapper)
 
   /// Append entry to `dumpDirectory/dumpFileName`; creates dir/file as needed.
   /// Never throws — debug log must not break transcription.
@@ -206,13 +206,13 @@ public enum DebugDump {
 
     if let handle = try? FileHandle(forWritingTo: fileURL) {
       defer { try? handle.close() }
-      // Debug-лог секретосодержащий (маскированные заголовки): приводим к 0600
-      // и на аппенде — файлы, созданные до этого фикса, могли остаться шире.
+      // Secrets-bearing debug log (masked headers): force 0600
+      // also on append — files created before this fix could be wider.
       try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
       handle.seekToEndOfFile()
       handle.write(data)
     } else if !fileManager.fileExists(atPath: fileURL.path) {
-      // Создание: 0600 (как config/plist).
+      // Creation: 0600 (like config/plist).
       try? data.write(to: fileURL)
       try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
     }
@@ -235,7 +235,7 @@ public enum DebugDump {
         withIntermediateDirectories: true
       )
       try data.write(to: fileURL)
-      // Запись — речь пользователя: только владелец (0600).
+      // Recording — user speech: owner-only (0600).
       try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
     } catch {
       Logger.log(

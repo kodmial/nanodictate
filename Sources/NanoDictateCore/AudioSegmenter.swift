@@ -1,6 +1,6 @@
 import Foundation
 
-// MARK: - VAD-сегментация записи (пошаговая диктовка)
+// MARK: - VAD recording segmentation (step-by-step dictation)
 
 //
 // Pure audio split by voice pauses (RMS threshold, as in
@@ -71,7 +71,7 @@ public enum AudioSegmenter {
   /// (like AudioService.rmsHistory RMS buffers).
   public static let defaultWindowDuration: TimeInterval = 0.085
 
-  // MARK: - Разбиение по RMS-таймлайну
+  // MARK: - Splitting by RMS timeline
 
   /// Split RMS timeline (one value per window) into segment window ranges.
   ///
@@ -167,7 +167,7 @@ public enum AudioSegmenter {
     }
   }
 
-  // MARK: - Разбиение по сэмплам
+  // MARK: - Splitting by samples
 
   /// Number of segments for Int16 PCM samples (16 kHz) without materializing
   /// segment PCM — same RMS-window math and `splitRanges` as `segments`,

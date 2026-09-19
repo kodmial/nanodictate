@@ -18,7 +18,7 @@
 import AppKit
 import Foundation
 
-// MARK: - Системные звуки
+// MARK: - System sounds
 
 /// Plays short macOS system sounds via NSSound.
 public final class SysSounds {
@@ -32,9 +32,9 @@ public final class SysSounds {
   /// macOS classic "error sound" — network failures (no internet / STT timeout).
   private static let errorSoundName = "Basso"
 
-  // MARK: Новые кейсы (быстрые UX-победы). Каждый — отдельный кейс с дефолтным
+  // MARK: New cases (quick UX wins). Each — a separate case with default
 
-  // поведением: существующие кейсы/методы (start/end/cancel/error) НЕ меняются.
+  // behavior: existing cases/methods (start/end/cancel/error) unchanged.
 
   /// Success sound AFTER text insertion. Default same Pop as playEnd, but a
   /// separate case/method: new queue "insert then sound" pinned to it, old
@@ -88,7 +88,7 @@ public final class SysSounds {
     play(Self.errorSoundName, label: "error")
   }
 
-  // MARK: Новые методы (UX quick wins)
+  // MARK: New methods (UX quick wins)
 
   /// Finish sound AFTER text insertion (not before). Called from
   /// completeInsertion after Inserter.insert — user hears it only when text
@@ -168,7 +168,7 @@ public final class SysSounds {
   }
 }
 
-// MARK: - Логгер
+// MARK: - Logger
 
 /// Minimal thread-safe file logger: appends to `<logDirectory>/agent.log`.
 /// Filters messages below `logLevel`, rotates to `agent.log.1` once the file
@@ -188,7 +188,7 @@ public enum Logger {
 
   private static let lock = NSLock()
 
-  /// Level ordering; unknown levels rank as "info" — never silently dropped
+/// Level ordering; unknown levels rank as "info" — never silently dropped
   /// on a typo'd level name.
   private static func levelRank(_ level: String) -> Int {
     switch level {
@@ -250,13 +250,13 @@ public enum Logger {
 
     if let handle = try? FileHandle(forWritingTo: fileURL) {
       defer { try? handle.close() }
-      // Лог может нести секреты/команды — 0600 и на аппенде (старые файлы
-      // могли быть созданы до проверки прав).
+      // Log may carry secrets/commands — 0600 also on append (old files
+      // may have been created before the permission check).
       try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
       handle.seekToEndOfFile()
       handle.write(data)
     } else if !fileManager.fileExists(atPath: fileURL.path) {
-      // Создание свежего файла: только владелец (0600), как config/plist.
+      // Fresh file creation: owner-only (0600), like config/plist.
       try? data.write(to: fileURL)
       try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
     }
