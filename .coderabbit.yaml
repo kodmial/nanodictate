@@ -8,8 +8,12 @@ reviews:
   poem: false
   review_status: true
   collapse_walkthrough: false
+  # Auto-review starts only after the review-ready label is applied; the label workflow (add-review-label.yml) applies it after CI passes.
   auto_review:
-    enabled: true
+    enabled: false
+    labels:
+      - review-ready
+    auto_incremental_review: true
     auto_pause_after_reviewed_commits: 0
     drafts: false
     base_branches:
