@@ -411,7 +411,7 @@ test("statusMarkdown renders running-with-signature and not-built branches", () 
   assert.match(running, /pids: 42, 43/);
   assert.match(running, /loaded: \*\*yes\*\*/);
   assert.match(running, /signed: \*\*yes\*\*/);
-  assert.match(running, /stable signature \(identity = "NanoDictate Code Signing"\): \*\*yes\*\* — TCC grants preserved\*\*/);
+  assert.match(running, /stable signature \(identity \+ entitlements match expected set\): \*\*yes\*\* — TCC grants preserved\*\*/);
   assert.match(running, /com\.apple\.security\.device\.audio-input = true/);
   assert.match(running, /state = running/);
 

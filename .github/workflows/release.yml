@@ -27,10 +27,10 @@ jobs:
           # runner that still produces a native x86_64 binary.
           - os: macos-15-intel
             arch: x86_64
-            swift: "5.10.1"
+            swift: "6.1"
           - os: macos-14
             arch: arm64
-            swift: "5.10.1"
+            swift: "6.1"
 
     steps:
       - name: Checkout
@@ -71,11 +71,12 @@ jobs:
           # Resources/ ships for reference only: entitlements are already
           # applied to the binaries at codesign time, and the LaunchAgent plist
           # is generated inline by the CLI (`nanodictate start` writes the
-          # canonical ~/Library/LaunchAgents/com.nanodictate.agent.plist) and
+          # canonical ~/Library/LaunchAgents/com.nanodictate.agent.plist);
           # regenerated at install time by the Homebrew formula's post_install
-          # and the MacPorts port's post-destroot (same single label). The
-          # runtime needs none of these — formulae/ports ship binaries +
-          # config only.
+          # only — the MacPorts port's destroot stages binaries + config
+          # without touching the user home (it prints `nanodictate start`
+          # instead). The runtime needs none of these — formulae/ports ship
+          # binaries + config only.
           cp .build/release/NanoDictateAgent .build/release/nanodictate config.example.toml "$DIST"/
           cp -R Resources "$DIST"/
           ARCHIVE="$DIST/nanodictate-$RELEASE_VERSION-macos-${{ matrix.arch }}.tar.gz"

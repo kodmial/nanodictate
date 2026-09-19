@@ -134,7 +134,7 @@ puts
 puts "Next steps:"
 puts "  1. Fill the maintainers handle in #{portfile_out} (never auto-generate a person's id)."
 puts "  2. Sanity-check the version string: `nanodictate --version` will print \"nanodictate #{VERSION}\"."
-puts "  3. Homebrew: copy #{formula_out} into the nanodictate-homebrew tap as"
+puts "  3. Homebrew: copy #{formula_out} into the kodmial/homebrew-nanodictate-homebrew tap as"
 puts "     Formula/nanodictate.rb, then run `brew audit --strict --new nanodictate` there."
 puts "  4. MacPorts: copy #{portfile_out} into a macports-ports checkout as"
 puts "     audio/nanodictate/Portfile, then run `port lint` before opening the PR."
