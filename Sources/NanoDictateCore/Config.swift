@@ -208,9 +208,10 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
 
   // MARK: Example-канон (config.example.toml)
 
-  /// Тестовый хук: переопределяет содержимое канона (nil = поиск на диске).
-  /// В проде не используется; нужен, чтобы тесты не зависели от расположения
-  /// config.example.toml.
+  /// Тестовый хук: переопределяет содержимое канона (nil = поиск на диске,
+  /// "" — сентинел «канона нет»). В проде не используется; нужен, чтобы тесты
+  /// не зависели от расположения config.example.toml и от установленной
+  /// homebrew/macports-формулы на машине разработчика.
   public static var exampleContentOverride: String?
 
   /// Кандидаты поиска файла канона config.example.toml, первый существующий:
@@ -234,6 +235,10 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
   /// nil — канон не найден. Работает и в CLI nanodictate, и в NanoDictateAgent.
   public static func exampleContent() -> String? {
     if let override = exampleContentOverride {
+      // Сентинел «канона нет»: пустая строка трактуется как отсутствие канона
+      // (тесты, полагающиеся на отсутствие файла на диске, ставят "" — иначе
+      // реальный поиск по bundledExampleURLs() нашёл бы установленную формулу).
+      if override.isEmpty { return nil }
       return override
     }
     for url in bundledExampleURLs() {
@@ -278,10 +283,16 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
       }
     }
     let content = try String(contentsOfFile: resolvedPath, encoding: .utf8)
-    // База мержа: канон (если доступен) поверх него накладывается юзер-файл;
-    // иначе — дефолты (поведение как раньше).
+    // База мержа: канон (если доступен) поверх него накладывается юзер-файл.
+    // Исключение — плоский legacy-конфиг: top-level base_url/model/api_key без
+    // секций [providers.*] и без active_provider. Для него база — дефолты
+    // (ровно прежнее поведение ветки «чистый legacy»); иначе секции канона
+    // (6 шт.) и его active_provider "airubiz" затерли бы legacy-поля юзера
+    // (включая apiKey/apiKeyFile, которые resolveActiveProvider ставит в nil).
+    let isLegacyFlat =
+      !content.contains("[providers.") && !content.contains("active_provider")
     let base: AppConfig
-    if let example = exampleContent() {
+    if let example = exampleContent(), !isLegacyFlat {
       base = try parse(example)
     } else {
       base = defaults

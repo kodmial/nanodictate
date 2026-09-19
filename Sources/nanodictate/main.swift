@@ -332,7 +332,7 @@ func stdinIsTTY() -> Bool {
 func cmdConfig(_ args: [String]) -> Int32 {
   let path = AppConfig.defaultPath()
   let fileManager = FileManager.default
-  let exists = fileManager.fileExists(atPath: path)
+  var exists = fileManager.fileExists(atPath: path)
 
   // `config path` — алиас `config --path`.
   if args.first?.lowercased() == "path" || args.contains("--path") {
@@ -357,6 +357,11 @@ func cmdConfig(_ args: [String]) -> Int32 {
 
   do {
     let config = try AppConfig.load(from: nil)
+    // load() на свежей машине сам создаёт файл (автокопия канона) — exists,
+    // посчитанный выше ДО load, устарел; перечитываем для веток --show-file
+    // и инфо-вывода, иначе печатали бы «Config not found» при уже созданном
+    // файле, а --show-file показывал бы текст ошибки вместо содержимого.
+    exists = fileManager.fileExists(atPath: path)
 
     if args.contains("--show-file") {
       if exists {

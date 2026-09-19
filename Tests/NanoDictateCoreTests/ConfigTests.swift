@@ -3,6 +3,21 @@ import Foundation
 
 final class ConfigTests: XCTestCase {
 
+    // Load-тесты полагаются на ОТСУТСТВИЕ канона на диске: на машине с
+    // установленной homebrew/macports-формулой реальный поиск по
+    // bundledExampleURLs() нашёл бы config.example.toml и изменил поведение.
+    // Сентинел "" = «канона нет» (см. AppConfig.exampleContent()); канон-тесты
+    // переопределяют его реальным содержимым в теле теста.
+    override func setUp() {
+        super.setUp()
+        AppConfig.exampleContentOverride = ""
+    }
+
+    override func tearDown() {
+        AppConfig.exampleContentOverride = nil
+        super.tearDown()
+    }
+
     // MARK: - Existing
 
     @objc func testParseBasic() throws {
@@ -135,9 +150,9 @@ final class ConfigTests: XCTestCase {
     // MARK: - Missing file via load()
 
     @objc func testLoadMissingFileReturnsDefaults() throws {
-        // Без канона (exampleContentOverride = nil, файл на диске не найден)
-        // отсутствующий конфиг не создаётся и load() отдаёт дефолты.
-        AppConfig.exampleContentOverride = nil
+        // Сентинел "" = «канона нет» (см. setUp): отсутствующий конфиг не
+        // создаётся и load() отдаёт дефолты.
+        AppConfig.exampleContentOverride = ""
         defer { AppConfig.exampleContentOverride = nil }
         let path = "/tmp/nonexistent_nanodictate_config_\(UUID()).toml"
         defer { try? FileManager.default.removeItem(atPath: path) }
@@ -832,6 +847,48 @@ final class ConfigTests: XCTestCase {
         let airubiz = config.providers.first { $0.id == "airubiz" }
         XCTAssertEqual(airubiz?.baseURL, "https://api.airubiz.site/v1/audio/transcriptions")
         XCTAssertEqual(airubiz?.model, "gigaam-v3-ctc-sherpa")
+    }
+
+    @objc func testLegacyFlatConfigPreservesLegacyKeys() throws {
+        // Плоский legacy-конфиг (top-level base_url/model/api_key, без секций
+        // [providers.*] и без active_provider) + доступный канон: мерж НЕ
+        // применяется — база дефолты, иначе секции канона (6 шт.) и его
+        // active_provider "airubiz" затёрли бы legacy-поля юзера (включая
+        // api_key/api_key_file, которые resolveActiveProvider ставит в nil).
+        let example = try exampleCanonContent()
+        AppConfig.exampleContentOverride = example
+        defer { AppConfig.exampleContentOverride = nil }
+        let legacyFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_legacy_flat_\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: legacyFile) }
+        let legacy = """
+        base_url = "https://legacy.example/v1/transcribe"
+        model = "legacy-model"
+        api_key = "legacy-secret"
+        api_key_file = "/nonexistent/keys.txt"
+        timeout_seconds = 42
+        """
+        try legacy.data(using: .utf8)!.write(to: legacyFile)
+
+        let config = try AppConfig.load(from: legacyFile.path)
+        XCTAssertEqual(
+            config.baseURL, "https://legacy.example/v1/transcribe",
+            "legacy base_url не затирается каноном"
+        )
+        XCTAssertEqual(config.model, "legacy-model")
+        XCTAssertEqual(
+            config.apiKey, "legacy-secret",
+            "legacy api_key не затирается секцией airubiz канона"
+        )
+        XCTAssertEqual(config.timeoutSeconds, 42)
+        XCTAssertTrue(
+            config.providers.isEmpty,
+            "legacy-конфиг не наследует секции канона"
+        )
+        XCTAssertEqual(
+            config.activeProvider, "",
+            "legacy-конфиг без active_provider — ровно прежнее поведение"
+        )
     }
 
     // MARK: - writeProviderKeyValue (config set-key)
