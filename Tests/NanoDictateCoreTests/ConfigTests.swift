@@ -3,6 +3,21 @@ import Foundation
 
 final class ConfigTests: XCTestCase {
 
+    // Load-тесты полагаются на ОТСУТСТВИЕ канона на диске: на машине с
+    // установленной homebrew/macports-формулой реальный поиск по
+    // bundledExampleURLs() нашёл бы config.example.toml и изменил поведение.
+    // Сентинел "" = «канона нет» (см. AppConfig.exampleContent()); канон-тесты
+    // переопределяют его реальным содержимым в теле теста.
+    override func setUp() {
+        super.setUp()
+        AppConfig.exampleContentOverride = ""
+    }
+
+    override func tearDown() {
+        AppConfig.exampleContentOverride = nil
+        super.tearDown()
+    }
+
     // MARK: - Existing
 
     @objc func testParseBasic() throws {
@@ -135,8 +150,18 @@ final class ConfigTests: XCTestCase {
     // MARK: - Missing file via load()
 
     @objc func testLoadMissingFileReturnsDefaults() throws {
-        let config = try AppConfig.load(from: "/tmp/nonexistent_nanodictate_config_\(UUID()).toml")
+        // Сентинел "" = «канона нет» (см. setUp): отсутствующий конфиг не
+        // создаётся и load() отдаёт дефолты.
+        AppConfig.exampleContentOverride = ""
+        defer { AppConfig.exampleContentOverride = nil }
+        let path = "/tmp/nonexistent_nanodictate_config_\(UUID()).toml"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let config = try AppConfig.load(from: path)
         XCTAssertEqual(config, AppConfig.defaults)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: path),
+            "без канона файл не создаётся"
+        )
     }
 
     // MARK: - api_key_file="" → nil
@@ -735,35 +760,145 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(AppConfig.maskSecret("  abcdefghijkl  "), "abcd***ijkl")
     }
 
-    // MARK: - initTemplate
+    // MARK: - Example-канон (config.example.toml)
 
-    @objc func testInitTemplateParses() throws {
-        let content = AppConfig.initTemplate()
-        let config = try AppConfig.parse(content)
-        XCTAssertEqual(config.activeProvider, "openai")
-        XCTAssertEqual(config.language, "")
-        XCTAssertTrue(config.soundsEnabled)
-        // Пять секций: openai, groq, local, cookie-relay, cloudflare.
-        XCTAssertEqual(config.providerNames, ["openai", "groq", "local", "cookie-relay", "cloudflare"])
-        for provider in config.providers {
-            XCTAssertEqual(provider.apiKey, "", "шаблон не содержит секретов")
-        }
-        XCTAssertEqual(config.providers.first { $0.id == "cookie-relay" }?.transport, "cookie-relay")
-        XCTAssertEqual(config.providers.first { $0.id == "cloudflare" }?.transport, "cloudflare")
-        XCTAssertTrue(
-            content.contains("auto_failover"),
-            "шаблон предупреждает о поведении ролей при auto_failover"
+    /// Читает канон из корня пакета (swift test запускается из корня пакета).
+    private func exampleCanonContent() throws -> String {
+        try String(
+            contentsOfFile: FileManager.default.currentDirectoryPath + "/config.example.toml",
+            encoding: .utf8
         )
     }
 
-    @objc func testInitTemplateRoundTripViaFile() throws {
+    @objc func testExampleCanonParses() throws {
+        let content = try exampleCanonContent()
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.activeProvider, "airubiz")
+        XCTAssertTrue(
+            config.providerNames.contains("airubiz"),
+            "канон содержит секцию airubiz: \(config.providerNames)"
+        )
+        let airubiz = config.providers.first { $0.id == "airubiz" }
+        XCTAssertEqual(airubiz?.baseURL, "https://api.airubiz.site/v1/audio/transcriptions")
+        XCTAssertEqual(airubiz?.model, "gigaam-v3-ctc-sherpa")
+        XCTAssertEqual(airubiz?.apiKey, "")
+        XCTAssertEqual(airubiz?.transport, "", "у airubiz транспорт не задан — direct")
+        XCTAssertEqual(
+            config.providers.first { $0.id == "cookie-relay" }?.transport,
+            "cookie-relay",
+            "transport cookie-relay у секции сохранён"
+        )
+        for provider in config.providers {
+            XCTAssertEqual(provider.apiKey, "", "канон не содержит секретов")
+        }
+    }
+
+    @objc func testExampleCanonRoundTripViaFile() throws {
+        let content = try exampleCanonContent()
         let file = FileManager.default.temporaryDirectory
-            .appendingPathComponent("test_init_template_\(UUID().uuidString).toml")
+            .appendingPathComponent("test_example_roundtrip_\(UUID().uuidString).toml")
         defer { try? FileManager.default.removeItem(at: file) }
-        try AppConfig.initTemplate().data(using: .utf8)!.write(to: file)
+        try content.data(using: .utf8)!.write(to: file)
         let config = try AppConfig.load(from: file.path)
-        XCTAssertEqual(config.activeProvider, "openai")
-        XCTAssertEqual(config.providerNames.count, 5)
+        XCTAssertEqual(config.activeProvider, "airubiz")
+        XCTAssertEqual(config.providerNames.count, 6)
+    }
+
+    @objc func testAutoCopyOnFirstRun() throws {
+        let example = try exampleCanonContent()
+        AppConfig.exampleContentOverride = example
+        defer { AppConfig.exampleContentOverride = nil }
+        let tempPath = "/tmp/nanodictate_autocopy_\(UUID().uuidString).toml"
+        defer { try? FileManager.default.removeItem(atPath: tempPath) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: tempPath))
+
+        let config = try AppConfig.load(from: tempPath)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: tempPath), "автокопия создаёт файл")
+        let written = try String(contentsOfFile: tempPath, encoding: .utf8)
+        XCTAssertEqual(written, example, "файл — точная копия канона")
+        XCTAssertEqual(config.activeProvider, "airubiz")
+    }
+
+    @objc func testMergeExampleUnderUserConfig() throws {
+        let example = try exampleCanonContent()
+        AppConfig.exampleContentOverride = example
+        defer { AppConfig.exampleContentOverride = nil }
+        let userFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_merge_canon_\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: userFile) }
+        // Юзер-конфиг БЕЗ секции airubiz, со своим активным groq.
+        let userConfig = """
+        active_provider = "groq"
+
+        [providers.groq]
+        name = "Groq"
+        base_url = "https://api.groq.com/openai/v1/audio/transcriptions"
+        model = "whisper-large-v3"
+        api_key = ""
+        """
+        try userConfig.data(using: .utf8)!.write(to: userFile)
+
+        let config = try AppConfig.load(from: userFile.path)
+        XCTAssertEqual(config.activeProvider, "groq", "юзер-конфиг перекрывает active_provider канона")
+        XCTAssertTrue(
+            config.providers.contains { $0.id == "airubiz" },
+            "секция airubiz из канона сохранена при мерже"
+        )
+        let airubiz = config.providers.first { $0.id == "airubiz" }
+        XCTAssertEqual(airubiz?.baseURL, "https://api.airubiz.site/v1/audio/transcriptions")
+        XCTAssertEqual(airubiz?.model, "gigaam-v3-ctc-sherpa")
+    }
+
+    @objc func testLegacyFlatConfigPreservesLegacyKeys() throws {
+        // Плоский legacy-конфиг (top-level base_url/model/api_key, без секций
+        // [providers.*] и без active_provider) + доступный канон: мерж НЕ
+        // применяется — база дефолты, иначе секции канона (6 шт.) и его
+        // active_provider "airubiz" затёрли бы legacy-поля юзера (включая
+        // api_key/api_key_file, которые resolveActiveProvider ставит в nil).
+        // Если в окружении задан NANODICTATE_API_KEY — снять (env имеет приоритет
+        // над файлом и перекрыл бы legacy api_key); паттерн — как в
+        // testLoadWithoutEnvKeepsFileKey, прежнее значение возвращается в defer.
+        let savedEnvKey = ProcessInfo.processInfo.environment["NANODICTATE_API_KEY"]
+        unsetenv("NANODICTATE_API_KEY")
+        defer {
+          if let savedEnvKey = savedEnvKey {
+            setenv("NANODICTATE_API_KEY", savedEnvKey, 1)
+          }
+        }
+        let example = try exampleCanonContent()
+        AppConfig.exampleContentOverride = example
+        defer { AppConfig.exampleContentOverride = nil }
+        let legacyFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_legacy_flat_\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: legacyFile) }
+        let legacy = """
+        base_url = "https://legacy.example/v1/transcribe"
+        model = "legacy-model"
+        api_key = "legacy-secret"
+        api_key_file = "/nonexistent/keys.txt"
+        timeout_seconds = 42
+        """
+        try legacy.data(using: .utf8)!.write(to: legacyFile)
+
+        let config = try AppConfig.load(from: legacyFile.path)
+        XCTAssertEqual(
+            config.baseURL, "https://legacy.example/v1/transcribe",
+            "legacy base_url не затирается каноном"
+        )
+        XCTAssertEqual(config.model, "legacy-model")
+        XCTAssertEqual(
+            config.apiKey, "legacy-secret",
+            "legacy api_key не затирается секцией airubiz канона"
+        )
+        XCTAssertEqual(config.timeoutSeconds, 42)
+        XCTAssertTrue(
+            config.providers.isEmpty,
+            "legacy-конфиг не наследует секции канона"
+        )
+        XCTAssertEqual(
+            config.activeProvider, "",
+            "legacy-конфиг без active_provider — ровно прежнее поведение"
+        )
     }
 
     // MARK: - writeProviderKeyValue (config set-key)

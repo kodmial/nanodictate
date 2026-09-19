@@ -136,11 +136,10 @@ extension L10n {
     "usage.logs": "Last 50 lines of agent log",
     "usage.help": "Show this help",
     "cli.dir.error": "Failed to create directories: %@",
-    "cli.plist.notfound":
-      "Plist template nanodictate-agent.plist.template not found (check Resources"
-      + " next to binary or in project; or set NANODICTATE_PLIST_TEMPLATE)",
     "cli.agent.notfound": "Failed to locate NanoDictateAgent path",
-    "cli.plist.readerror": "Failed to read plist template: %@",
+    "cli.agent.tccRehint":
+      "Note: the agent binary path changed — macOS may ask again to grant"
+      + " Microphone and Accessibility permissions.",
     "cli.plist.writeerror": "Failed to write plist: %@",
     "cli.bootstrap.nodata": "launchctl bootstrap: no output",
     "cli.bootstrap.fail": "launchctl bootstrap failed: %@",
@@ -152,17 +151,24 @@ extension L10n {
     "cli.unload.fail": "launchctl unload fallback failed: %@",
     "cli.no.providers": "(no providers — legacy config)",
     "cli.no.active": "(not selected — `nanodictate provider use <name>`)",
-    "cli.config.hint": "Config not found — create template: `nanodictate config init`",
+    "cli.config.hint":
+      "Config not found — it will be created automatically on first launch"
+      + " from config.example.toml (`nanodictate config init` writes it now)",
     "cli.pid.none": "none",
     "cli.config.overwrite": "Config %@ exists. Overwrite? (y/N)",
     "cli.config.exists": "Config already exists: %@",
     "cli.config.forcehint": "Use `nanodictate config init --force` to overwrite.",
     "cli.config.writeerror": "ERROR: failed to write %@: %@",
+    "cli.config.example.notfound":
+      "ERROR: config.example.toml not found (look next to the binary"
+      + " or in share/nanodictate)",
     "cli.config.template": "Config template created: %@ (chmod 600)",
     "cli.config.fillserts":
       "Fill secrets: `nanodictate config set-key <provider>` or edit the file.",
     "cli.config.noread": "Failed to read config: %@",
-    "cli.config.missing": "Config not found: create template with `nanodictate config init` (%@)",
+    "cli.config.missing":
+      "Config not found: created automatically on first launch from"
+      + " config.example.toml; `nanodictate config init` writes it now (%@)",
     "cli.config.noset": "(not selected)",
     "cli.setkey.usage": "Usage: nanodictate config set-key <provider-id> [key] [--stdin]",
     "cli.setkey.prompt": "Enter api_key value for '%@' (Enter to confirm):",
@@ -253,6 +259,9 @@ extension L10n {
     "menu.running": "running",
     "menu.stopped": "stopped",
     "menu.agent.notfound": "command completed (exit %@)",
+    "menu.agent.tccRehint":
+      "Note: the agent binary path changed — macOS may ask again to grant"
+      + " Microphone and Accessibility permissions.",
     // ── Remaining CLI gaps ──
     "cli.placeholder.empty": "(empty)",
     "cli.provider.activeMarker": "(* = active provider)",
@@ -386,10 +395,10 @@ extension L10n {
     "usage.logs": "Последние 50 строк лога агента",
     "usage.help": "Показать эту справку",
     "cli.dir.error": "Не удалось создать директории: %@",
-    "cli.plist.notfound": "Не найден шаблон nanodictate-agent.plist.template (проверьте Resources"
-      + " рядом с бинарником или в проекте; или задайте NANODICTATE_PLIST_TEMPLATE)",
     "cli.agent.notfound": "Не удалось определить путь к NanoDictateAgent",
-    "cli.plist.readerror": "Не удалось прочитать шаблон plist: %@",
+    "cli.agent.tccRehint":
+      "Внимание: изменился путь бинаря агента — macOS может запросить"
+      + " разрешение на Микрофон и Доступность заново.",
     "cli.plist.writeerror": "Не удалось записать plist: %@",
     "cli.bootstrap.nodata": "launchctl bootstrap: нет вывода",
     "cli.bootstrap.fail": "launchctl bootstrap не удался: %@",
@@ -401,17 +410,24 @@ extension L10n {
     "cli.unload.fail": "launchctl unload fallback не удался: %@",
     "cli.no.providers": "(нет провайдеров — legacy-конфиг)",
     "cli.no.active": "(не выбран — `nanodictate provider use <имя>`)",
-    "cli.config.hint": "Конфиг не найден: создайте шаблон — `nanodictate config init`",
+    "cli.config.hint":
+      "Конфиг не найден — будет создан автоматически при первом запуске из"
+      + " config.example.toml (`nanodictate config init` запишет сейчас)",
     "cli.pid.none": "нет",
     "cli.config.overwrite": "Конфиг %@ уже существует. Перезаписать? (y/N)",
     "cli.config.exists": "Конфиг уже существует: %@",
     "cli.config.forcehint": "Для перезаписи используйте `nanodictate config init --force`.",
     "cli.config.writeerror": "ОШИБКА: не удалось записать %@: %@",
+    "cli.config.example.notfound":
+      "ОШИБКА: config.example.toml не найден (поищите рядом с бинарником"
+      + " или в share/nanodictate)",
     "cli.config.template": "Шаблон конфига создан: %@ (chmod 600)",
     "cli.config.fillserts":
       "Заполните секреты: `nanodictate config set-key <provider>` или отредактируйте файл.",
     "cli.config.noread": "Не удалось прочитать конфиг: %@",
-    "cli.config.missing": "Конфиг не найден: создайте шаблон — `nanodictate config init` (%@)",
+    "cli.config.missing":
+      "Конфиг не найден: создаётся автоматически при первом запуске из"
+      + " config.example.toml; `nanodictate config init` запишет сейчас (%@)",
     "cli.config.noset": "(не выбран)",
     "cli.setkey.usage": "Использование: nanodictate config set-key <provider-id> [ключ] [--stdin]",
     "cli.setkey.prompt": "Введите значение api_key для '%@' (Enter для подтверждения):",
@@ -503,6 +519,9 @@ extension L10n {
     "menu.running": "работает",
     "menu.stopped": "остановлен",
     "menu.agent.notfound": "команда завершилась (exit %@)",
+    "menu.agent.tccRehint":
+      "Внимание: изменился путь бинаря агента — macOS может запросить"
+      + " разрешение на Микрофон и Доступность заново.",
     // ── Остатки CLI ──
     "cli.placeholder.empty": "(пусто)",
     "cli.provider.activeMarker": "(* — активный провайдер)",

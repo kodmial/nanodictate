@@ -107,25 +107,24 @@ curl -L -O https://github.com/kodmial/nanodictate/releases/download/v0.1.0/SHA25
 shasum -a 256 -c SHA256SUMS.txt        # optional: verifies the downloaded tarball
 ```
 
-Extract into a directory and keep everything together — the CLI resolves the
-LaunchAgent plist template at `Resources/nanodictate-agent.plist.template`
-**next to the binary**:
+Extract into a directory of your choice — only the two binaries are needed,
+the running binary registers the launch service itself:
 
 ```sh
 mkdir -p ~/.local/bin
 tar xzf nanodictate-0.1.0-macos-$(uname -m).tar.gz
 cp NanoDictateAgent nanodictate ~/.local/bin/          # or /usr/local/bin with sudo
-cp -R Resources ~/.local/bin/                          # keep the plist template findable
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Then create the config, grant permissions and start the agent:
+Then grant permissions and start the agent. The config needs no manual
+setup: on first launch the app copies `config.example.toml` (next to the
+binaries) to `~/.config/nanodictate/config.toml` automatically.
 
 ```sh
-mkdir -p ~/.config/nanodictate
-cp config.example.toml ~/.config/nanodictate/config.toml   # then set STT providers / API keys
-nanodictate config init                                     # alternative: writes a default config
-nanodictate start                                           # bootstraps ~/Library/LaunchAgents/com.nanodictate.agent.plist
+nanodictate start                                           # registers ~/Library/LaunchAgents/com.nanodictate.agent.plist (realpath of the agent) and loads the service
+# nanodictate config init                                  # optional: write the config explicitly (same canon)
+# cp config.example.toml ~/.config/nanodictate/config.toml # optional: manual copy
 ```
 
 **Permissions (manual, required).** In **System Settings > Privacy &
@@ -262,9 +261,21 @@ nanodictate status
 nanodictate stop
 ```
 
-The agent installs a plist template (`Resources/nanodictate-agent.plist.template`)
-as `~/Library/LaunchAgents/com.nanodictate.agent.plist` and bootstraps it into
-`launchd`. The `start` command is idempotent.
+The running binary registers the service itself: `nanodictate start` writes
+the canonical `~/Library/LaunchAgents/com.nanodictate.agent.plist` (Label
+`com.nanodictate.agent`, ProgramArguments = symlink-resolved real path of
+the agent) and bootstraps it into `launchd`. `start` takes over an existing
+service (rewrite → bootout → bootstrap — the file is written first so a
+write error never stops a working agent), so the path never goes stale after
+updates; on a binary path change it prints a hint that macOS may ask again
+for Microphone/Accessibility permission.
+
+With `brew install` / `sudo port install` the launch service is registered
+**at install time**: the formula's `post_install` and the port's
+`post-destroot` write the same canonical plist (same single label, no second
+daemon) and activate it once — after a clean install the agent is registered
+without a manual first run and starts at login (RunAtLoad + KeepAlive).
+`nanodictate start` remains for re-registration and management.
 
 ### CLI & TUI (nanodictate)
 
@@ -292,53 +303,48 @@ agent state, provider info, log tail, and supports keyboard navigation
 
 Config path: `~/.config/nanodictate/config.toml` (chmod 600, atomic writes).
 
-Example template (created by `nanodictate config init`):
+**Canonical config.** The repo ships `config.example.toml` — the single source
+of defaults (canon). If `~/.config/nanodictate/config.toml` does not exist,
+the first launch (agent or CLI) copies the canon there automatically
+(`nanodictate config init` writes the same canon explicitly; a manual `cp` is
+optional). The current canon is the `config.example.toml` file in the
+repository — treat it as authoritative over any sample shown in docs.
 
 ```toml
-# Диктовка — конфиг STT-провайдера (создан `nanodictate config init`)
-#
-# Секреты:
-#   - api_key / api_key_file в секции провайдера,
-#   - либо env-переменная NANODICTATE_API_KEY (приоритет над файлом —
-#     только у активного провайдера; failover-кандидаты и роли сохраняют
-#     свои api_key/api_key_file; в конфиг никогда не пишется).
-#
-# Пустые base_url/model в секциях — агент подставит дефолты адаптера
-# (например OpenAI → https://api.openai.com/v1/audio/transcriptions,
-# whisper-1; Groq → whisper-large-v3). Для секций
-# cookie-relay, cloudflare и открытого OpenAI-совместимого провайдера
-# base_url обязателен (cloudflare — полный URL, account_id и модель
-# в пути; например .../accounts/<ACCOUNT_ID>/ai/run/@cf/openai/whisper-large-v3-turbo).
-#
-# Транспорты (ключ transport):
-#   direct         — прямой запрос к base_url (по умолчанию)
-#   http           — HTTP-прокси: http_proxy = "host:port",
-#                    proxy_user / proxy_password (опционально)
-#   gateway        — шлюз-ретрансляция с API-ключом в заголовке:
-#                    proxy_key + proxy_key_header
-#   cookie-relay   — прокси с JS cookie-челленджем (автоматическая
-#                    расшифровка AES-128-CBC, не требует ключа)
+# NanoDictate — канонический конфиг
+# При первом запуске приложение автоматически копирует его в
+# ~/.config/nanodictate/config.toml, если того файла ещё нет. Правки вноси
+# в юзер-конфиг (~/.config/nanodictate/config.toml), а не в этот файл.
+# Секреты — только плейсхолдеры: api_key / api_key_file в секциях провайдеров
+# либо env-переменная NANODICTATE_API_KEY (приоритет над файлом — только у
+# активного провайдера; failover-кандидаты и роли сохраняют свои api_key/
+# api_key_file; в файл не пишется).
+# Пустые base_url/model — агент подставит дефолты адаптера.
+# This file is the canonical default config. On first launch the app copies it
+# to ~/.config/nanodictate/config.toml if that file does not exist.
 
-# Язык STT-подсказки (пусто = авто-детект Whisper, языковой параметр
-# в запрос НЕ шлётся). Явное значение (language = "ru") форвардится.
+# Язык STT-подсказки (пусто = авто-детект Whisper, параметр не шлётся).
+# Явное значение (language = "ru") форвардится в запрос.
 language = ""
 ui_language = "en"
 sounds_enabled = true
 timeout_seconds = 120
 log_level = "info"
-active_provider = "openai"
+active_provider = "airubiz"
 
 [providers.openai]
 name = "OpenAI"
 base_url = ""
 model = ""
 api_key = ""
+# api_key_file = "~/.config/nanodictate/keys/openai.txt"
 
 [providers.groq]
 name = "Groq"
 base_url = ""
 model = ""
 api_key = ""
+# api_key_file = "~/.config/nanodictate/keys/groq.txt"
 
 [providers.local]
 name = "Local"
@@ -357,37 +363,62 @@ transport = "cookie-relay"
 
 [providers.cloudflare]
 name = "Cloudflare Workers AI"
-base_url = ""
+# base_url для Cloudflare — полный URL с account_id и моделью в пути, например:
+# base_url = "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run/@cf/openai/whisper-large-v3-turbo"
 model = ""
 api_key = ""
-transport = "cloudflare"
+# transport у cloudflare не указывается: "cloudflare" — это id секции
+# (адаптер STT), а не HTTPTransport. Транспорт задают только для
+# http/gateway/cookie-relay.
 
-# Примеры транспортов для секций:
+[providers.airubiz]
+name = "Airubiz GigaAM (sherpa)"
+base_url = "https://api.airubiz.site/v1/audio/transcriptions"
+model = "gigaam-v3-ctc-sherpa"
+api_key = ""
+# Анонимный STT-сервер: ключ не нужен, транспорт по умолчанию direct.
+
+# Примеры транспортов для секций (раскомментируй нужный):
 #
 # [providers.http-proxy]
+# name = "HTTP Proxy example"
+# base_url = ""
+# model = ""
+# api_key = ""
 # transport = "http"
 # http_proxy = "proxy.example.com:8080"
 # proxy_user = ""
 # proxy_password = ""
 #
 # [providers.gateway-provider]
+# name = "Gateway example"
+# base_url = ""
+# model = ""
+# api_key = ""
 # transport = "gateway"
-# proxy_key = "your-api-key"
+# proxy_key = ""
 # proxy_key_header = "X-Custom-Auth"
 
-# Маршрутизация STT по ролям: final_provider применяется и в
-# чанковом пути (финальный проход по всей записи), и в не-чанковом
-# (одиночный прогон). segment_provider — только в чанковом пути
-# (сегменты речи), в не-чанковом segment не используется.
-# Не задано — роль играет active_provider. Роли (segment/final)
-# используют провайдер напрямую — auto_failover на ролях не действует.
-# Чтобы включить — раскомментируйте секцию:
+# Маршрутизация STT по ролям (см. [routing] в Config.swift):
+# final_provider — финальный проход (чанковый и не-чанковый путь),
+# segment_provider — только сегменты чанковой диктовки.
+# Не задано — роль играет active_provider. auto_failover на ролях не действует.
+# Чтобы включить — раскомментируй секцию:
 #
 # [routing]
 # segment_provider = "cloudflare"
 # final_provider = "groq"
-```
 
+# Дополнительные top-level опции (значения по умолчанию):
+# double_alt_max_interval = 0.4
+# undo_max_interval = 2.0
+# undo_sound_enabled = true
+# chunked = false
+# providers = ["groq", "cloudflare"]
+# auto_failover = false
+# insert_method = "cgevent"
+# review_before_insert = false
+```
 Top-level options:
 
 | Key                        | Default       | Meaning                                                                |

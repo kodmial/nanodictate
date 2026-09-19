@@ -36,49 +36,13 @@ let guiDomain = "gui/\(getuid())"
 /// Имя сервиса LaunchAgent (Label plist, target launchctl print/bootstrap/bootout).
 let agentServiceName = "com.nanodictate.agent"
 
-/// Абсолютный путь к бинарю агента (брат CLI-бинаря в .build/debug).
-/// Env NANODICTATE_AGENT_BIN позволяет переопределить (например, установленный
-/// в /usr/local/bin вариант). Промах тут не фатален — launchctl покажет ошибку.
-func findAgentBinaryPath() -> String? {
-  if let env = ProcessInfo.processInfo.environment["NANODICTATE_AGENT_BIN"], !env.isEmpty {
-    return env
-  }
-  let exe = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])
-  let sibling = exe.deletingLastPathComponent().appendingPathComponent("NanoDictateAgent")
-  if FileManager.default.fileExists(atPath: sibling.path) {
-    return sibling.path
-  }
-  return exe.path
-}
-
-/// Поиск шаблона LaunchAgent-plist (Resources/nanodictate-agent.plist.template):
-/// 1) явный env NANODICTATE_PLIST_TEMPLATE; 2) директория Resources рядом с
-/// бинарём; 3) исходники проекта (компиляция из дерева); 4) cwd/Resources.
-func findPlistTemplate() -> URL? {
-  let name = "nanodictate-agent.plist.template"
-  if let env = ProcessInfo.processInfo.environment["NANODICTATE_PLIST_TEMPLATE"] {
-    let url = URL(fileURLWithPath: env)
-    if FileManager.default.fileExists(atPath: url.path) {
-      return url
-    }
-  }
-  let exeDir = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0]))
-    .deletingLastPathComponent()
-  let fromSourceDir = URL(fileURLWithPath: #filePath)
-    .deletingLastPathComponent()  // Sources/nanodictate
-    .deletingLastPathComponent()  // Sources
-    .deletingLastPathComponent()  // project root
-    .appendingPathComponent("Resources/\(name)")
-  let candidates: [URL] = [
-    exeDir.appendingPathComponent("Resources/\(name)"),
-    fromSourceDir,
-    URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-      .appendingPathComponent("Resources/\(name)"),  // swiftlint:disable:this trailing_comma
-  ]
-  for url in candidates where FileManager.default.fileExists(atPath: url.path) {
-    return url
-  }
-  return nil
+/// Абсолютный (realpath) путь к бинарю агента для регистрации службы:
+/// NANODICTATE_AGENT_BIN → sibling NanoDictateAgent у realpath вызванного CLI
+/// → sibling у сырого argv[0] (dev-сборка). Один демон при любом способе
+/// установки: brew/port вызывают CLI через симлинк — realpath сохраняет
+/// Cellar/opt/local путь, не протухающий до следующего `start`.
+func findAgentBinaryPath() -> String {
+  return resolveAgentBinaryPath(invokedBinary: CommandLine.arguments[0])
 }
 
 // MARK: - Subcommands
@@ -86,64 +50,42 @@ func findPlistTemplate() -> URL? {
 func cmdStart() -> Int32 {
   let fileManager = FileManager.default
   let home = fileManager.homeDirectoryForCurrentUser
-  let launchAgentsDir = home.appendingPathComponent("Library/LaunchAgents")
   let logsDir = home.appendingPathComponent("Library/Logs/NanoDictate")
 
   do {
-    try fileManager.createDirectory(at: launchAgentsDir, withIntermediateDirectories: true)
     try fileManager.createDirectory(at: logsDir, withIntermediateDirectories: true)
   } catch {
     eprint(String(format: L10n.tr("cli.dir.error"), "\(error)"))
     return 1
   }
 
-  guard let template = findPlistTemplate() else {
-    eprint(L10n.tr("cli.plist.notfound"))
-    return 1
-  }
-  guard let binaryPath = findAgentBinaryPath() else {
+  let agentBinary = findAgentBinaryPath()
+  guard !agentBinary.isEmpty else {
     eprint(L10n.tr("cli.agent.notfound"))
     return 1
   }
-  guard let templateText = try? String(contentsOf: template, encoding: .utf8) else {
-    eprint(String(format: L10n.tr("cli.plist.readerror"), template.path))
-    return 1
-  }
-  // Шаблон генерируется в plist с РЕАЛЬНЫМ путём бинаря агента и лог-файлом
-  // в домашней директории пользователя (launchd ~ не раскрывает сам).
   let logPath = logsDir.appendingPathComponent("agent.log").path
-  let plistText =
-    templateText
-    .replacingOccurrences(of: "{{BINARY_PATH}}", with: binaryPath)
-    .replacingOccurrences(of: "{{LOG_PATH}}", with: logPath)
 
-  let dest = launchAgentsDir.appendingPathComponent("\(agentServiceName).plist")
-  do {
-    try Data(plistText.utf8).write(to: dest, options: .atomic)
-  } catch {
-    eprint(String(format: L10n.tr("cli.plist.writeerror"), "\(error)"))
+  // Полный takeover: прежний plist перечитывается, старый процесс выгружается
+  // (терпимо к «службы нет»), канонический plist перезаписывается и служба
+  // загружается заново. Повторный start уже запущенного агента корректно
+  // меняет владельца/путь (launchd держит план из plist на момент bootstrap).
+  let installer = AgentInstaller(launchctl: Launchctl(run: runProcess))
+  let result = installer.install(agentBinary: agentBinary, logPath: logPath)
+
+  if let writeError = result.writeError {
+    eprint(String(format: L10n.tr("cli.plist.writeerror"), writeError))
     return 1
   }
-
-  // Идемпотентность: если агент уже загружен — выйти, не вызывая bootstrap/load повторно.
-  let alreadyLoaded = runProcess("/bin/launchctl", ["print", "\(guiDomain)/\(agentServiceName)"])
-  if alreadyLoaded.status == 0 {
-    print("NanoDictate agent already running")
-    return 0
+  if result.binaryPathChanged {
+    print(L10n.tr("cli.agent.tccRehint"))
   }
-
-  let bootstrap = runProcess("/bin/launchctl", ["bootstrap", guiDomain, dest.path])
-  if bootstrap.status == 0 {
+  if result.registered {
     print("NanoDictate agent started")
     return 0
   }
-  let load = runProcess("/bin/launchctl", ["load", dest.path])
-  if load.status == 0 {
-    print("NanoDictate agent started")
-    return 0
-  }
-  let msg1 = bootstrap.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-  let msg2 = load.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+  let msg1 = result.bootstrapError
+  let msg2 = result.loadError
   eprint(
     msg1.isEmpty
       ? L10n.tr("cli.bootstrap.nodata") : String(format: L10n.tr("cli.bootstrap.fail"), msg1))
@@ -245,13 +187,18 @@ func configOverwriteConfirmed(_ path: String) -> Bool {
   return answer == "y" || answer == "yes"
 }
 
-/// Записать шаблон конфига (создаёт директорию при необходимости) с правами 0600.
+/// Записать канон (config.example.toml) в конфиг (создаёт директорию при
+/// необходимости) с правами 0600. Канон недоступен — понятная ошибка.
 func writeConfigTemplate(path: String) -> Int32 {
+  guard let example = AppConfig.exampleContent() else {
+    eprint(L10n.tr("cli.config.example.notfound"))
+    return 1
+  }
   let fileManager = FileManager.default
   let dir = (path as NSString).deletingLastPathComponent
   do {
     try fileManager.createDirectory(atPath: dir, withIntermediateDirectories: true)
-    try Data(AppConfig.initTemplate().utf8)
+    try Data(example.utf8)
       .write(to: URL(fileURLWithPath: path), options: .atomic)
     try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
   } catch {
@@ -327,7 +274,7 @@ func stdinIsTTY() -> Bool {
 func cmdConfig(_ args: [String]) -> Int32 {
   let path = AppConfig.defaultPath()
   let fileManager = FileManager.default
-  let exists = fileManager.fileExists(atPath: path)
+  var exists = fileManager.fileExists(atPath: path)
 
   // `config path` — алиас `config --path`.
   if args.first?.lowercased() == "path" || args.contains("--path") {
@@ -352,6 +299,11 @@ func cmdConfig(_ args: [String]) -> Int32 {
 
   do {
     let config = try AppConfig.load(from: nil)
+    // load() на свежей машине сам создаёт файл (автокопия канона) — exists,
+    // посчитанный выше ДО load, устарел; перечитываем для веток --show-file
+    // и инфо-вывода, иначе печатали бы «Config not found» при уже созданном
+    // файле, а --show-file показывал бы текст ошибки вместо содержимого.
+    exists = fileManager.fileExists(atPath: path)
 
     if args.contains("--show-file") {
       if exists {
@@ -430,21 +382,38 @@ func providerUse(_ name: String, _ args: [String]) -> Int32 {
   return restartAgentIfNeeded(args)
 }
 
-/// Перезапуск агента через launchctl (--no-restart пропускает). Общий для
-/// команд, меняющих конфиг: provider use и routing set/unset.
+/// Перезапуск агента (--no-restart пропускает). Общий для команд, меняющих
+/// конфиг: provider use и routing set/unset. Канонический plist перезаписывается
+/// (путь не протухает после обновления менеджера), затем kickstart -k;
+/// если служба не загружена — полная установка (bootout → bootstrap).
 func restartAgentIfNeeded(_ args: [String]) -> Int32 {
   if args.contains("--no-restart") {
     print(L10n.tr("cli.provider.norestart"))
     return 0
   }
-  let target = "\(guiDomain)/\(agentServiceName)"
-  let kick = runProcess("/bin/launchctl", ["kickstart", "-k", target])
-  if kick.status == 0 {
-    print(L10n.tr("cli.provider.restart"))
-  } else {
-    let msg = kick.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-    eprint(String(format: L10n.tr("cli.provider.kickfail"), msg.isEmpty ? kick.stdout : msg))
+  let agentBinary = findAgentBinaryPath()
+  guard !agentBinary.isEmpty else {
+    eprint(L10n.tr("cli.agent.notfound"))
+    return 1
   }
+  let logPath = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent("Library/Logs/NanoDictate/agent.log").path
+  let installer = AgentInstaller(launchctl: Launchctl(run: runProcess))
+  let result = installer.restart(agentBinary: agentBinary, logPath: logPath)
+
+  if let writeError = result.writeError {
+    eprint(String(format: L10n.tr("cli.plist.writeerror"), writeError))
+    return 1
+  }
+  if result.binaryPathChanged {
+    print(L10n.tr("cli.agent.tccRehint"))
+  }
+  if result.registered {
+    print(L10n.tr("cli.provider.restart"))
+    return 0
+  }
+  let msg = result.kickError.isEmpty ? result.bootstrapError : result.kickError
+  eprint(String(format: L10n.tr("cli.provider.kickfail"), msg.isEmpty ? result.loadError : msg))
   return 0
 }
 
@@ -871,9 +840,9 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
   // swiftlint:disable:next trailing_closure
   var provider = config.providers.first(where: { $0.id == options.providerID })
   if provider == nil, options.providerID == "gigaam" {
-    // Стоковый конфиг (config init) секции gigaam не содержит: фолбэк на
-    // активного провайдера, иначе — первого доступного, чтобы batch-режим
-    // работал out-of-box без правки флага.
+    // Канон (config.example.toml) секции gigaam не содержит — в нём активен
+    // airubiz: фолбэк на активного провайдера, иначе — первого доступного,
+    // чтобы batch-режим работал out-of-box без правки флага.
     let active: AppConfig.Provider? = (try? ProviderStore.loadProviders())
       .flatMap { list in
         // swiftlint:disable:next trailing_closure

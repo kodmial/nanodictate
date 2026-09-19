@@ -511,7 +511,9 @@ export async function restartAgent(): Promise<RestartResult> {
     };
   }
 
-  // Fallback: nanodictate start (idempotent: returns "already running" if loaded)
+  // Fallback: nanodictate start (takeover: bootout → rewrites canonical
+  // ~/Library/LaunchAgents/com.nanodictate.agent.plist → bootstrap; re-registers
+  // the service with the current binary path if kickstart failed)
   const dictctlPath = existsSync("/usr/local/bin/nanodictate")
     ? "/usr/local/bin/nanodictate"
     : "nanodictate";

@@ -37,9 +37,19 @@ whole package from source. This is normal for source-built Swift ports
 ### After install
 
 The port installs `nanodictate` and `NanoDictateAgent` into
-`$(port prefix)/bin` and ships `config.example.toml`, the two entitlements
-and the LaunchAgent plist template into
-`$(port prefix)/share/nanodictate/`.
+`$(port prefix)/bin` and ships `config.example.toml` into
+`$(port prefix)/share/nanodictate/`. The `post-destroot` step (run as root
+after `sudo port install`) then registers the launch service **once**: it
+writes the canonical plist into the **real user's** LaunchAgents
+(`/Users/$SUDO_USER/Library/LaunchAgents/com.nanodictate.agent.plist` —
+not root's `$HOME`), label `com.nanodictate.agent`, ProgramArguments = the
+`$(port prefix)/bin/NanoDictateAgent` binary, RunAtLoad + KeepAlive, and
+bootstraps it into the user's gui domain via `launchctl asuser`. So after a
+clean install the daemon is registered without a manual first run and starts
+at login. The same single label and file are used by `nanodictate start` —
+never a second daemon (no `startupitem`). If the install runs without a GUI
+session (SSH) the bootstrap is skipped tolerantly; the plist is still written
+and RunAtLoad starts the daemon at the next login.
 
 1. **TCC grants (required, manual).** In **System Settings → Privacy &
    Security** add the `NanoDictateAgent` binary to **Microphone** and
@@ -56,18 +66,15 @@ and the LaunchAgent plist template into
    nanodictate provider list
    ```
 
-3. **Start the agent.** The plist template does **not** sit next to the
-   binary in a MacPorts install, so point the CLI at it first:
+3. **The agent is already registered by the install** — no first-run step
+   needed. `nanodictate start` is still there to re-register with the
+   symlink-resolved real path and to manage the service:
 
    ```sh
-   export NANODICTATE_PLIST_TEMPLATE="$(port prefix)/share/nanodictate/nanodictate-agent.plist.template"
-   nanodictate start
+   nanodictate status   # or: launchctl print gui/$(id -u)/com.nanodictate.agent
+   nanodictate stop
+   nanodictate logs     # last 50 lines; ~/Library/Logs/NanoDictate/agent.log
    ```
-
-   This renders `~/Library/LaunchAgents/com.nanodictate.agent.plist` and
-   bootstraps the LaunchAgent. Manage it with `nanodictate status`,
-   `nanodictate stop`, `nanodictate logs` (or
-   `launchctl gui/$(id -u)/com.nanodictate.agent`).
 
 ### Why no Developer ID?
 

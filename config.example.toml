@@ -1,11 +1,14 @@
-# NanoDictate — пример конфига
-# Скопируй в ~/.config/nanodictate/config.toml и заполни секреты.
+# NanoDictate — канонический конфиг
+# При первом запуске приложение автоматически копирует его в
+# ~/.config/nanodictate/config.toml, если того файла ещё нет. Правки вноси
+# в юзер-конфиг (~/.config/nanodictate/config.toml), а не в этот файл.
 # Секреты — только плейсхолдеры: api_key / api_key_file в секциях провайдеров
 # либо env-переменная NANODICTATE_API_KEY (приоритет над файлом — только у
 # активного провайдера; failover-кандидаты и роли сохраняют свои api_key/
 # api_key_file; в файл не пишется).
 # Пустые base_url/model — агент подставит дефолты адаптера.
-# См. Sources/NanoDictateCore/Config.swift (AppConfig.initTemplate) и README.md.
+# This file is the canonical default config. On first launch the app copies it
+# to ~/.config/nanodictate/config.toml if that file does not exist.
 
 # Язык STT-подсказки (пусто = авто-детект Whisper, параметр не шлётся).
 # Явное значение (language = "ru") форвардится в запрос.
@@ -14,7 +17,7 @@ ui_language = "en"
 sounds_enabled = true
 timeout_seconds = 120
 log_level = "info"
-active_provider = "openai"
+active_provider = "airubiz"
 
 [providers.openai]
 name = "OpenAI"
@@ -54,6 +57,13 @@ api_key = ""
 # transport у cloudflare не указывается: "cloudflare" — это id секции
 # (адаптер STT), а не HTTPTransport. Транспорт задают только для
 # http/gateway/cookie-relay.
+
+[providers.airubiz]
+name = "Airubiz GigaAM (sherpa)"
+base_url = "https://api.airubiz.site/v1/audio/transcriptions"
+model = "gigaam-v3-ctc-sherpa"
+api_key = ""
+# Анонимный STT-сервер: ключ не нужен, транспорт по умолчанию direct.
 
 # Примеры транспортов для секций (раскомментируй нужный):
 #

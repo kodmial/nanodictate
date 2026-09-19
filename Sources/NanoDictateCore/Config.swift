@@ -206,20 +206,104 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
     return "\(home)/.config/nanodictate/config.toml"
   }
 
+  // MARK: Example-канон (config.example.toml)
+
+  /// Тестовый хук: переопределяет содержимое канона (nil = поиск на диске,
+  /// "" — сентинел «канона нет»). В проде не используется; нужен, чтобы тесты
+  /// не зависели от расположения config.example.toml и от установленной
+  /// homebrew/macports-формулы на машине разработчика.
+  public static var exampleContentOverride: String?
+
+  /// Кандидаты поиска файла канона config.example.toml, первый существующий:
+  /// рядом с бинарём (тарбол release.yml кладёт example в top-level рядом с
+  /// бинарями), короче — в share/nanodictate (Homebrew/MacPorts), затем —
+  /// фиксированные пути типовых пакетных менеджеров.
+  private static func bundledExampleURLs() -> [URL] {
+    let executableDir = (CommandLine.arguments[0] as NSString).deletingLastPathComponent
+    let prefixDir = (executableDir as NSString).deletingLastPathComponent
+    return [
+      URL(fileURLWithPath: executableDir).appendingPathComponent("config.example.toml"),
+      URL(fileURLWithPath: prefixDir).appendingPathComponent("share/nanodictate/config.example.toml"),
+      URL(fileURLWithPath: "/opt/homebrew/share/nanodictate/config.example.toml"),
+      URL(fileURLWithPath: "/usr/local/share/nanodictate/config.example.toml"),
+      URL(fileURLWithPath: "/opt/local/share/nanodictate/config.example.toml"),
+    ]
+  }
+
+  /// Содержимое канона config.example.toml: `exampleContentOverride`, если
+  /// задан; иначе — первый существующий файл из `bundledExampleURLs()`.
+  /// nil — канон не найден. Работает и в CLI nanodictate, и в NanoDictateAgent.
+  public static func exampleContent() -> String? {
+    if let override = exampleContentOverride {
+      // Сентинел «канона нет»: пустая строка трактуется как отсутствие канона
+      // (тесты, полагающиеся на отсутствие файла на диске, ставят "" — иначе
+      // реальный поиск по bundledExampleURLs() нашёл бы установленную формулу).
+      if override.isEmpty { return nil }
+      return override
+    }
+    for url in bundledExampleURLs() {
+      if let content = try? String(contentsOf: url, encoding: .utf8) {
+        return content
+      }
+    }
+    return nil
+  }
+
   /// Load config from a TOML-like file.
   /// - If `path` is nil, uses `defaultPath()`.
-  /// - If the file does not exist, returns default config (no error).
+  /// - If the file does not exist and the canonical `config.example.toml` is
+  ///   reachable, it is copied to `path` (chmod 0600, atomic) — first launch.
+  /// - If the file does not exist and the canon is not reachable, returns
+  ///   default config (no error).
   /// - If the file exists but cannot be parsed, throws `AppConfigError`.
   ///
   /// Приоритет ключа: `NANODICTATE_API_KEY` (env) > `api_key` из файла >
   /// `api_key_file` из файла. Env-ключ НИКОГДА не записывается в конфиг-файл.
   public static func load(from path: String?) throws -> AppConfig {
     let resolvedPath = path ?? defaultPath()
-    guard FileManager.default.fileExists(atPath: resolvedPath) else {
-      return applyEnvAPIKey(to: defaults)
+    if !FileManager.default.fileExists(atPath: resolvedPath) {
+      if let example = exampleContent() {
+        // Автокопия канона при первом запуске: та же техника, что у
+        // writeConfigTemplate (atomic + chmod 0600). После записи файл есть —
+        // продолжаем как «файл есть».
+        let dir = (resolvedPath as NSString).deletingLastPathComponent
+        do {
+          try FileManager.default.createDirectory(
+            atPath: dir, withIntermediateDirectories: true)
+          try Data(example.utf8).write(
+            to: URL(fileURLWithPath: resolvedPath), options: .atomic)
+          try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600], ofItemAtPath: resolvedPath)
+        } catch {
+          throw AppConfigError.cannotWriteConfig(resolvedPath, error)
+        }
+      } else {
+        // Канон недоступен — фолбэк на дефолты (без провайдера).
+        return applyEnvAPIKey(to: defaults)
+      }
     }
     let content = try String(contentsOfFile: resolvedPath, encoding: .utf8)
-    var config = try parse(content)
+    // База мержа: канон (если доступен) поверх него накладывается юзер-файл.
+    // Исключение — плоский legacy-конфиг: top-level base_url/model/api_key без
+    // секций [providers.*] и без active_provider. Для него база — дефолты
+    // (ровно прежнее поведение ветки «чистый legacy»); иначе секции канона
+    // (6 шт.) и его active_provider "airubiz" затерли бы legacy-поля юзера
+    // (включая apiKey/apiKeyFile, которые resolveActiveProvider ставит в nil).
+    // Маркеры ищутся по некомментарным строкам: закомментированные
+    // "# [providers.groq]" / "# active_provider = ..." legacy не ломают.
+    let nonCommentLines = content.split(separator: "\n").filter {
+      !$0.drop(while: { $0 == " " || $0 == "\t" }).hasPrefix("#")
+    }
+    let isLegacyFlat =
+      !nonCommentLines.contains { $0.contains("[providers.") }
+        && !nonCommentLines.contains { $0.contains("active_provider") }
+    let base: AppConfig
+    if let example = exampleContent(), !isLegacyFlat {
+      base = try parse(example)
+    } else {
+      base = defaults
+    }
+    var config = try parse(content, base: base)
     // Resolve apiKey from apiKeyFile if apiKey is empty
     if config.apiKey.isEmpty, let keyFile = config.apiKeyFile {
       config.apiKey = Self.readAPIKey(from: keyFile)
@@ -336,8 +420,10 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
 
   // MARK: - TOML-like parser
 
-  public static func parse(_ content: String) throws -> AppConfig {
-    try parseContent(content, resolveProvider: true)
+  public static func parse(
+    _ content: String, base: AppConfig = AppConfig.defaults
+  ) throws -> AppConfig {
+    try parseContent(content, base: base, resolveProvider: true)
   }
 
   /// Разбор ТОЛЬКО провайдеров без резолва `active_provider`: не бросает ошибок
@@ -346,7 +432,7 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
   public static func parseProvidersOnly(_ content: String) throws -> (
     activeProvider: String, providers: [Provider]
   ) {
-    let config = try parseContent(content, resolveProvider: false)
+    let config = try parseContent(content, base: AppConfig.defaults, resolveProvider: false)
     return (config.activeProvider, config.providers)
   }
 
@@ -364,35 +450,37 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
   }
 
   // swiftlint:disable:next cyclomatic_complexity function_body_length
-  private static func parseContent(_ content: String, resolveProvider: Bool) throws -> AppConfig {
-    var baseURL: String = defaults.baseURL
-    var model: String = defaults.model
-    var apiKey: String = defaults.apiKey
-    var apiKeyFile: String? = defaults.apiKeyFile
-    var proxyKey: String = defaults.proxyKey
-    var timeoutSeconds: Double = defaults.timeoutSeconds
-    var doubleAltMaxInterval: Double = defaults.doubleAltMaxInterval
-    var soundsEnabled: Bool = defaults.soundsEnabled
-    var logLevel: String = defaults.logLevel
-    var language: String = defaults.language
-    var uiLanguage: String = defaults.uiLanguage
-    var transport: String = defaults.transport
-    var httpProxy: String = defaults.httpProxy
-    var proxyUser: String = defaults.proxyUser
-    var proxyPassword: String = defaults.proxyPassword
-    var proxyKeyHeader: String = defaults.proxyKeyHeader
-    var undoMaxInterval: Double = defaults.undoMaxInterval
-    var undoSoundEnabled: Bool = defaults.undoSoundEnabled
-    var chunked: Bool = defaults.chunked
+  private static func parseContent(
+    _ content: String, base: AppConfig = AppConfig.defaults, resolveProvider: Bool
+  ) throws -> AppConfig {
+    var baseURL: String = base.baseURL
+    var model: String = base.model
+    var apiKey: String = base.apiKey
+    var apiKeyFile: String? = base.apiKeyFile
+    var proxyKey: String = base.proxyKey
+    var timeoutSeconds: Double = base.timeoutSeconds
+    var doubleAltMaxInterval: Double = base.doubleAltMaxInterval
+    var soundsEnabled: Bool = base.soundsEnabled
+    var logLevel: String = base.logLevel
+    var language: String = base.language
+    var uiLanguage: String = base.uiLanguage
+    var transport: String = base.transport
+    var httpProxy: String = base.httpProxy
+    var proxyUser: String = base.proxyUser
+    var proxyPassword: String = base.proxyPassword
+    var proxyKeyHeader: String = base.proxyKeyHeader
+    var undoMaxInterval: Double = base.undoMaxInterval
+    var undoSoundEnabled: Bool = base.undoSoundEnabled
+    var chunked: Bool = base.chunked
 
-    var activeProvider = ""
-    var providers: [Provider] = []
+    var activeProvider = base.activeProvider
+    var providers: [Provider] = base.providers
 
     // Новые UX-опции (средние улучшения): дефолт = прод-поведение.
-    var providersOrder: [String] = defaults.providersOrder
-    var autoFailover: Bool = defaults.autoFailover
-    var insertMethod: InsertMethod = defaults.insertMethod
-    var reviewBeforeInsert: Bool = defaults.reviewBeforeInsert
+    var providersOrder: [String] = base.providersOrder
+    var autoFailover: Bool = base.autoFailover
+    var insertMethod: InsertMethod = base.insertMethod
+    var reviewBeforeInsert: Bool = base.reviewBeforeInsert
 
     // Маршрутизация STT по ролям ([routing]): пусто — роль играет активный.
     var segmentProvider = ""
@@ -403,6 +491,10 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
     var legacySTTKeysSeen = false
     // Имя текущей секции [providers.X] (nil — верхний уровень).
     var currentProviderID: String?
+    // id секций [providers.X], объявленных В ЭТОМ контенте (не в base):
+    // повторное объявление в том же контенте — ошибка дубликата, тогда как
+    // перекрытие секции, пришедшей из base (канона), — штатный мерж.
+    var fileProviderIDs = Set<String>()
     // true внутри непровайдерской секции ([api] и т.п.) — все ключи пропускаем,
     // чтобы они не утекали в top-level.
     var insideForeignSection = false
@@ -437,10 +529,17 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
           guard !providerID.isEmpty else {
             throw AppConfigError.invalidLine(index + 1, rawLine)
           }
-          guard !providers.contains(where: { $0.id == providerID }) else {
+          // Секция уже есть: объявленная в ЭТОМ контенте — дубликат; пришедшая
+          // из base (канона) — юзер-файл перекрывает её (мерж-семантика).
+          guard !fileProviderIDs.contains(providerID) else {
             throw AppConfigError.duplicateProvider(providerID)
           }
-          providers.append(Provider.withDefaults(id: providerID))
+          if let existingIndex = providers.firstIndex(where: { $0.id == providerID }) {
+            providers[existingIndex] = Provider.withDefaults(id: providerID)
+          } else {
+            providers.append(Provider.withDefaults(id: providerID))
+          }
+          fileProviderIDs.insert(providerID)
           currentProviderID = providerID
           insideForeignSection = false
           currentRoutingSection = false
@@ -1005,107 +1104,5 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
     let head = trimmed.prefix(4)
     let tail = trimmed.suffix(4)
     return "\(head)***\(tail)"
-  }
-
-  /// Шаблон конфига для `nanodictate config init` (затем `config set-key`).
-  /// Пустые base_url/model — агент подставляет дефолты адаптера; секрет —
-  /// api_key/api_key_file или env NANODICTATE_API_KEY (перекрывает файловый
-  /// ключ только у активного провайдера; в файл никогда не пишется).
-  /// Файл шаблона обязан парситься существующим парсером (все ключи известны).
-  // swiftlint:disable:next function_body_length
-  public static func initTemplate() -> String {
-    """
-    # Диктовка — конфиг STT-провайдера (создан `nanodictate config init`)
-    #
-    # Секреты:
-    #   - api_key / api_key_file в секции провайдера,
-    #   - либо env-переменная NANODICTATE_API_KEY (приоритет над файлом —
-    #     только у активного провайдера; failover-кандидаты и роли сохраняют
-    #     свои api_key/api_key_file; в конфиг никогда не пишется).
-    #
-    # Пустые base_url/model в секциях — агент подставит дефолты адаптера
-    # (например OpenAI → https://api.openai.com/v1/audio/transcriptions,
-    # whisper-1; Groq → whisper-large-v3). Для секций
-    # cookie-relay, cloudflare и открытого OpenAI-совместимого провайдера
-    # base_url обязателен (cloudflare — полный URL, account_id и модель
-    # в пути; например .../accounts/<ACCOUNT_ID>/ai/run/@cf/openai/whisper-large-v3-turbo).
-    #
-    # Транспорты (ключ transport):
-    #   direct         — прямой запрос к base_url (по умолчанию)
-    #   http           — HTTP-прокси: http_proxy = "host:port",
-    #                    proxy_user / proxy_password (опционально)
-    #   gateway        — шлюз-ретрансляция с API-ключом в заголовке:
-    #                    proxy_key + proxy_key_header
-    #   cookie-relay   — прокси с JS cookie-челленджем (автоматическая
-    #                    расшифровка AES-128-CBC, не требует ключа)
-
-    # Язык STT-подсказки (пусто = авто-детект Whisper, языковой параметр
-    # в запрос НЕ шлётся). Явное значение (language = "ru") форвардится.
-    language = ""
-    ui_language = "en"
-    sounds_enabled = true
-    timeout_seconds = 120
-    log_level = "info"
-    active_provider = "openai"
-
-    [providers.openai]
-    name = "OpenAI"
-    base_url = ""
-    model = ""
-    api_key = ""
-
-    [providers.groq]
-    name = "Groq"
-    base_url = ""
-    model = ""
-    api_key = ""
-
-    [providers.local]
-    name = "Local"
-    base_url = ""
-    model = ""
-    api_key = ""
-
-    [providers.cookie-relay]
-    name = "Cookie Relay"
-    base_url = ""
-    model = ""
-    api_key = ""
-    transport = "cookie-relay"
-    # proxy_key = ""
-    # proxy_key_header = "X-Proxy-Key"
-
-    [providers.cloudflare]
-    name = "Cloudflare Workers AI"
-    base_url = ""
-    model = ""
-    api_key = ""
-    transport = "cloudflare"
-
-    # Примеры транспортов для секций:
-    #
-    # [providers.http-proxy]
-    # transport = "http"
-    # http_proxy = "proxy.example.com:8080"
-    # proxy_user = ""
-    # proxy_password = ""
-    #
-    # [providers.gateway-provider]
-    # transport = "gateway"
-    # proxy_key = "your-api-key"
-    # proxy_key_header = "X-Custom-Auth"
-
-    # Маршрутизация STT по ролям: final_provider применяется и в
-    # чанковом пути (финальный проход по всей записи), и в не-чанковом
-    # (одиночный прогон). segment_provider — только в чанковом пути
-    # (сегменты речи), в не-чанковом segment не используется.
-    # Не задано — роль играет active_provider. Роли (segment/final)
-    # используют провайдер напрямую — auto_failover на ролях не действует.
-    # Чтобы включить — раскомментируйте секцию:
-    #
-    # [routing]
-    # segment_provider = "cloudflare"
-    # final_provider = "groq"
-    """
   }
 }  // swiftlint:disable:this file_length

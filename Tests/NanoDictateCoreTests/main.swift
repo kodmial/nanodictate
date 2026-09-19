@@ -64,6 +64,7 @@ let suites: [XCTestCase.Type] = [
     BatchTranscriberTests.self,
     BatchLongFormTests.self,
     WAVDecoderTests.self,
+    AgentPlistTests.self,
 ]
 
 var passed = 0

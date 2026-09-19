@@ -66,18 +66,30 @@ the source tarball when the local OpenSSL provides them) and fills the
   (`AppConfig.defaultPath()`), never a file under `etc/`. `config.example.toml`
   therefore ships as a copy source in `share/nanodictate/`.
 - **Resources.** Entitlements (`com.nanodictate.agent.entitlements`,
-  `com.nanodictate.ctl.entitlements`) and the LaunchAgent template
-  (`nanodictate-agent.plist.template`) ship in `share/nanodictate/`.
+  `com.nanodictate.ctl.entitlements`) are build-time only (code signing in
+  `.github/workflows/release.yml`) and no longer ship in the packages: one
+  daemon at any install method means the package installs binaries + config
+  only.
 - **TCC grants.** Microphone + Accessibility are granted manually per binary
   in System Settings (prompted on first use). Because MacPorts source builds
   produce a new binary on every install/upgrade, grants may need to be
   re-applied after updates (the Homebrew binaries only change on a newer
   release).
-- **LaunchAgent.** `nanodictate start` renders
-  `~/Library/LaunchAgents/com.nanodictate.agent.plist` from the template using
-  real binary/log paths. Packaged installs must point the CLI at the template
-  via `NANODICTATE_PLIST_TEMPLATE` (documented in the formula caveats), because
-  the template does not sit next to the binary.
+- **LaunchAgent — гибрид A+B.** The running binary registers the service
+  itself: `nanodictate start` writes the canonical
+  `~/Library/LaunchAgents/com.nanodictate.agent.plist` (Label
+  `com.nanodictate.agent`) with symlink-resolved binary/log paths and
+  bootstraps it via launchctl. In addition, the packages call the same
+  registration **once at install**: the Homebrew formula's `post_install`
+  (runs as the user) and the MacPorts port's `post-destroot` (runs as root;
+  writes into the real user's LaunchAgents via `$SUDO_USER`) write the same
+  canonical plist with the same single label and `launchctl bootstrap` it, so
+  after a clean install the daemon is registered without a manual first run
+  (RunAtLoad starts it at login). No template lookup, no env vars, no
+  startupitem/service block and **no second label** anywhere (no
+  `homebrew.mxcl.*`) — one daemon regardless of install method or order, the
+  second manager takes over. On binary path change (e.g. after an upgrade)
+  the CLI prints a TCC re-grant hint.
 - **Version flag.** `nanodictate --version` prints `nanodictate 0.1.0` and
   lands together with the 0.1.0 release; the formula `test do` block depends
   on it.
