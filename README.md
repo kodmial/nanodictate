@@ -23,8 +23,10 @@ not published yet (see GitHub Releases below).
 sudo port install nanodictate
 ```
 
-Builds from source (Xcode 14.3+, use_xcode yes; first build is long). The port
-is pending upstream acceptance — use GitHub Releases below.
+Binary port — downloads the prebuilt tarball from the GitHub Release (the same
+arch-matched archive as Homebrew), nothing is compiled, no Xcode / Swift
+toolchain needed. The port is pending upstream acceptance — use GitHub Releases
+below.
 
 ### GitHub Releases (current)
 

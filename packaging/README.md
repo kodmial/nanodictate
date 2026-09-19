@@ -1,10 +1,11 @@
 # Packaging
 
-Templates and a generator for distributing NanoDictate through Homebrew
-(binary install from GitHub Releases) and MacPorts (build from source). The
-Homebrew path ships prebuilt ad-hoc signed binaries as-is; MacPorts compiles
-the SwiftPM package on the user's machine. Either way there is **no Developer
-ID signature and no notarization** — installs are unsigned/ad-hoc.
+Templates and a generator for distributing NanoDictate through Homebrew and
+MacPorts — both install a **prebuilt binary tarball** from GitHub Releases
+(the arch-matched `nanodictate-<VERSION>-macos-<arch>.tar.gz` assets published
+by the workflow), so no source build happens on the user's machine. Either way
+there is **no Developer ID signature and no notarization** — installs are
+unsigned/ad-hoc.
 
 ## Layout
 
@@ -12,7 +13,7 @@ ID signature and no notarization** — installs are unsigned/ad-hoc.
 | --- | --- |
 | `packaging/homebrew/nanodictate.rb.tpl` | Homebrew formula template (binary: `__VERSION__`, `__SHA256_ARM64__`, `__SHA256_X86_64__`) |
 | `packaging/homebrew/nanodictate.rb` | Generated formula (do not hand-edit) |
-| `packaging/macports/Portfile.tpl` | MacPorts Portfile template |
+| `packaging/macports/Portfile.tpl` | MacPorts Portfile template (binary: `__VERSION__`, `__SHA256_ARM64__`, `__SHA256_X86_64__`) |
 | `packaging/macports/Portfile` | Generated Portfile (do not hand-edit) |
 | `scripts/release-prep.rb` | Stdlib-only Ruby generator |
 
@@ -26,14 +27,11 @@ it, so it can only run after the release workflow finished):
 ruby scripts/release-prep.rb v0.1.0
 ```
 
-The script downloads the GitHub source tarball
-(`.../archive/refs/tags/v0.1.0.tar.gz`) and the two release binary tarballs
+The script downloads the two release binary tarballs
 (`.../releases/download/v0.1.0/nanodictate-0.1.0-macos-{arm64,x86_64}.tar.gz`).
-It computes `sha256` for each binary tarball (plus `sha256`/`rmd160`/`size` for
-the source tarball when the local OpenSSL provides them) and fills the
-`__VERSION__`, `__SHA256_ARM64__`, `__SHA256_X86_64__`, `__SOURCE_SHA256__`,
-`__RMD160__`, `__SOURCE_SIZE__` placeholders in both templates. Keep the
-`.tpl` placeholders in the repo — only the generated files get concrete values.
+It computes `sha256` for each and fills the `__VERSION__`, `__SHA256_ARM64__`,
+`__SHA256_X86_64__` placeholders in both templates. Keep the `.tpl`
+placeholders in the repo — only the generated files get concrete values.
 
 ## Releasing a new version
 
@@ -45,23 +43,17 @@ the source tarball when the local OpenSSL provides them) and fills the
    - **MacPorts**: copy `packaging/macports/Portfile` into a `macports-ports`
      checkout as `audio/nanodictate/Portfile` and open a PR.
 4. Verify before release: `brew audit --strict --new nanodictate`, `port lint`,
-   and a clean `brew install nanodictate` (binary — no build) / `port install`
-   on a fresh machine.
+   and a clean `brew install nanodictate` / `port install` (both binary — no
+   build) on a fresh machine.
 
 ## Maintainer notes
 
-- **Homebrew is binary, MacPorts builds from source.** The Homebrew formula
-  downloads the ad-hoc signed tarball published by the release workflow — no
-  compiler on the user's machine. MacPorts runs `swift build --configuration
-  release` via `use_xcode yes` because there is **no `swift` or `swift-lang`
-  MacPorts port** (verified against ports.macports.org, 2026-09) — existing
-  SwiftPM ports such as `swiftlint` build against Apple's toolchain the same
-  way.
-- **Sandbox.** The MacPorts build passes `--disable-sandbox` to `swift build`:
-  SwiftPM cannot install its own syscall sandbox inside the package manager's
-  build sandbox. Note that the build fetches the SwiftLint/SwiftFormat plugin
-  packages over the network; the plugins themselves run only when invoked
-  explicitly, not during `swift build`.
+- **Both Homebrew and MacPorts are binary.** The Homebrew formula and the
+  MacPorts port download the same arch-matched ad-hoc signed tarball published
+  by the release workflow (`nanodictate-<VERSION>-macos-<arch>.tar.gz`) — no
+  compiler on the user's machine. The Portfile sets `use_configure no` and just
+  unpacks the binaries into `${prefix}/bin` and ships `config.example.toml`
+  into `${prefix}/share/nanodictate/`.
 - **Config.** The CLI reads only `~/.config/nanodictate/config.toml`
   (`AppConfig.defaultPath()`), never a file under `etc/`. `config.example.toml`
   therefore ships as a copy source in `share/nanodictate/`.
@@ -71,10 +63,9 @@ the source tarball when the local OpenSSL provides them) and fills the
   daemon at any install method means the package installs binaries + config
   only.
 - **TCC grants.** Microphone + Accessibility are granted manually per binary
-  in System Settings (prompted on first use). Because MacPorts source builds
-  produce a new binary on every install/upgrade, grants may need to be
-  re-applied after updates (the Homebrew binaries only change on a newer
-  release).
+  in System Settings (prompted on first use). Both paths install the same
+  release binaries — no rebuild per install — so grants only need re-applying
+  when a newer release replaces the binary.
 - **LaunchAgent — гибрид A+B.** The running binary registers the service
   itself: `nanodictate start` writes the canonical
   `~/Library/LaunchAgents/com.nanodictate.agent.plist` (Label
@@ -98,8 +89,6 @@ the source tarball when the local OpenSSL provides them) and fills the
 
 - Fill the `maintainers` handle in the generated Portfile (a person's handle
   must not be auto-generated).
-- `rmd160` may stay a placeholder if the local Ruby cannot compute it
-  (`port checksum` can fill it).
 - A Homebrew **bottle** (served from Homebrew's CDN) would wrap the same
   release binaries; not needed while the formula downloads them directly from
   GitHub Releases. Developer ID signing remains out of scope for a bottle either

@@ -1,11 +1,14 @@
 # MacPorts packaging
 
-Like the Homebrew formula, the MacPorts port builds NanoDictate **from
-source** on the user's machine (`swift build --configuration release
---disable-sandbox`), so the installed binaries are unsigned/ad-hoc — no
-Developer ID and no notarization. This page is the user-facing install guide
-plus the maintainer release drill. For the template layout, the generator
-and cross-package notes see [packaging/README.md](../../packaging/README.md).
+Like the Homebrew formula, the MacPorts port installs a **prebuilt binary
+tarball** attached to the GitHub Release
+(`https://github.com/kodmial/nanodictate/releases/download/v<VERSION>/nanodictate-<VERSION>-macos-<arch>.tar.gz`),
+so no Xcode / Swift toolchain is needed on the user's machine and the
+install is fast (extract into `${prefix}`). The released binaries are
+unsigned/ad-hoc — no Developer ID and no notarization. This page is the
+user-facing install guide plus the maintainer release drill. For the
+template layout, the generator and cross-package notes see
+[packaging/README.md](../../packaging/README.md).
 
 > **Status (TODO):** the port is **not yet in the MacPorts ports tree** — a
 > PR to `macports-ports` is pending/planned. You cannot `port install
@@ -16,12 +19,12 @@ and cross-package notes see [packaging/README.md](../../packaging/README.md).
 ### Requirements
 
 - macOS 12+ — the Portfile sets `platforms {darwin >= 21}` (the GitHub
-  workflow builds on `macos-13` / `macos-14`).
+  workflow builds the tarballs on `macos-15-intel` for x86_64 and
+  `macos-14` for arm64).
 - MacPorts itself.
-- **Xcode 14.3+** (not just CLT): the Portfile sets `use_xcode yes` because
-  there is currently **no `swift` / `swift-lang` port in MacPorts** (both
-  were removed; verified against ports.macports.org, 2026-09). The Swift
-  compiler ships with Apple's Xcode, so Xcode must be installed.
+- Nothing else — the port fetches the arch-matched release tarball (arm64 on
+  Apple Silicon, x86_64 on Intel) and extracts it; no Xcode / Swift toolchain
+  and no network package fetching.
 
 ### Install (when the port is accepted)
 
@@ -29,10 +32,11 @@ and cross-package notes see [packaging/README.md](../../packaging/README.md).
 sudo port install nanodictate
 ```
 
-**Expect a long build.** The port runs SwiftPM, which fetches the
-SwiftLint/SwiftFormat plugin packages over the network and compiles the
-whole package from source. This is normal for source-built Swift ports
-(compare `swiftlint`).
+**Fast install.** No compilation: the port downloads
+`nanodictate-<VERSION>-macos-<arch>.tar.gz` from the GitHub Release,
+verifies it against the Portfile checksums (sha256) and extracts
+the binaries into `$(port prefix)/bin` plus `config.example.toml` into
+`$(port prefix)/share/nanodictate/`.
 
 ### After install
 
@@ -54,7 +58,7 @@ and RunAtLoad starts the daemon at the next login.
 1. **TCC grants (required, manual).** In **System Settings → Privacy &
    Security** add the `NanoDictateAgent` binary to **Microphone** and
    **Accessibility** (and **Input Monitoring** if the hotkey does not fire).
-   Grants are per-binary — after a `port upgrade` that rebuilds the binary
+   Grants are per-binary — after a `port upgrade` that replaces the binary
    you may need to re-grant.
 
 2. **Configure.** The CLI only reads `~/.config/nanodictate/config.toml`
@@ -78,18 +82,19 @@ and RunAtLoad starts the daemon at the next login.
 
 ### Why no Developer ID?
 
-Same as Homebrew: the port builds locally, so the produced binaries carry no
-quarantine attribute and Gatekeeper does not block them. Only browser
-downloads of the GitHub Releases tarballs get `com.apple.quarantine`; clear
-it once with `xattr -dr com.apple.quarantine /path/to/binary`. See
+Same as Homebrew: `port install` downloads the tarball with MacPorts' own
+fetcher, so the installed binaries carry no quarantine attribute and
+Gatekeeper does not block them. Only browser downloads of the GitHub
+Releases tarballs get `com.apple.quarantine`; clear it once with
+`xattr -dr com.apple.quarantine /path/to/binary`. See
 [Why no Developer ID in homebrew.md](homebrew.md#why-no-developer-id) for
 the comparison table.
 
 ## For the maintainer
 
 1. **Tag and push** — `git tag v0.1.0 && git push origin v0.1.0` (the
-   Release workflow attaches the prebuilt tarballs; the port is
-   source-based and only uses the tag).
+   Release workflow attaches the prebuilt binary tarballs the port
+   downloads).
 
 2. **Generate the Portfile** (needs network access to github.com):
 
@@ -97,9 +102,9 @@ the comparison table.
    ruby scripts/release-prep.rb v0.1.0
    ```
 
-   This writes `packaging/macports/Portfile` with the real version, source
-   tarball URL, sha256/rmd160/size. Keep the `Portfile.tpl` in the repo
-   unfilled.
+   This writes `packaging/macports/Portfile` with the real version, the
+   release tarball URL and the sha256 checksums for both arch tarballs
+   (arm64 + x86_64). Keep the `Portfile.tpl` in the repo unfilled.
 
 3. **Fill the `maintainers` handle** in the generated Portfile — a
    person's handle is never auto-generated.
@@ -108,7 +113,6 @@ the comparison table.
 
    ```sh
    port lint                                    # in the ports checkout
-   port checksum                                # fills rmd160 if it stayed a placeholder
    sudo port -v install nanodictate             # clean-machine test
    nanodictate --version                        # must print "nanodictate 0.1.0"
    ```
@@ -120,11 +124,5 @@ the comparison table.
 
 ## TODO
 
-- **Swift toolchain.** No `swift` / `swift-lang` MacPorts port exists →
-  `use_xcode yes` forces the build to use Apple's Swift from Xcode. If a
-  self-contained Swift port ever returns, prefer `depends_build port:swift`
-  so Xcode is not required (marked in the Portfile template).
 - Port not yet accepted into `macports-ports` (PR pending).
 - `maintainers` handle in the generated Portfile.
-- `rmd160` may stay a placeholder if the local Ruby/OpenSSL cannot compute
-  it — `port checksum` fills it.

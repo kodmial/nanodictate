@@ -47,7 +47,9 @@ jobs:
           swift-version: "${{ matrix.swift }}"
 
       - name: Build release binaries
-        run: swift build -c release
+        run: |
+          swift build -c release --product NanoDictateAgent
+          swift build -c release --product nanodictate
 
       - name: Ad-hoc sign binaries
         # Release binaries are ad-hoc signed WITHOUT entitlements on purpose:

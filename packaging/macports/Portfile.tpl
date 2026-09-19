@@ -1,20 +1,33 @@
 # -*- coding: utf-8; mode: tcl; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- vim:fenc=utf-8:ft=tcl:et:sw=4:ts=4:sts=4
 
 # NanoDictate — macOS dictation (double-Alt, bilingual EN/RU, 4 STT providers).
-# Template: __VERSION__, __SOURCE_SHA256__, __RMD160__, __SOURCE_SIZE__ are
-# filled by scripts/release-prep.rb — do not hand-edit the output.
+# Template: __VERSION__, __SHA256_ARM64__, __SHA256_X86_64__ are filled by
+# scripts/release-prep.rb — do not hand-edit the output.
 
 PortSystem          1.0
 PortGroup           github 1.0
 
-# Release tag, e.g. v0.1.0; same source tarball as the Homebrew formula
-# (https://github.com/kodmial/nanodictate/archive/refs/tags/v0.1.0.tar.gz).
-# The tarball URL is derived from the tag v__VERSION__ by PortGroup github
-# (no URL placeholder is substituted here; only the Homebrew formula uses
-# one); the checksums below are filled by scripts/release-prep.rb.
+# Binary port (symmetry with the Homebrew formula): the prebuilt tarball
+# attached to the tag is installed as-is — NO Xcode / Swift toolchain needed
+# on the user's machine. Tarball name is arch-dependent
+# (nanodictate-__VERSION__-macos-<arm64|x86_64>.tar.gz, built by
+# .github/workflows/release.yml), so distfile + checksum are chosen by
+# ${os.arch}; the download URL is derived from the tag v__VERSION__.
+# master_sites points at the GitHub release assets (needed to fetch the
+# arch-specific distfile itself, not just for livecheck); livecheck.type
+# github walks repo tags. The checksums are filled by scripts/release-prep.rb.
 github.setup        kodmial nanodictate __VERSION__ v
-github.tarball_from archive
 revision            0
+
+master_sites        https://github.com/kodmial/nanodictate/releases/download/v__VERSION__
+
+if {${os.arch} eq "arm64"} {
+    distfiles       nanodictate-__VERSION__-macos-arm64.tar.gz
+    checksums       sha256  __SHA256_ARM64__
+} else {
+    distfiles       nanodictate-__VERSION__-macos-x86_64.tar.gz
+    checksums       sha256  __SHA256_X86_64__
+}
 
 platforms           {darwin >= 21}
 categories          audio
@@ -29,26 +42,19 @@ long_description    NanoDictate is a macOS dictation tool: tap Alt twice, \
                     background agent (NanoDictateAgent, runs as a LaunchAgent) \
                     and a control CLI (nanodictate).
 
-# Swift toolchain. There is currently NO "swift" or "swift-lang" macports port
-# (both were removed; checked on ports.macports.org, 2026-09). Existing
-# SwiftPM-based ports (e.g. swiftlint) build against the Swift compiler shipped
-# with Apple's Xcode / Command Line Tools.
-# TODO(maintainer): if a self-contained Swift toolchain port ever returns,
-# prefer `depends_build port:swift` so Xcode/CLT is not required.
-# Package.swift requires swift-tools 5.7 (Xcode 14.3+).
-use_xcode           yes
-
+# Prebuilt tarball ships ad-hoc signed binaries (release.yml signs WITHOUT
+# entitlements on purpose: Microphone/Accessibility TCC grants are per-machine,
+# each user grants them on their own Mac). No build phase — extract + stage.
 use_configure       no
 
-build.cmd           swift
-build.target        build
-build.args          --configuration release --disable-sandbox
-
-set builtproductdir ${worksrcpath}/.build/release
-
 destroot {
-    xinstall -m 755 ${builtproductdir}/nanodictate ${destroot}${prefix}/bin/
-    xinstall -m 755 ${builtproductdir}/NanoDictateAgent ${destroot}${prefix}/bin/
+    # The tarball is flat (no wrapper): binaries, config + Resources/ land
+    # directly in ${workpath} (release.yml: tar -C dist ...). Resources/ ships
+    # for reference only (entitlements already applied at codesign) — the port
+    # stages binaries + config like the Homebrew formula; the runtime does not
+    # need Resources.
+    xinstall -m 755 ${workpath}/nanodictate ${destroot}${prefix}/bin/
+    xinstall -m 755 ${workpath}/NanoDictateAgent ${destroot}${prefix}/bin/
     # Только бинарь + конфиг; службу при установке регистрирует post-destroot
     # (тот же единственный Label com.nanodictate.agent и тот же канонический
     # plist ~/Library/LaunchAgents/com.nanodictate.agent.plist, что у
@@ -59,7 +65,7 @@ destroot {
     # не читает ${prefix}/etc).
     set share_dir ${destroot}${prefix}/share/nanodictate
     xinstall -d -m 755 ${share_dir}
-    xinstall -m 644 ${worksrcpath}/config.example.toml ${share_dir}/
+    xinstall -m 644 ${workpath}/config.example.toml ${share_dir}/
 }
 
 post-destroot {
@@ -143,10 +149,6 @@ post-destroot {
         ui_msg "nanodictate: SUDO_USER unset — not touching user LaunchAgents; run 'nanodictate start' to register the service"
     }
 }
-
-checksums           rmd160  __RMD160__ \
-                    sha256  __SOURCE_SHA256__ \
-                    size    __SOURCE_SIZE__
 
 livecheck.type      github
 
