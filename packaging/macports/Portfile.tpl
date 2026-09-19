@@ -47,6 +47,10 @@ long_description    NanoDictate is a macOS dictation tool: tap Alt twice, \
 # each user grants them on their own Mac). No build phase — extract + stage.
 use_configure       no
 
+# Binary port: no Makefile in the tarball — the default build phase would
+# run `make all` and fail ("No rule to make target 'all'").
+build {}
+
 destroot {
     # The tarball is flat (no wrapper): binaries, config + Resources/ land
     # directly in ${workpath} (release.yml: tar -C dist ...). Resources/ ships
