@@ -211,15 +211,18 @@ final class AgentPlistTests: XCTestCase {
     _ = lc.bootstrap(plistPath: "/p/a.plist", domain: "gui/501")
     _ = lc.load(plistPath: "/p/a.plist")
     _ = lc.kickstart(target: "gui/501/com.nanodictate.agent")
-    XCTAssertEqual(
-      mock.calls,
-      [
-        ("/bin/launchctl", ["print", "gui/501/com.nanodictate.agent"]),
-        ("/bin/launchctl", ["bootout", "gui/501/com.nanodictate.agent"]),
-        ("/bin/launchctl", ["bootstrap", "gui/501", "/p/a.plist"]),
-        ("/bin/launchctl", ["load", "/p/a.plist"]),
-        ("/bin/launchctl", ["kickstart", "-k", "gui/501/com.nanodictate.agent"]),
-      ])
+    let expected: [(String, [String])] = [
+      ("/bin/launchctl", ["print", "gui/501/com.nanodictate.agent"]),
+      ("/bin/launchctl", ["bootout", "gui/501/com.nanodictate.agent"]),
+      ("/bin/launchctl", ["bootstrap", "gui/501", "/p/a.plist"]),
+      ("/bin/launchctl", ["load", "/p/a.plist"]),
+      ("/bin/launchctl", ["kickstart", "-k", "gui/501/com.nanodictate.agent"]),
+    ]
+    XCTAssertEqual(mock.calls.count, expected.count)
+    for (got, want) in zip(mock.calls, expected) {
+      XCTAssertEqual(got.0, want.0)
+      XCTAssertEqual(got.1, want.1)
+    }
     XCTAssertEqual(lc.serviceTarget, "gui/\(getuid())/com.nanodictate.agent")
   }
 
