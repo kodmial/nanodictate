@@ -16,13 +16,13 @@ public enum TextRefinement {
     // Capitalize the first symbol (word-safe for Cyrillic).
     if let first = result.first {
       let upper = String(first).uppercased()
-      result.replaceSubrange(result.startIndex ... result.startIndex, with: upper)
+      result.replaceSubrange(result.startIndex...result.startIndex, with: upper)
     }
 
     // Append a period if the text does not end with sentence punctuation.
     if let last = result.last,
-       !".!?…".contains(last) // swiftlint:disable:this indentation_width
-    { // swiftlint:disable:this opening_brace
+      !".!?…".contains(last)
+    {  // swiftlint:disable:this opening_brace
       result.append(".")
     }
 
@@ -35,7 +35,7 @@ public enum TextRefinement {
 public enum Inserter {
   /// Размер пачки символов/backspace'ов между паузами (вставки и отката).
   static let chunkSize = 16
-  private static let delayUSec: useconds_t = 5000 // 5 мс
+  private static let delayUSec: useconds_t = 5000  // 5 мс
 
   /// Тестовые хуки (internal, видны через @testable): подменяют побочные
   /// эффекты — сон между пачками и post CGEvent-ов. В production не
@@ -86,7 +86,7 @@ public enum Inserter {
 
     while offset < chars.count {
       let end = min(offset + chunkSize, chars.count)
-      let chunk = String(chars[offset ..< end])
+      let chunk = String(chars[offset..<end])
       sendChunk(chunk, source: source)
       offset = end
 
@@ -148,7 +148,7 @@ public enum Inserter {
     let backspaceCount = old.count
 
     // Backspace: клавиша 51 (delete). Несколько нажатий — несколько раз.
-    for _ in 0 ..< backspaceCount {
+    for _ in 0..<backspaceCount {
       postKey(virtualKey: 51, source: source)
     }
     typeText(new)
@@ -227,7 +227,7 @@ public enum Inserter {
 
   /// Отправить `times` нажатий backspace (keyDown + keyUp каждое).
   private static func pressBackspace(_ times: Int, source: CGEventSource?) {
-    for _ in 0 ..< times {
+    for _ in 0..<times {
       // keyDown
       if let keyDown = CGEvent(
         keyboardEventSource: source,
@@ -364,10 +364,10 @@ public struct ClipboardInsertBridge {
   }
 }
 
-public extension Inserter {
+extension Inserter {
   /// Вставить текст через буфер обмена: сохранить текущий буфер → записать
   /// текст → Cmd+V → восстановить старый буфер через `restoreDelay` (~0.5 c).
-  static func insertViaClipboard(
+  public static func insertViaClipboard(
     text: String,
     bridge: ClipboardInsertBridge = .default
   ) {

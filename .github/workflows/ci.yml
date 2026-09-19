@@ -25,8 +25,15 @@ jobs:
           # runner SDKs while keeping the Swift 5 language mode.
           swift-version: "5.10.1"
 
-      - name: Run SwiftFormat
-        run: swift package plugin --allow-writing-to-package-directory swiftformat --lint .
+      # Форматтер — swift-format (Apple, swiftlang/swift-format) 0.50700.1,
+      # собранный из исходников в этом же прогоне: линт Sources по .swift-format.
+      - name: Build swift-format 0.50700.1
+        run: |
+          git clone --depth 1 --branch 0.50700.1 https://github.com/swiftlang/swift-format.git /tmp/swift-format
+          swift build -c release --package-path /tmp/swift-format --product swift-format
+
+      - name: Run swift-format lint
+        run: /tmp/swift-format/.build/release/swift-format lint --recursive --configuration .swift-format Sources
 
       - name: Run SwiftLint
         run: swift package plugin swiftlint

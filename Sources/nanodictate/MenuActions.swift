@@ -29,8 +29,9 @@ func confirmationGesture(_ key: MenuKey) -> ConfirmationGesture {
 /// (как `nanodictate provider use`, без --no-restart). Возвращает текст для notice.
 func confirmAndSwitchProvider(_ provider: STTProvider, _: inout MenuView) -> String {
   let display = provider.name.isEmpty ? provider.id : provider.name
-  render(ansiBold + String(format: L10n.tr("menu.switch.confirm"), display, provider.id) + ansiReset
-    + "\n\(L10n.tr("menu.switch.hint"))")
+  render(
+    ansiBold + String(format: L10n.tr("menu.switch.confirm"), display, provider.id) + ansiReset
+      + "\n\(L10n.tr("menu.switch.hint"))")
   guard AgentScreen.confirmationAccepts(key: confirmationGesture(readMenuKey())) else {
     return L10n.tr("menu.switch.cancelled")
   }
@@ -39,9 +40,11 @@ func confirmAndSwitchProvider(_ provider: STTProvider, _: inout MenuView) -> Str
   } catch {
     return String(format: L10n.tr("menu.switch.error"), "\(error)")
   }
-  let kick = runProcess("/bin/launchctl", ["kickstart", "-k", "\(guiDomain)/com.nanodictate.agent"])
+  let kick = runProcess(
+    "/bin/launchctl", ["kickstart", "-k", "\(guiDomain)/com.nanodictate.agent"])
   let kickMsg = kick.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-  let restart = kick.status == 0
+  let restart =
+    kick.status == 0
     ? L10n.tr("cli.provider.restart")
     : String(format: L10n.tr("cli.provider.kickfail"), kickMsg.isEmpty ? kick.stdout : kickMsg)
   return String(format: L10n.tr("menu.switch.ok"), display, restart)
@@ -66,7 +69,7 @@ func refreshMenu(_ view: inout MenuView) {
   view.providers = (try? ProviderStore.loadProviders()) ?? []
   view.logLines = readLogFile()
   view.cursor = 0
-  view.lastStatusRefresh = .distantPast // r — принудительно свежий статус
+  view.lastStatusRefresh = .distantPast  // r — принудительно свежий статус
 }
 
 /// Простые действия: переходы по страницам и смена состояния без ветвлений.
@@ -90,14 +93,16 @@ func applySimpleAction(_ action: MenuAction, _ view: inout MenuView) {
     view.notice = agentIsRunning() ? runSelfCommand("stop") : runSelfCommand("start")
     view.page = .status
     view.cursor = 0
-    view.lastStatusRefresh = .distantPast // агент старт/стоп → статус
+    view.lastStatusRefresh = .distantPast  // агент старт/стоп → статус
   case .showLastResult:
     view.notice = runSelfCommand("last")
   case .toggleLanguage:
     let newLang = L10n.language == .en ? "ru" : "en"
     try? AppConfig.writeKeyValue(key: "ui_language", value: newLang, to: AppConfig.defaultPath())
     L10n.language = newLang == "ru" ? .ru : .en
-    view.notice = L10n.tr("menu.language") + ": " + (L10n.language == .en ? L10n.tr("menu.languageEn") : L10n.tr("menu.languageRu"))
+    view.notice =
+      L10n.tr("menu.language") + ": "
+      + (L10n.language == .en ? L10n.tr("menu.languageEn") : L10n.tr("menu.languageRu"))
   default:
     break
   }
@@ -107,14 +112,15 @@ func applySimpleAction(_ action: MenuAction, _ view: inout MenuView) {
 /// чтобы не раздувать цикломатическую сложность `execute`.
 func applyComplexAction(_ action: MenuAction, _ view: inout MenuView) {
   switch action {
-  case let .switchProvider(id):
+  case .switchProvider(let id):
     switchToProvider(id: id, view: &view)
   case .retryTranscribe:
     retryTranscribe(&view)
   case .toggleReview:
     toggleReview(&view)
-  case .quit, .back, .showProviders, .showLogs, .refresh, .toggleAgent, .showLastResult, .toggleLanguage:
-    break // сюда не приходят: execute направляет их в applySimpleAction
+  case .quit, .back, .showProviders, .showLogs, .refresh, .toggleAgent, .showLastResult,
+    .toggleLanguage:
+    break  // сюда не приходят: execute направляет их в applySimpleAction
   }
 }
 
@@ -136,13 +142,15 @@ func retryTranscribe(_ view: inout MenuView) {
     view.notice = L10n.tr("menu.no.providers.retry")
     return
   }
-  let prompt = ansiBold + L10n.tr("menu.retry.prompt") + ansiReset
-    + "\n" + view.providers.enumerated()
+  let prompt =
+    ansiBold + L10n.tr("menu.retry.prompt") + ansiReset
+    + "\n"
+    + view.providers.enumerated()
     .map { "  \($0.offset + 1)) \(AgentScreen.providerItemLine($0.element))" }
     .joined(separator: "\n")
     + "\n\(L10n.tr("menu.retry.hint"))"
   render(prompt)
-  guard case let .number(number) = readMenuKey(), number >= 1, number <= view.providers.count else {
+  guard case .number(let number) = readMenuKey(), number >= 1, number <= view.providers.count else {
     view.notice = L10n.tr("menu.switch.cancelled")
     return
   }
@@ -155,9 +163,11 @@ func toggleReview(_ view: inout MenuView) {
   let newValue = !current
   do {
     try AppConfig.writeReviewBeforeInsert(value: newValue, to: AppConfig.defaultPath())
-    let kick = runProcess("/bin/launchctl", ["kickstart", "-k", "\(guiDomain)/com.nanodictate.agent"])
+    let kick = runProcess(
+      "/bin/launchctl", ["kickstart", "-k", "\(guiDomain)/com.nanodictate.agent"])
     let kickMsg = kick.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-    let restart = kick.status == 0
+    let restart =
+      kick.status == 0
       ? L10n.tr("cli.provider.restart")
       : String(format: L10n.tr("cli.provider.kickfail"), kickMsg.isEmpty ? kick.stdout : kickMsg)
     if newValue {
@@ -187,7 +197,7 @@ func handleMenuKey(_ key: MenuKey, entries: [MenuEntry], _ view: inout MenuView)
     moveCursorDown(view: &view, entries: entries)
   case .enter:
     return handleEnter(entries: entries, view: &view)
-  case let .number(number):
+  case .number(let number):
     return handleNumber(number, entries: entries, view: &view)
   }
   return false

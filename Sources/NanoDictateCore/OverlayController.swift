@@ -139,7 +139,7 @@ struct OverlayContentView: View {
         if !headerParts.model.isEmpty {
           Text(headerParts.model)
             .font(.caption)
-            .foregroundStyle(.tertiary) // иерархия: модель ступенью ниже
+            .foregroundStyle(.tertiary)  // иерархия: модель ступенью ниже
             .lineLimit(2)
             .truncationMode(.middle)
         }
@@ -230,7 +230,8 @@ struct OverlayContentView: View {
         startClock()
       }
       // Новый сеанс: атакующий догон до текущего уровня (при записи).
-      meterTarget = state.phase == .recording
+      meterTarget =
+        state.phase == .recording
         ? OverlayLevel.meter(fromRMS: state.level)
         : 0
       ensureMeterLoopRunning()
@@ -393,7 +394,7 @@ private struct ProcessingDots: View {
 
   var body: some View {
     HStack(spacing: 7) {
-      ForEach(0 ..< 3, id: \.self) { i in
+      ForEach(0..<3, id: \.self) { i in
         Circle()
           .fill(Color.primary)
           .frame(width: 10, height: 10)
@@ -423,7 +424,7 @@ public enum OverlayErrorText {
   /// Текст для оверлея, если ошибка — известный сетевой сбой; иначе nil.
   public static func text(for error: Error) -> String? {
     guard let transcribeError = error as? TranscribeError else { return nil }
-    if case let .network(message) = transcribeError {
+    if case .network(let message) = transcribeError {
       return networkText(message)
     }
     return nil
@@ -475,7 +476,8 @@ public enum OverlayLayout {
     let minMargin: CGFloat = 8
 
     let posX = point.x - panelSize.width / 2
-    let posXClamped = min(max(posX, screen.minX + minMargin), screen.maxX - panelSize.width - minMargin)
+    let posXClamped = min(
+      max(posX, screen.minX + minMargin), screen.maxX - panelSize.width - minMargin)
 
     let aboveY = point.y - panelSize.height - gap
     if aboveY >= screen.minY + minMargin {
@@ -487,7 +489,9 @@ public enum OverlayLayout {
 
   /// Возвращает screen-канвас для точки (координатная математика выше).
   public static func screenContaining(_ point: CGPoint) -> CGRect {
-    if let screen = NSScreen.screens.first(where: { $0.frame.insetBy(dx: -1, dy: -1).contains(point) }) {
+    if let screen = NSScreen.screens.first(where: {
+      $0.frame.insetBy(dx: -1, dy: -1).contains(point)
+    }) {
       return screen.frame
     }
     return NSScreen.main?.frame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
@@ -646,8 +650,8 @@ public final class OverlayController: NSObject {
     }
 
     Logger.log(
-      "overlay show at (\(point.x), \(point.y)) frame=\(NSStringFromRect(frame)) " +
-        "screen=\(NSStringFromRect(screen)) visible=\(panel.isVisible)",
+      "overlay show at (\(point.x), \(point.y)) frame=\(NSStringFromRect(frame)) "
+        + "screen=\(NSStringFromRect(screen)) visible=\(panel.isVisible)",
       level: "info"
     )
   }
@@ -658,7 +662,9 @@ public final class OverlayController: NSObject {
     // событие/ошибку там не нужно (микрофонный шум в логе).
     let wasVisible = panel?.isVisible == true
     if isDebug {
-      Logger.log("overlay hide" + (reason.map { " reason=\($0)" } ?? "") + " wasVisible=\(wasVisible)", level: "debug")
+      Logger.log(
+        "overlay hide" + (reason.map { " reason=\($0)" } ?? "") + " wasVisible=\(wasVisible)",
+        level: "debug")
     }
     if wasVisible {
       Logger.log("overlay hide" + (reason.map { " reason=\($0)" } ?? ""), level: "info")
@@ -883,13 +889,19 @@ public final class OverlayController: NSObject {
     // в этом случае окна нет по делу, и логировать «NO NanoDictateAgent window»
     // как ошибку не нужно.
     guard isVisible else { return }
-    guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
+    guard
+      let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID)
+        as? [[String: Any]]
+    else {
       Logger.log("overlay render check: CGWindowListCopyWindowInfo unavailable", level: "error")
       return
     }
-    let matches = windows.filter { ($0[kCGWindowOwnerName as String] as? String) == "NanoDictateAgent" }
+    let matches = windows.filter {
+      ($0[kCGWindowOwnerName as String] as? String) == "NanoDictateAgent"
+    }
     guard !matches.isEmpty else {
-      Logger.log("overlay render check: NO NanoDictateAgent window on screen after 0.5s", level: "error")
+      Logger.log(
+        "overlay render check: NO NanoDictateAgent window on screen after 0.5s", level: "error")
       return
     }
     for window in matches {

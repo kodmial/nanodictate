@@ -47,7 +47,9 @@ public struct BatchHTTPError: Error, Equatable {
     BatchHTTPError(kind: .network, message: message)
   }
 
-  public static func http(_ status: Int, message: String, retryAfter: TimeInterval?) -> BatchHTTPError {
+  public static func http(_ status: Int, message: String, retryAfter: TimeInterval?)
+    -> BatchHTTPError
+  {  // swiftlint:disable:this opening_brace
     BatchHTTPError(kind: .http, status: status, message: message, retryAfter: retryAfter)
   }
 
@@ -130,7 +132,9 @@ public struct BatchSegmentRecord: Codable, Equatable {
   public let status: String
   public let text: String
 
-  public init(index: Int, bodyStart: TimeInterval, bodyEnd: TimeInterval, status: String, text: String) {
+  public init(
+    index: Int, bodyStart: TimeInterval, bodyEnd: TimeInterval, status: String, text: String
+  ) {
     self.index = index
     self.bodyStart = bodyStart
     self.bodyEnd = bodyEnd
@@ -154,7 +158,13 @@ public struct BatchCheckpoint: Codable, Equatable {
   public let totalSegments: Int
   public let segments: [BatchSegmentRecord]
 
-  public init(version: Int, providerID: String, sourceFile: String, totalSegments: Int, segments: [BatchSegmentRecord]) {
+  public init(
+    version: Int,
+    providerID: String,
+    sourceFile: String,
+    totalSegments: Int,
+    segments: [BatchSegmentRecord]
+  ) {
     self.version = version
     self.providerID = providerID
     self.sourceFile = sourceFile
@@ -293,7 +303,7 @@ private final class BatchRunState: @unchecked Sendable {
     lock.lock()
     defer { lock.unlock() }
     guard end > 0 else { return [] }
-    return (0 ..< min(end, total)).compactMap { slots[$0] }
+    return (0..<min(end, total)).compactMap { slots[$0] }
   }
 }
 
@@ -346,7 +356,8 @@ public enum BatchTranscriber {
   /// Ретраябельная транскрибация одной попытки (`attempt` 0-based).
   public typealias SendRetryable = (Int) async throws -> String
   /// Прогресс: (i, N, bodyStartSec, bodyEndSec, elapsedSec, status) — 1-based i.
-  public typealias ProgressHandler = (Int, Int, TimeInterval, TimeInterval, TimeInterval, String) -> Void
+  public typealias ProgressHandler = (Int, Int, TimeInterval, TimeInterval, TimeInterval, String) ->
+    Void
 
   /// Плейсхолдер для чанка, распознавание которого провалилось.
   public static let placeholder = "[…]"
@@ -365,7 +376,7 @@ public enum BatchTranscriber {
   ) async throws -> String {
     precondition(retries >= 0)
     let schedule = backoff.isEmpty ? [2.0] : backoff
-    for attempt in 0 ... retries {
+    for attempt in 0...retries {
       do {
         return try await send(attempt)
       } catch let error as BatchHTTPError where !error.isRetryable {
@@ -425,7 +436,9 @@ public enum BatchTranscriber {
     checkpointPath: String? = nil,
     resume: Bool = false,
     loadCheckpoint: (String) -> BatchCheckpoint? = { try? Self.loadCheckpoint(from: $0) },
-    saveCheckpoint: @escaping (BatchCheckpoint, String) throws -> Void = { try Self.saveCheckpoint($0, to: $1) },
+    saveCheckpoint: @escaping (BatchCheckpoint, String) throws -> Void = {
+      try Self.saveCheckpoint($0, to: $1)
+    },
     sendOne: @escaping SendOne,
     delay: @escaping (TimeInterval) async throws -> Void,
     maxConcurrent: Int = 1,
@@ -475,7 +488,9 @@ public enum BatchTranscriber {
     checkpointPath: String? = nil,
     resume: Bool = false,
     loadCheckpoint: (String) -> BatchCheckpoint? = { try? Self.loadCheckpoint(from: $0) },
-    saveCheckpoint: @escaping (BatchCheckpoint, String) throws -> Void = { try Self.saveCheckpoint($0, to: $1) },
+    saveCheckpoint: @escaping (BatchCheckpoint, String) throws -> Void = {
+      try Self.saveCheckpoint($0, to: $1)
+    },
     sendOne: @escaping SendOne,
     delay: @escaping (TimeInterval) async throws -> Void,
     maxConcurrent: Int = 1,
@@ -560,7 +575,8 @@ public enum BatchTranscriber {
       if checkpoint.version == BatchCheckpoint.currentVersion,
         checkpoint.providerID == providerID,
         checkpoint.sourceFile == sourceFile,
-        checkpoint.totalSegments == specs.count {
+        checkpoint.totalSegments == specs.count
+      {  // swiftlint:disable:this opening_brace
         for i in specs.indices {
           // resolvedRecord уже гарантирует index в пределах
           // totalSegments == slots.count — дополнительный guard не нужен.
@@ -651,9 +667,10 @@ public enum BatchTranscriber {
       let text: String
       let status: String
       do {
-        text = try await transcribeChunk(send: { attempt in
-          try await sendOne(attempt, wav, spec.index, prompt)
-        }, delay: delay)
+        text = try await transcribeChunk(
+          send: { attempt in
+            try await sendOne(attempt, wav, spec.index, prompt)
+          }, delay: delay)
         status = BatchSegmentRecord.statusOK
       } catch {
         if Task.isCancelled {
@@ -690,7 +707,8 @@ public enum BatchTranscriber {
       )
     }
 
-    return makeOutcome(records: records.compactMap { $0 }, totalSegments: specs.count, started: started)
+    return makeOutcome(
+      records: records.compactMap { $0 }, totalSegments: specs.count, started: started)
   }
 
   // MARK: Параллельный проход (maxConcurrent > 1)
@@ -741,7 +759,7 @@ public enum BatchTranscriber {
     let workers = min(maxConcurrent, specs.count - completedCount)
     let ckWriter = CheckpointWriter()
     try await withThrowingTaskGroup(of: Void.self) { group in
-      for _ in 0 ..< workers {
+      for _ in 0..<workers {
         group.addTask {
           while let job = state.takeJob() {
             let spec = specs[job]
@@ -750,11 +768,12 @@ public enum BatchTranscriber {
             let text: String
             let status: String
             do {
-              text = try await transcribeChunk(send: { attempt in
-                // Параллельный путь контекст не шлёт: порядок
-                // воркеров произвольный, цепочка не выстраивается.
-                try await sendOne(attempt, wav, spec.index, nil)
-              }, delay: delay)
+              text = try await transcribeChunk(
+                send: { attempt in
+                  // Параллельный путь контекст не шлёт: порядок
+                  // воркеров произвольный, цепочка не выстраивается.
+                  try await sendOne(attempt, wav, spec.index, nil)
+                }, delay: delay)
               status = BatchSegmentRecord.statusOK
             } catch {
               if Task.isCancelled {
@@ -836,7 +855,9 @@ public enum BatchTranscriber {
 
   // MARK: Сборка итога
 
-  private static func makeOutcome(records: [BatchSegmentRecord], totalSegments: Int, started: TimeInterval) -> BatchOutcome {
+  private static func makeOutcome(
+    records: [BatchSegmentRecord], totalSegments: Int, started: TimeInterval
+  ) -> BatchOutcome {
     let joined = BatchTextJoiner.join(records.map(\.text))
     let skippedIndexes = records.enumerated()
       .filter { $0.element.status == BatchSegmentRecord.statusSkipped }

@@ -12,7 +12,7 @@ public enum InsertMethod: String, Equatable {
 
 // MARK: - AppConfig
 
-public struct AppConfig: Equatable { // swiftlint:disable:this type_body_length
+public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
   public var baseURL: String
   public var model: String
   public var apiKey: String
@@ -126,7 +126,8 @@ public struct AppConfig: Equatable { // swiftlint:disable:this type_body_length
     var result: [Provider] = []
     for name in failoverOrderNames {
       guard let provider = providers.first(where: { $0.id == name }),
-            seen.insert(provider.id).inserted else { continue } // swiftlint:disable:this indentation_width
+        seen.insert(provider.id).inserted
+      else { continue }
       if provider.id == failedID {
         continue
       }
@@ -231,7 +232,8 @@ public struct AppConfig: Equatable { // swiftlint:disable:this type_body_length
   /// (в т.ч. failover-кандидатов); никогда не записывается в файл.
   private static func applyEnvAPIKey(to config: AppConfig) -> AppConfig {
     guard let envKey = ProcessInfo.processInfo.environment["NANODICTATE_API_KEY"],
-          !envKey.isEmpty else { return config } // swiftlint:disable:this indentation_width
+      !envKey.isEmpty
+    else { return config }
     var result = config
     result.apiKey = envKey
     if !result.providers.isEmpty {
@@ -309,15 +311,16 @@ public struct AppConfig: Equatable { // swiftlint:disable:this type_body_length
       case let .cannotReadKeyFile(path, underlying):
         let msg = underlying?.localizedDescription ?? "unknown error"
         return "Cannot read API key file '\(path)': \(msg)"
-      case let .duplicateProvider(id):
+      case .duplicateProvider(let id):
         return "Duplicate provider section: [providers.\(id)]"
       case let .activeProviderNotFound(active, available):
-        let list = available.isEmpty ? L10n.tr("menu.noProviders") : available.joined(separator: ", ")
+        let list =
+          available.isEmpty ? L10n.tr("menu.noProviders") : available.joined(separator: ", ")
         return "active_provider = \"\(active)\" not found. Available providers: \(list)"
       case .ambiguousLegacyAndProviders:
-        return "Ambiguous config: both legacy keys " +
-          "(base_url/model/api_key...) and [providers.X] sections are " +
-          "present, but active_provider is not set. Set active_provider."
+        return "Ambiguous config: both legacy keys "
+          + "(base_url/model/api_key...) and [providers.X] sections are "
+          + "present, but active_provider is not set. Set active_provider."
       case let .cannotWriteConfig(path, underlying):
         let msg = underlying?.localizedDescription ?? "unknown error"
         return "Cannot write config '\(path)': \(msg)"
@@ -334,14 +337,18 @@ public struct AppConfig: Equatable { // swiftlint:disable:this type_body_length
   /// Разбор ТОЛЬКО провайдеров без резолва `active_provider`: не бросает ошибок
   /// выбора (stale active_provider, неоднозначность). Нужен меню и CLI, где
   /// сломанный выбор надо чинить, а не падать на загрузке.
-  public static func parseProvidersOnly(_ content: String) throws -> (activeProvider: String, providers: [Provider]) {
+  public static func parseProvidersOnly(_ content: String) throws -> (
+    activeProvider: String, providers: [Provider]
+  ) {
     let config = try parseContent(content, resolveProvider: false)
     return (config.activeProvider, config.providers)
   }
 
   /// Как `load(from:)`, но возвращает только провайдеров (без резолва) —
   /// для меню/CLI, которые должны работать даже при сломанном active_provider.
-  public static func loadProvidersOnly(from path: String?) throws -> (activeProvider: String, providers: [Provider]) {
+  public static func loadProvidersOnly(from path: String?) throws -> (
+    activeProvider: String, providers: [Provider]
+  ) {
     let resolvedPath = path ?? defaultPath()
     guard FileManager.default.fileExists(atPath: resolvedPath) else {
       return ("", [])
@@ -419,7 +426,8 @@ public struct AppConfig: Equatable { // swiftlint:disable:this type_body_length
         }
         let providersPrefix = "providers."
         if header.hasPrefix(providersPrefix) {
-          let providerID = String(header.dropFirst(providersPrefix.count)).trimmingCharacters(in: .whitespaces)
+          let providerID = String(header.dropFirst(providersPrefix.count)).trimmingCharacters(
+            in: .whitespaces)
           guard !providerID.isEmpty else {
             throw AppConfigError.invalidLine(index + 1, rawLine)
           }
@@ -452,40 +460,50 @@ public struct AppConfig: Equatable { // swiftlint:disable:this type_body_length
       guard let eqIndex = line.firstIndex(of: "=") else {
         throw AppConfigError.invalidLine(index + 1, rawLine)
       }
-      let key = line[line.startIndex ..< eqIndex]
+      let key = line[line.startIndex..<eqIndex]
         .trimmingCharacters(in: .whitespaces)
       let valuePart = line[line.index(after: eqIndex)...]
         .trimmingCharacters(in: .whitespaces)
 
       // Ключ внутри секции [providers.X].
       if let providerID = currentProviderID,
-         let providerIndex = providers.firstIndex(where: { $0.id == providerID }) // swiftlint:disable:this indentation_width line_length
-      { // swiftlint:disable:this opening_brace
+        let providerIndex = providers.firstIndex(where: { $0.id == providerID })
+      {  // swiftlint:disable:this opening_brace
         switch key {
         case "name":
-          providers[providerIndex].name = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+          providers[providerIndex].name = try parseString(
+            valuePart, line: index + 1, rawLine: rawLine)
         case "base_url":
-          providers[providerIndex].baseURL = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+          providers[providerIndex].baseURL = try parseString(
+            valuePart, line: index + 1, rawLine: rawLine)
         case "model":
-          providers[providerIndex].model = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+          providers[providerIndex].model = try parseString(
+            valuePart, line: index + 1, rawLine: rawLine)
         case "api_key":
-          providers[providerIndex].apiKey = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+          providers[providerIndex].apiKey = try parseString(
+            valuePart, line: index + 1, rawLine: rawLine)
         case "api_key_file":
-          providers[providerIndex].apiKeyFile = try parseStringOptional(valuePart, line: index + 1, rawLine: rawLine)
+          providers[providerIndex].apiKeyFile = try parseStringOptional(
+            valuePart, line: index + 1, rawLine: rawLine)
         case "proxy_key":
-          providers[providerIndex].proxyKey = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+          providers[providerIndex].proxyKey = try parseString(
+            valuePart, line: index + 1, rawLine: rawLine)
         case "proxy_key_header":
-          providers[providerIndex].proxyKeyHeader = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+          providers[providerIndex].proxyKeyHeader = try parseString(
+            valuePart, line: index + 1, rawLine: rawLine)
         case "transport":
           providers[providerIndex].transport = try Self.canonicalTransport(
             parseString(valuePart, line: index + 1, rawLine: rawLine)
           )
         case "http_proxy":
-          providers[providerIndex].httpProxy = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+          providers[providerIndex].httpProxy = try parseString(
+            valuePart, line: index + 1, rawLine: rawLine)
         case "proxy_user":
-          providers[providerIndex].proxyUser = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+          providers[providerIndex].proxyUser = try parseString(
+            valuePart, line: index + 1, rawLine: rawLine)
         case "proxy_password":
-          providers[providerIndex].proxyPassword = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+          providers[providerIndex].proxyPassword = try parseString(
+            valuePart, line: index + 1, rawLine: rawLine)
         default:
           // Неизвестный ключ внутри секции — игнорируем
           break
@@ -526,7 +544,8 @@ public struct AppConfig: Equatable { // swiftlint:disable:this type_body_length
       case "proxy_key_header":
         proxyKeyHeader = try parseString(valuePart, line: index + 1, rawLine: rawLine)
       case "transport":
-        transport = try Self.canonicalTransport(parseString(valuePart, line: index + 1, rawLine: rawLine))
+        transport = try Self.canonicalTransport(
+          parseString(valuePart, line: index + 1, rawLine: rawLine))
       case "http_proxy":
         httpProxy = try parseString(valuePart, line: index + 1, rawLine: rawLine)
       case "proxy_user":
@@ -616,7 +635,9 @@ public struct AppConfig: Equatable { // swiftlint:disable:this type_body_length
   /// - только секции, без active_provider → первый по порядку;
   /// - legacy-ключи + секции без active_provider → ошибка «неоднозначно»;
   /// - только legacy → прежнее поведение (ничего не трогаем).
-  private static func resolveActiveProvider(in config: inout AppConfig, legacySTTKeysSeen: Bool) throws {
+  private static func resolveActiveProvider(in config: inout AppConfig, legacySTTKeysSeen: Bool)
+    throws
+  {  // swiftlint:disable:this opening_brace
     if !config.activeProvider.isEmpty {
       guard let selected = config.providers.first(where: { $0.id == config.activeProvider }) else {
         throw AppConfigError.activeProviderNotFound(
@@ -685,17 +706,19 @@ public struct AppConfig: Equatable { // swiftlint:disable:this type_body_length
   private static func parseString(_ raw: String, line: Int, rawLine: String) throws -> String {
     let trimmed = raw.trimmingCharacters(in: .whitespaces)
     guard trimmed.count >= 2,
-          trimmed.hasPrefix("\""), // swiftlint:disable:this indentation_width
-          trimmed.hasSuffix("\"")
+      trimmed.hasPrefix("\""),
+      trimmed.hasSuffix("\"")
     else {
       throw AppConfigError.invalidLine(line, rawLine)
     }
     let inner = trimmed.index(trimmed.startIndex, offsetBy: 1)
     let end = trimmed.index(trimmed.endIndex, offsetBy: -1)
-    return String(trimmed[inner ..< end])
+    return String(trimmed[inner..<end])
   }
 
-  private static func parseStringOptional(_ raw: String, line: Int, rawLine: String) throws -> String? {
+  private static func parseStringOptional(_ raw: String, line: Int, rawLine: String) throws
+    -> String?
+  {  // swiftlint:disable:this opening_brace
     let trimmed = raw.trimmingCharacters(in: .whitespaces)
     if trimmed.isEmpty || trimmed == "\"\"" {
       return nil
@@ -724,13 +747,15 @@ public struct AppConfig: Equatable { // swiftlint:disable:this type_body_length
 
   /// Разбор массива строк: `providers = ["groq", "gigaam"]`.
   /// Допускает пробелы между элементами и после запятых.
-  private static func parseStringArray(_ raw: String, line: Int, rawLine: String) throws -> [String] {
+  private static func parseStringArray(_ raw: String, line: Int, rawLine: String) throws -> [String]
+  {  // swiftlint:disable:this opening_brace
     let trimmed = raw.trimmingCharacters(in: .whitespaces)
     guard trimmed.hasPrefix("["), trimmed.hasSuffix("]") else {
       throw AppConfigError.invalidLine(line, rawLine)
     }
     let inner = trimmed.dropFirst().dropLast()
-    let result = inner
+    let result =
+      inner
       .components(separatedBy: ",")
       .map { $0.trimmingCharacters(in: .whitespaces) }
       .filter { !$0.isEmpty }
@@ -756,12 +781,12 @@ public struct AppConfig: Equatable { // swiftlint:disable:this type_body_length
       if !trimmed.isEmpty {
         // Strip surrounding quotes if present
         if trimmed.count >= 2,
-           trimmed.hasPrefix("\""), // swiftlint:disable:this indentation_width
-           trimmed.hasSuffix("\"")
-        { // swiftlint:disable:this opening_brace
+          trimmed.hasPrefix("\""),
+          trimmed.hasSuffix("\"")
+        {  // swiftlint:disable:this opening_brace
           let inner = trimmed.index(trimmed.startIndex, offsetBy: 1)
           let end = trimmed.index(trimmed.endIndex, offsetBy: -1)
-          return String(trimmed[inner ..< end])
+          return String(trimmed[inner..<end])
         }
         return trimmed
       }
@@ -783,7 +808,9 @@ public struct AppConfig: Equatable { // swiftlint:disable:this type_body_length
   public static func writeKeyValue(key: String, value: String, to path: String) throws {
     let fileManager = FileManager.default
     var content = ""
-    if fileManager.fileExists(atPath: path), let existing = try? String(contentsOfFile: path, encoding: .utf8) {
+    if fileManager.fileExists(atPath: path),
+      let existing = try? String(contentsOfFile: path, encoding: .utf8)
+    {  // swiftlint:disable:this opening_brace
       content = existing
     }
 
@@ -792,13 +819,13 @@ public struct AppConfig: Equatable { // swiftlint:disable:this type_body_length
       guard !replaced else { return line }
       let stripped = line.drop { $0 == " " || $0 == "\t" }
       guard let eqIndex = stripped.firstIndex(of: "=") else { return line }
-      let lineKey = stripped[stripped.startIndex ..< eqIndex].trimmingCharacters(in: .whitespaces)
+      let lineKey = stripped[stripped.startIndex..<eqIndex].trimmingCharacters(in: .whitespaces)
       guard lineKey == key else { return line }
       let valueStart = stripped.index(after: eqIndex)
       let newLine: String
       if let open = line[valueStart...].firstIndex(of: "\""),
-         let close = line[line.index(after: open)...].firstIndex(of: "\"") // swiftlint:disable:this indentation_width
-      { // swiftlint:disable:this opening_brace
+        let close = line[line.index(after: open)...].firstIndex(of: "\"")
+      {  // swiftlint:disable:this opening_brace
         // Точечная замена значения в кавычках; хвост строки (комментарий) сохраняем.
         let prefix = String(line[..<open])
         let suffix = String(line[line.index(after: close)...])
@@ -868,7 +895,9 @@ public struct AppConfig: Equatable { // swiftlint:disable:this type_body_length
   ) throws {
     let fileManager = FileManager.default
     var content = ""
-    if fileManager.fileExists(atPath: path), let existing = try? String(contentsOfFile: path, encoding: .utf8) {
+    if fileManager.fileExists(atPath: path),
+      let existing = try? String(contentsOfFile: path, encoding: .utf8)
+    {  // swiftlint:disable:this opening_brace
       content = existing
     }
 
@@ -901,13 +930,13 @@ public struct AppConfig: Equatable { // swiftlint:disable:this type_body_length
       if inSection {
         sectionEnd = idx + 1
         guard !replaced, let eqIndex = stripped.firstIndex(of: "=") else { continue }
-        let lineKey = stripped[stripped.startIndex ..< eqIndex].trimmingCharacters(in: .whitespaces)
+        let lineKey = stripped[stripped.startIndex..<eqIndex].trimmingCharacters(in: .whitespaces)
         guard lineKey == key else { continue }
         let valueStart = stripped.index(after: eqIndex)
         let newLine: String
         if let open = line[valueStart...].firstIndex(of: "\""),
-           let close = line[line.index(after: open)...].firstIndex(of: "\"") // swiftlint:disable:this indentation_width
-        { // swiftlint:disable:this opening_brace
+          let close = line[line.index(after: open)...].firstIndex(of: "\"")
+        {  // swiftlint:disable:this opening_brace
           // Точечная замена значения в кавычках; хвостовой комментарий сохраняем.
           let prefix = String(line[..<open])
           let suffix = String(line[line.index(after: close)...])
@@ -956,7 +985,8 @@ public struct AppConfig: Equatable { // swiftlint:disable:this type_body_length
 
   /// Точечная правка `review_before_insert = true|false`.
   public static func writeReviewBeforeInsert(value: Bool, to path: String? = nil) throws {
-    try writeKeyValue(key: "review_before_insert", value: value ? "true" : "false", to: path ?? defaultPath())
+    try writeKeyValue(
+      key: "review_before_insert", value: value ? "true" : "false", to: path ?? defaultPath())
   }
 
   // MARK: Маскировка и шаблон конфига (CLI: config show / config init)
@@ -1070,4 +1100,4 @@ public struct AppConfig: Equatable { // swiftlint:disable:this type_body_length
     # final_provider = "groq"
     """
   }
-} // swiftlint:disable:this file_length
+}  // swiftlint:disable:this file_length

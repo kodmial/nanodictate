@@ -39,7 +39,8 @@ public struct MicRequestPolicy {
 
   /// Файл состояния по умолчанию: Application Support/NanoDictate.
   public static func defaultFileURL() -> URL {
-    let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+    let base =
+      FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
       ?? FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent("Library/Application Support")
     return base.appendingPathComponent("NanoDictate/mic-request-state.json", isDirectory: false)
@@ -99,7 +100,8 @@ public struct MicRequestPolicy {
       let data = try JSONEncoder().encode(state)
       try data.write(to: fileURL, options: .atomic)
     } catch {
-      Logger.log("mic request policy: state persist failed: \(error.localizedDescription)", level: "error")
+      Logger.log(
+        "mic request policy: state persist failed: \(error.localizedDescription)", level: "error")
     }
   }
 

@@ -1,3 +1,5 @@
+// swiftlint:disable file_length
+
 import AppKit
 import CoreGraphics
 
@@ -64,7 +66,8 @@ public final class HotkeyService {
 
     // Модификаторы (Option/Shift/Cmd) на многих клавиатурах приходят как
     // flagsChanged, а не keyDown — слушаем оба типа.
-    let mask: CGEventMask = (1 << CGEventType.keyDown.rawValue)
+    let mask: CGEventMask =
+      (1 << CGEventType.keyDown.rawValue)
       | (1 << CGEventType.flagsChanged.rawValue)
 
     let tap = CGEvent.tapCreate(
@@ -103,7 +106,9 @@ public final class HotkeyService {
 
   // MARK: - Callback
 
-  private static let eventTapCallback: CGEventTapCallBack = { _, type, event, userInfo -> Unmanaged<CGEvent>? in
+  private static let eventTapCallback: CGEventTapCallBack = {
+    // swiftlint:disable:next closure_parameter_position
+    _, type, event, userInfo -> Unmanaged<CGEvent>? in
     guard let userInfo else {
       return Unmanaged.passRetained(event)
     }
@@ -187,7 +192,14 @@ public final class HotkeyService {
   /// второй Alt. Нажатием Alt считается только событие, у которого keyCode —
   /// сама Option (58/61); любая другая клавиша между нажатиями Option рвёт
   /// пару: незавершённый первый тап аннулируется.
-  func handleKeyboardEvent(type: CGEventType, keyCode: Int64, flags: CGEventFlags, isRepeat: Bool, at time: TimeInterval = CFAbsoluteTimeGetCurrent(), event: CGEvent? = nil) {
+  func handleKeyboardEvent(
+    type: CGEventType,
+    keyCode: Int64,
+    flags: CGEventFlags,
+    isRepeat: Bool,
+    at time: TimeInterval = CFAbsoluteTimeGetCurrent(),
+    event: CGEvent? = nil
+  ) {
     let now = time
     // Дельта от ПРЕДЫДУЩЕГО события клавиатуры — период нажатий наглядно виден.
     let delta = lastEventTime.map { now - $0 } ?? 0
@@ -196,10 +208,12 @@ public final class HotkeyService {
     switch type {
     case .flagsChanged:
       let optionDown = flags.contains(.maskAlternate)
-      logKeyboardEvent(kind: "flagsChanged", optionDown: optionDown, keyCode: keyCode, delta: delta, flags: flags)
+      logKeyboardEvent(
+        kind: "flagsChanged", optionDown: optionDown, keyCode: keyCode, delta: delta, flags: flags)
       handleFlagsChanged(keyCode: keyCode, optionDown: optionDown, now: now)
     case .keyDown:
-      logKeyboardEvent(kind: "keyDown", optionDown: nil, keyCode: keyCode, delta: delta, flags: flags)
+      logKeyboardEvent(
+        kind: "keyDown", optionDown: nil, keyCode: keyCode, delta: delta, flags: flags)
       handleKeyDownCode(keyCode, isRepeat: isRepeat, now: now, event: event)
     default:
       break
@@ -231,22 +245,26 @@ public final class HotkeyService {
 
   /// keyDown: Option — тап (без автоповтора), Escape — отмена, Return/Keypad
   /// Enter — Enter-предикат, прочее между двумя нажатиями Option — сброс тапа.
-  private func handleKeyDownCode(_ keyCode: Int64, isRepeat: Bool, now: TimeInterval, event: CGEvent?) {
+  private func handleKeyDownCode(
+    _ keyCode: Int64, isRepeat: Bool, now: TimeInterval, event: CGEvent?
+  ) {
     switch keyCode {
     case 58, 61:
       // Автоповтор зажатой Option — не новое нажатие.
       if !isRepeat {
         handleOptionTap(at: now)
       }
-    case 53: // Escape (53) — ЕДИНСТВЕННАЯ клавиша отмены
+    case 53:  // Escape (53) — ЕДИНСТВЕННАЯ клавиша отмены
       if isDebug, optionDetector.lastTimestamp != nil {
-        Logger.log("cancel key pressed keyCode=\(keyCode) — pending Alt tap cancelled", level: "debug")
+        Logger.log(
+          "cancel key pressed keyCode=\(keyCode) — pending Alt tap cancelled", level: "debug")
       }
       optionDetector.cancelPendingTap()
       delegate?.cancelKeyPressed()
-    case 36, 76: // Return (36), Keypad Enter (76) — НЕ клавиша отмены
+    case 36, 76:  // Return (36), Keypad Enter (76) — НЕ клавиша отмены
       if isDebug, optionDetector.lastTimestamp != nil {
-        Logger.log("enter key pressed keyCode=\(keyCode) — pending Alt tap cancelled", level: "debug")
+        Logger.log(
+          "enter key pressed keyCode=\(keyCode) — pending Alt tap cancelled", level: "debug")
       }
       // Свой синтетический Return (постинг после Enter-останова) тап
       // видит повторно на следующей итерации run loop — по маркеру в
@@ -269,7 +287,9 @@ public final class HotkeyService {
   }
 
   /// Дебаг-лог клавиатурного события: строка совпадает с исходным форматом.
-  private func logKeyboardEvent(kind: String, optionDown: Bool?, keyCode: Int64, delta: TimeInterval, flags: CGEventFlags) {
+  private func logKeyboardEvent(
+    kind: String, optionDown: Bool?, keyCode: Int64, delta: TimeInterval, flags: CGEventFlags
+  ) {
     guard isDebug else { return }
     let middle = optionDown.map { $0 ? " optionDOWN" : " (maskAlternate absent)" } ?? ""
     Logger.log(
@@ -305,9 +325,15 @@ public final class HotkeyService {
     if let last {
       let interval = now - last
       if interval <= doubleTapMaxInterval + 1e-9 {
-        state = String(format: "SECOND tap (interval=%.4f <= max %.2f) — will fire", interval, doubleTapMaxInterval)
+        state = String(
+          format: "SECOND tap (interval=%.4f <= max %.2f) — will fire",
+          interval,
+          doubleTapMaxInterval)
       } else {
-        state = String(format: "TIMEOUT (interval=%.4f > max %.2f) — window restarted", interval, doubleTapMaxInterval)
+        state = String(
+          format: "TIMEOUT (interval=%.4f > max %.2f) — window restarted",
+          interval,
+          doubleTapMaxInterval)
       }
     } else {
       state = "FIRST tap — awaiting second"
@@ -360,7 +386,7 @@ public struct DoubleAltDetector {
     }
 
     if timestamp - last <= maxInterval + epsilon {
-      lastTimestamp = nil // сброс — детектируем пары, а не серии
+      lastTimestamp = nil  // сброс — детектируем пары, а не серии
       return true
     }
 
@@ -390,10 +416,10 @@ public enum HotkeyServiceError: LocalizedError {
     switch self {
     case .eventTapCreationFailed:
       return """
-      Failed to create CGEvent tap. \
-      Ensure the app has Accessibility permission in \
-      System Preferences > Security & Privacy > Privacy > Accessibility.
-      """
+        Failed to create CGEvent tap. \
+        Ensure the app has Accessibility permission in \
+        System Preferences > Security & Privacy > Privacy > Accessibility.
+        """
     }
   }
 }

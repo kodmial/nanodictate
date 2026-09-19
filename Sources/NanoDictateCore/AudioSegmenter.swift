@@ -57,7 +57,9 @@ public struct AudioSegment: Equatable {
   /// предыдущем сегменте больше реально приклеенного хвоста).
   public let overlapSeconds: TimeInterval
 
-  public init(start: TimeInterval, end: TimeInterval, samples: [Int16], overlapSeconds: TimeInterval = 0) {
+  public init(
+    start: TimeInterval, end: TimeInterval, samples: [Int16], overlapSeconds: TimeInterval = 0
+  ) {
     self.start = start
     self.end = end
     self.samples = samples
@@ -93,11 +95,12 @@ public enum AudioSegmenter {
     var segStart = 0
     var silenceStart: Int?
 
-    for i in 0 ..< rms.count {
+    for i in 0..<rms.count {
       // Жёсткий потолок: режем по достижении максимальной длины.
       let segmentDuration = TimeInterval(i - segStart + 1) * windowDuration
       if segmentDuration >= config.maxSegment {
-        appendSegmentIfHasSpeech(rms: rms, range: segStart ..< (i + 1), threshold: config.silenceRMS, to: &segments)
+        appendSegmentIfHasSpeech(
+          rms: rms, range: segStart..<(i + 1), threshold: config.silenceRMS, to: &segments)
         segStart = i + 1
         silenceStart = nil
         continue
@@ -120,11 +123,12 @@ public enum AudioSegmenter {
         guard boundary >= segStart else { continue }
         let duration = TimeInterval(boundary - segStart + 1) * windowDuration
         guard duration >= config.minSegment else { continue }
-        segments.append(segStart ..< (boundary + 1))
+        segments.append(segStart..<(boundary + 1))
         segStart = i
       }
     }
-    appendTrailingSegment(rms: rms, segStart: segStart, windowDuration: windowDuration, config: config, to: &segments)
+    appendTrailingSegment(
+      rms: rms, segStart: segStart, windowDuration: windowDuration, config: config, to: &segments)
     return segments
   }
 
@@ -152,14 +156,16 @@ public enum AudioSegmenter {
     config: AudioSegmenterConfig,
     to segments: inout [Range<Int>]
   ) {
-    guard segStart < rms.count, (rms[segStart ..< rms.count].max() ?? 0) >= config.silenceRMS else { return }
-    let trail = segStart ..< rms.count
+    guard segStart < rms.count, (rms[segStart..<rms.count].max() ?? 0) >= config.silenceRMS else {
+      return
+    }
+    let trail = segStart..<rms.count
     let trailSeconds = TimeInterval(trail.count) * windowDuration
     if trailSeconds < config.minSegment,
-       let last = segments.last, // swiftlint:disable:this indentation_width
-       TimeInterval(last.count) * windowDuration + trailSeconds <= config.maxSegment
-    { // swiftlint:disable:this opening_brace
-      segments[segments.count - 1] = last.lowerBound ..< rms.count
+      let last = segments.last,
+      TimeInterval(last.count) * windowDuration + trailSeconds <= config.maxSegment
+    {  // swiftlint:disable:this opening_brace
+      segments[segments.count - 1] = last.lowerBound..<rms.count
     } else {
       segments.append(trail)
     }
@@ -178,7 +184,7 @@ public enum AudioSegmenter {
     var rms: [Float] = []
     var cursor = 0
     while cursor < samples.count {
-      let chunk = Array(samples[cursor ..< min(cursor + windowSize, samples.count)])
+      let chunk = Array(samples[cursor..<min(cursor + windowSize, samples.count)])
       rms.append(AudioMetrics.rms(samples: chunk))
       cursor += windowSize
     }
@@ -194,7 +200,7 @@ public enum AudioSegmenter {
     for (index, range) in ranges.enumerated() {
       let bodyStart = range.lowerBound * windowSize
       let bodyEnd = min(range.upperBound * windowSize, samples.count)
-      let body = Array(samples[bodyStart ..< bodyEnd])
+      let body = Array(samples[bodyStart..<bodyEnd])
 
       var segSamples = body
       var overlapSeconds: TimeInterval = 0
@@ -203,18 +209,19 @@ public enum AudioSegmenter {
         // а не из region вблизи bodyStart (там может быть тишина паузы).
         let prevEnd = min(ranges[index - 1].upperBound * windowSize, samples.count)
         let overlapFrom = max(0, prevEnd - overlapCount)
-        segSamples = Array(samples[overlapFrom ..< prevEnd]) + body
+        segSamples = Array(samples[overlapFrom..<prevEnd]) + body
         // Фактически приклеено min(overlapCount, prevEnd) сэмплов —
         // короткое предыдущее тело каппит конфигурируемый оверлэп.
         overlapSeconds = TimeInterval(prevEnd - overlapFrom) / Double(sampleRate)
       }
 
-      result.append(AudioSegment(
-        start: TimeInterval(bodyStart) / Double(sampleRate),
-        end: TimeInterval(bodyEnd) / Double(sampleRate),
-        samples: segSamples,
-        overlapSeconds: overlapSeconds
-      ))
+      result.append(
+        AudioSegment(
+          start: TimeInterval(bodyStart) / Double(sampleRate),
+          end: TimeInterval(bodyEnd) / Double(sampleRate),
+          samples: segSamples,
+          overlapSeconds: overlapSeconds
+        ))
     }
     return result
   }

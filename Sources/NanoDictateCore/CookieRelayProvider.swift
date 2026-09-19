@@ -33,7 +33,7 @@ public final class CookieRelayProvider {
   /// curl/8.0 получает «Empty reply from server»).
   public static let chromeUA =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-      + "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    + "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
   /// Имя cookie в заголовке (без "=").
   private static let cookieName = "__test"
@@ -46,7 +46,7 @@ public final class CookieRelayProvider {
 
   /// Значение токена в памяти.
   private struct Token {
-    let value: String // lowerHex значения cookie, БЕЗ "__test="
+    let value: String  // lowerHex значения cookie, БЕЗ "__test="
     let createdAt: Date
   }
 
@@ -57,7 +57,7 @@ public final class CookieRelayProvider {
   /// Результат Task — значение из performRefresh(): свежий токен или nil.
   private var refreshInFlight: Task<String?, Never>?
 
-  private let origin: String // схема+хост прокси, где живёт челлендж
+  private let origin: String  // схема+хост прокси, где живёт челлендж
   private let userAgent: String
   private let transport: HTTPTransport?
   /// Инъекцируемые часы — тесты «старят» токен без реальных задержек.
@@ -107,7 +107,8 @@ public final class CookieRelayProvider {
   /// Полностью готовое значение заголовка Cookie («__test=<hex>») или nil.
   /// Синхронно, без сети.
   public func currentCookie() -> String? {
-    lock.lock(); defer { lock.unlock() }
+    lock.lock()
+    defer { lock.unlock() }
     return token.map { "\(Self.cookieName)=\($0.value)" }
   }
 
@@ -158,7 +159,7 @@ public final class CookieRelayProvider {
     var index = hex.startIndex
     while index < hex.endIndex {
       let next = hex.index(index, offsetBy: 2, limitedBy: hex.endIndex) ?? hex.endIndex
-      if let byte = UInt8(hex[index ..< next], radix: 16) {
+      if let byte = UInt8(hex[index..<next], radix: 16) {
         result.append(byte)
       }
       index = next
@@ -235,7 +236,7 @@ public final class CookieRelayProvider {
             CCCrypt(
               CCOperation(kCCDecrypt),
               CCAlgorithm(kCCAlgorithmAES),
-              CCOptions(0), // БЕЗ kCCOptionPKCS7Padding
+              CCOptions(0),  // БЕЗ kCCOptionPKCS7Padding
               keyPtr.baseAddress,
               kCCKeySizeAES128,
               ivPtr.baseAddress,
@@ -257,7 +258,8 @@ public final class CookieRelayProvider {
 
   /// Свежесть токена и факт идущего пересчёта — под одним замком (синхронно).
   private func refreshDecision() -> (fresh: Bool, inFlight: Bool) {
-    lock.lock(); defer { lock.unlock() }
+    lock.lock()
+    defer { lock.unlock() }
     return (isFreshLocked(), refreshInFlight != nil)
   }
 
@@ -285,7 +287,8 @@ public final class CookieRelayProvider {
   }
 
   private func clearInFlight() {
-    lock.lock(); defer { lock.unlock() }
+    lock.lock()
+    defer { lock.unlock() }
     refreshInFlight = nil
   }
 
@@ -315,7 +318,8 @@ public final class CookieRelayProvider {
 
   /// Кладёт принятый кукой токен в память (синхронно — ключ в безопасности).
   private func storeToken(_ value: String) {
-    lock.lock(); defer { lock.unlock() }
+    lock.lock()
+    defer { lock.unlock() }
     token = Token(value: value, createdAt: now())
   }
 

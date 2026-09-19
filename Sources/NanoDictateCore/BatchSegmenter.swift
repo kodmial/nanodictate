@@ -1,3 +1,5 @@
+// swiftlint:disable file_length
+
 import Foundation
 
 // MARK: - Ответственность: пакетная сегментация файла (без микрофонного пути)
@@ -46,7 +48,7 @@ public final class ArrayPCMBatchContent: PCMBatchContent {
     let low = max(0, range.lowerBound)
     let high = min(sampleCount, range.upperBound)
     guard low < high else { return [] }
-    let clamped = low ..< high
+    let clamped = low..<high
     return Array(samples[clamped])
   }
 }
@@ -105,7 +107,7 @@ public final class WAVFilePCMBatchContent: PCMBatchContent {
     } catch {
       try? handle.close()
       if let wavError = error as? WAVFileError {
-        throw wavError // invalidWAV от гардов — уже осмысленная ошибка
+        throw wavError  // invalidWAV от гардов — уже осмысленная ошибка
       }
       // OS-ошибка read/seek (недоступный файл, битый дескриптор) —
       // не сквашиваем в invalidWAV, сохраняем первопричину.
@@ -124,7 +126,7 @@ public final class WAVFilePCMBatchContent: PCMBatchContent {
     let low = max(0, range.lowerBound)
     let high = min(sampleCount, range.upperBound)
     guard low < high else { return [] }
-    let clamped = low ..< high
+    let clamped = low..<high
     readLock.lock()
     defer { readLock.unlock() }
     var out: [Int16] = []
@@ -146,7 +148,7 @@ public final class WAVFilePCMBatchContent: PCMBatchContent {
       throw WAVFileError.ioError(error.localizedDescription)
     }
     guard out.count == clamped.count else {
-      throw WAVFileError.invalidWAV // недобор: файл короче объявленного dataSize
+      throw WAVFileError.invalidWAV  // недобор: файл короче объявленного dataSize
     }
     return out
   }
@@ -159,7 +161,7 @@ public final class WAVFilePCMBatchContent: PCMBatchContent {
 /// Это позволяет хранить в RAM только ~N чанков (где N ≤ maxConcurrent).
 public struct BatchBodySpec: Equatable {
   public let index: Int
-  public let bodyStart: TimeInterval // секунды от начала файла
+  public let bodyStart: TimeInterval  // секунды от начала файла
   public let bodyEnd: TimeInterval
   /// Read-окно тела (в сэмплах, 0-based, моно).
   public let bodyRange: Range<Int>
@@ -229,20 +231,21 @@ public enum BatchSegmenter {
 
     while bodyStart < samples.count {
       let bodyEnd = min(bodyStart + bodySize, samples.count)
-      let body = Array(samples[bodyStart ..< bodyEnd])
+      let body = Array(samples[bodyStart..<bodyEnd])
 
       var chunkSamples = body
       if let prevBodyEnd, overlapCount > 0 {
         let overlapFrom = max(0, prevBodyEnd - overlapCount)
-        chunkSamples = Array(samples[overlapFrom ..< prevBodyEnd]) + body
+        chunkSamples = Array(samples[overlapFrom..<prevBodyEnd]) + body
       }
 
-      result.append(BatchChunk(
-        index: index,
-        bodyStart: TimeInterval(bodyStart) / Double(sampleRate),
-        bodyEnd: TimeInterval(bodyEnd) / Double(sampleRate),
-        samples: chunkSamples
-      ))
+      result.append(
+        BatchChunk(
+          index: index,
+          bodyStart: TimeInterval(bodyStart) / Double(sampleRate),
+          bodyEnd: TimeInterval(bodyEnd) / Double(sampleRate),
+          samples: chunkSamples
+        ))
 
       index += 1
       prevBodyEnd = bodyEnd
@@ -290,7 +293,8 @@ public enum BatchSegmenter {
     let overlapCount = max(0, min(Int((overlap * Double(sampleRate)).rounded()), totalSamples))
     let maxDriftSamples = Int((maxDrift * Double(sampleRate)).rounded())
     let minPauseSamples = Int((pauseDuration * Double(sampleRate)).rounded())
-    let windowSize = max(1, Int((AudioSegmenter.defaultWindowDuration * Double(sampleRate)).rounded()))
+    let windowSize = max(
+      1, Int((AudioSegmenter.defaultWindowDuration * Double(sampleRate)).rounded()))
 
     var result: [BatchBodySpec] = []
     var bodyStart = 0
@@ -316,16 +320,17 @@ public enum BatchSegmenter {
       }
 
       let overlapRange: Range<Int>? = prevBodyEnd.map {
-        max(0, $0 - overlapCount) ..< $0
+        max(0, $0 - overlapCount)..<$0
       }
 
-      result.append(BatchBodySpec(
-        index: index,
-        bodyStart: TimeInterval(bodyStart) / Double(sampleRate),
-        bodyEnd: TimeInterval(bodyEnd) / Double(sampleRate),
-        bodyRange: bodyStart ..< bodyEnd,
-        overlapRange: overlapRange
-      ))
+      result.append(
+        BatchBodySpec(
+          index: index,
+          bodyStart: TimeInterval(bodyStart) / Double(sampleRate),
+          bodyEnd: TimeInterval(bodyEnd) / Double(sampleRate),
+          bodyRange: bodyStart..<bodyEnd,
+          overlapRange: overlapRange
+        ))
 
       index += 1
       prevBodyEnd = bodyEnd
@@ -357,7 +362,7 @@ public enum BatchSegmenter {
 
     while cursor < high {
       let winEnd = min(cursor + windowSize, high)
-      let window = try content.readSamples(cursor ..< winEnd)
+      let window = try content.readSamples(cursor..<winEnd)
       let rms = AudioMetrics.rms(samples: window)
       let isSilent = rms < AudioMetrics.nearSilenceThreshold
 

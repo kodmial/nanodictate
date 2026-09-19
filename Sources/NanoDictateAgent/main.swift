@@ -7,9 +7,9 @@
 //  Swift 5.7, macOS 12, Intel. Только AppKit/Foundation/AVFoundation через NanoDictateCore.
 //
 
+import AVFoundation
 import AppKit
 import ApplicationServices
-import AVFoundation
 import NanoDictateCore
 
 // MARK: - Agent
@@ -264,7 +264,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     // (legacy-алиасы старого конфига канонизируются при парсинге;
     // корневой key или секция активного провайдера: resolveActiveProvider
     // уже скопировал его в effective-конфиг). nil — поведение как раньше.
-    let cookieRelayProvider = config.transport == "cookie-relay"
+    let cookieRelayProvider =
+      config.transport == "cookie-relay"
       ? CookieRelayProvider.makeForCookieRelay(baseURL: config.baseURL)
       : nil
     // Единый реестр cookie-relay-провайдеров по baseURL (кука выпускается
@@ -296,7 +297,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     // провайдер по порядку. От него зависит, КОГО исключать из failover-
     // очереди и какой адаптер запроса использует основной путь: повторять
     // падение основного провайдера при автоfailover нельзя.
-    activeProviderID = config.activeProvider.isEmpty
+    activeProviderID =
+      config.activeProvider.isEmpty
       ? config.providers.first?.id
       : config.activeProvider
     failoverCandidates = config.failoverProviders(excluding: activeProviderID)
@@ -319,14 +321,16 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         model: provider.model,
         apiKey: RetryProvider.resolveAPIKey(for: provider),
         proxyKey: provider.proxyKey,
-        proxyKeyHeader: provider.proxyKeyHeader.isEmpty ? config.proxyKeyHeader : provider.proxyKeyHeader,
+        proxyKeyHeader: provider.proxyKeyHeader.isEmpty
+          ? config.proxyKeyHeader : provider.proxyKeyHeader,
         language: config.language,
         timeout: config.timeoutSeconds,
         logLevel: config.logLevel,
         cookieRelayProvider: retryTransport(provider),
         httpProxy: provider.httpProxy.isEmpty ? config.httpProxy : provider.httpProxy,
         proxyUser: provider.proxyUser.isEmpty ? config.proxyUser : provider.proxyUser,
-        proxyPassword: provider.proxyPassword.isEmpty ? config.proxyPassword : provider.proxyPassword,
+        proxyPassword: provider.proxyPassword.isEmpty
+          ? config.proxyPassword : provider.proxyPassword,
         adapterID: provider.id
       )
     }
@@ -450,7 +454,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
 
     // Автоподхват права: опрос каждые 2 секунды на главном потоке.
     accessibilityPollTimer?.invalidate()
-    accessibilityPollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
+    accessibilityPollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) {
+      [weak self] timer in  // swiftlint:disable:this closure_parameter_position
       guard let self else {
         timer.invalidate()
         return
@@ -494,7 +499,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     // приложения. Статическая строка-литерал гарантированно валидна на
     // macOS 12+.
     guard
-      let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+      let url = URL(
+        string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
     else { return }
     NSWorkspace.shared.open(url)
   }
@@ -683,7 +689,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         Logger.log("mic permission request result: denied", level: "info")
         self.showMicrophoneError(L10n.tr("error.micPermission"))
       case .timedOut:
-        Logger.log("mic permission request timed out after \(Int(Self.micRequestTimeout)) s", level: "error")
+        Logger.log(
+          "mic permission request timed out after \(Int(Self.micRequestTimeout)) s", level: "error")
         self.showMicrophoneError(L10n.tr("error.micPermissionUnhandled"))
       case .suppressedByPolicy:
         Logger.log(
@@ -776,7 +783,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         if self.isDebug {
           Logger.log("record started: state = .recording", level: "debug")
         }
-      case let .failure(error):
+      case .failure(let error):
         Logger.log("microphone unavailable: \(error.localizedDescription)", level: "error")
         self.showMicrophoneError(L10n.tr("error.micEnableFailed"))
       }
@@ -824,6 +831,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
 
   /// Обычный путь финализации записи: сэмплы → WAV → ОДНА транскрибация.
   /// Ровно текущее поведение (регрессионный путь при chunked = false).
+  // swiftlint:disable:next function_body_length
   private func processSingleRequest(_ samples: [Int16]) {
     state = .transcribing
     // Новый цикл — токен отмены прошлого распознавания не действует.
@@ -835,7 +843,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     // видно, в каких единицах уходит аудио в STT. Звук завершения играем
     // НЕ здесь, а в completeInsertion ПОСЛЕ вставки текста.
     let duration = Double(samples.count) / 16000.0
-    Logger.log(String(format: "transcribe submit (\(samples.count) samples, %.2f s)", duration), level: "info")
+    Logger.log(
+      String(format: "transcribe submit (\(samples.count) samples, %.2f s)", duration),
+      level: "info")
 
     // Что именно уходит в LLM: длительность + уровень RMS + флаг «около-тишины».
     // Метрология — только при log_level == "debug" (не спамить).
@@ -861,7 +871,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     // любого терминального события.
     processingSession += 1
     let session = processingSession
-    DispatchQueue.main.asyncAfter(deadline: .now() + OverlayController.processingMaxDuration) { [weak self] in
+    DispatchQueue.main.asyncAfter(deadline: .now() + OverlayController.processingMaxDuration) {
+      [weak self] in  // swiftlint:disable:this closure_parameter_position
       guard
         let self,
         self.processingSession == session,
@@ -896,10 +907,12 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
           // state все ещё .transcribing) И распознавание не отменено
           // по Esc. Отмена по Esc ставит cancelRecognition и уводит
           // state в .idle — текст вставлен не будет.
-          guard NanoDictateFlow.shouldDeliverResult(
-            isCancelled: self.cancelRecognition,
-            sessionActive: self.processingSession == session && self.state == .transcribing
-          ) else { return }
+          guard
+            NanoDictateFlow.shouldDeliverResult(
+              isCancelled: self.cancelRecognition,
+              sessionActive: self.processingSession == session && self.state == .transcribing
+            )
+          else { return }
           self.completeInsertion(text)
         }
       } catch {
@@ -930,7 +943,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     overlay.setStatus(L10n.tr("overlay.recognizing"))
     sounds.playEnd()
     let duration = Double(samples.count) / 16000.0
-    Logger.log(String(format: "chunked transcribe submit (\(samples.count) samples, %.2f s)", duration), level: "info")
+    Logger.log(
+      String(format: "chunked transcribe submit (\(samples.count) samples, %.2f s)", duration),
+      level: "info")
 
     // Страж фазы «обработка»: несколько сегментов + финальный проход —
     // каждый запрос до networkRequestTimeout; сторож считает по числу
@@ -986,7 +1001,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
               switch operation {
               case let .appendSegment(index, text):
                 Inserter.append(text)
-                Logger.log("chunked append segment \(index + 1) (\(text.count) chars)", level: "info")
+                Logger.log(
+                  "chunked append segment \(index + 1) (\(text.count) chars)", level: "info")
               case let .replaceTail(old, new):
                 Inserter.replaceRange(old: old, new: new)
                 Logger.log(
@@ -1005,9 +1021,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
                 self.state == .transcribing
               else { return }
               switch phase {
-              case let .segment(index):
+              case .segment(let index):
                 let recognizingTemplate = L10n.tr("overlay.recognizingPart")
-                let recognizingStatus = recognizingTemplate.replacingOccurrences(of: "{n}", with: "\(index + 1)")
+                let recognizingStatus = recognizingTemplate.replacingOccurrences(
+                  of: "{n}", with: "\(index + 1)")
                 self.overlay.setStatus(recognizingStatus)
               case .finalizing:
                 self.overlay.setStatus(L10n.tr("overlay.finalProcessing"))
@@ -1073,7 +1090,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         return
       }
     } else if reviewBeforeInsert {
-      Logger.log("review_before_insert включён, но stdin не терминал — ревью чанка пропущено", level: "info")
+      Logger.log(
+        "review_before_insert включён, но stdin не терминал — ревью чанка пропущено", level: "info")
     }
 
     // Бухгалтерия undo: двойной Alt в пределах undoMaxInterval стирает
@@ -1174,7 +1192,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         self.liveSession == runState.session,
         self.state == .recording || self.state == .transcribing
       else { return }
-      self.overlay.setStatus(L10n.tr("overlay.recognizingPart").replacingOccurrences(of: "{n}", with: "\(index + 1)"))
+      self.overlay.setStatus(
+        L10n.tr("overlay.recognizingPart").replacingOccurrences(of: "{n}", with: "\(index + 1)"))
     }
 
     do {
@@ -1186,13 +1205,15 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         samples: segmentSamples,
         index: index,
         insertedText: runState.insertedText,
-        prompt: runState.promptParts.isEmpty ? nil : ChunkedPipeline.truncatedPrompt(runState.promptParts),
+        prompt: runState.promptParts.isEmpty
+          ? nil : ChunkedPipeline.truncatedPrompt(runState.promptParts),
         stt: { wav, filename, prompt in
           // Роль segment из [routing] — как в processChunked: провайдер
           // сегментов; не задан — активный transcriber (failover здесь
           // не нужен — финальный проход «докрутит»).
           let transcriber = self.roleTranscriber(self.segmentRoleProviderID) ?? self.transcriber
-          let segmentResult = try await transcriber.transcribe(wav: wav, filename: filename, prompt: prompt)
+          let segmentResult = try await transcriber.transcribe(
+            wav: wav, filename: filename, prompt: prompt)
           return ChunkedPipeline.SttResult(text: segmentResult.text, words: segmentResult.words)
         },
         filename: "live-segment-\(index + 1).wav"
@@ -1216,7 +1237,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         else { return }
         // Инкрементальная вставка в поле ввода: «появляется постепенно».
         Inserter.append(result.insertText)
-        Logger.log("live append segment \(index + 1) (\(result.insertText.count) chars)", level: "info")
+        Logger.log(
+          "live append segment \(index + 1) (\(result.insertText.count) chars)", level: "info")
         // Статус возвращается к фазе записи — кроме «хвоста» (идёт
         // фиксация: «Распознаю…» покажет страж/финальный проход).
         if self.state == .recording {
@@ -1265,7 +1287,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     // stop() и уже стоит в liveExecutor первым в очереди финализации.
     let samples = audio.stop()
     let duration = Double(samples.count) / 16000.0
-    Logger.log(String(format: "live finalize (\(samples.count) samples, %.2f s)", duration), level: "info")
+    Logger.log(
+      String(format: "live finalize (\(samples.count) samples, %.2f s)", duration), level: "info")
 
     // Страж фазы «обработка»: незавершённые сегменты + «хвост» + финальный
     // проход — каждый запрос до networkRequestTimeout (запас на все).
@@ -1301,7 +1324,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     overlay.setStatus(L10n.tr("overlay.recognizing"))
     sounds.playEnd()
     let duration = Double(samples.count) / 16000.0
-    Logger.log(String(format: "live limit finalize (\(samples.count) samples, %.2f s)", duration), level: "info")
+    Logger.log(
+      String(format: "live limit finalize (\(samples.count) samples, %.2f s)", duration),
+      level: "info")
 
     let requestCount = max(2, runState.segmentCount + 2)
     let liveMaxDuration = Double(requestCount) * Transcriber.networkRequestTimeout + 5
@@ -1379,15 +1404,18 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
           // идёт провайдером роли; не задан — активный transcriber
           // (ровно текущее поведение: без failover — роль выбрана явно).
           let transcriber = self.roleTranscriber(self.finalRoleProviderID) ?? self.transcriber
-          let finalResult = try await transcriber.transcribe(wav: wav, filename: filename, prompt: prompt)
+          let finalResult = try await transcriber.transcribe(
+            wav: wav, filename: filename, prompt: prompt)
           return ChunkedPipeline.SttResult(text: finalResult.text, words: finalResult.words)
         },
         insert: { operation in
           DispatchQueue.main.async {
             guard self.processingSession == session, self.state == .transcribing else { return }
-            if case let .replaceTail(old, new) = operation {
+            if case .replaceTail(let old, let new) = operation {
               Inserter.replaceRange(old: old, new: new)
-              Logger.log("live final replace: backspace \(old.count) chars, type \(new.count) chars", level: "info")
+              Logger.log(
+                "live final replace: backspace \(old.count) chars, type \(new.count) chars",
+                level: "info")
             }
           }
         },
@@ -1449,7 +1477,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         return
       }
     } else if reviewBeforeInsert {
-      Logger.log("review_before_insert включён, но stdin не терминал (launchd?) — ревью пропущено", level: "info")
+      Logger.log(
+        "review_before_insert включён, но stdin не терминал (launchd?) — ревью пропущено",
+        level: "info")
     }
 
     // Вставка текста выбранным способом (cgevent / clipboard) — единственная
@@ -1571,7 +1601,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
           }
           self.overlay.resetPhase()
           let retryErrorText = networkText ?? Self.message(for: error)
-          self.overlay.setStatus(L10n.tr("overlay.retryError").replacingOccurrences(of: "{message}", with: retryErrorText))
+          self.overlay.setStatus(
+            L10n.tr("overlay.retryError").replacingOccurrences(
+              of: "{message}", with: retryErrorText))
           self.hideAfter(2.0, reason: "retry failed")
         }
       }
@@ -1604,7 +1636,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         return
       }
     } else if reviewBeforeInsert {
-      Logger.log("review_before_insert включён, но stdin не терминал — ревью ретрая пропущено", level: "info")
+      Logger.log(
+        "review_before_insert включён, но stdin не терминал — ревью ретрая пропущено", level: "info"
+      )
     }
     Inserter.insert(text: text, method: insertMethod)
     overlay.resetPhase()
@@ -1753,11 +1787,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       return error.localizedDescription
     }
     switch transcribeError {
-    case let .network(message):
+    case .network(let message):
       return message
     case let .http(code, body):
       return "HTTP \(code): \(body)"
-    case let .invalidResponse(message):
+    case .invalidResponse(let message):
       return message
     }
   }
@@ -1782,17 +1816,22 @@ func ensureSingleInstance() -> Bool {
   let fileDescriptor = lockPath.withCString { Darwin.open($0, O_CREAT | O_RDWR, mode_t(0o600)) }
   guard fileDescriptor >= 0 else {
     let error = errno
-    Logger.log("single-instance lock open failed (errno \(error)): \(String(cString: strerror(error)))", level: "error")
+    Logger.log(
+      "single-instance lock open failed (errno \(error)): \(String(cString: strerror(error)))",
+      level: "error")
     exit(1)
   }
   guard flock(fileDescriptor, LOCK_EX | LOCK_NB) == 0 else {
     let error = errno
     guard error == EWOULDBLOCK else {
-      Logger.log("single-instance lock failed (errno \(error)): \(String(cString: strerror(error)))", level: "error")
+      Logger.log(
+        "single-instance lock failed (errno \(error)): \(String(cString: strerror(error)))",
+        level: "error")
       close(fileDescriptor)
       exit(1)
     }
-    Logger.log("another dictation agent instance already running — entering idle wait", level: "info")
+    Logger.log(
+      "another dictation agent instance already running — entering idle wait", level: "info")
     close(fileDescriptor)
     return false
   }

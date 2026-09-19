@@ -120,7 +120,7 @@ public final class SysSounds {
   }
 
   private func play(_ name: String, label: String) {
-    guard enabled else { return } // enabled == false — полный no-op
+    guard enabled else { return }  // enabled == false — полный no-op
     Logger.log("sounds: \(label)", level: "debug")
 
     // Тестовый раннер (NANODICTATE_TESTS=1): реальный системный звук НЕ
@@ -207,7 +207,7 @@ public enum Logger {
       do {
         try fileManager.createDirectory(atPath: expanded, withIntermediateDirectories: true)
       } catch {
-        return // нет доступа к каталогу логов — молча пропускаем
+        return  // нет доступа к каталогу логов — молча пропускаем
       }
     }
 

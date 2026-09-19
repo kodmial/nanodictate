@@ -1,5 +1,5 @@
-import AudioEngineGuard
 import AVFoundation
+import AudioEngineGuard
 import Foundation
 
 // MARK: - Протоколы движка (инъекция в тестах)
@@ -275,12 +275,14 @@ public final class AudioService {
     liveMicroPauseSamples = Int((0.25 * 16000).rounded())
     // Формат, в который пересэмплируем всё аудио: 16 кГц, моно, Float32.
     // Данный init гарантированно валиден на macOS 12+.
-    guard let format = AVAudioFormat(
-      commonFormat: .pcmFormatFloat32,
-      sampleRate: 16000,
-      channels: 1,
-      interleaved: false
-    ) else {
+    guard
+      let format = AVAudioFormat(
+        commonFormat: .pcmFormatFloat32,
+        sampleRate: 16000,
+        channels: 1,
+        interleaved: false
+      )
+    else {
       fatalError("AudioService: 16 kHz Float32 mono AVAudioFormat is guaranteed valid on macOS 12+")
     }
     targetFormat = format
@@ -334,7 +336,9 @@ public final class AudioService {
   /// разбирают движок и трогают state сеанса ТОЛЬКО если движок, что начал,
   /// всё ещё текущий (не подменён wedge'ом после таймаута сторожа).
   // swiftlint:disable:next cyclomatic_complexity function_body_length
-  private func startOnEngineQueue(using engine: AudioEngineLike, startGeneration: Int) -> Result<Void, Error> {
+  private func startOnEngineQueue(using engine: AudioEngineLike, startGeneration: Int) -> Result<
+    Void, Error
+  > {
     // Новый сеанс: чистые буферы, чистый лимит (после принудительной
     // остановки или аварийной ветки).
     collectedSamples = []
@@ -346,7 +350,7 @@ public final class AudioService {
     limitStopScheduled = false
     autoStopScheduled = false
     autoStopDetector.reset()
-    gain.reset() // новый сеанс — с нулевого усиления, без остатка прошлой записи
+    gain.reset()  // новый сеанс — с нулевого усиления, без остатка прошлой записи
     liveLastCutIndex = 0
     resetLiveVADLocked()
     lock.unlock()
@@ -389,7 +393,8 @@ public final class AudioService {
       }
       setRecording(false)
       teardownOnEngineQueue(using: engine)
-      Logger.log("record engine: input setup failed: \(setupFailure.localizedDescription)", level: "error")
+      Logger.log(
+        "record engine: input setup failed: \(setupFailure.localizedDescription)", level: "error")
       return .failure(setupFailure)
     }
     guard let input = capturedInput, let hwFormat = capturedHWFormat else {
@@ -399,8 +404,8 @@ public final class AudioService {
     }
     guard let converter = capturedConverter else {
       Logger.log(
-        "record engine: AVAudioConverter init failed (hw=\(Int(hwFormat.sampleRate)) Hz -> " +
-          "target=\(Int(targetFormat.sampleRate)) Hz)",
+        "record engine: AVAudioConverter init failed (hw=\(Int(hwFormat.sampleRate)) Hz -> "
+          + "target=\(Int(targetFormat.sampleRate)) Hz)",
         level: "error"
       )
       return .failure(AudioServiceError.unsupportedFormat)
@@ -413,28 +418,28 @@ public final class AudioService {
     let mic = MicrophoneAuth.statusText(AVCaptureDevice.authorizationStatus(for: .audio))
     Logger.log("mic permission: \(mic) (record start)", level: "info")
     Logger.log(
-      "record start: sampleRate=\(Int(targetFormat.sampleRate)) Hz, channels=\(targetFormat.channelCount), " +
-        "hwFormat=\(Int(hwFormat.sampleRate)) Hz",
+      "record start: sampleRate=\(Int(targetFormat.sampleRate)) Hz, channels=\(targetFormat.channelCount), "
+        + "hwFormat=\(Int(hwFormat.sampleRate)) Hz",
       level: "info"
     )
     // Диагностика автоостановки: видно, включена ли фича, пара порогов
     // гистерезиса, grace, гейт «речь была» и пол записи (все значения из
     // окружения — см. fromEnvironment).
     Logger.log(
-      "record auto-stop: enabled=\(autoStopConfig.enabled), " +
-        "speech>=\(autoStopConfig.speechRMSThreshold), silence<\(autoStopConfig.silenceRMSThreshold), " +
-        "silence>=\(String(format: "%.1f", autoStopConfig.requiredSilenceDuration))s, " +
-        "grace=\(String(format: "%.1f", autoStopConfig.gracePeriod))s, " +
-        "gate>=\(String(format: "%.1f", autoStopConfig.minSpeechRun))s, " +
-        "minRecord=\(String(format: "%.1f", autoStopConfig.minRecordingDuration))s",
+      "record auto-stop: enabled=\(autoStopConfig.enabled), "
+        + "speech>=\(autoStopConfig.speechRMSThreshold), silence<\(autoStopConfig.silenceRMSThreshold), "
+        + "silence>=\(String(format: "%.1f", autoStopConfig.requiredSilenceDuration))s, "
+        + "grace=\(String(format: "%.1f", autoStopConfig.gracePeriod))s, "
+        + "gate>=\(String(format: "%.1f", autoStopConfig.minSpeechRun))s, "
+        + "minRecord=\(String(format: "%.1f", autoStopConfig.minRecordingDuration))s",
       level: "info"
     )
     // Диагностика AGC: видно, включено ли усиление и какими параметрами
     // (рубильник/цель/потолок из окружения — см. InputGainConfig.fromEnvironment).
     Logger.log(
-      "record input-gain: enabled=\(gain.config.enabled), " +
-        "target=\(String(format: "%.1f", gain.config.targetRmsDb)) dBFS, " +
-        "max=\(String(format: "%.1f", gain.config.maxGainDb)) dB",
+      "record input-gain: enabled=\(gain.config.enabled), "
+        + "target=\(String(format: "%.1f", gain.config.targetRmsDb)) dBFS, "
+        + "max=\(String(format: "%.1f", gain.config.maxGainDb)) dB",
       level: "info"
     )
 
@@ -633,7 +638,8 @@ public final class AudioService {
     tapInstalled = false
     converter = nil
     lock.unlock()
-    Logger.log("record engine: wedged engine replaced — fresh AVAudioEngine installed", level: "info")
+    Logger.log(
+      "record engine: wedged engine replaced — fresh AVAudioEngine installed", level: "info")
     // Разборка старого движка вне очередей движка (см. комментарий метода).
     DispatchQueue.global(qos: .utility).async { [weak self] in
       guard let self else { return }
@@ -724,7 +730,7 @@ public final class AudioService {
     guard let start = liveUtteranceStart else { return [] }
     let end = min(liveUtteranceEnd, collectedSamples.count)
     guard end > start else { return [] }
-    return Array(collectedSamples[start ..< end])
+    return Array(collectedSamples[start..<end])
   }
 
   private func setRecording(_ value: Bool) {
@@ -788,14 +794,16 @@ public final class AudioService {
     converter: AVAudioConverter,
     targetFormat: AVAudioFormat
   ) -> (converted: AVAudioPCMBuffer, status: AVAudioConverterOutputStatus)? {
-    guard let converted = AVAudioPCMBuffer(
-      pcmFormat: targetFormat,
-      frameCapacity: outputFrameCapacity(
-        forInputFrames: input.frameLength,
-        inputRate: inputFormat.sampleRate,
-        outputRate: targetFormat.sampleRate
+    guard
+      let converted = AVAudioPCMBuffer(
+        pcmFormat: targetFormat,
+        frameCapacity: outputFrameCapacity(
+          forInputFrames: input.frameLength,
+          inputRate: inputFormat.sampleRate,
+          outputRate: targetFormat.sampleRate
+        )
       )
-    ) else { return nil }
+    else { return nil }
 
     var fedInput = false
     let status = converter.convert(to: converted, error: nil) { _, outStatus in
@@ -825,13 +833,16 @@ public final class AudioService {
       logDroppedBuffer(reason: "converter is nil (stopped?)", frames: buffer.frameLength)
       return
     }
-    guard let result = AudioService.convertOnce(
-      input: buffer,
-      inputFormat: buffer.format,
-      converter: converter,
-      targetFormat: targetFormat
-    ) else {
-      logDroppedBuffer(reason: "convertOnce -> nil (empty output or error)", frames: buffer.frameLength)
+    guard
+      let result = AudioService.convertOnce(
+        input: buffer,
+        inputFormat: buffer.format,
+        converter: converter,
+        targetFormat: targetFormat
+      )
+    else {
+      logDroppedBuffer(
+        reason: "convertOnce -> nil (empty output or error)", frames: buffer.frameLength)
       return
     }
     guard let channel = result.converted.floatChannelData?[0] else {
@@ -844,7 +855,7 @@ public final class AudioService {
     // RMS ДО усиления — вход AGC: «сколько дБ не хватает до целевого
     // уровня речи» (метеорология по сырому сигналу тапа).
     var sum: Float = 0
-    for i in 0 ..< frameLength {
+    for i in 0..<frameLength {
       let sample = channel[i]
       sum += sample * sample
     }
@@ -882,7 +893,8 @@ public final class AudioService {
       if isDebug {
         Logger.log(
           String(
-            format: "record first buffer: inFrames=%d (%.3f s @ %.0f Hz), outFrames=%d, rms=%.4f (%.1f dBFS)",
+            format:
+              "record first buffer: inFrames=%d (%.3f s @ %.0f Hz), outFrames=%d, rms=%.4f (%.1f dBFS)",
             buffer.frameLength,
             Double(buffer.frameLength) / buffer.format.sampleRate,
             buffer.format.sampleRate,
@@ -902,7 +914,7 @@ public final class AudioService {
     collectedSamples.reserveCapacity(
       min(collectedSamples.count + frameLength, limit.maxSamples)
     )
-    for i in 0 ..< appendCount {
+    for i in 0..<appendCount {
       let sample = channel[i]
       if sample > 1.0 {
         collectedSamples.append(Int16(32767))
@@ -934,9 +946,10 @@ public final class AudioService {
       // Вызывается только при liveUtteranceStart != nil (см. ниже) — nil
       // невозможен по инварианту, гард — страховка для компайлера.
       guard let start = self.liveUtteranceStart else { return }
-      let postEnd = min(self.liveUtteranceEnd + self.livePostRollSamples, self.collectedSamples.count)
+      let postEnd = min(
+        self.liveUtteranceEnd + self.livePostRollSamples, self.collectedSamples.count)
       let cutIndex = postEnd
-      deliveredSegment = Array(self.collectedSamples[start ..< postEnd])
+      deliveredSegment = Array(self.collectedSamples[start..<postEnd])
       self.liveLastCutIndex = cutIndex
       self.resetLiveVADLocked()
     }
@@ -989,10 +1002,12 @@ public final class AudioService {
     // аудио, а не по числу буферов — частота колбэков зависит от частоты
     // железа (~85 мс @ 48 кГц, ~93 мс @ 44.1 кГц), а «3 секунды тишины»
     // меряются по звуку.
-    let autoStopFired = autoStopConfig.enabled && !shouldStop && autoStopDetector.feed(
-      rms: meteredRms,
-      duration: Double(frameLength) / Double(targetFormat.sampleRate)
-    )
+    let autoStopFired =
+      autoStopConfig.enabled && !shouldStop
+      && autoStopDetector.feed(
+        rms: meteredRms,
+        duration: Double(frameLength) / Double(targetFormat.sampleRate)
+      )
     lock.unlock()
     if shouldStop {
       scheduleLimitStop()
@@ -1081,8 +1096,8 @@ public final class AudioService {
 
     if isDebug {
       Logger.log(
-        "record forced stop (\(reason == .limit ? "limit" : "silence auto-stop")): " +
-          "tearing engine down (samples=\(samples.count))",
+        "record forced stop (\(reason == .limit ? "limit" : "silence auto-stop")): "
+          + "tearing engine down (samples=\(samples.count))",
         level: "debug"
       )
     }
@@ -1126,7 +1141,8 @@ public final class AudioService {
     let summary = AudioMetrics.summarize(rmsValues: rmsHistory)
     Logger.log(
       String(
-        format: "record metering: rms min=%.4f (%.1f dBFS), avg=%.4f (%.1f dBFS), max=%.4f (%.1f dBFS), nearSilence=%@",
+        format:
+          "record metering: rms min=%.4f (%.1f dBFS), avg=%.4f (%.1f dBFS), max=%.4f (%.1f dBFS), nearSilence=%@",
         Double(summary.minRMS),
         Double(AudioMetrics.dbfs(summary.minRMS)),
         Double(summary.avgRMS),

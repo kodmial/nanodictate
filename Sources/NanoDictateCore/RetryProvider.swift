@@ -35,11 +35,13 @@ public final class RetryProvider {
   private var _lastFailedProviderID: String?
   public var lastFailedProviderID: String? {
     get {
-      lock.lock(); defer { lock.unlock() }
+      lock.lock()
+      defer { lock.unlock() }
       return _lastFailedProviderID
     }
     set {
-      lock.lock(); defer { lock.unlock() }
+      lock.lock()
+      defer { lock.unlock() }
       _lastFailedProviderID = newValue
     }
   }
@@ -82,23 +84,29 @@ public final class RetryProvider {
   /// Cookie-relay-провайдер провайдера: переиспользует инстанс из кэша, иначе
   /// создаёт и кладёт в кэш. Синхронный доступ к кэшу — через хелперы
   /// (NSLock не трогаем из async-контекста).
-  private static func sharedCookieRelay(for provider: AppConfig.Provider) async -> CookieRelayProvider? {
+  private static func sharedCookieRelay(for provider: AppConfig.Provider) async
+    -> CookieRelayProvider?
+  {  // swiftlint:disable:this opening_brace
     guard provider.transport == "cookie-relay" else { return nil }
     if let existing = cachedCookieRelay(provider.baseURL) {
       return existing
     }
-    guard let made = CookieRelayProvider.makeForCookieRelay(baseURL: provider.baseURL) else { return nil }
+    guard let made = CookieRelayProvider.makeForCookieRelay(baseURL: provider.baseURL) else {
+      return nil
+    }
     storeCookieRelay(provider.baseURL, made)
     return made
   }
 
   private static func cachedCookieRelay(_ baseURL: String) -> CookieRelayProvider? {
-    cookieRelayLock.lock(); defer { cookieRelayLock.unlock() }
+    cookieRelayLock.lock()
+    defer { cookieRelayLock.unlock() }
     return cookieRelayByURL[baseURL]
   }
 
   private static func storeCookieRelay(_ baseURL: String, _ provider: CookieRelayProvider) {
-    cookieRelayLock.lock(); defer { cookieRelayLock.unlock() }
+    cookieRelayLock.lock()
+    defer { cookieRelayLock.unlock() }
     cookieRelayByURL[baseURL] = provider
   }
 
@@ -135,26 +143,30 @@ public final class RetryProvider {
 
   /// Сохранить последний буфер WAV (вызывается из обработчика сэмплов агента).
   public func store(wav: Data) {
-    lock.lock(); defer { lock.unlock() }
+    lock.lock()
+    defer { lock.unlock() }
     _lastWAV = wav
     _lastWAVCreatedAt = Date()
   }
 
   /// Последний буфер WAV (nil — ещё не было записи в этой сессии).
   public var lastWAV: Data? {
-    lock.lock(); defer { lock.unlock() }
+    lock.lock()
+    defer { lock.unlock() }
     return _lastWAV
   }
 
   /// Время сохранения последней записи (для свежести retry из CLI).
   public var lastWAVCreatedAt: Date? {
-    lock.lock(); defer { lock.unlock() }
+    lock.lock()
+    defer { lock.unlock() }
     return _lastWAVCreatedAt
   }
 
   /// Была ли хоть одна запись в этой сессии.
   public var hasLastRecording: Bool {
-    lock.lock(); defer { lock.unlock() }
+    lock.lock()
+    defer { lock.unlock() }
     return _lastWAV != nil
   }
 
@@ -255,10 +267,10 @@ public final class RetryProvider {
       var abortError: Error?
       while let outcome = await group.next() {
         switch outcome {
-        case let .success(hit):
+        case .success(let hit):
           group.cancelAll()
           return .success(hit)
-        case let .failure(error):
+        case .failure(let error):
           if let transcribeError = error as? TranscribeError {
             lastFailure = transcribeError
           } else {

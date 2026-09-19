@@ -32,8 +32,8 @@ private func setRawMode(_ enabled: Bool) {
   guard tcgetattr(STDIN_FILENO, &term) == 0 else { return }
   if enabled {
     term.c_lflag &= ~(tcflag_t(ICANON) | tcflag_t(ECHO))
-    term.c_cc.16 = 1 // VMIN (Darwin)
-    term.c_cc.17 = 0 // VTIME (Darwin)
+    term.c_cc.16 = 1  // VMIN (Darwin)
+    term.c_cc.17 = 0  // VTIME (Darwin)
   } else {
     term.c_lflag |= tcflag_t(ICANON) | tcflag_t(ECHO)
   }
@@ -75,7 +75,7 @@ private func installSignalHandlers() {
   }
   var action = sigaction()
   sigemptyset(&action.sa_mask)
-  action.sa_flags = 0 // без SA_RESTART: блокирующее чтение входа прерывается сигналом
+  action.sa_flags = 0  // без SA_RESTART: блокирующее чтение входа прерывается сигналом
   action.__sigaction_u.__sa_handler = handler
   _ = sigaction(SIGINT, &action, nil)
   _ = sigaction(SIGTERM, &action, nil)
@@ -109,18 +109,18 @@ private func readEscapeKey() -> MenuKey {
 
 func readMenuKey() -> MenuKey {
   var byte: UInt8 = 0
-  guard read(STDIN_FILENO, &byte, 1) > 0 else { return .quit } // EOF — pipe закрыт
+  guard read(STDIN_FILENO, &byte, 1) > 0 else { return .quit }  // EOF — pipe закрыт
   switch byte {
-  case 0x1B: // Esc или префикс стрелок "ESC [ A/B"
+  case 0x1B:  // Esc или префикс стрелок "ESC [ A/B"
     if inputReady(50) {
       return readEscapeKey()
     }
-    return .quit // одиночный Esc
+    return .quit  // одиночный Esc
   case 0x0A, 0x0D: return .enter
-  case 0x71, 0x51: return .quit // q / Q
-  case 0x79, 0x59: return .yes // y / Y
-  case 0x72, 0x52: return .refresh // r / R
-  case 0x30 ... 0x39: return .number(Int(byte - 0x30)) // "0" ... "9"
+  case 0x71, 0x51: return .quit  // q / Q
+  case 0x79, 0x59: return .yes  // y / Y
+  case 0x72, 0x52: return .refresh  // r / R
+  case 0x30...0x39: return .number(Int(byte - 0x30))  // "0" ... "9"
   default: return .unknown
   }
 }
@@ -159,14 +159,16 @@ struct MenuView {
 private func entryKeyText(_ key: MenuKey?) -> String {
   guard let key else { return "•" }
   switch key {
-  case let .number(number): return "\(number)"
+  case .number(let number): return "\(number)"
   case .quit: return "q"
   case .refresh: return "r"
   default: return "•"
   }
 }
 
-private func statusPageText(status: AgentStatusData, entries: [MenuEntry], cursor: Int, notice: String?) -> String {
+private func statusPageText(
+  status: AgentStatusData, entries: [MenuEntry], cursor: Int, notice: String?
+) -> String {
   var lines = [ansiBold + AgentScreen.statusTitle() + ansiReset, String(repeating: "─", count: 28)]
   lines += AgentScreen.statusScreen(status).components(separatedBy: "\n")
   lines.append(String(repeating: "─", count: 28))
@@ -183,7 +185,10 @@ private func statusPageText(status: AgentStatusData, entries: [MenuEntry], curso
 }
 
 private func providersPageText(providers: [STTProvider], cursor: Int, notice: String?) -> String {
-  var lines = [ansiBold + AgentScreen.providersTitle() + ansiReset, String(repeating: "─", count: 28)]
+  var lines = [
+    // swiftlint:disable:next trailing_comma
+    ansiBold + AgentScreen.providersTitle() + ansiReset, String(repeating: "─", count: 28),
+  ]
   if providers.isEmpty {
     lines.append(L10n.tr("menu.empty.providers"))
   } else {
@@ -201,12 +206,16 @@ private func providersPageText(providers: [STTProvider], cursor: Int, notice: St
 }
 
 private func logsPageText(lines: [String], window: Int, top: Int) -> String {
-  var out = [ansiBold + AgentScreen.logsTitle(lineCount: lines.count) + ansiReset, String(repeating: "─", count: 28)]
+  var out = [
+    ansiBold + AgentScreen.logsTitle(lineCount: lines.count) + ansiReset,
+    // swiftlint:disable:next trailing_comma
+    String(repeating: "─", count: 28),
+  ]
   if lines.isEmpty {
     out.append(L10n.tr("menu.empty.log"))
   } else {
     let end = min(top + window, lines.count)
-    for i in top ..< end {
+    for i in top..<end {
       out.append(lines[i])
     }
   }
@@ -222,7 +231,9 @@ private func statusEntries(agentRunning: Bool) -> [MenuEntry] {
   // ключ "0" — дублировать его нельзя (раньше маппинг без case "0" уводил
   // дубль в default → .quit, и меню рисовало лишнюю строку "q — Language",
   // Enter по которой ВЫХОДИЛ из меню вместо переключения языка).
-  var entries = [MenuEntry(key: .number(0), label: L10n.tr("menu.language"), action: .toggleLanguage)]
+  var entries = [
+    MenuEntry(key: .number(0), label: L10n.tr("menu.language"), action: .toggleLanguage)
+  ]
   entries += AgentScreen.statusMenuItems(agentRunning: agentRunning).compactMap { item in
     // "0" уже добавлен первым пунктом — не рисуем дубль.
     guard item.key != "0" else { return nil }
@@ -271,7 +282,7 @@ func readLogFile(maxLines: Int = 500) -> [String] {
   defer { handle.closeFile() }
   let fileSize = handle.seekToEndOfFile()
   guard fileSize > 0 else { return [] }
-  let maxRead: UInt64 = 1024 * 1024 // 1 МБ — ≈12 000 строк @ ~80 байт
+  let maxRead: UInt64 = 1024 * 1024  // 1 МБ — ≈12 000 строк @ ~80 байт
   let readSize = min(fileSize, maxRead)
   handle.seek(toFileOffset: fileSize - readSize)
   let data = handle.readData(ofLength: Int(readSize))
@@ -287,7 +298,9 @@ func readLogFile(maxLines: Int = 500) -> [String] {
 private func collectStatus() -> AgentStatusData {
   var pid: String?
   let pgrep = runProcess("/usr/bin/pgrep", ["-f", "NanoDictateAgent"])
-  if pgrep.status == 0, let first = pgrep.stdout.split(whereSeparator: \.isWhitespace).map(String.init).first {
+  if pgrep.status == 0,
+    let first = pgrep.stdout.split(whereSeparator: \.isWhitespace).map(String.init).first
+  {  // swiftlint:disable:this opening_brace
     pid = first
   }
   var providerName: String?
@@ -301,10 +314,13 @@ private func collectStatus() -> AgentStatusData {
     } else if list.isEmpty {
       providersEmpty = true
     }
-  } catch { /* сломанный/legacy-конфиг — строка «не выбран» */ }
+  } catch {  // сломанный/legacy-конфиг — строка «не выбран»
+  }
   let logLines = readLogFile()
   let logURL = logFileURL()
-  let size = ((try? FileManager.default.attributesOfItem(atPath: logURL.path))?[.size] as? NSNumber)?.int64Value ?? 0
+  let size =
+    ((try? FileManager.default.attributesOfItem(atPath: logURL.path))?[.size] as? NSNumber)?
+    .int64Value ?? 0
   return AgentStatusData(
     agentRunning: agentIsRunning(),
     agentPID: pid,
@@ -326,7 +342,7 @@ func runMenu() -> Int32 {
   guard isTTY(), isatty(STDIN_FILENO) == 1 else { return 0 }
   let uiLanguage = (try? AppConfig.load(from: nil))?.uiLanguage
   L10n.language = uiLanguage == "ru" ? .ru : .en
-  installSignalHandlers() // снимок termios до raw-режима + SIGINT/SIGTERM
+  installSignalHandlers()  // снимок termios до raw-режима + SIGINT/SIGTERM
   setRawMode(true)
   defer {
     setRawMode(false)
@@ -359,7 +375,8 @@ func runMenu() -> Int32 {
       }
       entries = statusEntries(agentRunning: status.agentRunning)
       view.cursor = min(view.cursor, max(0, entries.count - 1))
-      text = statusPageText(status: status, entries: entries, cursor: view.cursor, notice: view.notice)
+      text = statusPageText(
+        status: status, entries: entries, cursor: view.cursor, notice: view.notice)
     case .providers:
       entries = providerEntries(view.providers)
       view.cursor = min(view.cursor, max(0, entries.count - 1))

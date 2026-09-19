@@ -21,7 +21,7 @@ public struct TimedWord: Equatable {
 
 public struct TranscriptionResult {
   public let text: String
-  public let rawData: Data // raw API response (JSON as-is)
+  public let rawData: Data  // raw API response (JSON as-is)
   /// Word-таймстампы из ответа; пусто — провайдер их не вернул
   /// (не ошибка: сшивка сегментов деградирует к по-словному diff).
   public let words: [TimedWord]
@@ -37,8 +37,8 @@ public struct TranscriptionResult {
 
 public enum TranscribeError: Error, Equatable {
   case network(String)
-  case http(Int, String) // HTTP code + body text (truncated to ~500 characters)
-  case invalidResponse(String) // not JSON or missing "text" field
+  case http(Int, String)  // HTTP code + body text (truncated to ~500 characters)
+  case invalidResponse(String)  // not JSON or missing "text" field
 }
 
 // MARK: - Сетевая доступность (preflight)
@@ -85,7 +85,8 @@ public enum NetworkReachability {
       // оптимистично считаем сеть доступной, жёсткий таймаут подстрахует.
       return true
     }
-    return isReachable(status: snapshot.status, possibleExternalRoute: snapshot.possibleExternalRoute)
+    return isReachable(
+      status: snapshot.status, possibleExternalRoute: snapshot.possibleExternalRoute)
   }
 
   // MARK: - NWPath
@@ -104,7 +105,10 @@ public enum NetworkReachability {
       var finished = false
       let resume: (PathSnapshot?) -> Void = { value in
         lock.lock()
-        guard !finished else { lock.unlock(); return }
+        guard !finished else {
+          lock.unlock()
+          return
+        }
         finished = true
         lock.unlock()
         // Обнуляем handler ДО cancel: иначе монитор держится замыканием
@@ -151,7 +155,9 @@ public protocol HTTPTransport: AnyObject {
   /// Send a request; return the response (status + body + headers).
   /// The default implementation is URLSession.
   // swiftlint:disable:next large_tuple
-  func send(request: URLRequest) async throws -> (status: Int, body: Data, headers: [String: String])
+  func send(request: URLRequest) async throws -> (
+    status: Int, body: Data, headers: [String: String]
+  )
 }
 
 // MARK: - Внутренние типы запроса/ответа
@@ -242,8 +248,8 @@ public final class Transcriber {
   /// (не-таймаутные) сетевые ошибки. Всё остальное терминально.
   static func isRetryable(_ error: TranscribeError) -> Bool {
     switch error {
-    case let .http(code, _):
-      return code == 429 || (500 ... 599).contains(code)
+    case .http(let code, _):
+      return code == 429 || (500...599).contains(code)
     case .network:
       return true
     case .invalidResponse:
@@ -254,7 +260,9 @@ public final class Transcriber {
   /// Попытка №`retryIndex` (1-я, 2-я, …) спит до повтора: экспоненциальный
   /// базовый интервал `0.5 * 2^n` сек + джиттер `jitter` сек (случайный
   /// 0…0.25 по умолчанию — растаскивает совпавшие по времени клиенты).
-  static func backoffDelay(beforeRetry retryIndex: Int, jitter: Double = Double.random(in: 0 ... 0.25)) -> TimeInterval {
+  static func backoffDelay(
+    beforeRetry retryIndex: Int, jitter: Double = Double.random(in: 0...0.25)
+  ) -> TimeInterval {
     0.5 * pow(2.0, Double(retryIndex)) + jitter
   }
 
@@ -263,7 +271,11 @@ public final class Transcriber {
   /// HTTP-date (задержка = дата − сейчас, потолок неотрицательности).
   /// Кривое значение → nil (тогда — дефолтный backoff).
   static func retryAfterSeconds(from headers: [String: String]) -> TimeInterval? {
-    guard let raw = headers.first(where: { $0.key.caseInsensitiveCompare("retry-after") == .orderedSame })?.value else {
+    guard
+      let raw = headers.first(where: {
+        $0.key.caseInsensitiveCompare("retry-after") == .orderedSame
+      })?.value
+    else {
       return nil
     }
     let trimmed = raw.trimmingCharacters(in: .whitespaces)
@@ -281,7 +293,10 @@ public final class Transcriber {
   /// Не распознано — nil.
   static func httpDate(from raw: String) -> Date? {
     let value = raw.trimmingCharacters(in: .whitespaces)
-    let formats = ["EEE, dd MMM yyyy HH:mm:ss zzz", "EEEE, dd-MMM-yy HH:mm:ss zzz", "EEE MMM d HH:mm:ss yyyy"]
+    let formats = [
+      // swiftlint:disable:next trailing_comma
+      "EEE, dd MMM yyyy HH:mm:ss zzz", "EEEE, dd-MMM-yy HH:mm:ss zzz", "EEE MMM d HH:mm:ss yyyy",
+    ]
     for format in formats {
       let formatter = DateFormatter()
       formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -334,10 +349,11 @@ public final class Transcriber {
     self.adapterID = adapterID
     // Инъектируемый сон между ретраями: тесты прогоняют backoff без реальных
     // пауз. Дефолт — настоящий Task.sleep (секунды > 0).
-    self.retrySleep = retrySleep ?? { seconds in
-      guard seconds > 0 else { return }
-      try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-    }
+    self.retrySleep =
+      retrySleep ?? { seconds in
+        guard seconds > 0 else { return }
+        try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+      }
   }
 
   /// Transcribe WAV audio via a multipart/form-data POST to the transcription endpoint.
@@ -347,7 +363,9 @@ public final class Transcriber {
   /// - Parameter prompt: необязательный контекст для Whisper-совместимых API
   ///   (поле `prompt` form-data): текст уже распознанных сегментов при пошаговой
   ///   диктовке. По умолчанию nil — старый путь (одного запроса) не меняется.
-  public func transcribe(wav: Data, filename: String = "audio.wav", prompt: String? = nil) async throws -> TranscriptionResult {
+  public func transcribe(wav: Data, filename: String = "audio.wav", prompt: String? = nil)
+    async throws -> TranscriptionResult
+  {  // swiftlint:disable:this opening_brace
     if logLevel.lowercased() == "debug" {
       // URL/модель/размер — без api_key/proxy_key и заголовков.
       let details = String(
@@ -366,12 +384,15 @@ public final class Transcriber {
       Logger.log("STT error: empty adapterID — transcribe требует провайдер", level: "error")
       throw TranscribeError.network("No STT provider configured")
     }
-    return try await transcribeViaAdapter(adapterID: adapterID, wav: wav, filename: filename, prompt: prompt)
+    return try await transcribeViaAdapter(
+      adapterID: adapterID, wav: wav, filename: filename, prompt: prompt)
   }
 
   // MARK: - Адаптерный путь
 
-  private func transcribeViaAdapter(adapterID: String, wav: Data, filename: String, prompt: String?) async throws -> TranscriptionResult {
+  private func transcribeViaAdapter(adapterID: String, wav: Data, filename: String, prompt: String?)
+    async throws -> TranscriptionResult
+  {  // swiftlint:disable:this opening_brace
     // Preflight ДО запроса: без сети не тратим запрос на заведомо мёртвый STT.
     if await !networkChecker() {
       Logger.log("STT not sent: no internet (preflight)", level: "error")
@@ -471,10 +492,12 @@ public final class Transcriber {
   /// Word-таймстампы (если вернул провайдер) кладутся в `result.words`;
   /// битый/пустой массив — не ошибка (пусто).
   /// Ошибки и их строки — ровно те же, что были в адаптерном пути (см. тесты).
-  private static func parseResponse(_ response: STTHTTPResponse, transcriptPath: [String]? = nil) throws -> TranscriptionResult {
+  private static func parseResponse(_ response: STTHTTPResponse, transcriptPath: [String]? = nil)
+    throws -> TranscriptionResult
+  {  // swiftlint:disable:this opening_brace
     let status = response.status
     let body = response.body
-    guard (200 ... 299).contains(status) else {
+    guard (200...299).contains(status) else {
       let text = String(decoding: body, as: UTF8.self)
       guard !text.isEmpty else {
         throw TranscribeError.http(status, "")
@@ -487,7 +510,7 @@ public final class Transcriber {
   }
 }
 
-private extension Transcriber {
+extension Transcriber {
   // MARK: - Debug dump (log_level == "debug")
 
   /// При `log_level == "debug"` сохраняет WAV в `recordingsDirectory` и
@@ -507,7 +530,9 @@ private extension Transcriber {
   /// (все попытки упали на транспортном уровне до HTTP), в секции ответа
   /// пишется `(no response — transport error)`. Поведение запроса/ответа не
   /// меняет; ошибок не бросает.
-  private func debugDump(context: SendContext, recording: DebugDump.RecordingInfo?, response: STTHTTPResponse?) {
+  private func debugDump(
+    context: SendContext, recording: DebugDump.RecordingInfo?, response: STTHTTPResponse?
+  ) {
     guard logLevel.lowercased() == "debug" else { return }
 
     var headers: [(name: String, value: String)] = []
@@ -520,7 +545,8 @@ private extension Transcriber {
       fields.append((name: "language", value: language))
     }
     if let prompt = context.prompt, !prompt.isEmpty {
-      fields.append((name: "prompt", value: String(prompt.prefix(80)) + (prompt.count > 80 ? "…" : "")))
+      fields.append(
+        (name: "prompt", value: String(prompt.prefix(80)) + (prompt.count > 80 ? "…" : "")))
     }
 
     let filePart = DebugDump.FilePart(
@@ -633,11 +659,13 @@ extension Transcriber {
             challengeRetried = true
             context.request.setValue(freshCookie, forHTTPHeaderField: "Cookie")
             attempt -= 1
-            Logger.log("STT cookie challenge: cookie обновлён, повтор с новым __test", level: "info")
+            Logger.log(
+              "STT cookie challenge: cookie обновлён, повтор с новым __test", level: "info")
             continue
           }
           Logger.log("STT cookie challenge: свежий cookie не получен", level: "error")
-          throw TranscribeError.invalidResponse("Cookie challenge page received; cookie refresh failed")
+          throw TranscribeError.invalidResponse(
+            "Cookie challenge page received; cookie refresh failed")
         }
         let result = try Self.parseResponse(response, transcriptPath: context.transcriptPath)
         if logLevel.lowercased() == "debug" {
@@ -679,13 +707,15 @@ extension Transcriber {
         // упрётся в тот же таймаут и снова заставит оверлей крутить
         // точки — поэтому фаза «обработка» не живёт дольше таймаута
         // + небольшой запас (см. OverlayController.processingMaxDuration).
-        Logger.log("STT timeout (attempt \(attempt)): \(error.localizedDescription)", level: "error")
+        Logger.log(
+          "STT timeout (attempt \(attempt)): \(error.localizedDescription)", level: "error")
         throw TranscribeError.network(Self.sttTimeoutMessage)
       } catch {
         // Transport-level (network) failure — eligible for retry.
         let message = error.localizedDescription
         lastError = TranscribeError.network(message)
-        Logger.log("STT network error (attempt \(attempt)/\(Self.maxAttempts)): \(message)", level: "error")
+        Logger.log(
+          "STT network error (attempt \(attempt)/\(Self.maxAttempts)): \(message)", level: "error")
         if attempt >= Self.maxAttempts {
           break
         }
@@ -697,7 +727,9 @@ extension Transcriber {
     // чтобы было видно, что до HTTP дело не дошло; ошибки дампа не роняют.
     debugDump(context: context, recording: recording, response: nil)
     if let lastError {
-      Logger.log("STT failed after \(Self.maxAttempts) attempts: \(Self.describe(lastError))", level: "error")
+      Logger.log(
+        "STT failed after \(Self.maxAttempts) attempts: \(Self.describe(lastError))", level: "error"
+      )
       throw lastError
     }
     throw TranscribeError.network("Unknown transport error")
@@ -709,13 +741,13 @@ extension Transcriber {
   /// не попали в лог.
   static func describe(_ error: TranscribeError) -> String {
     switch error {
-    case let .network(message):
+    case .network(let message):
       return "network: \(message)"
     case let .http(code, body):
       // Маскируем ПОЛНОЕ тело (секрет может пересечь границу обрезки),
       // потом отсекаем до ~120 символов.
       return "HTTP \(code): \(String(DebugDump.maskedResponseBody(Data(body.utf8)).prefix(120)))"
-    case let .invalidResponse(message):
+    case .invalidResponse(let message):
       return "invalid response: \(message)"
     }
   }

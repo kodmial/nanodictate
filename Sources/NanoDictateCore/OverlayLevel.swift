@@ -25,7 +25,7 @@ public enum OverlayLevel {
 
   /// Порог «горячей» зоны в метрах — выведен из dBFS-порога (0.88 при −6 dBFS).
   public static var hotMeterThreshold: Float {
-    (hotThresholddB - floordB) / -floordB // (−6 − (−50))/50 = 0.88
+    (hotThresholddB - floordB) / -floordB  // (−6 − (−50))/50 = 0.88
   }
 
   /// Перевод линейного RMS (0…1) в метр 0…1 по шкале −50…0 dBFS:

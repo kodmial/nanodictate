@@ -71,7 +71,9 @@ public struct STTRequestSpec {
     case rawAudio(data: Data, contentType: String)
   }
 
-  public init(url: URL?, headers: [(String, String)], body: STTRequestBody, transcriptPath: [String]? = nil) {
+  public init(
+    url: URL?, headers: [(String, String)], body: STTRequestBody, transcriptPath: [String]? = nil
+  ) {
     self.url = url
     self.headers = headers
     self.body = body
@@ -82,7 +84,7 @@ public struct STTRequestSpec {
   /// «audio/wav», …).
   public var contentType: String {
     switch body {
-    case let .multipart(_, contentType), let .rawAudio(_, contentType):
+    case .multipart(_, let contentType), .rawAudio(_, let contentType):
       return contentType
     }
   }
@@ -90,7 +92,7 @@ public struct STTRequestSpec {
   /// Тело запроса (мультипарт или сырое аудио).
   public var bodyData: Data {
     switch body {
-    case let .multipart(data, _), let .rawAudio(data, _):
+    case .multipart(let data, _), .rawAudio(let data, _):
       return data
     }
   }
@@ -195,13 +197,13 @@ public enum ProviderRequestBuilder {
   /// - `path == ["result","text"]` — cloudflare (часть JSON-пути адаптера).
   public static func extractText(from body: Data, path: [String]?) throws -> String {
     guard !body.isEmpty,
-          let json = try? JSONSerialization.jsonObject(with: body) // swiftlint:disable:this indentation_width
+      let json = try? JSONSerialization.jsonObject(with: body)
     else {
       throw TranscribeError.invalidResponse("Response is not a JSON object")
     }
     guard let path else {
       guard let dict = json as? [String: Any],
-            let text = dict["text"] as? String // swiftlint:disable:this indentation_width
+        let text = dict["text"] as? String
       else {
         throw TranscribeError.invalidResponse("Missing 'text' field")
       }
@@ -214,7 +216,9 @@ public enum ProviderRequestBuilder {
           throw TranscribeError.invalidResponse("Missing '\(path.joined(separator: "."))' field")
         }
         current = next
-      } else if let array = current as? [Any], let index = Int(segment), array.indices.contains(index) {
+      } else if let array = current as? [Any], let index = Int(segment),
+        array.indices.contains(index)
+      {  // swiftlint:disable:this opening_brace
         current = array[index]
       } else {
         throw TranscribeError.invalidResponse("Missing '\(path.joined(separator: "."))' field")
@@ -234,7 +238,7 @@ public enum ProviderRequestBuilder {
   /// результат.
   public static func extractWords(from body: Data, path: [String]?) -> [TimedWord] {
     guard !body.isEmpty,
-          let json = try? JSONSerialization.jsonObject(with: body) // swiftlint:disable:this indentation_width
+      let json = try? JSONSerialization.jsonObject(with: body)
     else {
       return []
     }
@@ -251,7 +255,9 @@ public enum ProviderRequestBuilder {
             break
           }
           current = next
-        } else if let array = current as? [Any], let index = Int(segment), array.indices.contains(index) {
+        } else if let array = current as? [Any], let index = Int(segment),
+          array.indices.contains(index)
+        {  // swiftlint:disable:this opening_brace
           current = array[index]
         } else {
           pathValid = false
@@ -266,8 +272,8 @@ public enum ProviderRequestBuilder {
     var words: [TimedWord] = []
     for item in items {
       guard let word = (item["word"] as? String) ?? (item["punctuated_word"] as? String),
-            let start = (item["start"] as? NSNumber)?.doubleValue, // swiftlint:disable:this indentation_width
-            let end = (item["end"] as? NSNumber)?.doubleValue
+        let start = (item["start"] as? NSNumber)?.doubleValue,
+        let end = (item["end"] as? NSNumber)?.doubleValue
       else {
         continue
       }
@@ -355,10 +361,12 @@ extension ProviderRequestBuilder {
         appendField("vad_filter", value: vadFilter ? "true" : "false")
       }
       if let threshold = stable.noSpeechThreshold {
-        appendField("no_speech_threshold", value: BatchStableMultipartFields.numberString(threshold))
+        appendField(
+          "no_speech_threshold", value: BatchStableMultipartFields.numberString(threshold))
       }
       if let ratio = stable.compressionRatioThreshold {
-        appendField("compression_ratio_threshold", value: BatchStableMultipartFields.numberString(ratio))
+        appendField(
+          "compression_ratio_threshold", value: BatchStableMultipartFields.numberString(ratio))
       }
       if let logprob = stable.logprobThreshold {
         appendField("logprob_threshold", value: BatchStableMultipartFields.numberString(logprob))

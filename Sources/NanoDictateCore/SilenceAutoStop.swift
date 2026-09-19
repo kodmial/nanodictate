@@ -127,13 +127,18 @@ public struct AutoStopConfig: Equatable {
     if env["NANODICTATE_AUTOSTOP_DISABLED"].map(parseDisabledFlag) ?? false {
       config.enabled = false
     }
-    if let raw = env["NANODICTATE_AUTOSTOP_DURATION"], let duration = Double(raw), duration.isFinite, duration > 0 {
+    if let raw = env["NANODICTATE_AUTOSTOP_DURATION"], let duration = Double(raw),
+      duration.isFinite, duration > 0
+    {  // swiftlint:disable:this opening_brace
       config.requiredSilenceDuration = duration
     }
-    if let raw = env["NANODICTATE_AUTOSTOP_RMS"], let value = Float(raw), value.isFinite, value > 0 {
+    if let raw = env["NANODICTATE_AUTOSTOP_RMS"], let value = Float(raw), value.isFinite, value > 0
+    {  // swiftlint:disable:this opening_brace
       config.silenceRMSThreshold = value
     }
-    if let raw = env["NANODICTATE_AUTOSTOP_SPEECH_RMS"], let value = Float(raw), value.isFinite, value > 0 {
+    if let raw = env["NANODICTATE_AUTOSTOP_SPEECH_RMS"], let value = Float(raw), value.isFinite,
+      value > 0
+    {  // swiftlint:disable:this opening_brace
       config.speechRMSThreshold = value
     }
     // Инвариант: речь не может распознаваться «тише», чем тишина.

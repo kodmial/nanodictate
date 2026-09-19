@@ -89,7 +89,8 @@ public enum RecognitionLabel {
   /// - через реле: `"<реле>→<провайдер> · <модель>"` (пустое имя реле — без стрелки).
   public static func build(provider: String, model: String, route: STTRoute = .direct) -> String {
     let labelParts = parts(provider: provider, model: model, route: route)
-    return labelParts.model.isEmpty ? labelParts.provider : "\(labelParts.provider) · \(labelParts.model)"
+    return labelParts.model.isEmpty
+      ? labelParts.provider : "\(labelParts.provider) · \(labelParts.model)"
   }
 
   // MARK: - Раздельные части ярлыка (шапка оверлея)
@@ -114,7 +115,9 @@ public enum RecognitionLabel {
   /// `build`/`forSession`: провайдер через `providerPart` (маршрут-префикс),
   /// модель обрезана. `build` строится отсюда, так что строка и части не могут
   /// разойтись.
-  public static func parts(provider: String, model: String, route: STTRoute = .direct) -> RecognitionLabelParts {
+  public static func parts(provider: String, model: String, route: STTRoute = .direct)
+    -> RecognitionLabelParts
+  {  // swiftlint:disable:this opening_brace
     RecognitionLabelParts(
       provider: providerPart(provider: provider, route: route),
       model: model.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -157,9 +160,9 @@ public enum RecognitionLabel {
     switch route {
     case .direct:
       return provider
-    case let .relay(relay) where relay.isEmpty:
+    case .relay(let relay) where relay.isEmpty:
       return provider
-    case let .relay(relay):
+    case .relay(let relay):
       return "\(relay)→\(provider)"
     }
   }

@@ -19,7 +19,8 @@ public struct ChunkedPipeline {
   /// Транскрибация WAV → результат (текст + word-таймстампы, если провайдер
   /// их вернул). `prompt` — контекст уже распознанных сегментов (для
   /// продолжения); `filename` — для отладки.
-  public typealias STTHandler = (_ wav: Data, _ filename: String, _ prompt: String?) async throws -> SttResult
+  public typealias STTHandler = (_ wav: Data, _ filename: String, _ prompt: String?) async throws ->
+    SttResult
   /// Одно клавиатурное действие, сделанное над активным приложением.
   public typealias InsertHandler = (Operation) -> Void
   /// Статусная фаза конвейера — для оверлея («Распознаю… (часть N)»,
@@ -105,7 +106,9 @@ public struct ChunkedPipeline {
   /// (raw-слайс, а не реконструкция из слов — внутренняя пунктуация цела).
   /// Таймстампов нет — текст не трогаем: дубликаты счистит финальный проход
   /// по-словным diff-ом (испорченный/пустой `words` НЕ ломает конвейер).
-  public static func dedupeOverlap(text: String, words: [TimedWord], overlapSeconds: TimeInterval) -> String {
+  public static func dedupeOverlap(text: String, words: [TimedWord], overlapSeconds: TimeInterval)
+    -> String
+  {  // swiftlint:disable:this opening_brace
     guard overlapSeconds > 0, !words.isEmpty else { return text }
     let overlapWordCount = words.prefix { $0.end <= overlapSeconds }.count
     guard overlapWordCount > 0 else { return text }
@@ -216,7 +219,8 @@ public struct ChunkedPipeline {
     // Один сегмент — это и есть вся запись целиком: финальный проход не
     // нужен (нечем «полировать»), двойной запрос только удорожает.
     guard segments.count > 1 else {
-      return Outcome(segmentCount: 1, insertedText: insertedText, finalized: false, finalChanged: false)
+      return Outcome(
+        segmentCount: 1, insertedText: insertedText, finalized: false, finalChanged: false)
     }
 
     // Финальный проход: весь WAV одним запросом (полный контекст), затем
@@ -231,7 +235,11 @@ public struct ChunkedPipeline {
     ) { onPhase?(.finalizing) }
     guard result.changed else {
       // Финальный текст совпал с уже-вставленным — ничего не трогаем.
-      return Outcome(segmentCount: segments.count, insertedText: insertedText, finalized: true, finalChanged: false)
+      return Outcome(
+        segmentCount: segments.count,
+        insertedText: insertedText,
+        finalized: true,
+        finalChanged: false)
     }
     return Outcome(
       segmentCount: segments.count,

@@ -78,10 +78,14 @@ public struct InputGainConfig: Equatable {
     if env["NANODICTATE_GAIN_DISABLED"].map(parseDisabledFlag) ?? false {
       enabled = false
     }
-    if let raw = env["NANODICTATE_GAIN_TARGET_DB"], let value = Double(raw), value.isFinite, value < 0, value > -120 {
+    if let raw = env["NANODICTATE_GAIN_TARGET_DB"], let value = Double(raw), value.isFinite,
+      value < 0, value > -120
+    {  // swiftlint:disable:this opening_brace
       target = Float(value)
     }
-    if let raw = env["NANODICTATE_GAIN_MAX_DB"], let value = Double(raw), value.isFinite, value > 0, value <= 60 {
+    if let raw = env["NANODICTATE_GAIN_MAX_DB"], let value = Double(raw), value.isFinite, value > 0,
+      value <= 60
+    {  // swiftlint:disable:this opening_brace
       maxGain = Float(value)
     }
     // Итог строится через init — НАСТОЯЩИЙ кламп (−120…−1 и 1…60) тот же,
@@ -184,7 +188,7 @@ public final class InputGain {
     let releaseAlpha = 1 - exp(-1 / max(1, config.releaseTime * Double(rate)))
 
     var sum: Float = 0
-    for i in 0 ..< frameLength {
+    for i in 0..<frameLength {
       // Направление сглаживания: подъём — быстрый attack, спад — медленный
       // release. Разница ровно 0 не двигает gain — ветка не важна.
       let alpha = Float(target > currentGainDb ? attackAlpha : releaseAlpha)

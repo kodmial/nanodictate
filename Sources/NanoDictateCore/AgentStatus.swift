@@ -134,9 +134,9 @@ public enum AgentScreen {
 
   /// События лога, после которых запись завершена (запись НЕ активна).
   private static let recordingEndMarkers = [
-    "transcribe submit", // запись остановлена и отправлена на распознавание
+    "transcribe submit",  // запись остановлена и отправлена на распознавание
     "record cancelled",
-    "record limit reached", // жёсткий лимит — запись финализирована
+    "record limit reached",  // жёсткий лимит — запись финализирована
     "transcription inserted",
     // swiftlint:disable:next trailing_comma
     "transcription failed",
@@ -170,7 +170,9 @@ public enum AgentScreen {
   }
 
   /// Строка провайдера как в `nanodictate status`.
-  public static func providerLine(providerName: String?, providerID: String?, providersEmpty: Bool) -> String {
+  public static func providerLine(providerName: String?, providerID: String?, providersEmpty: Bool)
+    -> String
+  {  // swiftlint:disable:this opening_brace
     if let name = providerName {
       if let id = providerID, id != name {
         return "\(name) [\(id)]"
@@ -190,7 +192,8 @@ public enum AgentScreen {
 
   /// Экран «Статус»: агент, запись, провайдер, лог (размер/ошибки/хвост).
   public static func statusScreen(_ status: AgentStatusData) -> String {
-    let agent = status.agentRunning
+    let agent =
+      status.agentRunning
       ? "running" + (status.agentPID.map { " (pid \($0))" } ?? "")
       : "stopped"
     let recording = status.recordingActive ? "active" : "idle"
@@ -222,7 +225,8 @@ public enum AgentScreen {
       MenuItem(key: "0", label: L10n.tr("menu.language")),
       MenuItem(key: "1", label: L10n.tr("menu.providers")),
       MenuItem(key: "2", label: L10n.tr("menu.logs")),
-      MenuItem(key: "3", label: agentRunning ? L10n.tr("menu.stopAgent") : L10n.tr("menu.startAgent")),
+      MenuItem(
+        key: "3", label: agentRunning ? L10n.tr("menu.stopAgent") : L10n.tr("menu.startAgent")),
       MenuItem(key: "4", label: L10n.tr("menu.showLastText")),
       MenuItem(key: "5", label: L10n.tr("menu.retryOther")),
       MenuItem(key: "6", label: L10n.tr("menu.reviewToggle")),
@@ -250,7 +254,9 @@ public enum AgentScreen {
   }
 
   /// Чистая проверка: существует ли провайдер с таким id (до реальной правки конфига).
-  public static func validateProviderSwitch(targetID: String, providers: [STTProvider]) -> ProviderSwitchResult {
+  public static func validateProviderSwitch(targetID: String, providers: [STTProvider])
+    -> ProviderSwitchResult
+  {  // swiftlint:disable:this opening_brace
     guard !providers.isEmpty else { return .empty }
     guard providers.contains(where: { $0.id == targetID }) else {
       return .unknownProvider(id: targetID, available: providers.map(\.id))

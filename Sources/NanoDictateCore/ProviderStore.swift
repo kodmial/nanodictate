@@ -5,8 +5,8 @@ import Foundation
 /// Публичный срез провайдера для UI-меню. Секретов не содержит — только
 /// выбор и метаданные.
 public struct STTProvider: Equatable {
-  public let id: String // = имя секции, например "groq"
-  public let name: String // отображаемое имя (name из секции; fallback — id)
+  public let id: String  // = имя секции, например "groq"
+  public let name: String  // отображаемое имя (name из секции; fallback — id)
   public let baseURL: String
   public let model: String
   public let isActive: Bool
@@ -70,7 +70,8 @@ public enum ProviderStore {
         available: providers.map(\.id)
       )
     }
-    try AppConfig.writeActiveProvider(name: providerID, to: configPathOverride ?? AppConfig.defaultPath())
+    try AppConfig.writeActiveProvider(
+      name: providerID, to: configPathOverride ?? AppConfig.defaultPath())
     _ = try loadProviders()
   }
 }

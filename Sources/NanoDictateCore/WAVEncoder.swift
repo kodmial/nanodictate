@@ -21,8 +21,9 @@ public enum WAVEncoder {
 
     // fmt sub-chunk
     data.append(contentsOf: "fmt ".utf8)
-    data.append(contentsOf: withUnsafeBytes(of: Int32(16).littleEndian) { Array($0) }) // sub-chunk size
-    data.append(contentsOf: withUnsafeBytes(of: Int16(1).littleEndian) { Array($0) }) // PCM
+    // sub-chunk size
+    data.append(contentsOf: withUnsafeBytes(of: Int32(16).littleEndian) { Array($0) })
+    data.append(contentsOf: withUnsafeBytes(of: Int16(1).littleEndian) { Array($0) })  // PCM
     data.append(contentsOf: withUnsafeBytes(of: numChannels.littleEndian) { Array($0) })
     data.append(contentsOf: withUnsafeBytes(of: Int32(sampleRate).littleEndian) { Array($0) })
     data.append(contentsOf: withUnsafeBytes(of: byteRate.littleEndian) { Array($0) })

@@ -68,10 +68,12 @@ extension L10n {
     "error.noInternet": "No internet",
     "error.sttTimeout": "STT timeout",
     "error.micPermission": "Allow microphone access: System Settings → Privacy",
-    "error.micPermissionUnhandled": "Microphone access request timed out: System Settings → Privacy",
+    "error.micPermissionUnhandled":
+      "Microphone access request timed out: System Settings → Privacy",
     "error.micEnableFailed": "Failed to enable microphone",
     "error.micNoResponse": "Microphone not responding",
-    "error.accessibilityRequired": "Accessibility must be enabled: System Settings → Privacy & Security",
+    "error.accessibilityRequired":
+      "Accessibility must be enabled: System Settings → Privacy & Security",
     "error.agentLaunchFailed": "Failed to launch dictation agent",
     "error.unsupportedAudioFormat": "Unsupported audio format",
     "error.audioServiceUnavailable": "Audio service unavailable",
@@ -79,7 +81,8 @@ extension L10n {
     "status.title": "NanoDictate — status",
     "status.logs": "Logs — agent.log ({n} lines total)",
     "status.hintNav": "digits/arrows — navigate · Enter — select · q/esc — exit",
-    "status.hintProviders": "digit/Enter — select · y/Enter — confirm · other — cancel · r — refresh · q/esc — back",
+    "status.hintProviders":
+      "digit/Enter — select · y/Enter — confirm · other — cancel · r — refresh · q/esc — back",
     "status.hintLogs": "↑/↓ — scroll · q/esc — back",
     "status.agent": "Agent",
     "status.recording": "Recording",
@@ -103,23 +106,29 @@ extension L10n {
     "usage.config": "Show config (secrets masked: abcd***wxyz)",
     "usage.config.init": "Create config.toml template (chmod 600; existing file overwritten only"
       + " after confirmation without --force)",
-    "usage.config.setkey": "Write api_key to [providers.PROVIDER] section (chmod 600; key not specified"
+    "usage.config.setkey":
+      "Write api_key to [providers.PROVIDER] section (chmod 600; key not specified"
       + " — keyboard input or stdin with --stdin/--pipe; NANODICTATE_API_KEY warning)",
     "usage.config.path": "Config file path (alias config --path)",
     "usage.config.showfile": "Config file contents with masked secrets",
     "usage.provider": "STT providers from config.toml (* = active)",
-    "usage.provider.use": "Make NAME the active provider: edit active_provider in config.toml, chmod 600"
+    "usage.provider.use":
+      "Make NAME the active provider: edit active_provider in config.toml, chmod 600"
       + " and restart agent (--no-restart skips restart)",
     "usage.provider.status": "Active provider + agent status",
     "usage.provider.show": "Detailed provider info (secrets masked)",
-    "usage.routing": "STT routing by roles ([routing]):\n  segment/final + their effective (fallback to active)",
-    "usage.routing.set": "ROLE = segment (step-by-step dictation segments) or final (full-recording pass);"
+    "usage.routing":
+      "STT routing by roles ([routing]):\n  segment/final + their effective (fallback to active)",
+    "usage.routing.set":
+      "ROLE = segment (step-by-step dictation segments) or final (full-recording pass);"
       + " NAME among [providers.X]; edit config.toml (chmod 600), restart agent (--no-restart skips restart)",
     "usage.routing.unset": "Clear role — fallback to active provider",
-    "usage.transcribe": "One-shot audio file transcription\n  (non-WAV converted via afconvert; with --json"
+    "usage.transcribe":
+      "One-shot audio file transcription\n  (non-WAV converted via afconvert; with --json"
       + " raw response saved to transcription_raw.json next to FILE)",
     "usage.batch": "Batch mode for long files: same flags",
-    "usage.batch.desc": "One provider (default gigaam), max-segment chunks with overlap, 3× retry, [..]"
+    "usage.batch.desc":
+      "One provider (default gigaam), max-segment chunks with overlap, 3× retry, [..]"
       + " placeholder on failure, checkpoint <out>.checkpoint.json (without --out — in temp dir) for --resume",
     "usage.retry": "Re-transcribe last recording with a different provider\n  (agent holds last WAV"
       + " in memory; insertion performed by the agent)",
@@ -127,7 +136,8 @@ extension L10n {
     "usage.logs": "Last 50 lines of agent log",
     "usage.help": "Show this help",
     "cli.dir.error": "Failed to create directories: %@",
-    "cli.plist.notfound": "Plist template nanodictate-agent.plist.template not found (check Resources"
+    "cli.plist.notfound":
+      "Plist template nanodictate-agent.plist.template not found (check Resources"
       + " next to binary or in project; or set NANODICTATE_PLIST_TEMPLATE)",
     "cli.agent.notfound": "Failed to locate NanoDictateAgent path",
     "cli.plist.readerror": "Failed to read plist template: %@",
@@ -149,7 +159,8 @@ extension L10n {
     "cli.config.forcehint": "Use `nanodictate config init --force` to overwrite.",
     "cli.config.writeerror": "ERROR: failed to write %@: %@",
     "cli.config.template": "Config template created: %@ (chmod 600)",
-    "cli.config.fillserts": "Fill secrets: `nanodictate config set-key <provider>` or edit the file.",
+    "cli.config.fillserts":
+      "Fill secrets: `nanodictate config set-key <provider>` or edit the file.",
     "cli.config.noread": "Failed to read config: %@",
     "cli.config.missing": "Config not found: create template with `nanodictate config init` (%@)",
     "cli.config.noset": "(not selected)",
@@ -158,8 +169,10 @@ extension L10n {
     "cli.setkey.cancelled": "Cancelled",
     "cli.setkey.empty": "Value is empty — key not written (pass as argument or via stdin)",
     "cli.setkey.invalid": "ERROR: value contains invalid characters (\", \\, newline)",
-    "cli.setkey.envwarn": "WARNING: NANODICTATE_API_KEY env var is set — it takes priority over file api_key;",
-    "cli.setkey.envnote": "the written key will not be used while it is set (see `nanodictate config show`).",
+    "cli.setkey.envwarn":
+      "WARNING: NANODICTATE_API_KEY env var is set — it takes priority over file api_key;",
+    "cli.setkey.envnote":
+      "the written key will not be used while it is set (see `nanodictate config show`).",
     "cli.setkey.updated": "api_key for provider '%@' updated: %@ (chmod 600)",
     "cli.provider.nosections": "No [providers.X] sections in config (using legacy config).",
     "cli.provider.active": "Active provider: %@",
@@ -167,7 +180,8 @@ extension L10n {
     "cli.provider.restart": "Agent restarted",
     "cli.provider.norestart": "Agent not restarted (--no-restart)",
     "cli.provider.kickfail": "Agent not restarted (run `nanodictate start`): %@",
-    "cli.routing.usage": "Usage: nanodictate routing set segment|final <provider-id> [--no-restart]",
+    "cli.routing.usage":
+      "Usage: nanodictate routing set segment|final <provider-id> [--no-restart]",
     "cli.routing.unset.usage": "Usage: nanodictate routing unset segment|final [--no-restart]",
     "cli.routing.noexist": "ERROR: provider '%@' not found. Available: %@",
     "cli.routing.role": "Role %@: %@",
@@ -187,13 +201,15 @@ extension L10n {
     "progress.eta.min": "~%d min left",
     "progress.eta.hour": "~%d hr left",
     "progress.eta.hm": "~%d hr %d min left",
-    "progress.summary": "Done: duration %@, segments %d, recognized %d, skipped %d, processing time %d s",
+    "progress.summary":
+      "Done: duration %@, segments %d, recognized %d, skipped %d, processing time %d s",
     "progress.skipped": "; skipped segments: %@",
     "progress.checkpoint": "Checkpoint: %@",
     "progress.jsonsaved": "Saved: %@",
     "progress.jsonfail": "Failed to save %@: %@",
     "progress.noresume": "WARNING: --resume but checkpoint %@ not found — starting from scratch",
-    "progress.badcheckpoint": "WARNING: checkpoint %@ is from a different file ('%@') — ignored, starting from scratch",
+    "progress.badcheckpoint":
+      "WARNING: checkpoint %@ is from a different file ('%@') — ignored, starting from scratch",
     "cli.last.notfound": "Agent log not found",
     "cli.last.notext": "No transcribed text yet (LAST_TEXT marker not found in log)",
     "cli.retry.usage": "Usage: nanodictate retry NAME",
@@ -223,12 +239,14 @@ extension L10n {
     "menu.switch.ok": "Provider '%@' is now active · %@",
     "menu.retry.prompt": "Re-transcribe last recording with provider:",
     "menu.retry.hint": "  (number — select · other key — cancel)",
-    "menu.review.on": "Review: on · %@ — WARNING: under launchd without a terminal review is skipped,"
+    "menu.review.on":
+      "Review: on · %@ — WARNING: under launchd without a terminal review is skipped,"
       + " text is inserted immediately",
     "menu.review.off": "Review before insert: off · %@",
     "menu.review.configerror": "Config write error: %@",
     "menu.nav.status": "digits/arrows — select · Enter — open · q — quit",
-    "menu.nav.providers": "digit/Enter — select · y/Enter — confirm · other key — cancel · r — refresh · q/esc — back",
+    "menu.nav.providers":
+      "digit/Enter — select · y/Enter — confirm · other key — cancel · r — refresh · q/esc — back",
     "menu.nav.logs": "↑/↓ — scroll · q/esc — back",
     "menu.running": "running",
     "menu.stopped": "stopped",
@@ -295,7 +313,8 @@ extension L10n {
     "error.noInternet": "Нет интернета",
     "error.sttTimeout": "Таймаут STT",
     "error.micPermission": "Разрешите доступ к микрофону: System Settings → Конфиденциальность",
-    "error.micPermissionUnhandled": "Запрос доступа к микрофону не обработан: System Settings → Конфиденциальность",
+    "error.micPermissionUnhandled":
+      "Запрос доступа к микрофону не обработан: System Settings → Конфиденциальность",
     "error.micEnableFailed": "Не удалось включить микрофон",
     "error.micNoResponse": "Микрофон не отвечает",
     "error.accessibilityRequired": "Разрешите доступность для клавиатуры: System Settings"
@@ -307,7 +326,8 @@ extension L10n {
     "status.title": "NanoDictate — статус",
     "status.logs": "Логи — agent.log (всего {n} строк)",
     "status.hintNav": "цифры/стрелки — выбор · Enter — выполнить · q/esc — выход",
-    "status.hintProviders": "цифра/Enter — выбрать · y/Enter — подтвердить · другая клавиша — отмена"
+    "status.hintProviders":
+      "цифра/Enter — выбрать · y/Enter — подтвердить · другая клавиша — отмена"
       + " · r — обновить · q/esc — назад",
     "status.hintLogs": "↑/↓ — прокрутка · q/esc — назад",
     "status.agent": "Агент",
@@ -332,7 +352,8 @@ extension L10n {
     "usage.config": "Показать конфиг (секреты маскируются: abcd***wxyz)",
     "usage.config.init": "Создать шаблон config.toml (chmod 600; существующий файл без --force"
       + " перезаписывается только после подтверждения в терминале)",
-    "usage.config.setkey": "Записать api_key в секцию [providers.ПРОВАЙДЕР] (chmod 600; КЛЮЧ не указан"
+    "usage.config.setkey":
+      "Записать api_key в секцию [providers.ПРОВАЙДЕР] (chmod 600; КЛЮЧ не указан"
       + " — ввод с клавиатуры или stdin при --stdin/пайпе; предупреждение, если задан"
       + " NANODICTATE_API_KEY)",
     "usage.config.path": "Путь к конфиг-файлу (алиас config --path)",
@@ -342,15 +363,19 @@ extension L10n {
       + " chmod 600 и перезапуск агента (--no-restart без перезапуска)",
     "usage.provider.status": "Активный провайдер + статус агента",
     "usage.provider.show": "Подробно о провайдере (секреты маскируются)",
-    "usage.routing": "Маршрутизация STT по ролям ([routing]):\n  segment/final + их effective (фолбэк на active)",
-    "usage.routing.set": "РОЛЬ = segment (сегменты пошаговой диктовки) или final (проход по всей записи);"
+    "usage.routing":
+      "Маршрутизация STT по ролям ([routing]):\n  segment/final + их effective (фолбэк на active)",
+    "usage.routing.set":
+      "РОЛЬ = segment (сегменты пошаговой диктовки) или final (проход по всей записи);"
       + " ИМЯ среди [providers.X]; правка config.toml (chmod 600), перезапуск агента"
       + " (--no-restart без перезапуска)",
     "usage.routing.unset": "Очистить роль — фолбэк на активного провайдера",
-    "usage.transcribe": "Разовая расшифровка аудиофайла\n  (не-WAV конвертируется через afconvert; с --json"
+    "usage.transcribe":
+      "Разовая расшифровка аудиофайла\n  (не-WAV конвертируется через afconvert; с --json"
       + " сырой ответ сохраняется в transcription_raw.json рядом с ФАЙЛ)",
     "usage.batch": "Пакетный режим для длинных файлов: те же флаги",
-    "usage.batch.desc": "Один провайдер (по умолчанию gigaam), чанки max-segment с overlap, retry 3×,"
+    "usage.batch.desc":
+      "Один провайдер (по умолчанию gigaam), чанки max-segment с overlap, retry 3×,"
       + " плейсхолдер [..] при провале, чекпоинт <--out>.checkpoint.json (без --out — во временной"
       + " папке) для --resume",
     "usage.retry": "Повторить распознавание последней записи другим провайдером\n  (агент хранит"
@@ -381,7 +406,8 @@ extension L10n {
     "cli.config.forcehint": "Для перезаписи используйте `nanodictate config init --force`.",
     "cli.config.writeerror": "ОШИБКА: не удалось записать %@: %@",
     "cli.config.template": "Шаблон конфига создан: %@ (chmod 600)",
-    "cli.config.fillserts": "Заполните секреты: `nanodictate config set-key <provider>` или отредактируйте файл.",
+    "cli.config.fillserts":
+      "Заполните секреты: `nanodictate config set-key <provider>` или отредактируйте файл.",
     "cli.config.noread": "Не удалось прочитать конфиг: %@",
     "cli.config.missing": "Конфиг не найден: создайте шаблон — `nanodictate config init` (%@)",
     "cli.config.noset": "(не выбран)",
@@ -401,8 +427,10 @@ extension L10n {
     "cli.provider.restart": "Агент перезапущен",
     "cli.provider.norestart": "Агент не перезапущен (--no-restart)",
     "cli.provider.kickfail": "Агент не перезапущен (запустите `nanodictate start`): %@",
-    "cli.routing.usage": "Использование: nanodictate routing set segment|final <provider-id> [--no-restart]",
-    "cli.routing.unset.usage": "Использование: nanodictate routing unset segment|final [--no-restart]",
+    "cli.routing.usage":
+      "Использование: nanodictate routing set segment|final <provider-id> [--no-restart]",
+    "cli.routing.unset.usage":
+      "Использование: nanodictate routing unset segment|final [--no-restart]",
     "cli.routing.noexist": "ОШИБКА: провайдер '%@' не найден. Доступные: %@",
     "cli.routing.role": "Роль %@: %@",
     "cli.routing.reset": "Роль %@ сброшена — фолбэк на активного провайдера",
@@ -421,13 +449,15 @@ extension L10n {
     "progress.eta.min": "~%d мин осталось",
     "progress.eta.hour": "~%d ч осталось",
     "progress.eta.hm": "~%d ч %d мин осталось",
-    "progress.summary": "Готово: длительность %@, сегментов %d, распознано %d, пропущено %d, время обработки %d с",
+    "progress.summary":
+      "Готово: длительность %@, сегментов %d, распознано %d, пропущено %d, время обработки %d с",
     "progress.skipped": "; пропущенные сегменты: %@",
     "progress.checkpoint": "Чекпоинт: %@",
     "progress.jsonsaved": "Сохранено: %@",
     "progress.jsonfail": "Не удалось сохранить %@: %@",
     "progress.noresume": "ПРЕДУПРЕЖДЕНИЕ: --resume, но чекпоинт %@ не найден — начинаю с нуля",
-    "progress.badcheckpoint": "ПРЕДУПРЕЖДЕНИЕ: чекпоинт %@ от другого файла ('%@') — он не используется,"
+    "progress.badcheckpoint":
+      "ПРЕДУПРЕЖДЕНИЕ: чекпоинт %@ от другого файла ('%@') — он не используется,"
       + " начинаю с нуля",
     "cli.last.notfound": "Лог агента не найден",
     "cli.last.notext": "Пока нет распознанного текста (маркер LAST_TEXT не найден в логе)",
@@ -435,7 +465,8 @@ extension L10n {
     "cli.retry.available": "Доступные провайдеры: %@",
     "cli.retry.notrunning": "ОШИБКА: агент не запущен — последний WAV хранится в памяти агента."
       + " Запустите агент (`nanodictate start`) и повторите.",
-    "cli.retry.sent": "Retry отправлен агенту: повторное распознавание последней записи провайдером '%@ [%@]'",
+    "cli.retry.sent":
+      "Retry отправлен агенту: повторное распознавание последней записи провайдером '%@ [%@]'",
     "cli.logs.notfound": "Лог не найден",
     "cli.help.usage": "Использование: nanodictate <команда> [аргументы]",
     "cli.cmd.unknown": "Неизвестная команда: %@",

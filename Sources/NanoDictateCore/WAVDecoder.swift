@@ -58,7 +58,7 @@ public enum WAVDecoder {
     var dataSize = 0
 
     while cursor + 8 <= data.count {
-      let chunkID = String(bytes: data[cursor ..< (cursor + 4)], encoding: .ascii) ?? ""
+      let chunkID = String(bytes: data[cursor..<(cursor + 4)], encoding: .ascii) ?? ""
       let size = Int(readUInt32LE(data, at: cursor + 4))
       let payloadStart = cursor + 8
 
@@ -78,7 +78,9 @@ public enum WAVDecoder {
 
       switch chunkID {
       case "fmt ":
-        guard let fmt = readFmtChunk(data, payloadStart: payloadStart, size: size) else { return nil }
+        guard let fmt = readFmtChunk(data, payloadStart: payloadStart, size: size) else {
+          return nil
+        }
         channels = fmt.channels
         sampleRate = fmt.sampleRate
         bitsPerSample = fmt.bitsPerSample
@@ -86,7 +88,7 @@ public enum WAVDecoder {
         break
       }
 
-      cursor = payloadStart + size + (size % 2) // чанки выровнены по 2 байта
+      cursor = payloadStart + size + (size % 2)  // чанки выровнены по 2 байта
     }
 
     guard sampleRate > 0, channels > 0, dataOffset >= 0, dataSize > 0 else { return nil }
@@ -117,7 +119,7 @@ public enum WAVDecoder {
 
     var samples: [Int16] = []
     samples.reserveCapacity(min(sampleCount, availableSamples))
-    for i in 0 ..< sampleCount {
+    for i in 0..<sampleCount {
       let offset = header.dataOffset + i * 2
       guard offset + 2 <= data.count else { break }
       let value = readUInt16LE(data, at: offset)
@@ -129,8 +131,8 @@ public enum WAVDecoder {
 
   /// Проверяет RIFF/WAVE-префикс файла (canonical WAV).
   private static func isRIFFWAVEPrefix(_ data: Data) -> Bool {
-    String(bytes: data[0 ..< 4], encoding: .ascii) == "RIFF"
-      && String(bytes: data[8 ..< 12], encoding: .ascii) == "WAVE"
+    String(bytes: data[0..<4], encoding: .ascii) == "RIFF"
+      && String(bytes: data[8..<12], encoding: .ascii) == "WAVE"
   }
 
   /// Поля fmt-чанка, значимые для декодирования (PCM 16-bit).
@@ -150,7 +152,7 @@ public enum WAVDecoder {
   ) -> PCMFmtChunk? {
     guard size >= 16 else { return nil }
     let audioFormat = Int(readUInt16LE(data, at: payloadStart))
-    guard audioFormat == 1 else { return nil } // PCM only
+    guard audioFormat == 1 else { return nil }  // PCM only
     let fmt = PCMFmtChunk(
       channels: Int(readUInt16LE(data, at: payloadStart + 2)),
       sampleRate: Int(readUInt32LE(data, at: payloadStart + 4)),

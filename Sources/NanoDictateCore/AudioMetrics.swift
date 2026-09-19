@@ -58,7 +58,7 @@ public enum AudioMetrics {
   /// Типовой VAD-порог: если средний уровень записи ниже него, в записи
   /// почти наверняка только шум микрофона / паузы — именно такой «аудио»
   /// не должен уходить в LLM как речь.
-  public static let nearSilenceThreshold: Float = 0.00316 // −50 dBFS
+  public static let nearSilenceThreshold: Float = 0.00316  // −50 dBFS
 
   /// Переводит линейную амплитуду (0...1) в децибелы относительно полной шкалы
   /// (dBFS): 1.0 → 0 dBFS, 0.1 → −20 dBFS. Нулевая амплитуда — −120 dBFS (пол).

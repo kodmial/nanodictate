@@ -34,7 +34,8 @@ public enum BatchPromptChain {
     guard trimmed.count > maxLength else { return trimmed }
 
     let windowStart = trimmed.index(trimmed.endIndex, offsetBy: -maxLength)
-    let startsAtWordBoundary = windowStart == trimmed.startIndex
+    let startsAtWordBoundary =
+      windowStart == trimmed.startIndex
       || trimmed[trimmed.index(before: windowStart)] == " "
     guard !startsAtWordBoundary, let firstSpace = trimmed[windowStart...].firstIndex(of: " ") else {
       // Окно целиком на границе слова (неполных слов нет) либо в окне

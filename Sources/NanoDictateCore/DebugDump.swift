@@ -165,7 +165,9 @@ public enum DebugDump {
     if headers.isEmpty {
       lines.append("  (none)")
     }
-    for header in headers.sorted(by: { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }) {
+    for header in headers.sorted(by: {
+      $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+    }) {
       lines.append("  \(header.name): \(maskedHeaderValue(name: header.name, value: header.value))")
     }
     lines.append("Multipart fields:")
@@ -219,7 +221,7 @@ public enum DebugDump {
       do {
         try fileManager.createDirectory(atPath: expanded, withIntermediateDirectories: true)
       } catch {
-        return // нет доступа — молча пропускаем
+        return  // нет доступа — молча пропускаем
       }
     }
 

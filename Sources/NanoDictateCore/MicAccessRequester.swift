@@ -104,7 +104,8 @@ public final class MicAccessRequester {
         // SwiftLint Kodeco разрешает максимум +2 — выравниваем под SwiftLint)
         guard let self,
           self.session == requestSession,
-          self.inFlight else { return }
+          self.inFlight
+        else { return }
         // swiftformat:enable indent
         self.inFlight = false
         // Токен меняется ЗДЕСЬ: поздний granted (диалог ответил после

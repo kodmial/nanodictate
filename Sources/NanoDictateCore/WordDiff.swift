@@ -70,15 +70,15 @@ public enum WordDiff {
     // Общий префикс по словам.
     var prefix = 0
     while prefix < oldWords.count, prefix < newWords.count,
-          oldWords[prefix] == newWords[prefix] // swiftlint:disable:this indentation_width
-    { // swiftlint:disable:this opening_brace
+      oldWords[prefix] == newWords[prefix]
+    {  // swiftlint:disable:this opening_brace
       prefix += 1
     }
     // Общий суффикс по словам (не пересекая префикс).
     var suffix = 0
     while suffix < oldWords.count - prefix, suffix < newWords.count - prefix,
-          oldWords[oldWords.count - 1 - suffix] == newWords[newWords.count - 1 - suffix] // swiftlint:disable:this indentation_width line_length
-    { // swiftlint:disable:this opening_brace
+      oldWords[oldWords.count - 1 - suffix] == newWords[newWords.count - 1 - suffix]
+    {  // swiftlint:disable:this opening_brace
       suffix += 1
     }
 
@@ -87,8 +87,8 @@ public enum WordDiff {
       return nil
     }
 
-    let spanOldWords = oldWords[prefix ..< (oldWords.count - suffix)]
-    let spanNewWords = newWords[prefix ..< (newWords.count - suffix)]
+    let spanOldWords = oldWords[prefix..<(oldWords.count - suffix)]
+    let spanNewWords = newWords[prefix..<(newWords.count - suffix)]
 
     return Change(
       oldText: old,
