@@ -89,7 +89,7 @@ public enum Inserter {
     }
   }
 
-  // MARK: - Undo (rollback)
+  // MARK: - Откат (undo)
 
   /// Erase exactly as many graphemes as inserted: backspace (virtualKey 51 /
   /// kVK_Delete) per char — symmetric undo to `insert(text:)`, same 5 ms pause.
@@ -136,9 +136,10 @@ public enum Inserter {
     // would take twice as many presses).
     let backspaceCount = old.count
 
-// Backspace: key 51 (delete). Multiple presses — multiple times. Goes via
-    // common post() — postHook and the isTestRun gate apply (unlike postKey).
-    pressBackspace(backspaceCount, source: source)
+    // Backspace: key 51 (delete). Multiple presses — multiple times.
+    for _ in 0..<backspaceCount {
+      postKey(virtualKey: 51, source: source)
+    }
     typeText(new)
   }
 
@@ -240,14 +241,14 @@ public enum Inserter {
     if let hook = postHook {
       hook(event, tap)
     } else if RuntimeEnvironment.isTestRun {
-      // Test runner does not print into the active application.
+      // Тестовый раннер в активное приложение не печатает.
     } else {
       event.post(tap: tap)
     }
   }
 }
 
-// MARK: - Insertion via the selected method (insert_method)
+// MARK: - Вставка выбранным способом (insert_method)
 
 extension Inserter {
   /// Insert text using selected method.
@@ -277,7 +278,7 @@ extension Inserter {
   static var cgEventInsertOverride: ((String) -> Void)?
 }
 
-// MARK: - Paste via clipboard
+// MARK: - Вставка через буфер обмена
 
 /// Clipboard bridge; all ops injected for tests (no real NSPasteboard/CGEvent).
   /// `.default` — real prod implementation.
@@ -313,7 +314,7 @@ public struct ClipboardInsertBridge {
     ClipboardInsertBridge()
   }
 
-  // MARK: Default implementations
+  // MARK: Дефолтные реализации
 
   public static func defaultReadClipboard() -> String? {
     NSPasteboard.general.string(forType: .string)

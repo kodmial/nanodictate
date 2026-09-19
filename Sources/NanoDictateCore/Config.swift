@@ -908,9 +908,8 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
   /// Не сериализует весь файл — иначе потеряются комментарии. Строка ищется
   /// на верхнем уровне (вне секций), значение в кавычках заменяется точечно
   /// (хвостовой комментарий сохраняется), без кавычек — заменяется всё после
-  /// `=`. Если ключа нет — вставляется перед первой секцией (секций нет —
-  /// в конец файла). После атомарной записи возвращает права 0600
-  /// (atomic-запись сбрасывает их на umask).
+  /// `=`. Если ключа нет — добавляется в конец. После атомарной записи
+  /// возвращает права 0600 (atomic-запись сбрасывает их на umask).
   ///
   /// `value` — готовая литеральная форма значения: `"gigaam"` для строк,
   /// `true`/`false` для bool, `2` для чисел.
@@ -924,14 +923,9 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
     }
 
     var replaced = false
-    var inSection = false
     let lines = content.components(separatedBy: "\n").map { line -> String in
+      guard !replaced else { return line }
       let stripped = line.drop { $0 == " " || $0 == "\t" }
-      if stripped.hasPrefix("[") {
-        inSection = true
-        return line
-      }
-      guard !replaced, !inSection else { return line }
       guard let eqIndex = stripped.firstIndex(of: "=") else { return line }
       let lineKey = stripped[stripped.startIndex..<eqIndex].trimmingCharacters(in: .whitespaces)
       guard lineKey == key else { return line }
@@ -955,24 +949,11 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
 
     var result = lines.joined(separator: "\n")
     if !replaced {
-      // Ключ не найден на верхнем уровне — вставляем ПЕРЕД первой секцией,
-      // иначе top-level ключ уедет внутрь чужой секции и сменит семантику.
-      if let firstSection = lines.firstIndex(where: {
-        $0.drop { $0 == " " || $0 == "\t" }.hasPrefix("[")
-      }) {
-        var output = lines
-        output.insert("\(key) = \(value)", at: firstSection)
-        result = output.joined(separator: "\n")
-        if !result.hasSuffix("\n") {
-          result += "\n"
-        }
-      } else {
-        // Секций нет — дописываем в конец (прежнее поведение).
-        if !result.isEmpty, !result.hasSuffix("\n") {
-          result += "\n"
-        }
-        result += "\(key) = \(value)\n"
+      // Строка не найдена — добавляем в конец.
+      if !result.isEmpty, !result.hasSuffix("\n") {
+        result += "\n"
       }
+      result += "\(key) = \(value)\n"
     }
 
     guard let data = result.data(using: .utf8) else {

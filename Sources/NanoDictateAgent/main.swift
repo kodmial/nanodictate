@@ -38,7 +38,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// Active provider id (nil — legacy config without sections).
   private let activeProviderID: String?
 
-  // MARK: STT routing by role ([routing])
+  // MARK: Маршрутизация STT по ролям ([routing])
 
   /// Segment-role provider id ([routing]); nil — unset, fallback active; resolved in init from config.
   private let segmentRoleProviderID: String?
@@ -207,8 +207,6 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   // swiftlint:disable:next function_body_length
   init(config: AppConfig) {
     logLevel = config.logLevel
-    // File logger level from config (`log_level`) — default stays "info".
-    Logger.logLevel = config.logLevel
     // Same resolved config the Transcriber below was built from —
     // source of truth for the overlay label (RecognitionLabel.forSession).
     resolvedConfig = config
@@ -938,8 +936,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     // request up to networkRequestTimeout; the guard counts by request number
     // (N segments, count > 1 ⇒ one more final). Same session-token mechanism
     // as processSingleRequest.
-    let segmentCount = AudioSegmenter.segmentCount(samples: samples)
-    let requestCount = segmentCount <= 1 ? 1 : segmentCount + 1
+    let segments = AudioSegmenter.segments(samples: samples)
+    let requestCount = segments.count <= 1 ? 1 : segments.count + 1
     let chunkedMaxDuration = Double(requestCount) * Transcriber.networkRequestTimeout + 5
 
     processingSession += 1
@@ -1807,8 +1805,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
 var instanceLockFD: Int32 = -1
 
 /// Tries to take the singleton lock. true — the lock is taken, services
-/// may start; false — another instance is already running or the lock could
-/// not be taken (both logged), the process must idle, starting nothing.
+/// may start; false — another instance is already running (logged), the
+/// process must idle, starting nothing.
 @discardableResult
 func ensureSingleInstance() -> Bool {
   let lockPath = FileManager.default.temporaryDirectory
@@ -1819,7 +1817,7 @@ func ensureSingleInstance() -> Bool {
     Logger.log(
       "single-instance lock open failed (errno \(error)): \(String(cString: strerror(error)))",
       level: "error")
-    return false
+    exit(1)
   }
   guard flock(fileDescriptor, LOCK_EX | LOCK_NB) == 0 else {
     let error = errno
@@ -1828,7 +1826,7 @@ func ensureSingleInstance() -> Bool {
         "single-instance lock failed (errno \(error)): \(String(cString: strerror(error)))",
         level: "error")
       close(fileDescriptor)
-      return false
+      exit(1)
     }
     Logger.log(
       "another dictation agent instance already running — entering idle wait", level: "info")

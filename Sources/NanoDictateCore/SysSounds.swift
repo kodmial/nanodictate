@@ -18,7 +18,7 @@
 import AppKit
 import Foundation
 
-// MARK: - System sounds
+// MARK: - Системные звуки
 
 /// Plays short macOS system sounds via NSSound.
 public final class SysSounds {
@@ -32,9 +32,9 @@ public final class SysSounds {
   /// macOS classic "error sound" — network failures (no internet / STT timeout).
   private static let errorSoundName = "Basso"
 
-  // MARK: New cases (quick UX wins). Each — a separate case with default
+  // MARK: Новые кейсы (быстрые UX-победы). Каждый — отдельный кейс с дефолтным
 
-  // behavior: existing cases/methods (start/end/cancel/error) unchanged.
+  // поведением: существующие кейсы/методы (start/end/cancel/error) НЕ меняются.
 
   /// Success sound AFTER text insertion. Default same Pop as playEnd, but a
   /// separate case/method: new queue "insert then sound" pinned to it, old
@@ -88,7 +88,7 @@ public final class SysSounds {
     play(Self.errorSoundName, label: "error")
   }
 
-  // MARK: New methods (UX quick wins)
+  // MARK: Новые методы (UX quick wins)
 
   /// Finish sound AFTER text insertion (not before). Called from
   /// completeInsertion after Inserter.insert — user hears it only when text
@@ -168,42 +168,18 @@ public final class SysSounds {
   }
 }
 
-// MARK: - Logger
+// MARK: - Логгер
 
 /// Minimal thread-safe file logger: appends to `<logDirectory>/agent.log`.
-/// Filters messages below `logLevel`, rotates to `agent.log.1` once the file
-/// exceeds `maxLogBytes`, restricts created files to 0600.
 public enum Logger {
   /// Logs directory; `~` expanded automatically.
   public static var logDirectory: String = "~/Library/Logs/NanoDictate"
 
-  /// Level threshold: messages below are dropped (debug < info < warn < error).
-  /// Default "info" matches config `log_level` — debug noise (SysSounds and
-  /// others) does not reach agent.log. Binary entry sets this from config.
-  public static var logLevel: String = "info"
-
-  /// Max agent.log size before rotation to agent.log.1 (old .1 replaced).
-  /// Bounds the log at any level — no unbounded growth on long runs.
-  public static var maxLogBytes: Int64 = 2 * 1024 * 1024
-
   private static let lock = NSLock()
 
-/// Level ordering; unknown levels rank as "info" — never silently dropped
-  /// on a typo'd level name.
-  private static func levelRank(_ level: String) -> Int {
-    switch level {
-    case "debug": return 0
-    case "info": return 1
-    case "warn": return 2
-    case "error": return 3
-    default: return 1
-    }
-  }
-
   /// Appends `yyyy-MM-dd HH:mm:ss [level] message` to agent.log. Creates
-  /// dir/file as needed. Never throws. Suppressed levels skip all file I/O.
+  /// dir/file as needed. Never throws.
   public static func log(_ message: String, level: String = "info") {
-    guard levelRank(level) >= levelRank(logLevel) else { return }
     lock.lock()
     defer { lock.unlock() }
 
@@ -234,31 +210,12 @@ public enum Logger {
 
     let fileURL = URL(fileURLWithPath: expanded).appendingPathComponent("agent.log")
 
-    // Bounded log: rotate agent.log → agent.log.1 once over maxLogBytes.
-    // Under the same lock — appends never interleave with rotation.
-    if fileManager.fileExists(atPath: fileURL.path) {
-      var size: Int64 = 0
-      if let attrs = try? fileManager.attributesOfItem(atPath: fileURL.path) {
-        size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
-      }
-      if size >= maxLogBytes {
-        let rotated = URL(fileURLWithPath: expanded).appendingPathComponent("agent.log.1")
-        try? fileManager.removeItem(atPath: rotated.path)
-        try? fileManager.moveItem(atPath: fileURL.path, toPath: rotated.path)
-      }
-    }
-
     if let handle = try? FileHandle(forWritingTo: fileURL) {
       defer { try? handle.close() }
-      // Log may carry secrets/commands — 0600 also on append (old files
-      // may have been created before the permission check).
-      try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
       handle.seekToEndOfFile()
       handle.write(data)
     } else if !fileManager.fileExists(atPath: fileURL.path) {
-      // Fresh file creation: owner-only (0600), like config/plist.
       try? data.write(to: fileURL)
-      try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
     }
   }
 }

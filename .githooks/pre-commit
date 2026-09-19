@@ -5,13 +5,6 @@
 # линтеров (error-уровень). Предупреждения (warnings) печатаются, но коммит
 # не останавливают. Незастейдженный/старый код не проверяется.
 #
-# Линтится НЕ worktree-копия, а staged-blob: контент каждого файла достаётся
-# из индекса (git show :<path>) и материализуется во временное дерево с теми
-# же относительными путями; линтеры запускаются из этого дерева. Поэтому
-# правки, сделанные после `git add`, не влияют на вердикт — проверяется ровно
-# то, что уйдёт в коммит. Конфиги линтеров копируются в корень дерева, чтобы
-# они подхватились по относительным путям.
-#
 # Семантика выхода (без --strict, поэтому «белый»):
 #   swift-format lint — exit 0 при предупреждениях, exit 1 при ошибках
 #     (битый синтаксис / невалидный Swift);
@@ -59,8 +52,7 @@ SWIFTLINT=$(resolve swiftlint)
 
 # --- Гейт: отсекаем staged-файлы, исчезнувшие из worktree -------------------
 # (git add f.swift && rm f.swift && git commit) — линтерам несуществующий путь
-# давать нельзя. Staged-blob через git show :<path> доступен и для них, но гейт
-# сохранён как был, чтобы не расширять поведение хука.
+# давать нельзя.
 existing=()
 for f in "${file_array[@]}"; do
     if [[ -e "$f" ]]; then
@@ -73,45 +65,13 @@ if [[ ${#existing[@]} -eq 0 ]]; then
     exit 0
 fi
 
-# --- Материализация staged-blob'ов во временное дерево ----------------------
-# Для каждого staged-файла снимаем КОНТЕНТ ИЗ ИНДЕКСА (git show ":$f"), а не
-# из worktree: после `git add` файл могли править дальше, и линт worktree-копии
-# проверял бы не тот контент, что реально уйдёт в коммит.
-tmp_dir=$(mktemp -d) || exit 1
-trap 'rm -rf "$tmp_dir"' EXIT INT TERM
-
-lint_files=()
-for f in "${existing[@]}"; do
-    mkdir -p -- "$tmp_dir/$(dirname "$f")"
-    if git show ":$f" > "$tmp_dir/$f" 2>/dev/null; then
-        lint_files+=("$f")
-    else
-        echo "warning: $f: не удалось прочитать staged-контент из индекса — пропуск" >&2
-    fi
-done
-if [[ ${#lint_files[@]} -eq 0 ]]; then
-    exit 0
-fi
-
-# Конфиги линтеров — в корень tmp-дерева: оба линтера ищут конфиг, поднимаясь
-# от директории файла вверх, так что при относительных путях найдут именно его
-# (а ${PWD}-исключения из .swiftlint.yml раскроются уже в tmp-дерево).
-for cfg in .swift-format .swiftlint.yml; do
-    if [[ -f "$repo_root/$cfg" ]]; then
-        cp "$repo_root/$cfg" "$tmp_dir/$cfg"
-    fi
-done
-
-# Линтим из tmp-дерева: относительные пути у файлов те же, что в коммите.
-cd "$tmp_dir" || exit 1
-
-echo "pre-commit lint: проверяю staged Swift-файлов: ${#lint_files[@]}"
+echo "pre-commit lint: проверяю staged Swift-файлов: ${#existing[@]}"
 
 # --- (а) swift-format: пакетно за один вызов ------------------------------
 if [[ ! -x "$SWIFT_FORMAT" ]]; then
     echo "warning: swift-format не найден (PATH, /opt/homebrew/bin, /opt/local/bin, /usr/local/bin) — пропущен, коммит не блокируется" >&2
 else
-    "$SWIFT_FORMAT" lint "${lint_files[@]}" 2>&1
+    "$SWIFT_FORMAT" lint "${existing[@]}" 2>&1
     if [[ $? -ne 0 ]]; then
         blocked=1
         violated+=("swift-format")  # error-уровень (битый синтаксис и т.п.)
@@ -124,7 +84,7 @@ fi
 if [[ ! -x "$SWIFTLINT" ]]; then
     echo "warning: swiftlint не найден (PATH, /opt/homebrew/bin, /opt/local/bin, /usr/local/bin) — пропущен, коммит не блокируется" >&2
 else
-    for f in "${lint_files[@]}"; do
+    for f in "${existing[@]}"; do
         "$SWIFTLINT" lint "$f" 2>&1
         if [[ $? -ne 0 ]]; then
             blocked=1

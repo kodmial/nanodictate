@@ -826,9 +826,6 @@ public final class OverlayController: NSObject {
     let sizeResult = AXUIElementCopyAttributeValue(
       axElement, kAXSizeAttribute as CFString, &sizeValue
     )
-    // Размер необязателен: чужой процесс может не отдавать его (браузеры,
-    // мессенджеры). При неудаче size остаётся нулевым — якорь считается по
-    // позиции, фоллбэк цепочки positionedPoint() работает без краха.
     if sizeResult == .success, let sizeVal = sizeValue {
       // swiftlint:disable:next force_cast
       AXValueGetValue(sizeVal as! AXValue, .cgSize, &size)

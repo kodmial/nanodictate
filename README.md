@@ -3,9 +3,8 @@
 Live voice dictation into any macOS app (12+). Double-tap **Alt** to start and
 stop — speak, and the recognized text is typed into the currently focused app.
 STT runs on OpenAI, Groq, Cloudflare Workers AI, or any OpenAI-compatible
-endpoint. Dev binaries deployed via the MCP server are signed with a stable
-identity, so **Microphone/Accessibility grants survive rebuilds**; release
-binaries replaced by an update may ask for the grants again.
+endpoint. Binaries are signed with a stable identity, so
+**Microphone/Accessibility grants survive rebuilds**.
 
 ## Installation
 
@@ -32,7 +31,6 @@ is pending upstream acceptance — use GitHub Releases below.
 ```sh
 curl -L -O https://github.com/kodmial/nanodictate/releases/download/v0.1.0/nanodictate-0.1.0-macos-$(uname -m).tar.gz
 tar xzf nanodictate-0.1.0-macos-$(uname -m).tar.gz
-mkdir -p ~/.local/bin
 cp NanoDictateAgent nanodictate ~/.local/bin/
 nanodictate start
 ```
@@ -146,14 +144,11 @@ any STT provider's section.
 
 ## Code Signing & TCC
 
-macOS uses the binary's code-signing identity and designated requirement to
-recognize updated code. The stable identity **NanoDictate Code Signing** can
-preserve grants across dev rebuilds — this applies only to binaries deployed
-via the MCP server (`mcp/nanodictate-deploy-mcp-server`, `dictation_sign` /
+macOS TCC grants are keyed to the binary's signature (cdhash). The fixed
+identity **NanoDictate Code Signing** keeps the cdhash stable across rebuilds,
+so grants survive. Sign only via the MCP server tools (`dictation_sign` /
 `dictation_deploy`); raw `swift build` + ad-hoc `codesign` changes the
-signature and drops Microphone/Accessibility grants. Release binaries are
-ad-hoc signed: after an update replaces the binary, macOS may ask for
-Microphone/Accessibility grants again — re-grant them once.
+signature and drops Microphone/Accessibility grants.
 
 ## Build & Test
 
@@ -172,10 +167,8 @@ agent with a stable signature (Node.js ≥ 22). See its
 ## Troubleshooting
 
 - Agent dead / hotkey gone: `nanodictate stop && nanodictate start`.
-- Permissions re-requested after a dev rebuild: re-sign with the stable
-  identity (`dictation_deploy`) and re-grant once; after a release update
-  replaces the binary, macOS re-prompts — just re-grant the permissions
-  again.
+- Permissions re-requested after a rebuild: re-sign with the stable identity
+  (`dictation_deploy`) and re-grant once.
 - Logs: `~/Library/Logs/NanoDictate/agent.log`; set `log_level = "debug"` for
   verbose output (`nanodictate logs` prints the last 50 lines).
 

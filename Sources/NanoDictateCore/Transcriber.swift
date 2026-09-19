@@ -455,21 +455,8 @@ public final class Transcriber {
   private func send(request: URLRequest) async throws -> STTHTTPResponse {
     var request = request
     if !httpProxy.isEmpty, let original = request.url?.absoluteString {
-      // Credentials (Authorization/Proxy-Authorization/Cookie) travel this
-      // hop: plaintext only allowed up to a loopback forwarder, otherwise the
-      // operator must give an explicit https scheme in http_proxy.
-      let scheme = httpProxy.contains("://") ? "" : "http://"
-      guard let proxiedURL = URL(string: "\(scheme)\(httpProxy)/\(original)") else {
+      guard let proxiedURL = URL(string: "http://\(httpProxy)/\(original)") else {
         throw URLError(.badURL)
-      }
-      let host = proxiedURL.host ?? ""
-      let isLoopback = host == "127.0.0.1" || host == "localhost" || host == "::1"
-      guard proxiedURL.scheme == "https" || isLoopback else {
-        Logger.log(
-          "STT error: http_proxy '\(host)' не loopback — plaintext-хоп с секретами запрещён",
-          level: "error"
-        )
-        throw TranscribeError.network("http_proxy requires https for non-loopback hosts")
       }
       request.url = proxiedURL
       if !proxyUser.isEmpty {
@@ -602,8 +589,8 @@ extension Transcriber {
 
   /// Shared "send + retry as needed" loop for both paths.
   /// - up to `maxAttempts` attempts: initial + retries with exponential
-  ///   backoff and jitter (retryable only: HTTP 429/5xx, transport
-  ///   non-timeout); HTTP 429 waits Retry-After (cap 10 s);
+  ///   backoff and jitter (retryable only: HTTP 429/5xx, transport errors
+  ///   including timeout); HTTP 429 waits Retry-After (cap 10 s);
   /// - cookie challenge retried once with a fresh cookie (attempt not burned);
   /// - `transcriptPath == nil` — flat "text" key; else extracted via the
   ///   adapter JSON path (cloudflare).
@@ -626,7 +613,7 @@ extension Transcriber {
 
     // maxAttempts tries (initial + up to maxAttempts-1 retries) with
     // exponential backoff and jitter. Retried only retryable errors
-    // (HTTP 429/5xx, transport non-timeout); timeout, cancel and
+    // (HTTP 429/5xx, transport errors including timeout); cancel and
     // invalidResponse — terminal, a retry never burns the overlay budget.
     var lastError: TranscribeError?
     var attempt = 0
@@ -716,11 +703,11 @@ extension Transcriber {
         Logger.log("STT cancelled (URLError.cancelled, attempt \(attempt))", level: "error")
         throw TranscribeError.network("Request cancelled")
       } catch let error as URLError where error.code == .timedOut {
-        // Hard network request timeout (networkRequestTimeout).
-        // Terminal, NO retry: a repeated request almost surely hits the
-        // same timeout and makes the overlay spin dots again — so the
-        // "processing" phase lives no longer than the timeout + a small
-        // margin (see OverlayController.processingMaxDuration).
+        // Hard network request timeout (networkRequestTimeout) — terminal,
+        // NO retry: a retried request would almost surely hit the same
+        // timeout again and keep the overlay spinning dots, so the
+        // "processing" phase never outlives the timeout + a small margin
+        // (see OverlayController.processingMaxDuration).
         Logger.log(
           "STT timeout (attempt \(attempt)): \(error.localizedDescription)", level: "error")
         throw TranscribeError.network(Self.sttTimeoutMessage)

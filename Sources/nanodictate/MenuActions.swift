@@ -1,13 +1,13 @@
 import Foundation
 import NanoDictateCore
 
-// MARK: - Actions
+// MARK: - Действия
 
 /// Runs a subcommand through this same binary (reuses cmdStart/cmdStop
 /// without duplication), returning its printable output in one line.
-func runSelfCommand(_ args: [String]) -> String {
+func runSelfCommand(_ subcommand: String) -> String {
   let exe = CommandLine.arguments.first ?? ""
-  let result = runProcess(exe, args)
+  let result = runProcess(exe, [subcommand])
   let out = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
   if !out.isEmpty {
     return out
@@ -109,12 +109,12 @@ func applySimpleAction(_ action: MenuAction, _ view: inout MenuView) {
   case .refresh:
     refreshMenu(&view)
   case .toggleAgent:
-    view.notice = agentIsRunning() ? runSelfCommand(["stop"]) : runSelfCommand(["start"])
+    view.notice = agentIsRunning() ? runSelfCommand("stop") : runSelfCommand("start")
     view.page = .status
     view.cursor = 0
     view.lastStatusRefresh = .distantPast  // agent start/stop → status
   case .showLastResult:
-    view.notice = runSelfCommand(["last"])
+    view.notice = runSelfCommand("last")
   case .toggleLanguage:
     let newLang = L10n.language == .en ? "ru" : "en"
     try? AppConfig.writeKeyValue(key: "ui_language", value: newLang, to: AppConfig.defaultPath())
@@ -173,7 +173,7 @@ func retryTranscribe(_ view: inout MenuView) {
     view.notice = L10n.tr("menu.switch.cancelled")
     return
   }
-  view.notice = runSelfCommand(["retry", view.providers[number - 1].id])
+  view.notice = runSelfCommand("retry \(view.providers[number - 1].id)")
 }
 
 /// Toggles the pre-insert review gate + agent restart.

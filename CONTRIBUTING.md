@@ -23,7 +23,7 @@ npm test   # build + node --test
 swift run NanoDictateCoreTests   # не `swift test` — таргет исполняемый
 ```
 
-Тесты — исполняемый таргет `NanoDictateCoreTests`; раннер печатает сводку и возвращает ненулевой код при падениях. CI гоняет те же команды (`.github/workflows/ci.yml`, Swift 6.1, `macos-15`).
+Тесты — исполняемый таргет `NanoDictateCoreTests`; раннер печатает сводку и возвращает ненулевой код при падениях. CI гоняет те же команды (`.github/workflows/ci.yml`, `swift 5.10.1`, `macos-latest`).
 
 ## Стиль коммитов
 

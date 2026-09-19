@@ -1078,7 +1078,7 @@ final class TranscriberTests: XCTestCase {
             apiKey: "test-key",
             transport: transport,
             networkChecker: { true },
-            httpProxy: "127.0.0.1:8080",
+            httpProxy: "proxy.example.com:8080",
             proxyUser: "alice",
             proxyPassword: "secret",
             adapterID: "gigaam"
@@ -1093,7 +1093,7 @@ final class TranscriberTests: XCTestCase {
             }
             XCTAssertEqual(
                 req.url?.absoluteString,
-                "http://127.0.0.1:8080/https://api.example/v1/audio/transcriptions",
+                "http://proxy.example.com:8080/https://api.example/v1/audio/transcriptions",
                 "URL переписан: http://<httpProxy>/<полный-исходный-URL>"
             )
             let expected = "Basic " + Data("alice:secret".utf8).base64EncodedString()
@@ -1109,7 +1109,7 @@ final class TranscriberTests: XCTestCase {
             apiKey: "test-key",
             transport: transport,
             networkChecker: { true },
-            httpProxy: "127.0.0.1:8080",
+            httpProxy: "proxy.example.com:8080",
             adapterID: "gigaam"
         )
 
@@ -1121,7 +1121,7 @@ final class TranscriberTests: XCTestCase {
             }
             XCTAssertEqual(
                 req.url?.absoluteString,
-                "http://127.0.0.1:8080/https://api.example/v1/audio/transcriptions",
+                "http://proxy.example.com:8080/https://api.example/v1/audio/transcriptions",
                 "без кредов URL всё равно переписывается"
             )
             XCTAssertNil(

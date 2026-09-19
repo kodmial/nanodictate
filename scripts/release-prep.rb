@@ -32,19 +32,12 @@ rescue LoadError
   # rmd160 stays a placeholder if OpenSSL is unavailable.
 end
 
-INPUT_TAG = ARGV[0]
-unless INPUT_TAG && INPUT_TAG =~ /\Av?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\z/
+TAG = ARGV[0]
+unless TAG && TAG =~ /\Av?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\z/
   abort "Usage: ruby scripts/release-prep.rb v0.1.0   (tag may be '0.1.0' or 'v0.1.0')"
 end
 
-# Canonical, validated tag: always v-prefixed. GitHub source tarball and
-# release download URLs must carry the literal tag (release.yml publishes
-# tags as v0.5.0), so "0.5.0" on the CLI normalizes to the same "v0.5.0".
-# The plain VERSION (no leading "v") is used only for archive filenames and
-# metadata (formula/Portfile version fields, --version output), never in a
-# tag URL.
-TAG     = INPUT_TAG.start_with?("v") ? INPUT_TAG : "v#{INPUT_TAG}"
-VERSION = TAG.sub(/\Av/, "")
+VERSION     = TAG.sub(/\Av/, "")
 ROOT        = File.expand_path("..", __dir__)
 TARBALL_URL = "https://github.com/kodmial/nanodictate/archive/refs/tags/#{TAG}.tar.gz"
 
@@ -134,7 +127,7 @@ puts
 puts "Next steps:"
 puts "  1. Fill the maintainers handle in #{portfile_out} (never auto-generate a person's id)."
 puts "  2. Sanity-check the version string: `nanodictate --version` will print \"nanodictate #{VERSION}\"."
-puts "  3. Homebrew: copy #{formula_out} into the kodmial/homebrew-nanodictate-homebrew tap as"
+puts "  3. Homebrew: copy #{formula_out} into the nanodictate-homebrew tap as"
 puts "     Formula/nanodictate.rb, then run `brew audit --strict --new nanodictate` there."
 puts "  4. MacPorts: copy #{portfile_out} into a macports-ports checkout as"
 puts "     audio/nanodictate/Portfile, then run `port lint` before opening the PR."

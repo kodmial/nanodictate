@@ -1,6 +1,6 @@
 import Foundation
 
-// MARK: - STT request debug dump
+// MARK: - Отладочный дамп STT-запросов
 
 /// Debug transcription log (`transcriber-debug.log`), enabled at log level debug.
 /// Entry built by pure `summarize`; `append` only writes. At debug, raw audio
@@ -15,10 +15,6 @@ public enum DebugDump {
 
   /// Audio recordings dir (`recording-*.wav`), written only at debug; created on write.
   public static var recordingsDirectory: String = "~/Library/Logs/NanoDictate/recordings"
-
-  /// Max audio recordings kept on disk; oldest pruned on save beyond this cap.
-  /// Debug audio grows fast — bound the footprint.
-  private static let maxRecordings = 50
 
   private static let lock = NSLock()
 
@@ -48,7 +44,7 @@ public enum DebugDump {
     }
   }
 
-  // MARK: - Masking
+  // MARK: - Маскирование
 
   /// Mask header value by name (case-insensitive). Authorization whole → "Bearer ***",
   /// X-Proxy-Key → "***". Anything outside `safeDumpHeaders` masked — secret
@@ -97,7 +93,7 @@ public enum DebugDump {
     return result
   }
 
-  // MARK: - Recording file names (pure functions, no I/O)
+  // MARK: - Имена файлов аудиозаписей (чистые функции, без I/O)
 
   /// Recording filename: `recording-<yyyyMMdd-HHmmss-SSS>.wav`; milliseconds
   /// avoid collisions within one second.
@@ -113,7 +109,7 @@ public enum DebugDump {
     return (dir as NSString).appendingPathComponent(recordingFileName(for: date))
   }
 
-  // MARK: - Recording assembly (pure function, no I/O)
+  // MARK: - Сборка записи (чистая функция, без I/O)
 
   /// One log entry: request (method/url/masked headers/fields/file meta) and
   /// response (status + masked body). No response → "(no response — transport error)".
@@ -181,7 +177,7 @@ public enum DebugDump {
     return lines.joined(separator: "\n") + "\n"
   }
 
-  // MARK: - File writing (wrapper)
+  // MARK: - Запись в файл (враппер)
 
   /// Append entry to `dumpDirectory/dumpFileName`; creates dir/file as needed.
   /// Never throws — debug log must not break transcription.
@@ -206,21 +202,15 @@ public enum DebugDump {
 
     if let handle = try? FileHandle(forWritingTo: fileURL) {
       defer { try? handle.close() }
-      // Secrets-bearing debug log (masked headers): force 0600
-      // also on append — files created before this fix could be wider.
-      try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
       handle.seekToEndOfFile()
       handle.write(data)
     } else if !fileManager.fileExists(atPath: fileURL.path) {
-      // Creation: 0600 (like config/plist).
       try? data.write(to: fileURL)
-      try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
     }
   }
 
   /// Save WAV to `path`, creating dir as needed. Never throws —
-  /// failures only logged; must not break transcription. Recording restricted
-  /// to owner (0600); oldest pruned when `maxRecordings` exceeded.
+  /// failures only logged; must not break transcription.
   public static func saveRecording(data: Data, to path: String) {
     lock.lock()
     defer { lock.unlock() }
@@ -235,8 +225,6 @@ public enum DebugDump {
         withIntermediateDirectories: true
       )
       try data.write(to: fileURL)
-      // Recording — user speech: owner-only (0600).
-      try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
     } catch {
       Logger.log(
         L10n.tr("debug.recordingSaveFailed")
@@ -244,28 +232,6 @@ public enum DebugDump {
           .replacingOccurrences(of: "{error}", with: "\(error)"),
         level: "error"
       )
-    }
-    pruneRecordings(fileManager: fileManager)
-  }
-
-  /// Remove oldest `recording-*.wav` when the directory exceeds
-  /// `maxRecordings`. Filenames are timestamp-prefixed, so lexicographic order
-  /// equals chronological. Best-effort — never throws.
-  private static func pruneRecordings(fileManager: FileManager) {
-    let dir = (recordingsDirectory as NSString).expandingTildeInPath
-    guard
-      let urls = try? fileManager.contentsOfDirectory(
-        at: URL(fileURLWithPath: dir, isDirectory: true),
-        includingPropertiesForKeys: nil
-      )
-    else { return }
-    let names = urls
-      .map { $0.lastPathComponent }
-      .filter { $0.hasPrefix("recording-") && $0.hasSuffix(".wav") }
-      .sorted()
-    guard names.count > maxRecordings else { return }
-    for name in names.prefix(names.count - maxRecordings) {
-      try? fileManager.removeItem(atPath: (dir as NSString).appendingPathComponent(name))
     }
   }
 }

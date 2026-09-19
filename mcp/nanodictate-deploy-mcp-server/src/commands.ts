@@ -7,16 +7,8 @@
  */
 
 import { spawn } from "node:child_process";
-import {
-  accessSync,
-  constants as fsConstants,
-  existsSync,
-  mkdirSync,
-  renameSync,
-  writeFileSync,
-} from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { accessSync, constants as fsConstants, existsSync } from "node:fs";
+import { join } from "node:path";
 import {
   AGENT_BUNDLE_ID,
   AGENT_SERVICE_NAME,
@@ -505,102 +497,10 @@ export interface RestartResult {
   detail: string;
 }
 
-/** Canonical LaunchAgent plist path (~/Library/LaunchAgents/com.nanodictate.agent.plist). */
-function agentPlistPath(): string {
-  return join(
-    homedir(),
-    "Library",
-    "LaunchAgents",
-    `${AGENT_SERVICE_NAME}.plist`,
-  );
-}
-
-/** Agent log path used by the canonical plist. */
-function agentLogPath(): string {
-  return join(homedir(), "Library", "Logs", "NanoDictate", "agent.log");
-}
-
-/** XML-escape a plist string value (paths may contain &, ", <, >). */
-function xmlEscape(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
-}
-
-/**
- * Inline XML of the canonical plist — mirrors AgentPlist.plistContent in
- * Sources/NanoDictateCore/AgentPlist.swift so the two writers stay in lockstep.
- */
-function agentPlistContent(agentBinary: string, logPath: string): string {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>${AGENT_SERVICE_NAME}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>${xmlEscape(agentBinary)}</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>StandardOutPath</key>
-  <string>${xmlEscape(logPath)}</string>
-  <key>StandardErrorPath</key>
-  <string>${xmlEscape(logPath)}</string>
-</dict>
-</plist>
-`;
-}
-
-/**
- * Re-register the LaunchAgent so launchd's loaded plan points at the given
- * binary. Kickstart alone re-runs the STALE bootstrap-time plan (ProgramArguments
- * is read at bootstrap, not from the plist file) — a plist changed to a different
- * binary needs bootout → bootstrap to take effect. Failures are tolerated: when
- * the loaded plan already matches, the kickstart below succeeds regardless, and
- * a fully broken state is recovered by the `nanodictate start` fallback.
- */
-async function reRegisterAgent(
-  agentBinary: string,
-  target: string,
-): Promise<void> {
-  const plistPath = agentPlistPath();
-  try {
-    mkdirSync(dirname(plistPath), { recursive: true });
-    const tmpPath = `${plistPath}.tmp`;
-    writeFileSync(tmpPath, agentPlistContent(agentBinary, agentLogPath()), {
-      mode: 0o600,
-    });
-    renameSync(tmpPath, plistPath);
-  } catch {
-    return;
-  }
-  const domain = target.slice(0, target.lastIndexOf("/"));
-  await run("/bin/launchctl", ["bootout", target]);
-  await run("/bin/launchctl", ["bootstrap", domain, plistPath]);
-}
-
-/**
- * Restart the LaunchAgent via `launchctl kickstart -k`. Fallback to `nanodictate start`.
- * The agent is re-registered with .build/<configuration>/NanoDictateAgent first,
- * so a successful restart runs the freshly built and signed binary — never a
- * Homebrew/MacPorts install or an older build the plist used to point at.
- */
-export async function restartAgent(
-  configuration: Configuration = "debug",
-): Promise<RestartResult> {
+/** Restart the LaunchAgent via `launchctl kickstart -k`. Fallback to `nanodictate start`. */
+export async function restartAgent(): Promise<RestartResult> {
   const uid = (await run("id", ["-u"])).stdout.trim();
   const target = `gui/${uid}/${AGENT_SERVICE_NAME}`;
-
-  const agentBinary = binaryPaths(configuration).agent;
-  if (existsSync(agentBinary)) {
-    await reRegisterAgent(agentBinary, target);
-  }
 
   const kick = await run("/bin/launchctl", ["kickstart", "-k", target]);
   if (kick.status === 0) {
@@ -679,29 +579,6 @@ export function parseEntitlements(xml: string): Record<string, unknown> | null {
   return Object.keys(result).length > 0 ? result : null;
 }
 
-/**
- * Expected agent entitlements — exactly what the canonical
- * Resources/com.nanodictate.agent.entitlements contains. Same identity + same
- * entitlements → same code-directory hash → TCC grants preserved across rebuilds.
- */
-export const AGENT_ENTITLEMENTS: Record<string, unknown> = {
-  "com.apple.security.device.audio-input": true,
-};
-
-/** True when the parsed entitlements match the expected agent set exactly. */
-export function matchesAgentEntitlements(
-  entitlements: Record<string, unknown> | null,
-): boolean {
-  if (!entitlements) return false;
-  return (
-    Object.keys(entitlements).length ===
-      Object.keys(AGENT_ENTITLEMENTS).length &&
-    Object.entries(AGENT_ENTITLEMENTS).every(
-      ([key, value]) => entitlements[key] === value,
-    )
-  );
-}
-
 /** Gather process, launchd and code-signature status. */
 export async function getStatus(
   configuration: Configuration,
@@ -763,8 +640,7 @@ export async function getStatus(
   const signatureStable =
     !!codeSignature &&
     codeSignature.signed &&
-    codeSignature.identity === SIGNING_IDENTITY &&
-    matchesAgentEntitlements(codeSignature.entitlements);
+    codeSignature.identity === SIGNING_IDENTITY;
 
   return {
     agentRunning: pids.length > 0,
