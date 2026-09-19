@@ -649,7 +649,6 @@ public enum BatchTranscriber {
     onProgress: ProgressHandler?
   ) async throws -> BatchOutcome {
     var records = slots
-    var lastError: String?
     for (i, spec) in specs.enumerated() {
       if let resolved = records[i] {
         onProgress?(
@@ -684,7 +683,6 @@ public enum BatchTranscriber {
         }
         text = Self.placeholder
         status = BatchSegmentRecord.statusSkipped
-        lastError = error.localizedDescription
       }
       records[i] = BatchSegmentRecord(
         index: i,
@@ -717,7 +715,6 @@ public enum BatchTranscriber {
     return makeOutcome(
       records: records.compactMap { $0 },
       totalSegments: specs.count,
-      lastError: lastError,
       started: started
     )
   }
@@ -767,7 +764,6 @@ public enum BatchTranscriber {
       return makeOutcome(records: records, totalSegments: specs.count, started: started)
     }
 
-    let lastError = LastErrorBox()
     let workers = min(maxConcurrent, specs.count - completedCount)
     let ckWriter = CheckpointWriter()
     try await withThrowingTaskGroup(of: Void.self) { group in
@@ -793,7 +789,6 @@ public enum BatchTranscriber {
               }
               text = Self.placeholder
               status = BatchSegmentRecord.statusSkipped
-              lastError.set(error.localizedDescription)
             }
             let record = BatchSegmentRecord(
               index: job,
@@ -847,7 +842,6 @@ public enum BatchTranscriber {
     return makeOutcome(
       records: records,
       totalSegments: specs.count,
-      lastError: lastError.current,
       started: started
     )
   }
@@ -874,10 +868,7 @@ public enum BatchTranscriber {
   // MARK: Сборка итога
 
   private static func makeOutcome(
-    records: [BatchSegmentRecord],
-    totalSegments: Int,
-    lastError: String? = nil,
-    started: TimeInterval
+    records: [BatchSegmentRecord], totalSegments: Int, started: TimeInterval
   ) -> BatchOutcome {
     let joined = BatchTextJoiner.join(records.map(\.text))
     let skippedIndexes = records.enumerated()
@@ -889,7 +880,6 @@ public enum BatchTranscriber {
       okCount: records.filter { $0.status == BatchSegmentRecord.statusOK }.count,
       skippedCount: skippedIndexes.count,
       skippedIndexes: skippedIndexes,
-      lastError: lastError,
       elapsed: CFAbsoluteTimeGetCurrent() - started
     )
   }
