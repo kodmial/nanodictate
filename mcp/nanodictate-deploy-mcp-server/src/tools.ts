@@ -227,7 +227,7 @@ export function statusMarkdown(r: StatusResult): string {
       `- identity: \`${sig.identity ?? "(none)"}\``,
       sig.teamId ? `- team id: \`${sig.teamId}\`` : "- team id: (none)",
       `- entitlements file: ${sig.entitlementsFile ? `\`${sig.entitlementsFile}\`` : "(absent — dictation_sign will fail)"}`,
-      `- stable signature (identity = "${SIGNING_IDENTITY}"): ${r.signatureStable ? "**yes** — TCC grants preserved**" : "**NO** — re-grant Microphone/Accessibility after rebuild"}`,
+      `- stable signature (identity + entitlements match expected set): ${r.signatureStable ? "**yes** — TCC grants preserved**" : "**NO** — re-grant Microphone/Accessibility after rebuild"}`,
     );
     if (sig.entitlements) {
       lines.push(
@@ -366,7 +366,7 @@ async function handleDeploy(params: DeployInput) {
     sign = await signProject(params.configuration);
   }
   if (build.success && sign?.success) {
-    restart = await restartAgent();
+    restart = await restartAgent(params.configuration);
   }
 
   const success =
@@ -501,7 +501,7 @@ export function registerTools(server: McpServer): void {
       description:
         "Reports: process state (pgrep -f NanoDictateAgent), LaunchAgent load state (launchctl print gui/<uid>/com.nanodictate.agent), and the code signature of .build/<configuration>/NanoDictateAgent (codesign -dv: signing identity, team id, entitlements). signatureStable = true means the identity matches \"" +
         SIGNING_IDENTITY +
-        "\" and TCC grants are preserved.",
+        "\" and the entitlements match the expected agent set (com.apple.security.device.audio-input = true), so TCC grants are preserved.",
       inputSchema: StatusInputSchema,
       outputSchema: StatusOutputSchema,
       annotations: {

@@ -455,8 +455,21 @@ public final class Transcriber {
   private func send(request: URLRequest) async throws -> STTHTTPResponse {
     var request = request
     if !httpProxy.isEmpty, let original = request.url?.absoluteString {
-      guard let proxiedURL = URL(string: "http://\(httpProxy)/\(original)") else {
+      // Учётные данные (Authorization/Proxy-Authorization/Cookie) уходят этим
+      // хопом: plaintext допустим только до loopback-форвардера, иначе оператор
+      // обязан дать явную https-схему в http_proxy.
+      let scheme = httpProxy.contains("://") ? "" : "http://"
+      guard let proxiedURL = URL(string: "\(scheme)\(httpProxy)/\(original)") else {
         throw URLError(.badURL)
+      }
+      let host = proxiedURL.host ?? ""
+      let isLoopback = host == "127.0.0.1" || host == "localhost" || host == "::1"
+      guard proxiedURL.scheme == "https" || isLoopback else {
+        Logger.log(
+          "STT error: http_proxy '\(host)' не loopback — plaintext-хоп с секретами запрещён",
+          level: "error"
+        )
+        throw TranscribeError.network("http_proxy requires https for non-loopback hosts")
       }
       request.url = proxiedURL
       if !proxyUser.isEmpty {

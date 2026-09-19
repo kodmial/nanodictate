@@ -5,10 +5,9 @@ on:
     tags:
       - 'v*'
 
-# Creating the GitHub Release needs write access to contents; artifact
-# upload/download use the artifact-metadata scope granted to those actions.
-permissions:
-  contents: write
+# Creating the GitHub Release needs contents: write; the build job only reads
+# the repo. Permissions are set per job (least privilege).
+permissions: {}
 
 jobs:
   # Build the two macOS binaries (Intel + Apple Silicon), ad-hoc sign them and
@@ -17,26 +16,34 @@ jobs:
   build:
     name: Build & Package (${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macos-13
+          # macos-13 is retired from Actions; macos-15-intel is the Intel
+          # runner that still produces a native x86_64 binary.
+          - os: macos-15-intel
             arch: x86_64
+            swift: "5.10.1"
           - os: macos-14
             arch: arm64
+            swift: "5.10.1"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Swift
-        uses: swift-actions/setup-swift@v2
+        uses: swift-actions/setup-swift@7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a
         with:
           # Same toolchain as the CI workflow (swift-tools-version:5.7 manifest,
-          # Swift 5 language mode).
-          swift-version: "5.10.1"
+          # Swift 5 language mode), pinned by full commit SHA (tag v2). Set
+          # explicitly per matrix entry: macOS 15 runner images ship a newer
+          # Xcode/Swift by default.
+          swift-version: "${{ matrix.swift }}"
 
       - name: Build release binaries
         run: swift build -c release
@@ -88,6 +95,8 @@ jobs:
     name: Create GitHub Release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download tarballs
         uses: actions/download-artifact@v4
@@ -115,8 +124,10 @@ jobs:
           RELEASE_VERSION: ${{ steps.assets.outputs.version }}
           REPO: ${{ github.repository }}
           REF: ${{ github.ref_name }}
-        # If the release already exists (e.g. a re-run of the workflow), treat
-        # it as success: report and exit 0. Any other failure exits non-zero.
+        # A re-run whose release already exists (fully or partially published)
+        # re-attaches every asset with --clobber, fixing partial uploads; the
+        # job exits 0 only after that upload itself succeeded (set -e). Any
+        # other failure exits non-zero.
         run: |
           set -euo pipefail
           NOTES="Release v$RELEASE_VERSION.
@@ -131,7 +142,8 @@ jobs:
           else
             rc=$?
             if gh release view "$REF" >/dev/null 2>&1; then
-              echo "Release $REF already exists (re-run); skipping."
+              echo "Release $REF already exists (re-run); re-attaching assets (--clobber)."
+              gh release upload "$REF" dist/nanodictate-*.tar.gz dist/SHA256SUMS.txt --clobber
               exit 0
             fi
             exit "$rc"

@@ -151,16 +151,16 @@ func cmdStatus() -> Int32 {
   return running ? 0 : 1
 }
 
-/// Masks secrets in a raw config-file text: api_key / proxy_key — values in
-/// quotes are replaced with maskSecret (first 4 + "***" + last 4). Empty
-/// values stay empty.
+/// Masks secrets in a raw config-file text: api_key / proxy_key /
+/// proxy_password — values in quotes are replaced with maskSecret (first 4 +
+/// "***" + last 4). Empty values stay empty.
 func maskFileSecrets(in content: String) -> String {
   var lines: [String] = []
   for line in content.components(separatedBy: .newlines) {
     let key =
       line.split(separator: "=", maxSplits: 1).first
       .map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
-    if key == "api_key" || key == "proxy_key",
+    if key == "api_key" || key == "proxy_key" || key == "proxy_password",
       let eqIndex = line.firstIndex(of: "="),
       let open = line[line.index(after: eqIndex)...].firstIndex(of: "\""),
       let close = line[line.index(after: open)...].firstIndex(of: "\"")
@@ -329,7 +329,11 @@ func cmdConfig(_ args: [String]) -> Int32 {
     if !exists {
       print(String(format: L10n.tr("cli.config.missing"), path))
     }
-    print("active_provider: \(ProviderStore.activeProvider?.id ?? L10n.tr("cli.config.noset"))")
+    let activeProviderID: String? =
+      config.activeProvider.isEmpty
+      ? config.providers.first?.id
+      : config.activeProvider
+    print("active_provider: \(activeProviderID ?? L10n.tr("cli.config.noset"))")
     print("base_url: \(config.baseURL)")
     print("model: \(config.model)")
     print("timeout_seconds: \(config.timeoutSeconds)")

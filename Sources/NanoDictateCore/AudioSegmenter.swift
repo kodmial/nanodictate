@@ -169,6 +169,25 @@ public enum AudioSegmenter {
 
   // MARK: - Разбиение по сэмплам
 
+  /// Number of segments for Int16 PCM samples (16 kHz) without materializing
+  /// segment PCM — same RMS-window math and `splitRanges` as `segments`,
+  /// but only the resulting count (for request-count planning).
+  public static func segmentCount(
+    samples: [Int16],
+    sampleRate: Int = 16000,
+    config: AudioSegmenterConfig = .defaults
+  ) -> Int {
+    let windowSize = max(1, Int((defaultWindowDuration * Double(sampleRate)).rounded()))
+    var rms: [Float] = []
+    var cursor = 0
+    while cursor < samples.count {
+      let chunk = Array(samples[cursor..<min(cursor + windowSize, samples.count)])
+      rms.append(AudioMetrics.rms(samples: chunk))
+      cursor += windowSize
+    }
+    return splitRanges(rms: rms, windowDuration: defaultWindowDuration, config: config).count
+  }
+
   /// Split Int16 PCM samples (16 kHz) into segments with overlap.
   /// Samples treated as continuous from recording start.
   public static func segments(

@@ -1,0 +1,38 @@
+# Removes the review-ready label on every push (synchronize) so a fresh push is
+# never marked "review-ready" for commits that CI has not validated yet.
+# add-review-label.yml (workflow_run, CI completion) re-applies the label only
+# after the CI run for that exact head_sha succeeds — together the label is set
+# while (and only while) the PR's current head has a green CI run.
+name: remove-review-ready-on-sync
+
+on:
+  pull_request:
+    types: [synchronize]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  remove-label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo, number } = context.issue;
+            try {
+              await github.rest.issues.removeLabel({
+                owner,
+                repo,
+                issue_number: number,
+                name: 'review-ready',
+              });
+              console.log(`Removed review-ready from #${number}`);
+            } catch (err) {
+              if (err.status === 404) {
+                // label absent — nothing to remove
+                console.log(`No review-ready label on #${number} (nothing to remove)`);
+              } else {
+                throw err;
+              }
+            }

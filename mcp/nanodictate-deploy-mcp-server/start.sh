@@ -4,8 +4,10 @@
 #
 # A fresh clone has no dist/ (and possibly no node_modules/) because both are
 # gitignored — running dist/index.js directly would fail with ENOENT and the
-# server would silently not register. This wrapper builds on first run, then
-# execs the compiled server so the MCP stdio transport keeps the same process.
+# server would silently not register. This wrapper builds unless dist/index.js
+# is up to date (dist missing, or any source/config file is newer than the
+# compiled server), then execs the compiled server so the MCP stdio transport
+# keeps the same process.
 #
 # Never writes to stdout (that would corrupt the JSON-RPC protocol); build
 # logs go to .start-build.log (gitignored via *.log) and errors to stderr.
@@ -16,8 +18,20 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 DIST="$DIR/dist/index.js"
 LOG="$DIR/.start-build.log"
 
+needs_build=0
 if [[ ! -f "$DIST" ]]; then
-  echo "start.sh: $DIST missing — installing dependencies and building" >&2
+  needs_build=1
+elif find "$DIR" \
+       \( -name '*.ts' -o -name package.json -o -name tsconfig.json \) \
+       -not -path '*/node_modules/*' -not -path '*/dist/*' \
+       -newer "$DIST" -print -quit | grep -q .; then
+  # A TypeScript source or config file (package.json, tsconfig.json) is newer
+  # than dist/index.js — rebuild, so the wrapper always runs the current code.
+  needs_build=1
+fi
+
+if [[ "$needs_build" == 1 ]]; then
+  echo "start.sh: $DIST missing or stale — installing dependencies and building" >&2
 
   if [[ -f "$DIR/package-lock.json" ]]; then
     if ! npm ci --prefix "$DIR" >"$LOG" 2>&1; then

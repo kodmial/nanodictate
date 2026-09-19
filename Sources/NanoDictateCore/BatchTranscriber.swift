@@ -173,10 +173,15 @@ public struct BatchCheckpoint: Codable, Equatable {
   }
 
   /// Запись чанка (по ключу — index), если он уже разрешён (ok/skipped).
+  /// Ищем по полю index, а не по позиции в массиве: в "рваной" контрольной
+  /// точке разрешённые чанки могут идти не подряд (пропуски) — позиция в
+  /// массиве не обязана совпадать с номером чанка.
   public func resolvedRecord(index: Int) -> BatchSegmentRecord? {
     guard index >= 0, index < totalSegments else { return nil }
-    guard segments.indices.contains(index), segments[index].isResolved else { return nil }
-    return segments[index]
+    guard let record = segments.first(where: { $0.index == index }), record.isResolved else {
+      return nil
+    }
+    return record
   }
 }
 

@@ -136,10 +136,9 @@ public enum Inserter {
     // would take twice as many presses).
     let backspaceCount = old.count
 
-    // Backspace: key 51 (delete). Multiple presses — multiple times.
-    for _ in 0..<backspaceCount {
-      postKey(virtualKey: 51, source: source)
-    }
+    // Backspace: key 51 (delete). Multiple presses — multiple times. Идёт через
+    // общий post() — postHook и isTestRun-гейт применимы (в отличие от postKey).
+    pressBackspace(backspaceCount, source: source)
     typeText(new)
   }
 

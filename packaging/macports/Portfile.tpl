@@ -49,99 +49,20 @@ set builtproductdir ${worksrcpath}/.build/release
 destroot {
     xinstall -m 755 ${builtproductdir}/nanodictate ${destroot}${prefix}/bin/
     xinstall -m 755 ${builtproductdir}/NanoDictateAgent ${destroot}${prefix}/bin/
-    # Только бинарь + конфиг; службу при установке регистрирует post-destroot
-    # (тот же единственный Label com.nanodictate.agent и тот же канонический
-    # plist ~/Library/LaunchAgents/com.nanodictate.agent.plist, что у
-    # `nanodictate start`) — startupitem НЕ нужен (отдельный startupitem создал
-    # бы второй демон).
+    # Только бинарь + конфиг. LaunchAgent порт НЕ регистрирует: destroot/
+    # staging не должен мутировать хомяк пользователя и бустраппить агента
+    # при обычной установке (для юзер-агентов у MacPorts механизма нет —
+    # startupitem создал бы второй, системный, демон). Службу поднимает
+    # пользователь ПОСЛЕ установки: `nanodictate start` — тот же единственный
+    # Label com.nanodictate.agent и тот же канонический plist
+    # ~/Library/LaunchAgents/com.nanodictate.agent.plist.
     # config.example.toml — канон дефолтов: при первом запуске приложение
     # копирует его в юзер-конфиг ~/.config/nanodictate/config.toml (CLI никогда
     # не читает ${prefix}/etc).
     set share_dir ${destroot}${prefix}/share/nanodictate
     xinstall -d -m 755 ${share_dir}
     xinstall -m 644 ${worksrcpath}/config.example.toml ${share_dir}/
-}
-
-post-destroot {
-    # Гибрид A+B: упаковка сама создаёт канонический plist в LaunchAgents
-    # реального пользователя и РАЗОВО активирует службу — после чистой
-    # установки (без ручного первого запуска) демон зарегистрирован, стартует
-    # при входе в систему (RunAtLoad + KeepAlive) и Alt+Alt работает сразу.
-    # post-destroot исполняется от root (sudo port install): дом пользователя —
-    # через $SUDO_USER, НЕ $HOME (HOME у root — /var/root). Тот же файл и тот
-    # же единственный label, что пишет `nanodictate start`, — один демон при
-    # любом способе и порядке установки, второй менеджер подменяет.
-    if {[info exists env(SUDO_USER)] && ${env(SUDO_USER)} ne ""} {
-        set real_user ${env(SUDO_USER)}
-        set user_home /Users/${real_user}
-        set launch_dir ${user_home}/Library/LaunchAgents
-        set logs_dir ${user_home}/Library/Logs/NanoDictate
-        set plist_path ${launch_dir}/com.nanodictate.agent.plist
-        set agent_bin ${prefix}/bin/NanoDictateAgent
-        set log_path ${logs_dir}/agent.log
-
-        if {[catch {
-            exec /bin/mkdir -p ${launch_dir} ${logs_dir}
-            exec /usr/sbin/chown ${real_user} ${launch_dir} ${logs_dir}
-        }]} {
-            ui_warn "nanodictate: could not create ${launch_dir} — the service will register on first 'nanodictate start'"
-        } else {
-            # Канонический plist, идентичный формату AgentService (CLI):
-            # Label/ProgramArguments = реальный путь бинаря + RunAtLoad/
-            # KeepAlive. Бинарь — ${prefix}/bin/NanoDictateAgent (настоящий
-            # файл, xinstall кладёт его без симлинков — реальный путь).
-            set plist_xml {
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>com.nanodictate.agent</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>__AGENT_BIN__</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>StandardOutPath</key>
-  <string>__LOG_PATH__</string>
-  <key>StandardErrorPath</key>
-  <string>__LOG_PATH__</string>
-</dict>
-</plist>
-}
-            set content [string map [list __AGENT_BIN__ ${agent_bin} __LOG_PATH__ ${log_path}] ${plist_xml}]
-            if {[catch {
-                set fd [open ${plist_path} w 0600]
-                puts -nonewline ${fd} ${content}
-                close ${fd}
-                exec /usr/sbin/chown ${real_user} ${plist_path}
-            }]} {
-                ui_warn "nanodictate: could not write ${plist_path} — the service will register on first 'nanodictate start'"
-            } else {
-                # Разовая активация из-под root: bootstrap в gui-домен другого
-                # пользователя требует launchctl asuser (прямой bootstrap из
-                # root в чужой gui-домен launchd запрещает). Терпимо: при
-                # установке по SSH GUI-сессии нет, и «уже загружено» на
-                # повторном install — норма; служба всё равно стартует при
-                # входе в систему (RunAtLoad).
-                set uid [exec /usr/bin/id -u ${real_user}]
-                # Установка поверх УЖЕ работающей службы (например, переустановка
-                # вторым менеджером): новый plist уже на диске (записан выше) —
-                # сперва терпимо выгружаем старую копию (bootout), и bootstrap
-                # ниже применяет замену мгновенно, без перезахода в систему.
-                # Симметрия с brew post_install. Службы может не быть — это
-                # норма: catch молча пропускает ошибку выгрузки (та же идиома,
-                # что у bootstrap ниже), установку не роняет.
-                catch {exec /bin/launchctl asuser ${uid} /bin/launchctl bootout gui/${uid}/com.nanodictate.agent}
-                catch {exec /bin/launchctl asuser ${uid} /bin/launchctl bootstrap gui/${uid} ${plist_path}}
-            }
-        }
-    } else {
-        ui_msg "nanodictate: SUDO_USER unset — not touching user LaunchAgents; run 'nanodictate start' to register the service"
-    }
+    ui_msg "nanodictate: installed. To register and start the background agent, run 'nanodictate start'"
 }
 
 checksums           rmd160  __RMD160__ \

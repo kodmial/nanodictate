@@ -9,7 +9,7 @@ user-facing install guide plus the maintainer release drill. For the template
 layout, the generator and cross-package notes see
 [packaging/README.md](../../packaging/README.md).
 
-> **Status (TODO):** the tap repository `nanodictate-homebrew` is **not
+> **Status (TODO):** the tap repository `kodmial/homebrew-nanodictate-homebrew` is **not
 > created yet**. Until it is published, install from a local formula file —
 > see [Install from a local file](#install-from-a-local-file).
 
@@ -26,18 +26,18 @@ layout, the generator and cross-package notes see
 ### Install via the tap (when the tap exists)
 
 ```sh
-brew install kodmial/nanodictate-homebrew/nanodictate
+brew install kodmial/homebrew-nanodictate-homebrew/nanodictate
 ```
 
 > **Tap repo naming:** Homebrew auto-taps `owner/repo` only when the GitHub
 > repository is literally named `homebrew-<repo>` — the mandatory prefix, not a
 > convention. So the tap repository must be `kodmial/homebrew-nanodictate-homebrew`
 > (with the formula at `Formula/nanodictate.rb`). Any other repo name makes the
-> `brew install kodmial/nanodictate-homebrew/nanodictate` command above fail —
+> `brew install kodmial/homebrew-nanodictate-homebrew/nanodictate` command above fail —
 > Homebrew cannot find the tap.
 
 The `owner/repo/formula` form fetches the formula from the
-`kodmial/nanodictate-homebrew` tap repository without a separate `brew tap`
+`kodmial/homebrew-nanodictate-homebrew` tap repository without a separate `brew tap`
 step. The install is a download of a few megabytes, not a build — no wait for
 SwiftPM to compile anything.
 
@@ -161,7 +161,7 @@ Release drill for a new version (details in
    values.
 
 3. **Publish to the tap.** Copy the generated formula into the
-   `nanodictate-homebrew` tap repo (TODO: create the tap repo) as
+   `kodmial/homebrew-nanodictate-homebrew` tap repo (TODO: create the tap repo) as
    `Formula/nanodictate.rb` and push it. Also copy
    `packaging/homebrew/nanodictate.rb` over `<tap>/Formula/nanodictate.rb`
    on every future release.
@@ -180,8 +180,8 @@ released version.
 
 ## TODO
 
-- Create the `nanodictate-homebrew` tap repository (the
-  `brew install kodmial/nanodictate-homebrew/nanodictate` command above).
+- Create the `kodmial/homebrew-nanodictate-homebrew` tap repository (the
+  `brew install kodmial/homebrew-nanodictate-homebrew/nanodictate` command above).
 - A Homebrew **bottle** (served from Homebrew's own CDN) would wrap these same
   binaries; it is not needed while the formula downloads them straight from
   GitHub Releases — see the note in [packaging/README.md](../../packaging/README.md).

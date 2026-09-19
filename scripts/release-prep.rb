@@ -32,12 +32,19 @@ rescue LoadError
   # rmd160 stays a placeholder if OpenSSL is unavailable.
 end
 
-TAG = ARGV[0]
-unless TAG && TAG =~ /\Av?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\z/
+INPUT_TAG = ARGV[0]
+unless INPUT_TAG && INPUT_TAG =~ /\Av?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\z/
   abort "Usage: ruby scripts/release-prep.rb v0.1.0   (tag may be '0.1.0' or 'v0.1.0')"
 end
 
-VERSION     = TAG.sub(/\Av/, "")
+# Canonical, validated tag: always v-prefixed. GitHub source tarball and
+# release download URLs must carry the literal tag (release.yml publishes
+# tags as v0.5.0), so "0.5.0" on the CLI normalizes to the same "v0.5.0".
+# The plain VERSION (no leading "v") is used only for archive filenames and
+# metadata (formula/Portfile version fields, --version output), never in a
+# tag URL.
+TAG     = INPUT_TAG.start_with?("v") ? INPUT_TAG : "v#{INPUT_TAG}"
+VERSION = TAG.sub(/\Av/, "")
 ROOT        = File.expand_path("..", __dir__)
 TARBALL_URL = "https://github.com/kodmial/nanodictate/archive/refs/tags/#{TAG}.tar.gz"
 

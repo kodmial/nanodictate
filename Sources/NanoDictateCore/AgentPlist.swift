@@ -342,12 +342,17 @@ public struct AgentInstaller {
       return result
     }
 
-    let kick = launchctl.kickstart(target: serviceTarget)
-    if kick.status == 0 {
-      result.registered = true
-      return result
+    // Бинарь сменился — kickstart не годится: launchd перезапустит СТАРЫЙ путь
+    // из in-memory плана (ProgramArguments не перечитывается). Сразу полная
+    // переустановка планирования: bootout → bootstrap.
+    if !result.binaryPathChanged {
+      let kick = launchctl.kickstart(target: serviceTarget)
+      if kick.status == 0 {
+        result.registered = true
+        return result
+      }
+      result.kickError = kick.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
     }
-    result.kickError = kick.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
     result.bootoutSucceeded = launchctl.bootout(target: serviceTarget).status == 0
     let bootstrap = launchctl.bootstrap(plistPath: plistURL.path, domain: AgentService.guiDomain())
     if bootstrap.status == 0 {

@@ -16,6 +16,10 @@ public enum DebugDump {
   /// Audio recordings dir (`recording-*.wav`), written only at debug; created on write.
   public static var recordingsDirectory: String = "~/Library/Logs/NanoDictate/recordings"
 
+  /// Max audio recordings kept on disk; oldest pruned on save beyond this cap.
+  /// Debug audio grows fast — bound the footprint.
+  private static let maxRecordings = 50
+
   private static let lock = NSLock()
 
   /// Multipart file-part metadata; raw bytes not saved.
@@ -202,15 +206,21 @@ public enum DebugDump {
 
     if let handle = try? FileHandle(forWritingTo: fileURL) {
       defer { try? handle.close() }
+      // Debug-лог секретосодержащий (маскированные заголовки): приводим к 0600
+      // и на аппенде — файлы, созданные до этого фикса, могли остаться шире.
+      try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
       handle.seekToEndOfFile()
       handle.write(data)
     } else if !fileManager.fileExists(atPath: fileURL.path) {
+      // Создание: 0600 (как config/plist).
       try? data.write(to: fileURL)
+      try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
     }
   }
 
   /// Save WAV to `path`, creating dir as needed. Never throws —
-  /// failures only logged; must not break transcription.
+  /// failures only logged; must not break transcription. Recording restricted
+  /// to owner (0600); oldest pruned when `maxRecordings` exceeded.
   public static func saveRecording(data: Data, to path: String) {
     lock.lock()
     defer { lock.unlock() }
@@ -225,6 +235,8 @@ public enum DebugDump {
         withIntermediateDirectories: true
       )
       try data.write(to: fileURL)
+      // Запись — речь пользователя: только владелец (0600).
+      try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
     } catch {
       Logger.log(
         L10n.tr("debug.recordingSaveFailed")
@@ -232,6 +244,28 @@ public enum DebugDump {
           .replacingOccurrences(of: "{error}", with: "\(error)"),
         level: "error"
       )
+    }
+    pruneRecordings(fileManager: fileManager)
+  }
+
+  /// Remove oldest `recording-*.wav` when the directory exceeds
+  /// `maxRecordings`. Filenames are timestamp-prefixed, so lexicographic order
+  /// equals chronological. Best-effort — never throws.
+  private static func pruneRecordings(fileManager: FileManager) {
+    let dir = (recordingsDirectory as NSString).expandingTildeInPath
+    guard
+      let urls = try? fileManager.contentsOfDirectory(
+        at: URL(fileURLWithPath: dir, isDirectory: true),
+        includingPropertiesForKeys: nil
+      )
+    else { return }
+    let names = urls
+      .map { $0.lastPathComponent }
+      .filter { $0.hasPrefix("recording-") && $0.hasSuffix(".wav") }
+      .sorted()
+    guard names.count > maxRecordings else { return }
+    for name in names.prefix(names.count - maxRecordings) {
+      try? fileManager.removeItem(atPath: (dir as NSString).appendingPathComponent(name))
     }
   }
 }

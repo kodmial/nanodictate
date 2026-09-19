@@ -17,7 +17,9 @@ public enum RecognitionLabel {
     guard let transport else { return .direct }
     let trimmed = transport.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return .direct }
-    return .relay(AppConfig.canonicalTransport(trimmed))
+    let canonical = AppConfig.canonicalTransport(trimmed)
+    guard canonical == "cookie-relay" else { return .direct }
+    return .relay(canonical)
   }
 
   /// Active session provider: `active_provider` if set (guaranteed after
