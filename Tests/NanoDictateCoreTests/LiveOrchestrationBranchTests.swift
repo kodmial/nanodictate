@@ -85,6 +85,9 @@ final class LiveOrchestrationBranchTests: XCTestCase {
     /// in liveFinalize body precedes finishLiveRun submit.
     @objc func testTailDeliveredBeforeFinalizeSubmit_ManualStop() {
         // CI runner: виртуальное аудио/тайминг-флак, локально проходит.
+        // Колбэк audio.stop() — тайминг-флак (tail-push порядок зависел от
+        // планировщика главной очереди), ловился в локальных прогонах;
+        // локально проходит стабильно.
         if ProcessInfo.processInfo.environment["CI"] != nil { return }
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -113,6 +116,9 @@ final class LiveOrchestrationBranchTests: XCTestCase {
     /// (same function that calls liveFinalizeFromSamples), not in doc above it.
     @objc func testTailDeliveredBeforeFinalizeSubmit_LimitPathHasNoSecondStop() {
         // CI runner: виртуальное аудио/тайминг-флак, локально проходит.
+        // Лимитный путь (onSpeechSegment → onRecordingLimitReached) — тайминг-флак
+        // (tail-push порядок зависел от планировщика главной очереди), ловился
+        // в локальных прогонах; локально проходит стабильно.
         if ProcessInfo.processInfo.environment["CI"] != nil { return }
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
