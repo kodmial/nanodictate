@@ -35,28 +35,38 @@ Built as a Swift Package Manager package (`swift-tools-version:5.7`, macOS 12+).
 - Batch file transcription with chunked segments, parallel workers, pause
   cutting, checkpoint/resume, and a progress bar.
 - Multi-provider STT via adapters implementing the OpenAI-compatible
-  `/audio/transcriptions` protocol:
-  - **OpenAI** (`openai`)
-  - **Groq** (`groq`)
-  - **GigaAM** (`gigaam`, default batch provider)
-  - **Local** (`local`, local whisper/llama.cpp/faster-whisper server)
-  - **Cloudflare Workers AI** (`cloudflare`, raw WAV + Bearer token, full URL
-    with `account_id` in path)
-  - **Cookie Relay** (`cookie-relay`, JS-challenge relay with computed
-    `__test` cookie)
-  - Any OpenAI-compatible endpoint via the generic `openai-compatible` adapter
-- Proxy transports (see [Proxy Transports](#proxy-transports)).
+  `/audio/transcriptions` protocol — see [Providers](#providers): `openai`,
+  `groq`, `airubiz` (default), `cloudflare`, or any custom
+  OpenAI-compatible endpoint.
+- Proxy transports (see [Transports](#transports)).
 - Optional review gate (`review_before_insert`) — confirm the text in the
   terminal before it is typed.
 - Auto-failover between providers (`auto_failover`) and manual retry
   (`nanodictate retry <provider>`).
 - TOML configuration at `~/.config/nanodictate/config.toml`.
 
+## Providers
+
+| id | What it is | Key |
+|---|---|---|
+| `openai` | Whisper API | api_key |
+| `groq` | Whisper (fast) | api_key |
+| `airubiz` | GigaAM, anonymous (**default**) | none |
+| `cloudflare` | Workers AI, raw WAV; `base_url` = full URL with `account_id`/model in path | api_key |
+| `*` | any OpenAI-compatible endpoint (generic) | per server |
+
+Default `active_provider = "airubiz"`; an unknown id falls back to the
+generic `openai-compatible` adapter. All adapters are covered by unit tests;
+live e2e is verified manually — there are no live-server tests in the repo
+(CI runs no network).
+
 ## Installation
 
-Choose one of the three distribution paths. Homebrew and MacPorts are
-planned but not live yet (TODOs below); ready-to-run binaries for the latest
-release are always available from **GitHub Releases**.
+Choose one of the three distribution paths. Homebrew and MacPorts packaging is
+included in this repository (`packaging/`: formula/Portfile templates plus a
+release generator in `scripts/release-prep.rb`), but the tap and port are not
+published yet — ready-to-run binaries for the latest release are always
+available from **GitHub Releases**.
 
 > **No Developer ID / no notarization (deliberate).** There is no paid Apple
 > Developer account behind this project, so release binaries are unsigned
@@ -65,15 +75,16 @@ release are always available from **GitHub Releases**.
 > [docs/packaging/macports.md](docs/packaging/macports.md) for the details
 > and the `xattr` workaround below.
 
-### Homebrew (coming soon)
+### Homebrew
 
 The formula is a **binary formula**: `brew` downloads the prebuilt tarball
 from GitHub Releases and installs it as-is — no Xcode / Swift toolchain
-needed. TODO: the tap repository is not created yet, so the command below is
-pending.
+needed. The formula template (`packaging/homebrew/nanodictate.rb.tpl`) and
+the generator (`scripts/release-prep.rb`) ship in the repo; the tap itself is
+not published yet, so **GitHub Releases** below is the working path today.
 
 ```sh
-brew install kodmial/nanodictate-homebrew/nanodictate
+brew install kodmial/nanodictate-homebrew/nanodictate    # once the tap is published
 ```
 
 Requires **macOS 12+** only. Until the tap exists you can install the
@@ -81,10 +92,11 @@ generated formula directly:
 `brew install /path/to/nanodictate/packaging/homebrew/nanodictate.rb`
 (also a binary download — nothing is compiled).
 
-### MacPorts (coming soon)
+### MacPorts
 
-The port is pending a PR to `macports-ports` (TODO: not accepted yet). It
-also builds from source:
+The Portfile is pending a PR to `macports-ports` (not accepted yet); the
+template (`packaging/macports/Portfile.tpl`) and generator
+(`scripts/release-prep.rb`) ship in the repo. It builds from source:
 
 ```sh
 sudo port install nanodictate
@@ -173,7 +185,8 @@ The tests are packaged as a standalone executable target
 `swift run` instead of `swift test` (the package declares no test targets for
 `swift test` to discover). The runner executes every `test*` method, prints a
 summary, and exits non-zero if any test fails. The current suite runs
-**771 tests**. The same commands are used by the CI workflow
+**795 tests** (working tree; final number confirmed by local run). The same
+commands are used by the CI workflow
 (`.github/workflows/ci.yml`).
 
 ```sh
@@ -199,13 +212,13 @@ Create a Certificate...** — Name `NanoDictate Code Signing`, Identity Type
 Self-Signed Root, Certificate Type Code Signing — then verify with
 `security find-identity -p codesigning -v`.
 
-### Permissions — Микрофон + Универсальный доступ
+### Permissions — Microphone + Accessibility
 
 After the first signed build, grant two permissions in **System Settings >
 Privacy & Security**:
 
-- **Микрофон (Microphone)** — audio capture (`com.apple.security.device.audio-input`).
-- **Универсальный доступ (Accessibility)** — global Alt+Alt hotkey and text
+- **Microphone** — audio capture (`com.apple.security.device.audio-input`).
+- **Accessibility** — global Alt+Alt hotkey and text
   insertion via `CGEvent` (TCC grant, not an entitlement).
 
 Add the *signed* binary (`.build/debug/NanoDictateAgent`) to each list. The
@@ -346,12 +359,6 @@ model = ""
 api_key = ""
 # api_key_file = "~/.config/nanodictate/keys/groq.txt"
 
-[providers.local]
-name = "Local"
-base_url = ""
-model = ""
-api_key = ""
-
 [providers.cookie-relay]
 name = "Cookie Relay"
 base_url = ""
@@ -424,13 +431,13 @@ Top-level options:
 | Key                        | Default       | Meaning                                                                |
 |----------------------------|---------------|------------------------------------------------------------------------|
 | `active_provider`          | *(first)*     | Which `[providers.<id>]` section is active.                            |
-| `providers`                | `[]`          | Explicit failover order, e.g. `["groq", "gigaam"]`.                   |
+| `providers`                | `[]`          | Explicit failover order, e.g. `["groq", "airubiz"]`.                  |
 | `auto_failover`            | `false`       | Retry with the next provider on network/server errors.                 |
 | `timeout_seconds`          | `120`         | Timeout for the STT request.                                           |
 | `double_alt_max_interval`  | `0.4`         | Max gap between the two Alt presses (seconds).                         |
 | `sounds_enabled`           | `true`        | Play system sounds on events.                                          |
 | `log_level`                | `"info"`      | `"debug"` enables verbose logging and STT request/response dumps.      |
-| `language`                 | `"ru"`        | Spoken language hint sent to the STT API (`""` to omit).               |
+| `language`                 | `""`          | Spoken language hint sent to the STT API (`""` = auto-detect, not sent). |
 | `ui_language`              | `"en"`        | UI language: `"en"` or `"ru"`. Switchable from the TUI menu.           |
 | `insert_method`            | `"cgevent"`   | `"cgevent"` or `"clipboard"` (clipboard + Cmd+V).                      |
 | `review_before_insert`     | `false`       | Confirm text in terminal before inserting.                             |
@@ -457,24 +464,27 @@ Add the *signed* binary (`.build/debug/NanoDictateAgent`) to each list. The
 path changes after a rebuild with a different signature — see
 [Code Signing](#code-signing).
 
-## Proxy Transports
+## Transports
 
-Each provider can set `transport` in its `[providers.<id>]` section (or at
-the top level) to route requests through a proxy.
+How a provider's requests reach the STT server. Set `transport` in the
+provider's `[providers.<id>]` section (or at the top level).
 
-| Transport        | Config value     | Description                                                                 |
-|------------------|------------------|-----------------------------------------------------------------------------|
-| Direct           | *(empty / omit)* | No proxy; request goes straight to `base_url`.                              |
-| HTTP Proxy       | `"http"`         | Standard HTTP proxy. Uses `http_proxy` (or `https_proxy`) environment      |
-|                  |                  | variables. Optional `proxy_user` + `proxy_password` send                   |
-|                  |                  | `Proxy-Authorization: Basic ...` header.                                    |
-| Gateway          | `"gateway"`      | Secret relay via custom header. Uses `proxy_key` as the header value and    |
-|                  |                  | `proxy_key_header` as the header name (default: `X-Proxy-Key`).            |
-| Cookie Relay     | `"cookie-relay"` | JS-challenge relay with automatic cookie computation (`__test` cookie via   |
-|                  |                  | AES-128-CBC in memory) and periodic renewal.                                |
+| transport | Fields | When |
+|---|---|---|
+| `direct` (default) | `base_url`, `api_key` | direct HTTPS |
+| `http` | `http_proxy = host:port`, optional `proxy_user`/`proxy_password` | via HTTP proxy (Basic auth) |
+| `gateway` | `proxy_key`, optional `proxy_key_header` (default `X-Proxy-Key`) | secret header; active when `proxy_key` non-empty |
+| `cookie-relay` | `base_url`, optional `proxy_key` | JS-challenge relay (`__test` cookie, AES-128-CBC, TTL 120s) |
 
-Legacy aliases `"relay"` and `"infinityfree"` are automatically converted to
-`"cookie-relay"` with a deprecation warning.
+Notes:
+
+- `cloudflare` is a provider id, **not** a transport — transport is only set
+  for `http`/`gateway`/`cookie-relay` (see `config.example.toml`).
+- Legacy aliases `relay` / `infinityfree` are converted to `cookie-relay`
+  with a deprecation warning (`Config.canonicalTransport`).
+- `base_url` is required for all non-`direct` transports.
+- Secrets are never written to the config file; use the environment variable
+  `NANODICTATE_API_KEY` for the active provider only.
 
 ## UI Language
 
@@ -591,3 +601,21 @@ rm -f /usr/local/bin/nanodictate     # symlink (if created by the MCP server)
 ## License
 
 [MIT](LICENSE) — Copyright (c) 2026 NanoDictate contributors.
+
+## Local linting
+
+Two linters enforce code style: `swift-format` (0.50700.1) and `swiftlint`
+(0.55.1) — installed with `brew install swift-format swiftlint` (or
+`port install swift-format swiftlint`). Manual run:
+`swift-format lint --recursive Sources` and
+`swiftlint lint Sources`. The pre-commit hook
+(`.githooks/pre-commit`, enabled with `git config core.hooksPath .githooks`)
+checks only staged `.swift` files and blocks a commit only on linter
+`error`-level findings; warnings are printed but do not stop the commit.
+Ограничение: хук линтует содержимое РАБОЧЕГО ДЕРЕВА файлов, а не
+staged-индекс (`git diff --cached --name-only` отбирает файлы, но
+линтерам передаётся путь с диска). Если застейджить часть правок и
+продолжить править те же файлы — гейт смотрит не на то содержимое:
+возможен ложный блок или пропуск ошибки. Чтобы избегать: перед коммитом
+делай `git add` всех правок файла (или commit через `git commit` сразу
+после добавления).

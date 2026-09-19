@@ -415,8 +415,8 @@ final class ConfigTests: XCTestCase {
         [providers.groq]
         api_key = "groq-file-key"
 
-        [providers.local]
-        api_key_file = "~/.config/nanodictate/keys/local.key"
+        [providers.cloudflare]
+        api_key_file = "~/.config/nanodictate/keys/cloudflare.key"
         """
         try content.write(toFile: path, atomically: true, encoding: .utf8)
         setenv("NANODICTATE_API_KEY", "env-key", 1)
@@ -427,10 +427,10 @@ final class ConfigTests: XCTestCase {
                        "активной секции env-ключ перезаписывает file-ключ")
         XCTAssertEqual(config.providers.first(where: { $0.id == "groq" })?.apiKey, "groq-file-key",
                        "неактивная секция хранит СВОЙ api_key — env её не перезатирает")
-        XCTAssertEqual(config.providers.first(where: { $0.id == "local" })?.apiKey, "",
+        XCTAssertEqual(config.providers.first(where: { $0.id == "cloudflare" })?.apiKey, "",
                        "неактивная секция с api_key_file не получает env-ключ в api_key")
-        XCTAssertEqual(config.providers.first(where: { $0.id == "local" })?.apiKeyFile,
-                       "~/.config/nanodictate/keys/local.key",
+        XCTAssertEqual(config.providers.first(where: { $0.id == "cloudflare" })?.apiKeyFile,
+                       "~/.config/nanodictate/keys/cloudflare.key",
                        "неактивная секция сохраняет СВОЙ api_key_file нетронутым")
     }
 
@@ -967,7 +967,7 @@ final class ConfigTests: XCTestCase {
             .appendingPathComponent("test_set_key_append_\(UUID().uuidString).toml")
         defer { try? FileManager.default.removeItem(at: file) }
         try """
-        [providers.local]
+        [providers.cloudflare]
         base_url = ""
         model = ""
 
@@ -975,11 +975,11 @@ final class ConfigTests: XCTestCase {
         base_url = ""
         """.data(using: .utf8)!.write(to: file)
 
-        try AppConfig.writeProviderKeyValue(providerID: "local", key: "api_key", value: "\"k\"", to: file.path)
+        try AppConfig.writeProviderKeyValue(providerID: "cloudflare", key: "api_key", value: "\"k\"", to: file.path)
         let config = try AppConfig.parse(String(contentsOf: file, encoding: .utf8))
-        XCTAssertEqual(config.providers.first { $0.id == "local" }?.apiKey, "k")
+        XCTAssertEqual(config.providers.first { $0.id == "cloudflare" }?.apiKey, "k")
         XCTAssertEqual(config.providers.first { $0.id == "groq" }?.apiKey, "",
-                       "ключ попал в секцию local, не в groq")
+                       "ключ попал в секцию cloudflare, не в groq")
     }
 
     @objc func testWriteProviderKeyValueRecognizesSectionWithTrailingComment() {

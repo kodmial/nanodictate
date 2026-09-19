@@ -17,7 +17,6 @@ final class STTAdapterTests: XCTestCase {
         let known = ProviderRequestBuilder.knownProviderIDs
         XCTAssertTrue(known.contains("openai"))
         XCTAssertTrue(known.contains("groq"))
-        XCTAssertTrue(known.contains("local"))
         XCTAssertTrue(known.contains("cloudflare"))
         XCTAssertFalse(known.contains("custom"))
         // Мёртвые адаптеры снесены: deepgram/giga-chat/relay не числятся в
@@ -25,13 +24,12 @@ final class STTAdapterTests: XCTestCase {
         XCTAssertFalse(known.contains("deepgram"))
         XCTAssertFalse(known.contains("giga-chat"))
         XCTAssertFalse(known.contains("relay"))
-        XCTAssertEqual(known, ["openai", "groq", "local", "cloudflare"])
+        XCTAssertEqual(known, ["openai", "groq", "cloudflare"])
     }
 
     @objc func testAdapterFromMapping() {
         XCTAssertEqual(STTAdapterID.from("openai"), .openai)
         XCTAssertEqual(STTAdapterID.from("groq"), .groq)
-        XCTAssertEqual(STTAdapterID.from("local"), .local)
         XCTAssertEqual(STTAdapterID.from("cloudflare"), .cloudflare)
         XCTAssertEqual(STTAdapterID.from("whatever"), .openAICompatible)
         // Живые selfhosted-провайдеры (GigaAM и т.п.) — неизвестный id → openAICompatible.
@@ -49,13 +47,11 @@ final class STTAdapterTests: XCTestCase {
     @objc func testDefaultBaseURLAndModel() {
         XCTAssertEqual(STTAdapterID.openai.defaultBaseURL, "https://api.openai.com/v1/audio/transcriptions")
         XCTAssertEqual(STTAdapterID.groq.defaultBaseURL, "https://api.groq.com/openai/v1/audio/transcriptions")
-        XCTAssertEqual(STTAdapterID.local.defaultBaseURL, "http://127.0.0.1:8080/v1/audio/transcriptions")
         XCTAssertEqual(STTAdapterID.cloudflare.defaultBaseURL, "")
         XCTAssertEqual(STTAdapterID.openAICompatible.defaultBaseURL, "",
                        "ручные провайдеры без дефолтного endpoint — base_url обязателен")
         XCTAssertEqual(STTAdapterID.openai.defaultModel, "whisper-1")
         XCTAssertEqual(STTAdapterID.groq.defaultModel, "whisper-large-v3")
-        XCTAssertEqual(STTAdapterID.local.defaultModel, "whisper-1")
         XCTAssertEqual(STTAdapterID.cloudflare.defaultModel, "")
         XCTAssertEqual(STTAdapterID.openAICompatible.defaultModel, "")
     }
@@ -74,7 +70,7 @@ final class STTAdapterTests: XCTestCase {
         XCTAssertEqual(ProviderRequestBuilder.resolveBaseURL("", for: "selfhosted"), "")
     }
 
-    // MARK: - OpenAI-совместимые адаптеры (openai/groq/local)
+    // MARK: - OpenAI-совместимые адаптеры (openai/groq)
 
     @objc func testOpenAIPlan() {
         let spec = ProviderRequestBuilder.plan(
@@ -146,15 +142,6 @@ final class STTAdapterTests: XCTestCase {
         let text = String(data: data, encoding: .utf8)!
         XCTAssertTrue(text.contains("name=\"language\"\r\n\r\nru\r\n"),
                        "явный language форвардится в multipart как раньше")
-    }
-
-    @objc func testLocalPlanWithoutKey() {
-        // local — без ключа: Authorization всё равно "Bearer " (формат не меняется).
-        let spec = ProviderRequestBuilder.plan(
-            adapterID: "local", baseURL: "", model: "", apiKey: "",
-            language: "ru", wav: wav)
-        XCTAssertEqual(spec.url?.absoluteString, "http://127.0.0.1:8080/v1/audio/transcriptions")
-        XCTAssertEqual(spec.headers.first(where: { $0.0 == "Authorization" })?.1, "Bearer ")
     }
 
     // MARK: - Selfhosted (gigaam / selfhosted → openAICompatible)
@@ -385,20 +372,6 @@ final class STTAdapterTests: XCTestCase {
         XCTAssertTrue(formatPos < granPos)
         let closingPos = text.range(of: "--Boundary-", options: .backwards)!.lowerBound
         XCTAssertTrue(granPos < closingPos, "закрывающий boundary после полей таймстампов")
-    }
-
-    /// local: word-таймстампов НЕ просим (GigaAM/sherpa поддержку не гарантируют).
-    @objc func testLocalPlanOmitsTimestampFields() {
-        let spec = ProviderRequestBuilder.plan(
-            adapterID: "local", baseURL: "", model: "", apiKey: "",
-            language: "ru", wav: wav)
-        guard case .multipart(let data, _) = spec.body else {
-            XCTFail("local — multipart")
-            return
-        }
-        let text = String(data: data, encoding: .utf8)!
-        XCTAssertFalse(text.contains("response_format"))
-        XCTAssertFalse(text.contains("timestamp_granularities"))
     }
 
     /// multipartBody напрямую: явный emission response_format + granularities[].

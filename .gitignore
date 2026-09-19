@@ -6,6 +6,7 @@ transcription_raw.json.claude/
 example/
 .claude/
 .playwright-mcp/
+.idea/
 
 # Agent logs
 agent.log

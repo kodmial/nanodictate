@@ -110,7 +110,7 @@ final class BatchLongFormTests: XCTestCase {
     @objc func testGatingOpenAICompatibleTemperatureOnly() {
         // gigaam/selfhosted (openAICompatible) + известные openai-совместимые —
         // шлём только temperature
-        for adapter in ["gigaam", "local", "openai-compatible", "selfhosted"] {
+        for adapter in ["gigaam", "openai-compatible", "selfhosted"] {
             let f = fields(for: adapter)
             XCTAssertEqual(f?.temperature, 0, "\(adapter): temperature шлётся")
             XCTAssertNil(f?.vadFilter, "\(adapter): vad_filter не шлём")

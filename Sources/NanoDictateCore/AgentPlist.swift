@@ -18,10 +18,11 @@ public enum AgentService {
   }
 
   /// Канонический путь plist (~/Library/LaunchAgents/com.nanodictate.agent.plist).
-  public static func canonicalURL(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser)
-    -> URL
-  {
-    return homeDirectory
+  public static func canonicalURL(
+    homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+  ) -> URL {
+    return
+      homeDirectory
       .appendingPathComponent("Library/LaunchAgents")
       .appendingPathComponent("\(name).plist")
   }
@@ -70,7 +71,8 @@ public func resolveAgentBinaryPath(
 public enum AgentPlist {
   /// Экранирование XML-спецсимволов (пути могут содержать &, ", <, >).
   public static func xmlEscape(_ value: String) -> String {
-    return value
+    return
+      value
       .replacingOccurrences(of: "&", with: "&amp;")
       .replacingOccurrences(of: "<", with: "&lt;")
       .replacingOccurrences(of: ">", with: "&gt;")
@@ -79,9 +81,9 @@ public enum AgentPlist {
 
   /// Инлайн-XML канонического plist: Label, ProgramArguments (бинарь + флаги),
   /// RunAtLoad + KeepAlive (как в прежнем шаблоне), лог-пути в ~/Library/Logs.
-  public static func plistContent(agentBinary: String, flags: [String] = [], logPath: String)
-    -> String
-  {
+  public static func plistContent(
+    agentBinary: String, flags: [String] = [], logPath: String
+  ) -> String {
     let argsBlock = ([agentBinary] + flags)
       .map { "    <string>\(xmlEscape($0))</string>" }
       .joined(separator: "\n")
@@ -151,7 +153,9 @@ public enum AgentPlist {
 /// Инъектируемый исполнитель launchctl: прод — runProcess, тесты — мок
 /// (launchd в тестах не вызывается).
 public final class Launchctl {
+  // swiftlint:disable large_tuple
   public typealias Run = (String, [String]) -> (status: Int32, stdout: String, stderr: String)
+  // swiftlint:enable large_tuple
 
   public var run: Run
 
@@ -169,29 +173,39 @@ public final class Launchctl {
   }
 
   /// launchctl bootout — выгрузка под target; обрыв допустим (службы нет).
+  // swiftlint:disable large_tuple
   @discardableResult
   public func bootout(target: String) -> (status: Int32, stdout: String, stderr: String) {
     return run("/bin/launchctl", ["bootout", target])
   }
+  // swiftlint:enable large_tuple
 
   /// launchctl bootstrap gui/uid path — загрузка плана из plist.
+  // swiftlint:disable large_tuple
   @discardableResult
-  public func bootstrap(plistPath: String, domain: String) -> (status: Int32, stdout: String,
-    stderr: String) {
+  public func bootstrap(plistPath: String, domain: String) -> (
+    status: Int32, stdout: String,
+    stderr: String
+  ) {
     return run("/bin/launchctl", ["bootstrap", domain, plistPath])
   }
+  // swiftlint:enable large_tuple
 
   /// launchctl load path — legacy-фолбэк (старые macOS / без gui-домена).
+  // swiftlint:disable large_tuple
   @discardableResult
   public func load(plistPath: String) -> (status: Int32, stdout: String, stderr: String) {
     return run("/bin/launchctl", ["load", plistPath])
   }
+  // swiftlint:enable large_tuple
 
   /// launchctl kickstart -k target — рестарт загруженной службы.
+  // swiftlint:disable large_tuple
   @discardableResult
   public func kickstart(target: String) -> (status: Int32, stdout: String, stderr: String) {
     return run("/bin/launchctl", ["kickstart", "-k", target])
   }
+  // swiftlint:enable large_tuple
 }
 
 // MARK: - Установщик службы
@@ -267,9 +281,9 @@ public struct AgentInstaller {
   /// binaryPathChanged = true, если старый plist указывал на другой бинарь
   /// (смена менеджера/обновление) — CLI печатает TCC-подсказку.
   @discardableResult
-  public func install(agentBinary: String, flags: [String] = [], logPath: String)
-    -> AgentInstallResult
-  {
+  public func install(
+    agentBinary: String, flags: [String] = [], logPath: String
+  ) -> AgentInstallResult {
     let previous = AgentPlist.programArguments(
       fromPlistAt: plistURL.path, fileManager: fileManager)?.first
     var result = AgentInstallResult(
@@ -277,7 +291,10 @@ public struct AgentInstaller {
 
     do {
       try AgentPlist.writePlist(
-        agentBinary: agentBinary, flags: flags, logPath: logPath, to: plistURL,
+        agentBinary: agentBinary,
+        flags: flags,
+        logPath: logPath,
+        to: plistURL,
         fileManager: fileManager)
     } catch {
       result.writeError = "\(error)"
@@ -305,16 +322,19 @@ public struct AgentInstaller {
   /// фолбэк-установку в этом методе, полный `nanodictate start` или перелогин.
   /// Если служба не загружена (kickstart упал) — полная установка.
   @discardableResult
-  public func restart(agentBinary: String, flags: [String] = [], logPath: String)
-    -> AgentInstallResult
-  {
+  public func restart(
+    agentBinary: String, flags: [String] = [], logPath: String
+  ) -> AgentInstallResult {
     let previous = AgentPlist.programArguments(
       fromPlistAt: plistURL.path, fileManager: fileManager)?.first
     var result = AgentInstallResult(
       binaryPathChanged: previous != nil && previous != agentBinary)
     do {
       try AgentPlist.writePlist(
-        agentBinary: agentBinary, flags: flags, logPath: logPath, to: plistURL,
+        agentBinary: agentBinary,
+        flags: flags,
+        logPath: logPath,
+        to: plistURL,
         fileManager: fileManager)
     } catch {
       result.writeError = "\(error)"

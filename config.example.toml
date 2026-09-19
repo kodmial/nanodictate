@@ -33,12 +33,6 @@ model = ""
 api_key = ""
 # api_key_file = "~/.config/nanodictate/keys/groq.txt"
 
-[providers.local]
-name = "Local"
-base_url = ""
-model = ""
-api_key = ""
-
 [providers.cookie-relay]
 name = "Cookie Relay"
 base_url = ""

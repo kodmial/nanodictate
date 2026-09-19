@@ -167,7 +167,7 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
 
   public static let defaults = AppConfig(
     // Личных endpoint/model по умолчанию больше нет: пустые значения,
-    // адаптер известного провайдера (openai/groq/local/…) подставит свои
+    // адаптер известного провайдера (openai/groq/…) подставит свои
     // дефолтные baseURL/model, неизвестный id — остаётся на ручной настройке.
     baseURL: "",
     model: "",
@@ -223,9 +223,11 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
     let prefixDir = (executableDir as NSString).deletingLastPathComponent
     return [
       URL(fileURLWithPath: executableDir).appendingPathComponent("config.example.toml"),
-      URL(fileURLWithPath: prefixDir).appendingPathComponent("share/nanodictate/config.example.toml"),
+      URL(fileURLWithPath: prefixDir).appendingPathComponent(
+        "share/nanodictate/config.example.toml"),
       URL(fileURLWithPath: "/opt/homebrew/share/nanodictate/config.example.toml"),
       URL(fileURLWithPath: "/usr/local/share/nanodictate/config.example.toml"),
+      // swiftlint:disable:next trailing_comma
       URL(fileURLWithPath: "/opt/local/share/nanodictate/config.example.toml"),
     ]
   }
@@ -292,11 +294,11 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
     // Маркеры ищутся по некомментарным строкам: закомментированные
     // "# [providers.groq]" / "# active_provider = ..." legacy не ломают.
     let nonCommentLines = content.split(separator: "\n").filter {
-      !$0.drop(while: { $0 == " " || $0 == "\t" }).hasPrefix("#")
+      !$0.drop { $0 == " " || $0 == "\t" }.hasPrefix("#")
     }
     let isLegacyFlat =
       !nonCommentLines.contains { $0.contains("[providers.") }
-        && !nonCommentLines.contains { $0.contains("active_provider") }
+      && !nonCommentLines.contains { $0.contains("active_provider") }
     let base: AppConfig
     if let example = exampleContent(), !isLegacyFlat {
       base = try parse(example)
@@ -325,10 +327,11 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
     else { return config }
     var result = config
     result.apiKey = envKey
-    let activeID = result.activeProvider.isEmpty ? result.providers.first?.id : result.activeProvider
+    let activeID =
+      result.activeProvider.isEmpty ? result.providers.first?.id : result.activeProvider
     if let activeID = activeID,
       let index = result.providers.firstIndex(where: { $0.id == activeID })
-    {
+    {  // swiftlint:disable:this opening_brace
       result.providers[index].apiKey = envKey
     }
     return result

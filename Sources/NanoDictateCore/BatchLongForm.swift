@@ -143,7 +143,7 @@ public struct BatchStableMultipartFields: Equatable {
   /// |--------------------|--------|-------------|------------|
   /// | openai             | ✓      | ✓           | ✗ (нет в API Create transcription) |
   /// | groq               | ✓      | ✓           | ✓ (задача: поддерживает; groq строгий к неизвестным полям) |
-  /// | local/gigaam       | ✓      | ✓           | ✗ (sherpa/GigaAM не гарантируют) |
+  /// | openai-compatible (selfhost: GigaAM/whisper.cpp) | ✓      | ✓           | ✗ (sherpa/GigaAM не гарантируют) |
   /// | cloudflare         | ✗      | ✗           | ✗ (тело = сырые WAV-байты, multipart невозможен) |
   ///
   /// no_speech_threshold / compression_ratio_threshold / logprob_threshold
@@ -159,7 +159,7 @@ public struct BatchStableMultipartFields: Equatable {
     switch STTAdapterID.from(adapterID) {
     case .cloudflare:
       return nil
-    case .openai, .groq, .local, .openAICompatible:
+    case .openai, .groq, .openAICompatible:
       return BatchStableMultipartFields(
         temperature: params.temperature,
         vadFilter: (STTAdapterID.from(adapterID) == .groq) ? params.vadFilter : nil,

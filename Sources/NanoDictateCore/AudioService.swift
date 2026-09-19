@@ -782,7 +782,7 @@ public final class AudioService {
   private func observeConfigurationChanges(for engine: AudioEngineLike) {
     let token = NotificationCenter.default.addObserver(
       forName: .AVAudioEngineConfigurationChange,
-      object: (engine as? AVAudioEngine) ?? nil,
+      object: engine as? AVAudioEngine,
       queue: nil
     ) { [weak self] _ in
       self?.handleConfigurationChange()
@@ -950,6 +950,13 @@ public final class AudioService {
   /// (захваты unfair — короткие, без блокирующих вызовов и чужих очередей).
   /// Полновесные снимки буферов/конвертера — по-прежнему NSLock в
   /// `takeBufferedSnapshot`.
+  /// Снимок тройки (generation/isRecording/autoStopScheduled) пакетно.
+  struct SessionSnapshot {
+    let generation: Int
+    let isRecording: Bool
+    let autoStopScheduled: Bool
+  }
+
   final class SessionLedger: @unchecked Sendable {
     private var unfair = os_unfair_lock()
     private var word: UInt64 = 0
@@ -964,8 +971,7 @@ public final class AudioService {
       word = UInt64(clamping: generation) << Self.generationShift
     }
 
-    /// Снимок тройки (generation/isRecording/autoStopScheduled) пакетно.
-    var snapshot: (generation: Int, isRecording: Bool, autoStopScheduled: Bool) {
+    var snapshot: SessionSnapshot {
       os_unfair_lock_lock(&unfair)
       defer { os_unfair_lock_unlock(&unfair) }
       return unpack(word)
@@ -1033,17 +1039,14 @@ public final class AudioService {
     }
 
     /// Распаковка слова в тройку — только под захватом unfair.
-    private func unpack(_ packed: UInt64) -> (
-      generation: Int, isRecording: Bool, autoStopScheduled: Bool
-    ) {
-      (
+    private func unpack(_ packed: UInt64) -> SessionSnapshot {
+      SessionSnapshot(
         generation: Int(packed >> Self.generationShift),
         isRecording: packed & Self.recordingBit != 0,
         autoStopScheduled: packed & Self.autoStopBit != 0
       )
     }
   }
-
 
   /// Реальный объём выхода при ресемплинге пропорционален частотам:
   /// `inputFrames × outputRate / inputRate` + запас (¼), чтобы конвертер

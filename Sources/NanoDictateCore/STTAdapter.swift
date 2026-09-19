@@ -11,7 +11,6 @@ import Foundation
 public enum STTAdapterID: String, Equatable {
   case openai
   case groq
-  case local
   /// Cloudflare Workers AI Whisper: сырые WAV-байты + `Authorization: Bearer` +
   /// `Content-Type: audio/wav` (multipart эта сторона отвергает: 400 code 8001).
   /// base_url обязателен (модель зашита в URL), дефолтов нет.
@@ -30,7 +29,6 @@ public enum STTAdapterID: String, Equatable {
     switch self {
     case .openai: return "https://api.openai.com/v1/audio/transcriptions"
     case .groq: return "https://api.groq.com/openai/v1/audio/transcriptions"
-    case .local: return "http://127.0.0.1:8080/v1/audio/transcriptions"
     // cloudflare/openAICompatible — ручные: base_url обязателен.
     case .cloudflare, .openAICompatible: return ""
     }
@@ -41,7 +39,6 @@ public enum STTAdapterID: String, Equatable {
     switch self {
     case .openai: return "whisper-1"
     case .groq: return "whisper-large-v3"
-    case .local: return "whisper-1"
     // Cloudflare: модель в URL Workers AI, отдельной дефолтной нет.
     case .cloudflare, .openAICompatible: return ""
     }
@@ -111,7 +108,7 @@ public struct STTRequestSpec {
 public enum ProviderRequestBuilder {
   /// Имена известных адаптеров в каноническом порядке (справочник CLI).
   public static let knownProviderIDs: [String] =
-    ["openai", "groq", "local", "cloudflare"]
+    ["openai", "groq", "cloudflare"]
 
   /// «Human name» провайдера для подписи оверлея/логов; неизвестный id —
   /// сам id.
@@ -119,7 +116,6 @@ public enum ProviderRequestBuilder {
     switch STTAdapterID.from(id) {
     case .openai: return "OpenAI"
     case .groq: return "Groq"
-    case .local: return "Local"
     case .cloudflare: return "Cloudflare"
     case .openAICompatible: return id
     }
@@ -162,7 +158,7 @@ public enum ProviderRequestBuilder {
     switch STTAdapterID.from(adapterID) {
     case .cloudflare:
       return planCloudflare(baseURL: resolvedBaseURL, apiKey: apiKey, wav: wav)
-    case .openai, .groq, .local, .openAICompatible:
+    case .openai, .groq, .openAICompatible:
       return planOpenAICompatible(
         adapterID: adapterID,
         baseURL: resolvedBaseURL,
@@ -291,7 +287,7 @@ extension ProviderRequestBuilder {
   /// response_format/timestamp_granularities[] (word-таймстампы), затем
   /// stable-поля устойчивой транскрибации (температура/vad_filter/пороги —
   /// только не-nil, после гейтинга), закрывающий boundary. Это ЕДИНЫЙ
-  /// источник правды о формате тела — адаптеры openai/groq/local дают
+  /// источник правды о формате тела — адаптеры openai/groq дают
   /// байт-в-байт те же данные (поля таймстампов и stable добавляются только
   /// явными параметрами).
   // swiftlint:disable:next function_parameter_count
@@ -381,7 +377,7 @@ extension ProviderRequestBuilder {
 
   // MARK: - Адаптеры
 
-  /// OpenAI / Groq / Local / openAI-compatible: мультипарт + Bearer.
+  /// OpenAI / Groq / openAI-compatible: мультипарт + Bearer.
   // swiftlint:disable:next function_parameter_count
   private static func planOpenAICompatible(
     adapterID: String,
@@ -417,13 +413,12 @@ extension ProviderRequestBuilder {
   }
 
   /// Провайдеры, у которых включаем word-таймстампы (verbose_json +
-  /// timestamp_granularities[]=word). local/cloudflare не включаем:
-  /// whisper.cpp/sherpa поддержку не гарантируют, cloudflare ходит сырым
+  /// timestamp_granularities[]=word). cloudflare не включаем: он ходит сырым
   /// WAV-телом (см. planCloudflare).
   private static func supportsWordTimestamps(_ adapterID: String) -> Bool {
     switch STTAdapterID.from(adapterID) {
     case .openai, .openAICompatible: return true
-    case .groq, .local, .cloudflare: return false
+    case .groq, .cloudflare: return false
     }
   }
 
@@ -433,7 +428,7 @@ extension ProviderRequestBuilder {
   private static func supportsVerboseJSON(_ adapterID: String) -> Bool {
     switch STTAdapterID.from(adapterID) {
     case .openai, .groq, .openAICompatible: return true
-    case .local, .cloudflare: return false
+    case .cloudflare: return false
     }
   }
 
