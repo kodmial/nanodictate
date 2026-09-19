@@ -8,8 +8,9 @@ reviews:
   poem: false
   review_status: true
   collapse_walkthrough: false
-  # The initial-release PR carries 134 changed files, above the default limit of 100; 0 disables the limit.
-  max_files_reviewed: 0
+  # CodeRabbit caps at 100 files/run; this PR carries 134 — partition workaround (run A: all except Sources/NanoDictateCore/**).
+  path_filters:
+    - "!Sources/NanoDictateCore/**"
   # Auto-review starts only after the review-ready label is applied; the label workflow (add-review-label.yml) applies it after CI passes.
   auto_review:
     enabled: false
