@@ -151,7 +151,6 @@ public final class AudioService {
   private let targetFormat: AVAudioFormat
   private var converter: AVAudioConverter?
   private var collectedSamples: [Int16] = []
-  private var isRecording = false
   private var tapInstalled = false
   /// Поколение движка: инкрементируется при КАЖДОЙ подмене «зависшего» движка
   /// (replaceEngineAfterWedge). Вместе с (engine, queue) образует атомарный
@@ -159,7 +158,10 @@ public final class AudioService {
   /// терминальные ветки старта сверяют «я — всё ещё текущее поколение?».
   /// Устаревшие движки (отброшенные подменой) молча дропают буферы и не
   /// трогают state нового сеанса.
-  private var generation = 0
+  /// Регистр `session` держит ЕДИНСТВЕННУЮ копию тройки (generation, isRecording,
+  /// autoStopScheduled) — читать её можно и под `lock` (снимок буферов), и
+  /// lock-free с realtime-пути, не расходясь с записанным значением.
+  private let session: SessionLedger
   /// Жёсткий лимит: 60.0 c, 960 000 сэмплов. Ни при каких условиях запись не
   /// может превысить эти значения (см. `process` и `scheduleLimitStop`).
   private var limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
@@ -172,10 +174,10 @@ public final class AudioService {
   private var limitStopScheduled = false
   /// Автоостановка по тишине: порог/длительность + рубильник `enabled`
   /// (из init; Agent забирает их из окружения — см. AutoStopConfig.fromEnvironment)
-  /// и защёлка «финализация уже запланирована» — как у лимита, ровно один колбэк.
+  /// и защёлка «финализация уже запланирована» — в регистре `session`
+  /// (бит autoStop), как у лимита: ровно один колбэк.
   private let autoStopConfig: AutoStopConfig
   private var autoStopDetector = SilenceAutoStopDetector()
-  private var autoStopScheduled = false
   /// Первый буфер сеанса логируется отдельно (debug): длительность и энергия
   /// показывают, пошёл ли реально звук в движок после старта.
   private var didLogFirstBuffer = false
@@ -261,6 +263,9 @@ public final class AudioService {
     let factory = makeEngine ?? { AVAudioEngine() }
     engineFactory = factory
     self.engine = engine ?? factory()
+    // Регистр жизненного цикла: единственная копия (generation/isRecording/
+    // autoStopScheduled). Стартует с нулевого поколения, флаги сброшены.
+    session = SessionLedger(generation: 0)
     engineQueue = DispatchQueue(label: "nanodictate.audio.engine", qos: .userInitiated)
     self.autoStopConfig = autoStopConfig
     gain = InputGain(config: gainConfig)
@@ -340,7 +345,15 @@ public final class AudioService {
   private func captureEngineSlot() -> EngineSlot {
     lock.lock()
     defer { lock.unlock() }
-    return EngineSlot(engine: engine, queue: engineQueue, generation: generation)
+    // Поколение берём из регистра `session` (единственная копия — см.
+    // SessionLedger): продвигает его только replaceEngineAfterWedge, всегда
+    // под этим же `lock`, так что пара (engine, generation) по-прежнему
+    // снимается согласованно.
+    return EngineSlot(
+      engine: engine,
+      queue: engineQueue,
+      generation: session.snapshot.generation
+    )
   }
 
   /// Весь подъём движка — строго на очереди этого движка. `startGeneration` —
@@ -361,7 +374,9 @@ public final class AudioService {
     collectedSamples = []
     rmsHistory = []
     limitStopScheduled = false
-    autoStopScheduled = false
+    // Защёлка автостопа — в регистре (бит autoStop): новый сеанс стартует
+    // без «финализация уже запланирована».
+    session.clearAutoStop()
     autoStopDetector.reset()
     gain.reset()  // новый сеанс — с нулевого усиления, без остатка прошлой записи
     liveLastCutIndex = 0
@@ -398,7 +413,7 @@ public final class AudioService {
       // Терминальная ветка — как у engine.start() ниже: движок обязан быть
       // разобран, иначе следующий Alt+Alt упадёт на повторном installTap.
       // Но сначала гард поколения: если движок, что начал, уже подменён
-      // (wedge) — state нового сеанса (setRecording(false)/сброс буферов)
+      // (wedge) — state нового сеанса (session.end()/сброс буферов)
       // трогать нельзя, разбираем только сам устаревший движок.
       guard isCurrentGeneration(startGeneration) else {
         teardownEngineOnly(using: engine)
@@ -549,12 +564,12 @@ public final class AudioService {
   /// engineQueue, чтобы не блокировать главный поток.
   public func stop() -> [Int16] {
     lock.lock()
-    guard isRecording else {
+    guard isRecordingLocked else {
       lock.unlock()
       return []
     }
     let duration = CFAbsoluteTimeGetCurrent() - recordStartTime
-    isRecording = false
+    setRecording(false)
     // «Хвост» (незакрытый уттеренс) забираем тем же снимком, под той же
     // блокировкой — VAD-состояние и буфер записи согласованы.
     let tail = takeLiveTailLocked()
@@ -586,13 +601,13 @@ public final class AudioService {
   /// Отменяет запись, отбрасывая данные.
   public func cancel() {
     lock.lock()
-    guard isRecording else {
+    guard isRecordingLocked else {
       lock.unlock()
       return
     }
     let duration = CFAbsoluteTimeGetCurrent() - recordStartTime
     let frames = collectedSamples.count
-    isRecording = false
+    setRecording(false)
     collectedSamples = []
     // Отмена отбрасывает ВСЁ, включая незакрытый уттеренс: колбэка
     // onSpeechSegment нет (Esc = данные не доставляются).
@@ -650,7 +665,7 @@ public final class AudioService {
     // Новое поколение: операции и tap-блоки старого движка (если его start()
     // разблокируется позже) видят расхождение поколений и не трогают state,
     // а новые старты получают свежую метку.
-    generation += 1
+    session.advanceGeneration()
     // tap и конвертер принадлежали старому движку — свежий старт ставит их
     // с нуля (повторный installTap на занятом bus = NSException).
     tapInstalled = false
@@ -715,7 +730,7 @@ public final class AudioService {
     collectedSamples = []
     rmsHistory = []
     liveLastCutIndex = 0
-    autoStopScheduled = false
+    session.clearAutoStop()
     autoStopDetector.reset()
     resetLiveVADLocked()
     lock.unlock()
@@ -783,10 +798,9 @@ public final class AudioService {
   /// stop() сам гасит флаги и разбирает tap/движок. Двойная остановка
   /// безопасна (stop идемпотентен через тот же guard isRecording).
   private func handleConfigurationChange() {
-    lock.lock()
-    let recording = isRecording
-    lock.unlock()
-    guard recording else { return }
+    // Чтение флага записи без NSLock: уведомление может прийти на чужой
+    // очереди, а регистр `session` не удерживает блокировку state.
+    guard isRecordingLocked else { return }
     Logger.log("record engine: configuration changed — stopping, user must restart", level: "warn")
     // Сэмплы сеанса отдаёт сам stop() (его путь финализации) — здесь они не нужны.
     _ = stop()
@@ -815,16 +829,28 @@ public final class AudioService {
     return Array(collectedSamples[start..<end])
   }
 
+  /// Значение фактически принадлежит записи (взводится `begin`), параметр
+  /// оставлен ради симметрии вызовов на точках старта.
   private func setRecording(_ value: Bool) {
-    lock.lock()
-    isRecording = value
-    lock.unlock()
+    if value {
+      session.begin(generation: session.snapshot.generation)
+    } else {
+      session.end()
+    }
   }
 
   private var isRecordingLocked: Bool {
-    lock.lock()
-    defer { lock.unlock() }
-    return isRecording
+    session.isRecording
+  }
+
+  /// Проверка поколения с realtime-пути, без NSLock: tap-блок отброшенного
+  /// движка не должен трогать state нового сеанса (см. SessionLedger).
+  private func isCurrentGeneration(_ generation: Int) -> Bool {
+    session.isCurrentGeneration(generation)
+  }
+
+  private var isAutoStopScheduled: Bool {
+    session.snapshot.autoStopScheduled
   }
 
   private func setTapInstalled(_ value: Bool) {
@@ -848,20 +874,124 @@ public final class AudioService {
   }
 
   private func takeBufferedSnapshot() -> BufferedSnapshot {
+    // Флаги сеанса читаем ПЕРВЫМИ и без NSLock: на заблокированном lock
+    // (например, во время пересборки VAD в stop/performForcedStop) realtime
+    // tap-поток успевает увидеть «записи нет» и выйти, не вставая в очередь
+    // за блокировкой. Счётчик защёлкивается в начале сеанса, так что живой
+    // буфер после снятия флага уже не нужен. Дальше полновесный снимок
+    // (конвертер) — под NSLock; оба источника согласованы, потому что
+    // пишутся одним потоком-владельцем сеанса.
+    guard isRecordingLocked else {
+      return BufferedSnapshot(alive: false, converter: nil)
+    }
     lock.lock()
     defer { lock.unlock() }
-    let alive = isRecording && !limit.isExhausted && !autoStopScheduled
+    let alive = !limit.isExhausted && !isAutoStopScheduled
     return BufferedSnapshot(alive: alive, converter: converter)
   }
 
-  /// «Движок поколения `generation` — всё ещё текущий?» (не подменён
-  /// wedge'ом). Проверка из tap-блока (аудио-поток) и терминальных веток
-  /// старта (очередь движка) — короткий захват lock, без вложенности.
-  private func isCurrentGeneration(_ generation: Int) -> Bool {
-    lock.lock()
-    defer { lock.unlock() }
-    return self.generation == generation
+  /// Регистр жизненного цикла сеанса: убирает NSLock (mutex с возможным
+  /// syscall и инверсией приоритета) с realtime-пути tap-колбэка. Примитив —
+  /// `os_unfair_lock`: в неспорном случае это один атомарный CAS в userspace
+  /// без системных вызовов и ObjC-рантайма (raw C11-атомики потребовали бы
+  /// правок вне зоны — C-обёртки в AudioEngineGuard; зависимости swift-atomics
+  /// в пакете нет). Слово состояния упаковывает тройку
+  /// (generation/isRecording/autoStopScheduled): поколение — в старшем слове,
+  /// флаги — в младших двух битах; снимается пакетно под одним захватом.
+  /// Захваты короткие (несколько инструкций), вложенности нет, порядок всегда
+  /// ledger→NSLock (обратного не бывает — дедлока нет). Полновесные снимки
+  /// буферов/конвертера — по-прежнему NSLock в `takeBufferedSnapshot`.
+  final class SessionLedger: @unchecked Sendable {
+    private var unfair = os_unfair_lock()
+    private var word: UInt64 = 0
+    /// Бит 0 — идёт запись; бит 1 — защёлка планировщика автостопа.
+    private static let recordingBit: UInt64 = 1
+    private static let autoStopBit: UInt64 = 2
+    /// Старшее слово счётчика поколений; младшее — флаговое.
+    private static let generationShift: UInt64 = 32
+
+    /// Начальное поколение наследуют от сервиса, флаги — нулевые.
+    init(generation: Int) {
+      word = UInt64(clamping: generation) << Self.generationShift
+    }
+
+    /// Снимок тройки (generation/isRecording/autoStopScheduled) пакетно.
+    var snapshot: (generation: Int, isRecording: Bool, autoStopScheduled: Bool) {
+      os_unfair_lock_lock(&unfair)
+      defer { os_unfair_lock_unlock(&unfair) }
+      return unpack(word)
+    }
+
+    /// Чтение `isRecording` вне NSLock для раннего выхода realtime-thread
+    /// (полный снимок — см. `takeBufferedSnapshot`).
+    var isRecording: Bool {
+      os_unfair_lock_lock(&unfair)
+      defer { os_unfair_lock_unlock(&unfair) }
+      return word & Self.recordingBit != 0
+    }
+
+    /// Сверка поколения без NSLock (tap-блок, терминальные ветки старта).
+    func isCurrentGeneration(_ generation: Int) -> Bool {
+      os_unfair_lock_lock(&unfair)
+      defer { os_unfair_lock_unlock(&unfair) }
+      return Int(word >> Self.generationShift) == generation
+    }
+
+    /// Переход старта: поколение + флаг recording. Флаг записи читается из
+    /// регистра без блокировки — `begin` вызывается на потоке, который уже
+    /// владеет сеансом (очередь движка либо main).
+    func begin(generation: Int) {
+      os_unfair_lock_lock(&unfair)
+      defer { os_unfair_lock_unlock(&unfair) }
+      word =
+        (UInt64(clamping: generation) << Self.generationShift)
+        | (word & Self.autoStopBit) | Self.recordingBit
+    }
+
+    /// Переход останова: сброс recording + autoStop, поколение сохранить.
+    func end() {
+      os_unfair_lock_lock(&unfair)
+      defer { os_unfair_lock_unlock(&unfair) }
+      word &= ~(Self.recordingBit | Self.autoStopBit)
+    }
+
+    /// Снятие защёлки автостопа — новый сеанс стартует без «финализация уже
+    /// запланирована» (флаг записи не трогаем: его взводит `begin`).
+    func clearAutoStop() {
+      os_unfair_lock_lock(&unfair)
+      defer { os_unfair_lock_unlock(&unfair) }
+      word &= ~Self.autoStopBit
+    }
+
+    /// Защёлка автостопа: бит планировщика; поколение/запись сохранить.
+    func latchAutoStop() {
+      os_unfair_lock_lock(&unfair)
+      defer { os_unfair_lock_unlock(&unfair) }
+      word |= Self.autoStopBit
+    }
+
+    /// Шаг поколения подмены wedge: счётчик +1, сброс recording/autoStop.
+    @discardableResult
+    func advanceGeneration() -> Int {
+      os_unfair_lock_lock(&unfair)
+      defer { os_unfair_lock_unlock(&unfair) }
+      let generation = Int(word >> Self.generationShift) + 1
+      word = UInt64(clamping: generation) << Self.generationShift
+      return generation
+    }
+
+    /// Распаковка слова в тройку — только под захватом unfair.
+    private func unpack(_ packed: UInt64) -> (
+      generation: Int, isRecording: Bool, autoStopScheduled: Bool
+    ) {
+      (
+        generation: Int(packed >> Self.generationShift),
+        isRecording: packed & Self.recordingBit != 0,
+        autoStopScheduled: packed & Self.autoStopBit != 0
+      )
+    }
   }
+
 
   /// Реальный объём выхода при ресемплинге пропорционален частотам:
   /// `inputFrames × outputRate / inputRate` + запас (¼), чтобы конвертер
@@ -975,7 +1105,7 @@ public final class AudioService {
     // главном потоке синхронно с накоплением здесь.
     var deliveredSegment: [Int16]?
     lock.lock()
-    guard isRecording else {
+    guard isRecordingLocked else {
       lock.unlock()
       return
     }
@@ -1150,11 +1280,14 @@ public final class AudioService {
   /// уходит туда же (из колбэка tap removeTap вызывать нельзя).
   private func scheduleAutoStop() {
     lock.lock()
-    guard !autoStopScheduled else {
+    // Защёлка живёт в регистре `session` (бит autoStop), но проверяется под
+    // NSLock: планировщик вызывается с realtime-пути, где важна и ранняя
+    // отсечка без входа в буферы (автостоп — событие, не каждый буфер).
+    guard !isAutoStopScheduled else {
       lock.unlock()
       return
     }
-    autoStopScheduled = true
+    session.latchAutoStop()
     lock.unlock()
 
     DispatchQueue.main.async { [weak self] in
@@ -1180,12 +1313,12 @@ public final class AudioService {
   private func performForcedStop(reason: ForcedStopReason) {
     lock.lock()
     // Пользователь уже остановил запись — не дублируем финализацию.
-    guard isRecording else {
+    guard isRecordingLocked else {
       lock.unlock()
       return
     }
     let duration = CFAbsoluteTimeGetCurrent() - recordStartTime
-    isRecording = false
+    setRecording(false)
     let rms = rmsHistory
     rmsHistory = []
     let tail = takeLiveTailLocked()
