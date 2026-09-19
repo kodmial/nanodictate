@@ -9,7 +9,9 @@ func eprint(_ message: String) {
   FileHandle.standardError.write(Data((message + "\n").utf8))
 }
 
-func runProcess(_ launchPath: String, _ args: [String]) -> (status: Int32, stdout: String, stderr: String) { // swiftlint:disable:this large_tuple
+func runProcess(_ launchPath: String, _ args: [String]) -> (  // swiftlint:disable:this large_tuple
+  status: Int32, stdout: String, stderr: String
+) {
   let process = Process()
   process.executableURL = URL(fileURLWithPath: launchPath)
   process.arguments = args
@@ -63,15 +65,15 @@ func findPlistTemplate() -> URL? {
   let exeDir = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0]))
     .deletingLastPathComponent()
   let fromSourceDir = URL(fileURLWithPath: #filePath)
-    .deletingLastPathComponent() // Sources/nanodictate
-    .deletingLastPathComponent() // Sources
-    .deletingLastPathComponent() // project root
+    .deletingLastPathComponent()  // Sources/nanodictate
+    .deletingLastPathComponent()  // Sources
+    .deletingLastPathComponent()  // project root
     .appendingPathComponent("Resources/\(name)")
   let candidates: [URL] = [
     exeDir.appendingPathComponent("Resources/\(name)"),
     fromSourceDir,
     URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-      .appendingPathComponent("Resources/\(name)"), // swiftlint:disable:this trailing_comma
+      .appendingPathComponent("Resources/\(name)"),  // swiftlint:disable:this trailing_comma
   ]
   for url in candidates where FileManager.default.fileExists(atPath: url.path) {
     return url
@@ -110,7 +112,8 @@ func cmdStart() -> Int32 {
   // Шаблон генерируется в plist с РЕАЛЬНЫМ путём бинаря агента и лог-файлом
   // в домашней директории пользователя (launchd ~ не раскрывает сам).
   let logPath = logsDir.appendingPathComponent("agent.log").path
-  let plistText = templateText
+  let plistText =
+    templateText
     .replacingOccurrences(of: "{{BINARY_PATH}}", with: binaryPath)
     .replacingOccurrences(of: "{{LOG_PATH}}", with: logPath)
 
@@ -141,7 +144,9 @@ func cmdStart() -> Int32 {
   }
   let msg1 = bootstrap.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
   let msg2 = load.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-  eprint(msg1.isEmpty ? L10n.tr("cli.bootstrap.nodata") : String(format: L10n.tr("cli.bootstrap.fail"), msg1))
+  eprint(
+    msg1.isEmpty
+      ? L10n.tr("cli.bootstrap.nodata") : String(format: L10n.tr("cli.bootstrap.fail"), msg1))
   eprint(msg2.isEmpty ? L10n.tr("cli.load.nodata") : String(format: L10n.tr("cli.load.fail"), msg2))
   return 1
 }
@@ -160,8 +165,11 @@ func cmdStop() -> Int32 {
   }
   let msg1 = bootout.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
   let msg2 = unload.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-  eprint(msg1.isEmpty ? L10n.tr("cli.bootout.nodata") : String(format: L10n.tr("cli.bootout.fail"), msg1))
-  eprint(msg2.isEmpty ? L10n.tr("cli.unload.nodata") : String(format: L10n.tr("cli.unload.fail"), msg2))
+  eprint(
+    msg1.isEmpty ? L10n.tr("cli.bootout.nodata") : String(format: L10n.tr("cli.bootout.fail"), msg1)
+  )
+  eprint(
+    msg2.isEmpty ? L10n.tr("cli.unload.nodata") : String(format: L10n.tr("cli.unload.fail"), msg2))
   return 1
 }
 
@@ -204,15 +212,16 @@ func cmdStatus() -> Int32 {
 func maskFileSecrets(in content: String) -> String {
   var lines: [String] = []
   for line in content.components(separatedBy: .newlines) {
-    let key = line.split(separator: "=", maxSplits: 1).first
+    let key =
+      line.split(separator: "=", maxSplits: 1).first
       .map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
     if key == "api_key" || key == "proxy_key",
-       let eqIndex = line.firstIndex(of: "="), // swiftlint:disable:this indentation_width
-       let open = line[line.index(after: eqIndex)...].firstIndex(of: "\""),
-       let close = line[line.index(after: open)...].firstIndex(of: "\"")
-    { // swiftlint:disable:this opening_brace
+      let eqIndex = line.firstIndex(of: "="),
+      let open = line[line.index(after: eqIndex)...].firstIndex(of: "\""),
+      let close = line[line.index(after: open)...].firstIndex(of: "\"")
+    {  // swiftlint:disable:this opening_brace
       let prefix = String(line[..<open])
-      let value = String(line[line.index(after: open) ..< close])
+      let value = String(line[line.index(after: open)..<close])
       let suffix = String(line[close...])
       let masked = value.isEmpty ? "" : AppConfig.maskSecret(value)
       lines.append("\(prefix)\"\(masked)\"\(suffix)")
@@ -265,7 +274,8 @@ func cmdConfigSetKey(path: String, args: [String]) -> Int32 {
   }
   let rest = Array(args.dropFirst())
   let useStdin = rest.contains("--stdin")
-  let keyArg = rest.first { !$0.hasPrefix("--") }
+  // swiftlint:disable:next trailing_closure
+  let keyArg = rest.first(where: { !$0.hasPrefix("--") })
 
   let value: String
   if let keyArg {
@@ -299,7 +309,8 @@ func cmdConfigSetKey(path: String, args: [String]) -> Int32 {
   do {
     // writeProviderKeyValue ждёт значение в формате строки конфига (с кавычками),
     // как writeKeyValue для строк (ср. writeActiveProvider).
-    try AppConfig.writeProviderKeyValue(providerID: providerID, key: "api_key", value: "\"\(value)\"", to: path)
+    try AppConfig.writeProviderKeyValue(
+      providerID: providerID, key: "api_key", value: "\"\(value)\"", to: path)
   } catch {
     eprint(String(format: L10n.tr("cli.config.writeerror"), providerID, "\(error)"))
     return 1
@@ -462,13 +473,13 @@ func providerStatus() -> Int32 {
 func providerShow(_ name: String) -> Int32 {
   do {
     let (activeID, providers) = try AppConfig.loadProvidersOnly(from: nil)
-    guard let provider = providers.first { $0.id == name } else {
+    guard let provider = providers.first(where: { $0.id == name }) else {
       let available = providers.map(\.id)
-      eprint(String(format: L10n.tr("cli.provider.notfound"), name, available.joined(separator: ", ")))
+      eprint(
+        String(format: L10n.tr("cli.provider.notfound"), name, available.joined(separator: ", ")))
       return 2
     }
     print("id: \(provider.id)")
-    // swiftlint:disable:next colon
     print("name: \(provider.name.isEmpty ? provider.id : provider.name)")
     print("active: \(provider.id == activeID)")
     print("base_url: \(provider.baseURL)")
@@ -543,18 +554,15 @@ func routingShow() -> Int32 {
   let ids = providers.map(\.id)
   let seg = config.routing.segmentProvider
   let fin = config.routing.finalProvider
-  // swiftlint:disable:next colon
   let activeDisplay = activeID.isEmpty ? L10n.tr("cli.config.unset") : activeID
   func effective(_ role: String) -> String {
     !role.isEmpty && ids.contains(role)
       ? role
-      // swiftlint:disable:next colon
-      : (activeID.isEmpty ? L10n.tr("cli.config.unset") : "\(activeID) \(L10n.tr("cli.config.active"))")
+      : (activeID.isEmpty
+        ? L10n.tr("cli.config.unset") : "\(activeID) \(L10n.tr("cli.config.active"))")
   }
   print("active_provider: \(activeDisplay)")
-  // swiftlint:disable:next colon
   print("segment_provider: \(seg.isEmpty ? L10n.tr("cli.config.unset") : seg)")
-  // swiftlint:disable:next colon
   print("final_provider: \(fin.isEmpty ? L10n.tr("cli.config.unset") : fin)")
   print("segment (effective): \(effective(seg))")
   print("final (effective): \(effective(fin))")
@@ -583,11 +591,14 @@ func routingSet(role: String, providerID: String, args: [String]) -> Int32 {
     let (_, providers) = try AppConfig.loadProvidersOnly(from: nil)
     guard providers.contains(where: { $0.id == providerID }) else {
       let available = providers.map(\.id)
-      eprint(String(format: L10n.tr("cli.routing.noexist"), providerID, available.joined(separator: ", ")))
+      eprint(
+        String(
+          format: L10n.tr("cli.routing.noexist"), providerID, available.joined(separator: ", ")))
       eprint(L10n.tr("cli.routing.listHint"))
       return 2
     }
-    try AppConfig.writeRoutingKeyValue(key: key, value: "\"\(providerID)\"", to: AppConfig.defaultPath())
+    try AppConfig.writeRoutingKeyValue(
+      key: key, value: "\"\(providerID)\"", to: AppConfig.defaultPath())
   } catch {
     eprint(String(format: L10n.tr("cli.flag.configload"), "\(error)"))
     return 1
@@ -641,6 +652,7 @@ func cmdRouting(_ args: [String]) -> Int32 {
   }
 }
 
+// swiftlint:disable:next cyclomatic_complexity function_body_length
 func cmdTranscribe(_ args: [String]) -> Int32 {
   // Пакетные флаги (--provider/--out/--max-segment/--overlap/--no-progress/
   // --resume) включают пакетный режим; без них — разовая расшифровка как раньше.
@@ -652,36 +664,64 @@ func cmdTranscribe(_ args: [String]) -> Int32 {
     let argument = args[i]
     switch argument {
     case "--provider":
-      guard i + 1 < args.count else { eprint(L10n.tr("cli.flag.provider")); return 1 }
-      batch.providerID = args[i + 1]; i += 2; batchRequested = true
+      guard i + 1 < args.count else {
+        eprint(L10n.tr("cli.flag.provider"))
+        return 1
+      }
+      batch.providerID = args[i + 1]
+      i += 2
+      batchRequested = true
     case "--out":
-      guard i + 1 < args.count else { eprint(L10n.tr("cli.flag.out")); return 1 }
-      batch.outPath = args[i + 1]; i += 2; batchRequested = true
+      guard i + 1 < args.count else {
+        eprint(L10n.tr("cli.flag.out"))
+        return 1
+      }
+      batch.outPath = args[i + 1]
+      i += 2
+      batchRequested = true
     case "--max-segment":
       guard i + 1 < args.count, let value = Double(args[i + 1]), value > 0 else {
-        eprint(L10n.tr("cli.flag.maxsegment")); return 1
+        eprint(L10n.tr("cli.flag.maxsegment"))
+        return 1
       }
-      batch.maxSegment = v; i += 2; batchRequested = true
+      batch.maxSegment = value
+      i += 2
+      batchRequested = true
     case "--overlap":
       guard i + 1 < args.count, let value = Double(args[i + 1]), value >= 0 else {
-        eprint(L10n.tr("cli.flag.overlap")); return 1
+        eprint(L10n.tr("cli.flag.overlap"))
+        return 1
       }
-      batch.overlap = v; i += 2; batchRequested = true
+      batch.overlap = value
+      i += 2
+      batchRequested = true
     case "--no-progress":
-      batch.showProgress = false; i += 1; batchRequested = true
+      batch.showProgress = false
+      i += 1
+      batchRequested = true
     case "--cut-at-pauses":
-      batch.cutAtPauses = true; i += 1; batchRequested = true
+      batch.cutAtPauses = true
+      i += 1
+      batchRequested = true
     case "--no-cut-at-pauses":
-      batch.cutAtPauses = false; i += 1; batchRequested = true
+      batch.cutAtPauses = false
+      i += 1
+      batchRequested = true
     case "--resume":
-      batch.resume = true; i += 1; batchRequested = true
+      batch.resume = true
+      i += 1
+      batchRequested = true
     case "--parallel":
       guard i + 1 < args.count, let value = Int(args[i + 1]), value >= 1 else {
-        eprint(L10n.tr("cli.flag.parallel")); return 1
+        eprint(L10n.tr("cli.flag.parallel"))
+        return 1
       }
-      batch.maxConcurrent = v; i += 2; batchRequested = true
+      batch.maxConcurrent = value
+      i += 2
+      batchRequested = true
     case "--json":
-      batch.json = true; i += 1
+      batch.json = true
+      i += 1
     case "--help", "-h":
       eprint(usageTranscribeBatch)
       return 0
@@ -691,8 +731,12 @@ func cmdTranscribe(_ args: [String]) -> Int32 {
         eprint(usageTranscribeBatch)
         return 1
       }
-      guard file == nil else { eprint(String(format: L10n.tr("cli.flag.extra"), argument)); return 1 }
-      file = argument; i += 1
+      guard file == nil else {
+        eprint(String(format: L10n.tr("cli.flag.extra"), argument))
+        return 1
+      }
+      file = argument
+      i += 1
     }
   }
   guard let file else {
@@ -721,11 +765,13 @@ struct BatchTranscribeOptions {
   var json = false
 }
 
+// swiftlint:disable indentation_width
 let usageTranscribeBatch = """
-  \(L10n.tr("usage.transcribe"))
-  \(L10n.tr("usage.batch"))
-    \(L10n.tr("usage.batch.desc"))
-"""
+    \(L10n.tr("usage.transcribe"))
+    \(L10n.tr("usage.batch"))
+      \(L10n.tr("usage.batch.desc"))
+  """
+// swiftlint:enable indentation_width
 
 func formatClock(_ seconds: TimeInterval) -> String {
   let totalSeconds = max(0, Int(seconds.rounded()))
@@ -765,11 +811,9 @@ final class BatchProgressBar {
     lock.lock()
     defer { lock.unlock() }
     guard enabled, !finished else { return }
-    // swiftlint:disable:next colon
     let pct = total <= 0 ? 1.0 : min(1.0, max(0, Double(completed) / Double(total)))
     let filled = Int((pct * Double(width)).rounded())
     let bar = String(repeating: "█", count: filled) + String(repeating: "░", count: width - filled)
-    // swiftlint:disable:next colon
     let avg = completed > 0 ? elapsed / Double(completed) : 0
     let eta = avg * Double(max(0, total - completed))
     let percent = Int((pct * 100).rounded())
@@ -814,6 +858,7 @@ final class BatchProgressBar {
   }
 }
 
+// swiftlint:disable:next cyclomatic_complexity function_body_length
 func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int32 {
   let fileManager = FileManager.default
 
@@ -823,15 +868,18 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
     eprint(String(format: L10n.tr("cli.flag.configload"), "\(error)"))
     return 1
   }
-  var provider = config.providers.first { $0.id == options.providerID }
+  // swiftlint:disable:next trailing_closure
+  var provider = config.providers.first(where: { $0.id == options.providerID })
   if provider == nil, options.providerID == "gigaam" {
     // Стоковый конфиг (config init) секции gigaam не содержит: фолбэк на
     // активного провайдера, иначе — первого доступного, чтобы batch-режим
     // работал out-of-box без правки флага.
     let active: AppConfig.Provider? = (try? ProviderStore.loadProviders())
       .flatMap { list in
-        list.first { $0.isActive }.flatMap { active in
-          config.providers.first { $0.id == active.id }
+        // swiftlint:disable:next trailing_closure
+        list.first(where: { $0.isActive }).flatMap { active in
+          // swiftlint:disable:next trailing_closure
+          config.providers.first(where: { $0.id == active.id })
         }
       }
     let fallback = active ?? config.providers.first
@@ -874,26 +922,28 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
     // fileNotFound/ioError — файл физически недоступен, конвертация
     // afconvert не поможет — показываем исходную ошибку и выходим.
     if let probeError = error as? WAVFilePCMBatchContent.WAVFileError,
-       case .fileNotFound = probeError // swiftlint:disable:this indentation_width
-    {
+      case .fileNotFound = probeError
+    {  // swiftlint:disable:this opening_brace
       eprint(String(format: L10n.tr("cli.transcribe.filenotfound"), file))
       return 1
     }
     if let probeError = error as? WAVFilePCMBatchContent.WAVFileError,
-       case let .ioError(message) = probeError // swiftlint:disable:this indentation_width
-    {
+      case let .ioError(message) = probeError
+    {  // swiftlint:disable:this opening_brace
       eprint(String(format: L10n.tr("cli.transcribe.readerror"), file, message))
       return 1
     }
     // invalidWAV (не PCM16 WAV / не 16 кГц моно) — штатный случай:
     // afconvert во временный файл (временный живёт до конца прогона —
     // run(fileURL:) читает из него окна).
-    let converted = fileManager.temporaryDirectory.appendingPathComponent("nanodictate-batch-\(UUID().uuidString).wav")
-    let conv = runProcess("/usr/bin/afconvert", ["-f", "WAVE", "-d", "LEI16@16000", "-c", "1", file, converted.path])
+    let converted = fileManager.temporaryDirectory.appendingPathComponent(
+      "nanodictate-batch-\(UUID().uuidString).wav")
+    let conv = runProcess(
+      "/usr/bin/afconvert", ["-f", "WAVE", "-d", "LEI16@16000", "-c", "1", file, converted.path])
     guard conv.status == 0 else {
       let msg = conv.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-      // swiftlint:disable:next colon
-      eprint(String(format: L10n.tr("cli.transcribe.waverror"), file, msg.isEmpty ? conv.stdout : msg))
+      eprint(
+        String(format: L10n.tr("cli.transcribe.waverror"), file, msg.isEmpty ? conv.stdout : msg))
       return 1
     }
     tempWavURL = converted
@@ -928,9 +978,9 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
     // суффикс "-pause" в ключе чекпоинта. Старые чекпоинты без суффикса
     // (фиксированная нарезка, до внедрения паузного выравнивания)
     // заведомо несовместимы и корректно игнорируются resume.
-    // swiftlint:disable:next colon
     let pauseFactor = options.cutAtPauses ? "-pause" : ""
-    let checkpointName = "nanodictate-batch-\(stableCheckpointStamp(inputURL.path))-\(provider.id)-"
+    let checkpointName =
+      "nanodictate-batch-\(stableCheckpointStamp(inputURL.path))-\(provider.id)-"
       + "\(Int(options.maxSegment))-\(Int(options.overlap))\(pauseFactor).checkpoint.json"
     checkpointPath = fileManager.temporaryDirectory.appendingPathComponent(checkpointName).path
   }
@@ -941,29 +991,33 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
   if options.resume, fileManager.fileExists(atPath: checkpointPath) {
     if let checkpoint = try? BatchTranscriber.loadCheckpoint(from: checkpointPath) {
       if checkpoint.sourceFile != sourcePath {
-        eprint(String(format: L10n.tr("progress.badcheckpoint"), checkpointPath, checkpoint.sourceFile))
+        eprint(
+          String(format: L10n.tr("progress.badcheckpoint"), checkpointPath, checkpoint.sourceFile))
       }
     }
   }
 
   // 4. Реальный транспорт чанка: запрос по полям провайдера + Retry-After.
   let transport = URLSessionBatchTransport()
-  let apiKey = RetryProvider.resolveAPIKey(for: provider) // env > api_key > api_key_file
+  let apiKey = RetryProvider.resolveAPIKey(for: provider)  // env > api_key > api_key_file
   let language = config.language
   let sendOne: BatchTranscriber.SendOne = { _, wav, chunkIndex, prompt in
-    guard let prepared = BatchRequestBuilder.makeRequest(
-      provider: provider,
-      apiKey: apiKey,
-      language: language,
-      timeout: config.timeoutSeconds,
-      wav: wav,
-      chunkIndex: chunkIndex,
-      batchParams: BatchSTTParams(prompt: prompt),
-      proxyKey: provider.proxyKey,
-      // swiftlint:disable:next colon
-      proxyKeyHeader: provider.proxyKeyHeader.isEmpty ? config.proxyKeyHeader : provider.proxyKeyHeader
-    ) else {
-      throw BatchHTTPError.invalidResponse(String(format: L10n.tr("cli.batch.badBaseUrl"), provider.id))
+    guard
+      let prepared = BatchRequestBuilder.makeRequest(
+        provider: provider,
+        apiKey: apiKey,
+        language: language,
+        timeout: config.timeoutSeconds,
+        wav: wav,
+        chunkIndex: chunkIndex,
+        batchParams: BatchSTTParams(prompt: prompt),
+        proxyKey: provider.proxyKey,
+        proxyKeyHeader: provider.proxyKeyHeader.isEmpty
+          ? config.proxyKeyHeader : provider.proxyKeyHeader
+      )
+    else {
+      throw BatchHTTPError.invalidResponse(
+        String(format: L10n.tr("cli.batch.badBaseUrl"), provider.id))
     }
     let response: BatchHTTPResponse
     do {
@@ -971,7 +1025,7 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
     } catch {
       throw BatchHTTPError.network(error.localizedDescription)
     }
-    guard (200 ... 299).contains(response.status) else {
+    guard (200...299).contains(response.status) else {
       let snippet = String(decoding: response.body, as: UTF8.self)
       throw BatchHTTPError.http(
         response.status,
@@ -980,10 +1034,13 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
       )
     }
     do {
-      return try ProviderRequestBuilder.extractText(from: response.body, path: prepared.transcriptPath)
-        .trimmingCharacters(in: .whitespacesAndNewlines)
+      return try ProviderRequestBuilder.extractText(
+        from: response.body, path: prepared.transcriptPath
+      )
+      .trimmingCharacters(in: .whitespacesAndNewlines)
     } catch {
-      throw BatchHTTPError.invalidResponse(String(format: L10n.tr("cli.batch.parseError"), "\(error)"))
+      throw BatchHTTPError.invalidResponse(
+        String(format: L10n.tr("cli.batch.parseError"), "\(error)"))
     }
   }
 
@@ -991,7 +1048,7 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
   let progressBar = BatchProgressBar(enabled: options.showProgress)
 
   Task {
-    defer { progressBar.finish() } // перевести строку при любом исходе
+    defer { progressBar.finish() }  // перевести строку при любом исходе
     do {
       let outcome = try await BatchTranscriber.run(
         fileURL: batchWavURL,
@@ -1008,16 +1065,17 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
           }
         },
         maxConcurrent: options.maxConcurrent,
-        cutAtPauses: options.cutAtPauses
-      ) { completedChunks, totalChunks, _, _, elapsed, _ in
-        progressBar.update(completed: completedChunks, total: totalChunks, elapsed: elapsed)
-      }
+        cutAtPauses: options.cutAtPauses,
+        // swiftlint:disable:next trailing_closure
+        onProgress: { completedChunks, totalChunks, _, _, elapsed, _ in
+          progressBar.update(completed: completedChunks, total: totalChunks, elapsed: elapsed)
+        }
+      )
 
       // 5. Текст: в --out (атомарно) или в stdout. В файл — с завершающим
       // переводом строки (пустой текст — пустой файл, без голого \n).
       if let out = options.outPath {
         do {
-          // swiftlint:disable:next colon
           let content = outcome.text.isEmpty ? outcome.text : outcome.text + "\n"
           try content.write(to: URL(fileURLWithPath: out), atomically: true, encoding: .utf8)
         } catch {
@@ -1033,7 +1091,7 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
 
       if let tempWav = tempWavForCleanup {
         try? FileManager.default.removeItem(at: tempWav)
-      } // read-окна отработали
+      }  // read-окна отработали
 
       // 6. Итог в stderr.
       let duration = Double(batchSampleCount) / Double(batchSampleRate)
@@ -1046,7 +1104,9 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
         Int(outcome.elapsed)
       )
       if !outcome.skippedIndexes.isEmpty {
-        summary += String(format: L10n.tr("progress.skipped"), outcome.skippedIndexes.map(String.init).joined(separator: ", "))
+        summary += String(
+          format: L10n.tr("progress.skipped"),
+          outcome.skippedIndexes.map(String.init).joined(separator: ", "))
       }
       eprint(summary)
       eprint(String(format: L10n.tr("progress.checkpoint"), checkpointPath))
@@ -1054,9 +1114,11 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
       // 7. --json: как в разовом режиме — transcription_raw.json рядом с ФАЙЛ
       // (в пакетном режиме это копия чекпоинта с текстами чанков).
       if options.json {
-        let rawURL = inputURL.deletingLastPathComponent().appendingPathComponent("transcription_raw.json")
+        let rawURL = inputURL.deletingLastPathComponent().appendingPathComponent(
+          "transcription_raw.json")
         do {
-          try Data(contentsOf: URL(fileURLWithPath: checkpointPath)).write(to: rawURL, options: .atomic)
+          try Data(contentsOf: URL(fileURLWithPath: checkpointPath)).write(
+            to: rawURL, options: .atomic)
           eprint(String(format: L10n.tr("progress.jsonsaved"), rawURL.path))
         } catch {
           eprint(String(format: L10n.tr("progress.jsonfail"), rawURL.path, "\(error)"))
@@ -1071,9 +1133,10 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
 
   // Keep the main thread alive until the async batch finishes (it exits above).
   RunLoop.main.run()
-  return 1 // unreachable
+  return 1  // unreachable
 }
 
+// swiftlint:disable:next function_body_length
 func cmdTranscribeLegacy(_ file: String, json: Bool) -> Int32 {
   let fileManager = FileManager.default
   let inputURL = URL(fileURLWithPath: file)
@@ -1081,12 +1144,14 @@ func cmdTranscribeLegacy(_ file: String, json: Bool) -> Int32 {
   var wavURL = inputURL
   var tempWavURL: URL?
   if inputURL.pathExtension.lowercased() != "wav" {
-    let converted = fileManager.temporaryDirectory.appendingPathComponent("nanodictate-\(UUID().uuidString).wav")
-    let conv = runProcess("/usr/bin/afconvert", ["-f", "WAVE", "-d", "LEI16@16000", "-c", "1", file, converted.path])
+    let converted = fileManager.temporaryDirectory.appendingPathComponent(
+      "nanodictate-\(UUID().uuidString).wav")
+    let conv = runProcess(
+      "/usr/bin/afconvert", ["-f", "WAVE", "-d", "LEI16@16000", "-c", "1", file, converted.path])
     guard conv.status == 0 else {
       let msg = conv.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-      // swiftlint:disable:next colon
-      eprint(String(format: L10n.tr("cli.transcribe.waverror"), file, msg.isEmpty ? conv.stdout : msg))
+      eprint(
+        String(format: L10n.tr("cli.transcribe.waverror"), file, msg.isEmpty ? conv.stdout : msg))
       return 1
     }
     tempWavURL = converted
@@ -1118,7 +1183,8 @@ func cmdTranscribeLegacy(_ file: String, json: Bool) -> Int32 {
 
   // Активный провайдер = адаптер запроса (как в NanoDictateAgent): при пустом
   // active_provider — первый провайдер по порядку, иначе его id.
-  let activeAdapterID: String? = config.activeProvider.isEmpty
+  let activeAdapterID: String? =
+    config.activeProvider.isEmpty
     ? config.providers.first?.id
     : config.activeProvider
   let transcriber = Transcriber(
@@ -1164,7 +1230,7 @@ func cmdTranscribeLegacy(_ file: String, json: Bool) -> Int32 {
 
   // Keep the main thread alive until the async transcribe finishes (it exits above).
   RunLoop.main.run()
-  return 1 // unreachable
+  return 1  // unreachable
 }
 
 func cmdLogs() -> Int32 {
@@ -1220,7 +1286,8 @@ func cmdRetry(_ name: String) -> Int32 {
   }
   guard let provider = providers.first(where: { $0.id == name }) else {
     let available = providers.map(\.id)
-    eprint(String(format: L10n.tr("cli.provider.notfound"), name, available.joined(separator: ", ")))
+    eprint(
+      String(format: L10n.tr("cli.provider.notfound"), name, available.joined(separator: ", ")))
     return 2
   }
   let target = "\(guiDomain)/\(agentServiceName)"
@@ -1235,7 +1302,6 @@ func cmdRetry(_ name: String) -> Int32 {
     userInfo: ["provider": name],
     deliverImmediately: true
   )
-  // swiftlint:disable:next colon
   let display = provider.name.isEmpty ? provider.id : provider.name
   print(String(format: L10n.tr("cli.retry.sent"), display, provider.id))
   return 0
@@ -1244,48 +1310,47 @@ func cmdRetry(_ name: String) -> Int32 {
 /// Список id провайдеров одной строкой (подсказка для usage retry).
 func providerNamesText() -> String {
   let ids = (try? AppConfig.loadProvidersOnly(from: nil).providers.map(\.id)) ?? []
-  // swiftlint:disable:next colon
   return ids.isEmpty ? L10n.tr("cli.provider.nosections") : ids.joined(separator: ", ")
 }
 
 // MARK: - Usage
 
 let usage = """
-\(L10n.tr("usage.title"))
+  \(L10n.tr("usage.title"))
 
-\(L10n.tr("usage.cmds"))
-  start                            \(L10n.tr("usage.start"))
-  stop                             \(L10n.tr("usage.stop"))
-  status                           \(L10n.tr("usage.status"))
-  config                           \(L10n.tr("usage.config"))
-    config init [--force]          \(L10n.tr("usage.config.init"))
-    config set-key \(L10n.tr("usage.placeholder.provider")) [\(L10n.tr("usage.placeholder.key"))] [--stdin]
-      \(L10n.tr("usage.config.setkey"))
-    config path                    \(L10n.tr("usage.config.path"))
-    config --show-file             \(L10n.tr("usage.config.showfile"))
-  provider list                    \(L10n.tr("usage.provider"))
-    provider use \(L10n.tr("usage.placeholder.name")) [--no-restart]
-    provider set \(L10n.tr("usage.placeholder.name")) [--no-restart] (\(L10n.tr("usage.placeholder.setAlias")))
-      \(L10n.tr("usage.provider.use"))
-    provider status                \(L10n.tr("usage.provider.status"))
-    provider show \(L10n.tr("usage.placeholder.name"))              \(L10n.tr("usage.provider.show"))
-  routing [show]                   \(L10n.tr("usage.routing"))
-    routing set \(L10n.tr("usage.placeholder.role")) \(L10n.tr("usage.placeholder.name")) [--no-restart]
-      \(L10n.tr("usage.routing.set"))
-    routing unset \(L10n.tr("usage.placeholder.role")) [--no-restart]
-      \(L10n.tr("usage.routing.unset"))
-  transcribe \(L10n.tr("usage.placeholder.file")) [--json]         \(L10n.tr("usage.transcribe"))
-  transcribe \(L10n.tr("usage.placeholder.file")) [--json]         \(L10n.tr("usage.batch"))
-    [--provider <id>] [--out \(L10n.tr("usage.placeholder.path"))]
-      [--max-segment <\(L10n.tr("usage.placeholder.seconds"))>] [--overlap <\(L10n.tr("usage.placeholder.seconds"))>]
-    [--no-progress] [--resume]
-      \(L10n.tr("usage.batch.desc"))
-  retry \(L10n.tr("usage.placeholder.name"))                        \(L10n.tr("usage.retry"))
-  last                             \(L10n.tr("usage.last"))
-  logs                             \(L10n.tr("usage.logs"))
-  help                             \(L10n.tr("usage.help"))
-  --version, -v                    print version and exit
-"""
+  \(L10n.tr("usage.cmds"))
+    start                            \(L10n.tr("usage.start"))
+    stop                             \(L10n.tr("usage.stop"))
+    status                           \(L10n.tr("usage.status"))
+    config                           \(L10n.tr("usage.config"))
+      config init [--force]          \(L10n.tr("usage.config.init"))
+      config set-key \(L10n.tr("usage.placeholder.provider")) [\(L10n.tr("usage.placeholder.key"))] [--stdin]
+        \(L10n.tr("usage.config.setkey"))
+      config path                    \(L10n.tr("usage.config.path"))
+      config --show-file             \(L10n.tr("usage.config.showfile"))
+    provider list                    \(L10n.tr("usage.provider"))
+      provider use \(L10n.tr("usage.placeholder.name")) [--no-restart]
+      provider set \(L10n.tr("usage.placeholder.name")) [--no-restart] (\(L10n.tr("usage.placeholder.setAlias")))
+        \(L10n.tr("usage.provider.use"))
+      provider status                \(L10n.tr("usage.provider.status"))
+      provider show \(L10n.tr("usage.placeholder.name"))              \(L10n.tr("usage.provider.show"))
+    routing [show]                   \(L10n.tr("usage.routing"))
+      routing set \(L10n.tr("usage.placeholder.role")) \(L10n.tr("usage.placeholder.name")) [--no-restart]
+        \(L10n.tr("usage.routing.set"))
+      routing unset \(L10n.tr("usage.placeholder.role")) [--no-restart]
+        \(L10n.tr("usage.routing.unset"))
+    transcribe \(L10n.tr("usage.placeholder.file")) [--json]         \(L10n.tr("usage.transcribe"))
+    transcribe \(L10n.tr("usage.placeholder.file")) [--json]         \(L10n.tr("usage.batch"))
+      [--provider <id>] [--out \(L10n.tr("usage.placeholder.path"))]
+        [--max-segment <\(L10n.tr("usage.placeholder.seconds"))>] [--overlap <\(L10n.tr("usage.placeholder.seconds"))>]
+      [--no-progress] [--resume]
+        \(L10n.tr("usage.batch.desc"))
+    retry \(L10n.tr("usage.placeholder.name"))                        \(L10n.tr("usage.retry"))
+    last                             \(L10n.tr("usage.last"))
+    logs                             \(L10n.tr("usage.logs"))
+    help                             \(L10n.tr("usage.help"))
+    --version, -v                    print version and exit
+  """
 
 // MARK: - Main
 
@@ -1293,7 +1358,6 @@ let args = Array(CommandLine.arguments.dropFirst())
 
 /// Localize early: read ui_language from config (if exists) before any output.
 let uiLanguage = (try? AppConfig.load(from: nil))?.uiLanguage
-// swiftlint:disable:next colon
 L10n.language = uiLanguage == "ru" ? .ru : .en
 
 guard let command = args.first?.lowercased() else {
