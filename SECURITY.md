@@ -7,10 +7,8 @@ Reporting** instead of opening a public issue — this keeps the details private
 until a fix is available:
 
 ```
-https://github.com/<owner>/<repo>/security/advisories/new
+https://github.com/kodmial/nanodictate/security/advisories/new
 ```
-
-(Replace `<owner>` and `<repo>` with this repository's owner and name.)
 
 In the report, please include:
 
