@@ -957,15 +957,21 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
     if !replaced {
       // Ключ не найден на верхнем уровне — вставляем ПЕРЕД первой секцией,
       // иначе top-level ключ уедет внутрь чужой секции и сменит семантику.
-      // Секций нет вовсе — дописываем в конец.
-      let firstSection = lines.firstIndex {
+      if let firstSection = lines.firstIndex(where: {
         $0.drop { $0 == " " || $0 == "\t" }.hasPrefix("[")
-      }
-      var output = lines
-      output.insert("\(key) = \(value)", at: firstSection ?? output.count)
-      result = output.joined(separator: "\n")
-      if !result.hasSuffix("\n") {
-        result += "\n"
+      }) {
+        var output = lines
+        output.insert("\(key) = \(value)", at: firstSection)
+        result = output.joined(separator: "\n")
+        if !result.hasSuffix("\n") {
+          result += "\n"
+        }
+      } else {
+        // Секций нет — дописываем в конец (прежнее поведение).
+        if !result.isEmpty, !result.hasSuffix("\n") {
+          result += "\n"
+        }
+        result += "\(key) = \(value)\n"
       }
     }
 
