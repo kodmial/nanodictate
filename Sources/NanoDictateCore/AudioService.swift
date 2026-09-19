@@ -106,6 +106,13 @@ public struct RecordingLimit {
 public final class AudioService {
   public weak var levelDelegate: AudioLevelDelegate?
 
+  /// Ошибка смены аудио-устройства во время записи: входной формат движка
+  /// изменился (`AVAudioEngineConfigurationChangeNotification`), живой
+  /// tap-конвертер под новый формат не пересоздан. Запись завершена
+  /// немедленно — продолжение со старым конвертером дало бы тишину или
+  /// рассинхрон сэмплов. Пользователь перезапускает запись одной командой.
+  public var onDeviceChange: ((Error) -> Void)?
+
   /// Уровень логирования: `"debug"` включает метрологию (min/avg/max RMS,
   /// флаг «около-тишины»). Не влияет на логи доступа к микрофону и lifecycle
   /// записи — они пишутся всегда, на уровне `info`.
@@ -228,6 +235,11 @@ public final class AudioService {
   /// replaceEngineAfterWedge). Инъекция тестов; по умолчанию — настоящий
   /// AVAudioEngine.
   private let engineFactory: () -> AudioEngineLike
+  /// Наблюдатель `AVAudioEngineConfigurationChangeNotification`: смена
+  /// аудио-устройства во время записи делает живой tap-конвертер невалидным
+  /// (входной формат движка изменился). Храним токен, чтобы снять подписку в
+  /// teardown — иначе колбэк бьёт в освобождённый state.
+  private var configChangeObserver: NSObjectProtocol?
   /// Фоновая очередь движка или главная — определяется движком, не потоком
   /// вызова. Используется только для диагностики.
   private var isDebug: Bool {
@@ -414,6 +426,9 @@ public final class AudioService {
     lock.lock()
     self.converter = converter
     lock.unlock()
+    // Подписка на смену аудио-устройства — после того как конвертер лёг в
+    // state: уведомление может прийти сразу после регистрации.
+    observeConfigurationChanges(for: engine)
 
     // Доступ к микрофону (TCC) при каждом создании/повторном старте записи.
     // Повторный системный запрос доступа (главная жалоба) выглядит в логе
@@ -641,6 +656,9 @@ public final class AudioService {
     tapInstalled = false
     converter = nil
     lock.unlock()
+    // Подписка на смену устройства принадлежала СТАРОМУ движку: его
+    // configuration-change не должен гасить запись на свежей паре.
+    removeConfigurationObserver()
     Logger.log(
       "record engine: wedged engine replaced — fresh AVAudioEngine installed", level: "info")
     // Разборка старого движка вне очередей движка (см. комментарий метода).
@@ -689,6 +707,9 @@ public final class AudioService {
       engine.stop()
     }
     setRecording(false)
+    // Подписку на смену устройства снимаем ДО сброса state: уведомление —
+    // про сеанс записи, после разборки ему нечего делать.
+    removeConfigurationObserver()
     lock.lock()
     converter = nil
     collectedSamples = []
@@ -712,6 +733,64 @@ public final class AudioService {
     _ = guardedEngineCall {
       engine.stop()
     }
+  }
+
+  /// Подписка на смену аудиоустройства для сеанса записи. В заголовках AVFAudio
+  /// НЕТ свойства `configurationChangeHandler` — единственный канал это
+  /// `AVAudioEngineConfigurationChangeNotification` (AVAudioEngine.h, macOS 10.10+).
+  /// Уведомление наблюдаем через NotificationCenter с объектом ЭТОГО сеанса:
+  /// чужие движки (подмена после wedge) своих наблюдателей не будят.
+  /// `userInfo` уведомления не разбираем — решение принимает
+  /// `handleConfigurationChange` (запись останавливается с явной ошибкой).
+  /// Токен наблюдателя живёт под lock: `replaceEngineAfterWedge` снимает
+  /// подписку с вызывающего потока, а не с очереди движка.
+  private func observeConfigurationChanges(for engine: AudioEngineLike) {
+    let token = NotificationCenter.default.addObserver(
+      forName: .AVAudioEngineConfigurationChange,
+      object: (engine as? AVAudioEngine) ?? nil,
+      queue: nil
+    ) { [weak self] _ in
+      self?.handleConfigurationChange()
+    }
+    lock.lock()
+    let stale = configChangeObserver
+    configChangeObserver = token
+    lock.unlock()
+    // Снятие старого токена — вне lock: NotificationCenter чужой код, под
+    // блокировкой state ему делать нечего.
+    if let stale = stale { NotificationCenter.default.removeObserver(stale) }
+  }
+
+  /// Снятие подписки на смену устройства. Вызывают: точки разборки
+  /// (teardownOnEngineQueue), подмена движка после wedge, запись нового
+  /// сеанса (через observeConfigurationChanges).
+  private func removeConfigurationObserver() {
+    lock.lock()
+    let token = configChangeObserver
+    configChangeObserver = nil
+    lock.unlock()
+    if let token = token { NotificationCenter.default.removeObserver(token) }
+  }
+
+  /// Обработчик смены аудиоустройства во время записи: tap и конвертер привязаны
+  /// к СТАРОМУ формату входа, движок пересобрал граф. Безопасное восстановление
+  /// tap/конвертера наживую НЕВОЗМОЖНО: tap висит на старом input node, а
+  /// повторный installTap на пересобранном bus бросает NSException; конвертер
+  /// resample рассчитан из старого hwFormat. Поэтому запись останавливается, а
+  /// пользователю отдаётся ЯВНАЯ ошибка `.deviceChanged` через onDeviceChange
+  /// (колбэк — UI сам решает: тост/алерт/автозапись заново).
+  /// Блокировка: читаем isRecording под lock, сбрасывать state НЕ ЗДЕСЬ —
+  /// stop() сам гасит флаги и разбирает tap/движок. Двойная остановка
+  /// безопасна (stop идемпотентен через тот же guard isRecording).
+  private func handleConfigurationChange() {
+    lock.lock()
+    let recording = isRecording
+    lock.unlock()
+    guard recording else { return }
+    Logger.log("record engine: configuration changed — stopping, user must restart", level: "warn")
+    // Сэмплы сеанса отдаёт сам stop() (его путь финализации) — здесь они не нужны.
+    _ = stop()
+    onDeviceChange?(AudioServiceError.deviceChanged)
   }
 
   /// Сброс live-VAD — строго под блокировкой (начало сеанса, teardown,
@@ -1184,11 +1263,22 @@ public enum AudioServiceError: Error, LocalizedError {
   /// устаревшего старта агент игнорирует. Главное: такой старт не приводит
   /// к audio.cancel()/переходу в .recording на живой свежей паре.
   case engineSuperseded
+  /// Смена аудио-устройства во время записи: живой tap-конвертер собран под
+  /// старый входной формат и пересоздан быть не может без разрыва сеанса.
+  /// Понятная ошибка пользователю вместо тишины в записи.
+  case deviceChanged
   public var errorDescription: String? {
     switch self {
     case .unsupportedFormat: return L10n.tr("error.unsupportedAudioFormat")
     case .engineGone: return L10n.tr("error.audioServiceUnavailable")
     case .engineSuperseded: return L10n.tr("error.audioServiceUnavailable")
+    case .deviceChanged:
+      // Ключ error.audioDeviceChanged заведён в roadmap L10n-таблиц; пока
+      // таблиц нет — явная строка по L10n.language, не raw key в UI.
+      switch L10n.language {
+      case .ru: return "Аудио-устройство изменилось — запись остановлена. Начните запись заново."
+      case .en: return "Audio device changed — recording stopped. Please start recording again."
+      }
     }
   }
 }
