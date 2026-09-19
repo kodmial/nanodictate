@@ -245,13 +245,18 @@ func configOverwriteConfirmed(_ path: String) -> Bool {
   return answer == "y" || answer == "yes"
 }
 
-/// Записать шаблон конфига (создаёт директорию при необходимости) с правами 0600.
+/// Записать канон (config.example.toml) в конфиг (создаёт директорию при
+/// необходимости) с правами 0600. Канон недоступен — понятная ошибка.
 func writeConfigTemplate(path: String) -> Int32 {
+  guard let example = AppConfig.exampleContent() else {
+    eprint(L10n.tr("cli.config.example.notfound"))
+    return 1
+  }
   let fileManager = FileManager.default
   let dir = (path as NSString).deletingLastPathComponent
   do {
     try fileManager.createDirectory(atPath: dir, withIntermediateDirectories: true)
-    try Data(AppConfig.initTemplate().utf8)
+    try Data(example.utf8)
       .write(to: URL(fileURLWithPath: path), options: .atomic)
     try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
   } catch {
@@ -871,9 +876,9 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
   // swiftlint:disable:next trailing_closure
   var provider = config.providers.first(where: { $0.id == options.providerID })
   if provider == nil, options.providerID == "gigaam" {
-    // Стоковый конфиг (config init) секции gigaam не содержит: фолбэк на
-    // активного провайдера, иначе — первого доступного, чтобы batch-режим
-    // работал out-of-box без правки флага.
+    // Канон (config.example.toml) секции gigaam не содержит — в нём активен
+    // airubiz: фолбэк на активного провайдера, иначе — первого доступного,
+    // чтобы batch-режим работал out-of-box без правки флага.
     let active: AppConfig.Provider? = (try? ProviderStore.loadProviders())
       .flatMap { list in
         // swiftlint:disable:next trailing_closure

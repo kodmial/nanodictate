@@ -120,13 +120,14 @@ cp -R Resources ~/.local/bin/                          # keep the plist template
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Then create the config, grant permissions and start the agent:
+Then grant permissions and start the agent. The config needs no manual
+setup: on first launch the app copies `config.example.toml` (next to the
+binaries) to `~/.config/nanodictate/config.toml` automatically.
 
 ```sh
-mkdir -p ~/.config/nanodictate
-cp config.example.toml ~/.config/nanodictate/config.toml   # then set STT providers / API keys
-nanodictate config init                                     # alternative: writes a default config
-nanodictate start                                           # bootstraps ~/Library/LaunchAgents/com.nanodictate.agent.plist
+nanodictate start                                           # first launch creates ~/.config/nanodictate/config.toml from config.example.toml
+# nanodictate config init                                  # optional: write the config explicitly (same canon)
+# cp config.example.toml ~/.config/nanodictate/config.toml # optional: manual copy
 ```
 
 **Permissions (manual, required).** In **System Settings > Privacy &
@@ -298,48 +299,21 @@ agent state, provider info, log tail, and supports keyboard navigation
 
 Config path: `~/.config/nanodictate/config.toml` (chmod 600, atomic writes).
 
-Example template (created by `nanodictate config init`):
+**Canonical config.** The repo ships `config.example.toml` — the single source
+of defaults (canon). If `~/.config/nanodictate/config.toml` does not exist,
+the first launch (agent or CLI) copies the canon there automatically
+(`nanodictate config init` writes the same canon explicitly; a manual `cp` is
+optional). The current canon is the `config.example.toml` file in the
+repository — treat it as authoritative over any sample shown in docs.
 
-```toml
-# active_provider = "openai"
+Key options (see `config.example.toml` for the full canon):
 
-[providers.openai]
-name = "OpenAI"
-base_url = "https://api.openai.com/v1/audio/transcriptions"
-model = "whisper-1"
-api_key_file = "~/.config/nanodictate/keys/openai.txt"
-
-[providers.groq]
-name = "Groq"
-base_url = "https://api.groq.com/openai/v1/audio/transcriptions"
-model = "whisper-large-v3"
-api_key_file = "~/.config/nanodictate/keys/groq.txt"
-
-[providers.local]
-name = "Local whisper"
-base_url = "http://127.0.0.1:8080/v1/audio/transcriptions"
-model = "whisper-1"
-api_key = ""
-
-[providers.cookie-relay]
-name = "Cookie Relay"
-base_url = "https://proxy.example.com/audio/transcriptions"
-model = "whisper-large-v3"
-transport = "cookie-relay"
-proxy_key = ""
-proxy_key_header = "X-Proxy-Key"
-
-[providers.cloudflare]
-name = "Cloudflare"
-base_url = "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run/@cf/openai/whisper-large-v3-turbo"
-model = ""
-# transport = "cloudflare"
-# api_key = ""
-
-# [routing]
-# segment_provider = ""
-# final_provider = ""
-```
+| Key                        | Canon value                           | Meaning                                            |
+|----------------------------|---------------------------------------|----------------------------------------------------|
+| `active_provider`          | `"airubiz"`                           | Default provider: Airubiz GigaAM (sherpa), anonymous STT. |
+| `[providers.<id>]`         | openai, groq, local, cookie-relay, cloudflare, airubiz | Provider sections (id/name/base_url/model/api_key). |
+| `timeout_seconds`          | `120`                                 | Timeout for the STT request.                       |
+| `language`                 | `""`                                  | Spoken-language hint (`""` = auto-detect).         |
 
 Top-level options:
 

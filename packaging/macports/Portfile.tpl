@@ -49,8 +49,11 @@ set builtproductdir ${worksrcpath}/.build/release
 destroot {
     xinstall -m 755 ${builtproductdir}/nanodictate ${destroot}${prefix}/bin/
     xinstall -m 755 ${builtproductdir}/NanoDictateAgent ${destroot}${prefix}/bin/
-    # The CLI reads ~/.config/nanodictate/config.toml (never ${prefix}/etc),
-    # so config.example.toml is shipped as a copy source in share/nanodictate/.
+    # config.example.toml — канон дефолтов: при первом запуске приложение
+    # копирует его в юзер-конфиг ~/.config/nanodictate/config.toml (CLI никогда
+    # не читает ${prefix}/etc). post-install НЕ добавлять: он выполняется под
+    # root и не может надёжно писать в ~/.config пользователя — механизм
+    # первого запуска в коде это покрывает.
     set share_dir ${destroot}${prefix}/share/nanodictate
     xinstall -d -m 755 ${share_dir}
     xinstall -m 644 ${worksrcpath}/config.example.toml ${share_dir}/

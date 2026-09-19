@@ -152,17 +152,24 @@ extension L10n {
     "cli.unload.fail": "launchctl unload fallback failed: %@",
     "cli.no.providers": "(no providers — legacy config)",
     "cli.no.active": "(not selected — `nanodictate provider use <name>`)",
-    "cli.config.hint": "Config not found — create template: `nanodictate config init`",
+    "cli.config.hint":
+      "Config not found — it will be created automatically on first launch"
+      + " from config.example.toml (`nanodictate config init` writes it now)",
     "cli.pid.none": "none",
     "cli.config.overwrite": "Config %@ exists. Overwrite? (y/N)",
     "cli.config.exists": "Config already exists: %@",
     "cli.config.forcehint": "Use `nanodictate config init --force` to overwrite.",
     "cli.config.writeerror": "ERROR: failed to write %@: %@",
+    "cli.config.example.notfound":
+      "ERROR: config.example.toml not found (look next to the binary"
+      + " or in share/nanodictate)",
     "cli.config.template": "Config template created: %@ (chmod 600)",
     "cli.config.fillserts":
       "Fill secrets: `nanodictate config set-key <provider>` or edit the file.",
     "cli.config.noread": "Failed to read config: %@",
-    "cli.config.missing": "Config not found: create template with `nanodictate config init` (%@)",
+    "cli.config.missing":
+      "Config not found: created automatically on first launch from"
+      + " config.example.toml; `nanodictate config init` writes it now (%@)",
     "cli.config.noset": "(not selected)",
     "cli.setkey.usage": "Usage: nanodictate config set-key <provider-id> [key] [--stdin]",
     "cli.setkey.prompt": "Enter api_key value for '%@' (Enter to confirm):",
@@ -401,17 +408,24 @@ extension L10n {
     "cli.unload.fail": "launchctl unload fallback не удался: %@",
     "cli.no.providers": "(нет провайдеров — legacy-конфиг)",
     "cli.no.active": "(не выбран — `nanodictate provider use <имя>`)",
-    "cli.config.hint": "Конфиг не найден: создайте шаблон — `nanodictate config init`",
+    "cli.config.hint":
+      "Конфиг не найден — будет создан автоматически при первом запуске из"
+      + " config.example.toml (`nanodictate config init` запишет сейчас)",
     "cli.pid.none": "нет",
     "cli.config.overwrite": "Конфиг %@ уже существует. Перезаписать? (y/N)",
     "cli.config.exists": "Конфиг уже существует: %@",
     "cli.config.forcehint": "Для перезаписи используйте `nanodictate config init --force`.",
     "cli.config.writeerror": "ОШИБКА: не удалось записать %@: %@",
+    "cli.config.example.notfound":
+      "ОШИБКА: config.example.toml не найден (поищите рядом с бинарником"
+      + " или в share/nanodictate)",
     "cli.config.template": "Шаблон конфига создан: %@ (chmod 600)",
     "cli.config.fillserts":
       "Заполните секреты: `nanodictate config set-key <provider>` или отредактируйте файл.",
     "cli.config.noread": "Не удалось прочитать конфиг: %@",
-    "cli.config.missing": "Конфиг не найден: создайте шаблон — `nanodictate config init` (%@)",
+    "cli.config.missing":
+      "Конфиг не найден: создаётся автоматически при первом запуске из"
+      + " config.example.toml; `nanodictate config init` запишет сейчас (%@)",
     "cli.config.noset": "(не выбран)",
     "cli.setkey.usage": "Использование: nanodictate config set-key <provider-id> [ключ] [--stdin]",
     "cli.setkey.prompt": "Введите значение api_key для '%@' (Enter для подтверждения):",

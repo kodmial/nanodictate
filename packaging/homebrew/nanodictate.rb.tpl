@@ -41,6 +41,10 @@ class NanoDictate < Formula
   end
 
   def caveats
+    # NB: no post_install here on purpose — Homebrew runs post_install with a
+    # root HOME and cannot reliably write into the user's ~/.config. The
+    # first-launch mechanism in the app (auto-copy of config.example.toml
+    # to ~/.config/nanodictate/config.toml) covers this.
     <<~EOS
       NanoDictate needs manual macOS privacy grants (System Settings → Privacy & Security):
         - Microphone:     enable NanoDictateAgent (recording)
@@ -48,8 +52,12 @@ class NanoDictate < Formula
       macOS prompts on first use; grants are per-binary, so a binary change
       (e.g. after `brew upgrade`) may require re-granting.
 
-      Configure before using:
-        nanodictate config init        # creates ~/.config/nanodictate/config.toml
+      The config is created automatically on first launch: the app copies
+      #{opt_share}/nanodictate/config.example.toml to
+      ~/.config/nanodictate/config.toml (the file the app reads). No manual
+      `config init` step is required; `nanodictate config init` writes the
+      same canon explicitly.
+
         nanodictate provider list
         nanodictate config set-key <provider>
 
