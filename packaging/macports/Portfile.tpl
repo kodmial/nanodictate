@@ -49,17 +49,19 @@ set builtproductdir ${worksrcpath}/.build/release
 destroot {
     xinstall -m 755 ${builtproductdir}/nanodictate ${destroot}${prefix}/bin/
     xinstall -m 755 ${builtproductdir}/NanoDictateAgent ${destroot}${prefix}/bin/
+    # Только бинарь + конфиг. СЛУЖБУ регистрирует САМ запущенный бинарь:
+    # `nanodictate start` пишет канонический plist
+    # ~/Library/LaunchAgents/com.nanodictate.agent.plist (Label
+    # com.nanodictate.agent) и грузит его через launchctl — startupitem
+    # НЕ нужен (отдельный startupitem создал бы второй демон).
     # config.example.toml — канон дефолтов: при первом запуске приложение
     # копирует его в юзер-конфиг ~/.config/nanodictate/config.toml (CLI никогда
-    # не читает ${prefix}/etc). post-install НЕ добавлять: он выполняется под
+    # не читает ${prefix}/etc). post-install НЕ добавляем: он выполняется под
     # root и не может надёжно писать в ~/.config пользователя — механизм
     # первого запуска в коде это покрывает.
     set share_dir ${destroot}${prefix}/share/nanodictate
     xinstall -d -m 755 ${share_dir}
     xinstall -m 644 ${worksrcpath}/config.example.toml ${share_dir}/
-    xinstall -m 644 ${worksrcpath}/Resources/com.nanodictate.agent.entitlements ${share_dir}/
-    xinstall -m 644 ${worksrcpath}/Resources/com.nanodictate.ctl.entitlements ${share_dir}/
-    xinstall -m 644 ${worksrcpath}/Resources/nanodictate-agent.plist.template ${share_dir}/
 }
 
 checksums           rmd160  __RMD160__ \

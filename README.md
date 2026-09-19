@@ -108,15 +108,13 @@ curl -L -O https://github.com/kodmial/nanodictate/releases/download/v0.1.0/SHA25
 shasum -a 256 -c SHA256SUMS.txt        # optional: verifies the downloaded tarball
 ```
 
-Extract into a directory and keep everything together — the CLI resolves the
-LaunchAgent plist template at `Resources/nanodictate-agent.plist.template`
-**next to the binary**:
+Extract into a directory of your choice — only the two binaries are needed,
+the running binary registers the launch service itself:
 
 ```sh
 mkdir -p ~/.local/bin
 tar xzf nanodictate-0.1.0-macos-$(uname -m).tar.gz
 cp NanoDictateAgent nanodictate ~/.local/bin/          # or /usr/local/bin with sudo
-cp -R Resources ~/.local/bin/                          # keep the plist template findable
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
@@ -125,7 +123,7 @@ setup: on first launch the app copies `config.example.toml` (next to the
 binaries) to `~/.config/nanodictate/config.toml` automatically.
 
 ```sh
-nanodictate start                                           # first launch creates ~/.config/nanodictate/config.toml from config.example.toml
+nanodictate start                                           # registers ~/Library/LaunchAgents/com.nanodictate.agent.plist (realpath of the agent) and loads the service
 # nanodictate config init                                  # optional: write the config explicitly (same canon)
 # cp config.example.toml ~/.config/nanodictate/config.toml # optional: manual copy
 ```
@@ -269,9 +267,13 @@ nanodictate status
 nanodictate stop
 ```
 
-The agent installs a plist template (`Resources/nanodictate-agent.plist.template`)
-as `~/Library/LaunchAgents/com.nanodictate.agent.plist` and bootstraps it into
-`launchd`. The `start` command is idempotent.
+The running binary registers the service itself: `nanodictate start` writes
+the canonical `~/Library/LaunchAgents/com.nanodictate.agent.plist` (Label
+`com.nanodictate.agent`, ProgramArguments = symlink-resolved real path of
+the agent) and bootstraps it into `launchd`. `start` takes over an existing
+service (bootout → rewrite → bootstrap), so the path never goes stale after
+updates; on a binary path change it prints a hint that macOS may ask again
+for Microphone/Accessibility permission.
 
 ### CLI & TUI (nanodictate)
 

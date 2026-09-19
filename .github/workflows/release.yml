@@ -61,8 +61,12 @@ jobs:
           RELEASE_VERSION="${RELEASE_VERSION#v}"
           DIST="dist"
           mkdir -p "$DIST"
-          # Keep Resources/ next to the binaries: the CLI looks the plist
-          # template up at <binary dir>/Resources/nanodictate-agent.plist.template.
+          # Resources/ ships for reference only: entitlements are already
+          # applied to the binaries at codesign time, and the LaunchAgent plist
+          # is generated inline by the CLI (`nanodictate start` writes the
+          # canonical ~/Library/LaunchAgents/com.nanodictate.agent.plist). The
+          # runtime needs none of these — formulae/ports install binaries +
+          # config only.
           cp .build/release/NanoDictateAgent .build/release/nanodictate config.example.toml "$DIST"/
           cp -R Resources "$DIST"/
           ARCHIVE="$DIST/nanodictate-$RELEASE_VERSION-macos-${{ matrix.arch }}.tar.gz"

@@ -37,9 +37,10 @@ whole package from source. This is normal for source-built Swift ports
 ### After install
 
 The port installs `nanodictate` and `NanoDictateAgent` into
-`$(port prefix)/bin` and ships `config.example.toml`, the two entitlements
-and the LaunchAgent plist template into
-`$(port prefix)/share/nanodictate/`.
+`$(port prefix)/bin` and ships `config.example.toml` into
+`$(port prefix)/share/nanodictate/` — binaries and config only. The launch
+service is registered by the running binary itself, never by the port
+(no startupitem, no duplicate daemon).
 
 1. **TCC grants (required, manual).** In **System Settings → Privacy &
    Security** add the `NanoDictateAgent` binary to **Microphone** and
@@ -56,11 +57,12 @@ and the LaunchAgent plist template into
    nanodictate provider list
    ```
 
-3. **Start the agent.** The plist template does **not** sit next to the
-   binary in a MacPorts install, so point the CLI at it first:
+3. **Start the agent.** The running binary registers the service itself: no
+   template lookup, no env vars. `nanodictate start` writes the canonical
+   plist `~/Library/LaunchAgents/com.nanodictate.agent.plist` with the
+   symlink-resolved binary path and bootstraps the LaunchAgent:
 
    ```sh
-   export NANODICTATE_PLIST_TEMPLATE="$(port prefix)/share/nanodictate/nanodictate-agent.plist.template"
    nanodictate start
    ```
 

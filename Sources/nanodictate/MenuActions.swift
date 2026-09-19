@@ -25,6 +25,31 @@ func confirmationGesture(_ key: MenuKey) -> ConfirmationGesture {
   }
 }
 
+/// Перезапуск агента из меню: канонический plist перезаписывается реальным
+/// путём бинаря (не протухает после обновления), затем kickstart -k;
+/// при незагруженной службе — полная установка. Текст для notice.
+func restartAgentNow() -> String {
+  let agentBinary = findAgentBinaryPath()
+  guard !agentBinary.isEmpty else {
+    return L10n.tr("cli.agent.notfound")
+  }
+  let logPath = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent("Library/Logs/NanoDictate/agent.log").path
+  let installer = AgentInstaller(launchctl: Launchctl(run: runProcess))
+  let result = installer.restart(agentBinary: agentBinary, logPath: logPath)
+  if let writeError = result.writeError {
+    return String(format: L10n.tr("cli.plist.writeerror"), writeError)
+  }
+  if result.binaryPathChanged {
+    return L10n.tr("menu.agent.tccRehint")
+  }
+  if result.registered {
+    return L10n.tr("cli.provider.restart")
+  }
+  let msg = result.kickError.isEmpty ? result.bootstrapError : result.kickError
+  return String(format: L10n.tr("cli.provider.kickfail"), msg.isEmpty ? result.loadError : msg)
+}
+
 /// Подтверждение + переключение активного провайдера + рестарт агента
 /// (как `nanodictate provider use`, без --no-restart). Возвращает текст для notice.
 func confirmAndSwitchProvider(_ provider: STTProvider, _: inout MenuView) -> String {
@@ -40,14 +65,7 @@ func confirmAndSwitchProvider(_ provider: STTProvider, _: inout MenuView) -> Str
   } catch {
     return String(format: L10n.tr("menu.switch.error"), "\(error)")
   }
-  let kick = runProcess(
-    "/bin/launchctl", ["kickstart", "-k", "\(guiDomain)/com.nanodictate.agent"])
-  let kickMsg = kick.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-  let restart =
-    kick.status == 0
-    ? L10n.tr("cli.provider.restart")
-    : String(format: L10n.tr("cli.provider.kickfail"), kickMsg.isEmpty ? kick.stdout : kickMsg)
-  return String(format: L10n.tr("menu.switch.ok"), display, restart)
+  return String(format: L10n.tr("menu.switch.ok"), display, restartAgentNow())
 }
 
 /// Выполняет действие пункта меню. true — нужно выйти из меню.
@@ -163,13 +181,7 @@ func toggleReview(_ view: inout MenuView) {
   let newValue = !current
   do {
     try AppConfig.writeReviewBeforeInsert(value: newValue, to: AppConfig.defaultPath())
-    let kick = runProcess(
-      "/bin/launchctl", ["kickstart", "-k", "\(guiDomain)/com.nanodictate.agent"])
-    let kickMsg = kick.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-    let restart =
-      kick.status == 0
-      ? L10n.tr("cli.provider.restart")
-      : String(format: L10n.tr("cli.provider.kickfail"), kickMsg.isEmpty ? kick.stdout : kickMsg)
+    let restart = restartAgentNow()
     if newValue {
       // Под launchd у агента нет терминала: гейт ревью пропускается
       // (см. hasInteractiveStdin в main.swift) — предупреждаем заранее.

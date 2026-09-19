@@ -75,8 +75,10 @@ download fails the install.
 ### After install
 
 The formula installs `nanodictate` and `NanoDictateAgent` into
-`$(brew --prefix)/bin` and ships `config.example.toml`, the two entitlements
-and the LaunchAgent plist template into `$(brew --prefix)/share/nanodictate/`.
+`$(brew --prefix)/bin` and ships `config.example.toml` into
+`$(brew --prefix)/share/nanodictate/` — binaries and config only. The
+launch service is registered by the running binary itself, never by the
+formula (no service block, no duplicate daemon).
 
 1. **TCC grants (required, manual).** In **System Settings → Privacy &
    Security** add the `NanoDictateAgent` binary to **Microphone** (recording)
@@ -94,12 +96,13 @@ and the LaunchAgent plist template into `$(brew --prefix)/share/nanodictate/`.
    nanodictate provider list
    ```
 
-3. **Start the agent.** The plist template does **not** sit next to the
-   binary in a Homebrew install, so point the CLI at it first (the formula
-   caveats document this):
+3. **Start the agent.** The running binary registers the service itself: no
+   template lookup, no env vars. `nanodictate start` writes the canonical
+   plist `~/Library/LaunchAgents/com.nanodictate.agent.plist` with the
+   symlink-resolved binary path and bootstraps the LaunchAgent
+   (auto-restarts at login):
 
    ```sh
-   export NANODICTATE_PLIST_TEMPLATE="$(brew --prefix)/share/nanodictate/nanodictate-agent.plist.template"
    nanodictate start
    ```
 

@@ -27,24 +27,26 @@ class NanoDictate < Formula
   end
 
   def install
-    # Each release tarball holds, at its top level, the two binaries plus
-    # config.example.toml and Resources/ (see .github/workflows/release.yml).
+    # Каждая релизная тарболка содержит на верхнем уровне два бинаря и
+    # config.example.toml (плюс Resources/ для справки — см. release.yml).
+    # Только бинарь + конфиг: СЛУЖБУ регистрирует сам запущенный бинарь
+    # (`nanodictate start` пишет канонический plist в ~/Library/LaunchAgents),
+    # формула службу НЕ ставит — никаких service-блоков/startupitem, чтобы
+    # не плодить второй демон (homebrew.mxcl.*).
     bin.install "nanodictate", "NanoDictateAgent"
 
-    # config.example.toml is a copy source, not a live config: the CLI always
-    # reads ~/.config/nanodictate/config.toml (AppConfig.defaultPath()), never
-    # a file under etc/. So the example ships in share/nanodictate/.
+    # config.example.toml — копируемый источник, не живой конфиг: CLI всегда
+    # читает ~/.config/nanodictate/config.toml (AppConfig.defaultPath()), никогда
+    # файл под etc/. Пример живёт в share/nanodictate/.
     (share/"nanodictate").install "config.example.toml"
-    (share/"nanodictate").install "Resources/com.nanodictate.agent.entitlements",
-                                  "Resources/com.nanodictate.ctl.entitlements",
-                                  "Resources/nanodictate-agent.plist.template"
   end
 
   def caveats
-    # NB: no post_install here on purpose — Homebrew runs post_install with a
-    # root HOME and cannot reliably write into the user's ~/.config. The
-    # first-launch mechanism in the app (auto-copy of config.example.toml
-    # to ~/.config/nanodictate/config.toml) covers this.
+    # NB: post_install нет намеренно — Homebrew запускает его с root-овым HOME
+    # и не может надёжно писать в ~/.config пользователя. Механизм первого
+    # запуска в коде (автокопия config.example.toml в ~/.config/nanodictate/
+    # config.toml) покрывает это; регистрация службы — тоже работа запущенного
+    # бинаря, а не формулы.
     <<~EOS
       NanoDictate needs manual macOS privacy grants (System Settings → Privacy & Security):
         - Microphone:     enable NanoDictateAgent (recording)
@@ -61,8 +63,10 @@ class NanoDictate < Formula
         nanodictate provider list
         nanodictate config set-key <provider>
 
-      Start the background agent as a user LaunchAgent (auto-restarts at login):
-        export NANODICTATE_PLIST_TEMPLATE="#{opt_share}/nanodictate/nanodictate-agent.plist.template"
+      Start the background agent as a user LaunchAgent (auto-restarts at login).
+      The running binary registers the service itself — it writes the canonical
+      plist ~/Library/LaunchAgents/com.nanodictate.agent.plist with the real
+      (symlink-resolved) binary path, so the path never goes stale after updates:
         nanodictate start
 
       Manage it with `nanodictate status`, `nanodictate stop`, `nanodictate logs`.

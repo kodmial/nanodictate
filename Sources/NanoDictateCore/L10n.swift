@@ -136,11 +136,10 @@ extension L10n {
     "usage.logs": "Last 50 lines of agent log",
     "usage.help": "Show this help",
     "cli.dir.error": "Failed to create directories: %@",
-    "cli.plist.notfound":
-      "Plist template nanodictate-agent.plist.template not found (check Resources"
-      + " next to binary or in project; or set NANODICTATE_PLIST_TEMPLATE)",
     "cli.agent.notfound": "Failed to locate NanoDictateAgent path",
-    "cli.plist.readerror": "Failed to read plist template: %@",
+    "cli.agent.tccRehint":
+      "Note: the agent binary path changed — macOS may ask again to grant"
+      + " Microphone and Accessibility permissions.",
     "cli.plist.writeerror": "Failed to write plist: %@",
     "cli.bootstrap.nodata": "launchctl bootstrap: no output",
     "cli.bootstrap.fail": "launchctl bootstrap failed: %@",
@@ -260,6 +259,9 @@ extension L10n {
     "menu.running": "running",
     "menu.stopped": "stopped",
     "menu.agent.notfound": "command completed (exit %@)",
+    "menu.agent.tccRehint":
+      "Note: the agent binary path changed — macOS may ask again to grant"
+      + " Microphone and Accessibility permissions.",
     // ── Remaining CLI gaps ──
     "cli.placeholder.empty": "(empty)",
     "cli.provider.activeMarker": "(* = active provider)",
@@ -393,10 +395,10 @@ extension L10n {
     "usage.logs": "Последние 50 строк лога агента",
     "usage.help": "Показать эту справку",
     "cli.dir.error": "Не удалось создать директории: %@",
-    "cli.plist.notfound": "Не найден шаблон nanodictate-agent.plist.template (проверьте Resources"
-      + " рядом с бинарником или в проекте; или задайте NANODICTATE_PLIST_TEMPLATE)",
     "cli.agent.notfound": "Не удалось определить путь к NanoDictateAgent",
-    "cli.plist.readerror": "Не удалось прочитать шаблон plist: %@",
+    "cli.agent.tccRehint":
+      "Внимание: изменился путь бинаря агента — macOS может запросить"
+      + " разрешение на Микрофон и Доступность заново.",
     "cli.plist.writeerror": "Не удалось записать plist: %@",
     "cli.bootstrap.nodata": "launchctl bootstrap: нет вывода",
     "cli.bootstrap.fail": "launchctl bootstrap не удался: %@",
@@ -517,6 +519,9 @@ extension L10n {
     "menu.running": "работает",
     "menu.stopped": "остановлен",
     "menu.agent.notfound": "команда завершилась (exit %@)",
+    "menu.agent.tccRehint":
+      "Внимание: изменился путь бинаря агента — macOS может запросить"
+      + " разрешение на Микрофон и Доступность заново.",
     // ── Остатки CLI ──
     "cli.placeholder.empty": "(пусто)",
     "cli.provider.activeMarker": "(* — активный провайдер)",
