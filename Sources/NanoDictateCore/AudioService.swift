@@ -340,13 +340,14 @@ public final class AudioService {
     Void, Error
   > {
     // Новый сеанс: чистые буферы, чистый лимит (после принудительной
-    // остановки или аварийной ветки).
-    collectedSamples = []
-    rmsHistory = []
+    // остановки или аварийной ветки). Всё состояние под lock — старт идёт
+    // на очереди движка, process/stop могут читать параллельно.
     didLogFirstBuffer = false
     limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
     recordStartTime = CFAbsoluteTimeGetCurrent()
     lock.lock()
+    collectedSamples = []
+    rmsHistory = []
     limitStopScheduled = false
     autoStopScheduled = false
     autoStopDetector.reset()
@@ -410,7 +411,9 @@ public final class AudioService {
       )
       return .failure(AudioServiceError.unsupportedFormat)
     }
+    lock.lock()
     self.converter = converter
+    lock.unlock()
 
     // Доступ к микрофону (TCC) при каждом создании/повторном старте записи.
     // Повторный системный запрос доступа (главная жалоба) выглядит в логе
@@ -686,8 +689,8 @@ public final class AudioService {
       engine.stop()
     }
     setRecording(false)
-    converter = nil
     lock.lock()
+    converter = nil
     collectedSamples = []
     rmsHistory = []
     liveLastCutIndex = 0
@@ -755,6 +758,21 @@ public final class AudioService {
     lock.lock()
     defer { lock.unlock() }
     return tapInstalled
+  }
+
+  /// Снимок состояния приёма под одной блокировкой: признак записи,
+  /// флаги принудительных остановок и конвертер. Закрывает гонку
+  /// старт/стоп/подмена — process видит согласованную тройку.
+  private struct BufferedSnapshot {
+    var alive: Bool
+    var converter: AVAudioConverter?
+  }
+
+  private func takeBufferedSnapshot() -> BufferedSnapshot {
+    lock.lock()
+    defer { lock.unlock() }
+    let alive = isRecording && !limit.isExhausted && !autoStopScheduled
+    return BufferedSnapshot(alive: alive, converter: converter)
   }
 
   /// «Движок поколения `generation` — всё ещё текущий?» (не подменён
@@ -825,11 +843,11 @@ public final class AudioService {
     // поздний буфер старого тапа не должен трогать state InputGain — reset()
     // нового сеанса (engineQueue, под lock) и apply (аудио-поток) не
     // пересекаются (гард ниже на 635 остаётся — защита задублирована).
-    guard isRecording else { return }
-    // После принудительной остановки (лимит или автоостановка по тишине)
-    // «хвост» не записываем: буфер в памяти дальше не растёт.
-    guard !limit.isExhausted, !autoStopScheduled else { return }
-    guard let converter else {
+    // Все флаги и конвертер снимаются под lock одним снимком: безлочный
+    // гард убран — гонка старт/стоп закрыта (см. takeBufferedSnapshot).
+    let snapshot = takeBufferedSnapshot()
+    guard snapshot.alive else { return }
+    guard let converter = snapshot.converter else {
       logDroppedBuffer(reason: "converter is nil (stopped?)", frames: buffer.frameLength)
       return
     }
@@ -1026,10 +1044,10 @@ public final class AudioService {
     Logger.log("record drop buffer: \(reason) frames=\(frames)", level: "debug")
   }
 
-  /// Планирует принудительную остановку ровно один раз. Сэмплы и «хвост»
-  /// (незакрытый уттеренс) снимаются здесь (на аудиопотоке) синхронно, под
-  /// одной блокировкой — клиент получает законченный буфер: и всю запись,
-  /// и последнюю фразу для live-распознавания.
+  /// Планирует принудительную остановку ровно один раз. Снимок сэмплов и
+  /// «хвоста» (незакрытый уттеренс) берётся в `performForcedStop` на главной
+  /// очереди под одной блокировкой — между планированием и финализацией
+  /// буферы продолжают накапливаться, хвост ничего не теряет.
   private func scheduleLimitStop() {
     lock.lock()
     guard !limitStopScheduled else {
@@ -1037,22 +1055,20 @@ public final class AudioService {
       return
     }
     limitStopScheduled = true
-    let tail = takeLiveTailLocked()
-    let samples = collectedSamples
     lock.unlock()
 
     // removeTap/engine.stop нельзя вызывать из колбэка tap (риск дедлока
     // и повторного входа) — переносим на главную очередь, откуда teardown
     // уйдёт на engineQueue, как обычный stop().
     DispatchQueue.main.async { [weak self] in
-      self?.performForcedStop(samples: samples, tail: tail, reason: .limit)
+      self?.performForcedStop(reason: .limit)
     }
   }
 
-  /// Планирует автоостановку по тишине ровно один раз — тот же снимок под
-  /// блокировкой, что у `scheduleLimitStop`: «хвост» незакрытого уттеренса и
-  /// полные сэмплы записи берутся на аудиопотоке, teardown движка уходит на
-  /// главную очередь (из колбэка tap removeTap вызывать нельзя).
+  /// Планирует автоостановку по тишине ровно один раз — тот же поздний снимок
+  /// в `performForcedStop`, что у `scheduleLimitStop`: «хвост» незакрытого
+  /// уттеренса и полные сэмплы берутся на главной очереди, teardown движка
+  /// уходит туда же (из колбэка tap removeTap вызывать нельзя).
   private func scheduleAutoStop() {
     lock.lock()
     guard !autoStopScheduled else {
@@ -1060,12 +1076,10 @@ public final class AudioService {
       return
     }
     autoStopScheduled = true
-    let tail = takeLiveTailLocked()
-    let samples = collectedSamples
     lock.unlock()
 
     DispatchQueue.main.async { [weak self] in
-      self?.performForcedStop(samples: samples, tail: tail, reason: .autoStopSilence)
+      self?.performForcedStop(reason: .autoStopSilence)
     }
   }
 
@@ -1081,7 +1095,10 @@ public final class AudioService {
   /// конвертера, доставка собранных сэмплов через колбэк финализации.
   /// «Хвост» отдаётся ДО колбэка — клиент успевает поставить его в очередь
   /// распознавания раньше финализации всей записи.
-  private func performForcedStop(samples: [Int16], tail: [Int16], reason: ForcedStopReason) {
+  /// Снимок — на главной очереди, максимально поздно: между `schedule*`
+  /// (аудиопоток) и финализацией tap успевает добрать ~100-200 мс, иначе
+  /// хвост последней фразы терялся.
+  private func performForcedStop(reason: ForcedStopReason) {
     lock.lock()
     // Пользователь уже остановил запись — не дублируем финализацию.
     guard isRecording else {
@@ -1092,6 +1109,8 @@ public final class AudioService {
     isRecording = false
     let rms = rmsHistory
     rmsHistory = []
+    let tail = takeLiveTailLocked()
+    let samples = collectedSamples
     lock.unlock()
 
     if isDebug {
