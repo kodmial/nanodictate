@@ -806,16 +806,20 @@ public final class OverlayController: NSObject {
     let focusResult = AXUIElementCopyAttributeValue(
       axApp, kAXFocusedUIElementAttribute as CFString, &focusedElement
     )
-    guard focusResult == .success, let axElement = element as? AXUIElement else { return nil }
+    guard focusResult == .success, let element = focusedElement else { return nil }
+
+    // swiftlint:disable:next force_cast
+    let axElement = element as! AXUIElement
 
     var positionValue: AnyObject?
     let posResult = AXUIElementCopyAttributeValue(
       axElement, kAXPositionAttribute as CFString, &positionValue
     )
-    guard posResult == .success, let posAXValue = positionValue as? AXValue else { return nil }
+    guard posResult == .success, let posVal = positionValue else { return nil }
 
     var position = CGPoint.zero
-    guard AXValueGetValue(posAXValue, .cgPoint, &position) else { return nil }
+    // swiftlint:disable:next force_cast
+    guard AXValueGetValue(posVal as! AXValue, .cgPoint, &position) else { return nil }
 
     var size = CGSize.zero
     var sizeValue: AnyObject?
@@ -825,8 +829,9 @@ public final class OverlayController: NSObject {
     // Размер необязателен: чужой процесс может не отдавать его (браузеры,
     // мессенджеры). При неудаче size остаётся нулевым — якорь считается по
     // позиции, фоллбэк цепочки positionedPoint() работает без краха.
-    if sizeResult == .success, let sizeAXValue = sizeValue as? AXValue {
-      AXValueGetValue(sizeAXValue, .cgSize, &size)
+    if sizeResult == .success, let sizeVal = sizeValue {
+      // swiftlint:disable:next force_cast
+      AXValueGetValue(sizeVal as! AXValue, .cgSize, &size)
     }
 
     // AX coordinates: origin at the top-left of the main screen, y grows downward.
