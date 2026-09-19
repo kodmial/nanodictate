@@ -783,11 +783,11 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(airubiz?.model, "gigaam-v3-ctc-sherpa")
         XCTAssertEqual(airubiz?.apiKey, "")
         XCTAssertEqual(airubiz?.transport, "", "у airubiz транспорт не задан — direct")
-        XCTAssertEqual(
-            config.providers.first { $0.id == "cookie-relay" }?.transport,
-            "cookie-relay",
-            "transport cookie-relay у секции сохранён"
-        )
+        let cloudflare = config.providers.first { $0.id == "cloudflare" }
+        XCTAssertEqual(cloudflare?.transport, "",
+                       "у cloudflare transport не задан — секция = STT-адаптер, а не HTTPTransport")
+        XCTAssertNil(config.providers.first { $0.id == "cookie-relay" },
+                     "канон больше не содержит секцию cookie-relay")
         for provider in config.providers {
             XCTAssertEqual(provider.apiKey, "", "канон не содержит секретов")
         }
@@ -801,7 +801,9 @@ final class ConfigTests: XCTestCase {
         try content.data(using: .utf8)!.write(to: file)
         let config = try AppConfig.load(from: file.path)
         XCTAssertEqual(config.activeProvider, "airubiz")
-        XCTAssertEqual(config.providerNames.count, 6)
+        XCTAssertEqual(config.providerNames,
+                       ["openai", "groq", "cloudflare", "airubiz"],
+                       "секции канона в порядке появления")
     }
 
     @objc func testAutoCopyOnFirstRun() throws {
