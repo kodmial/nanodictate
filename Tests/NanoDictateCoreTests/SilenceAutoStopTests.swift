@@ -3,31 +3,31 @@ import Foundation
 
 // MARK: - Автоостановка по непрерывной тишине: гистерезис, grace, гейт «речь была»
 
-/// Модель детектора — гистерезисная пара порогов −45/−58 дБФС, grace после
-/// старта записи, гейт «речь была» и минимальная длительность записи (см.
-/// AutoStopConfig в SilenceAutoStop.swift). Здесь — чистые буферы с
-/// контролируемым временем: конфиг строится явно, длительность буфера задаётся
-/// в секундах напрямую (частота колбэков на числа не влияет).
+/// Detector model — hysteresis threshold pair −45/−58 dBFS, grace after
+/// recording start, 'speech was' gate and minimum recording duration (see
+/// AutoStopConfig in SilenceAutoStop.swift). Here — pure buffers with
+/// controlled timing: config built explicitly, buffer duration set in
+/// seconds directly (callback rate does not affect numbers).
 ///
-/// Условные уровни (линейный RMS):
-///   • уверенная речь     0.5      (≫ порога речи 0.00562)
-///   • граница речи       0.00562  (≥ порога → речь)
-///   • серая зона         0.00251  (−52 дБФС: тихая речь — между порогами)
-///   • граница тишины     0.00126  (строго ниже → тишина)
-///   • реальная тишина    0.0001   (шумовой фон −80 дБФС)
+/// Conditional levels (linear RMS):
+///   • confident speech     0.5      (≫ speech threshold 0.00562)
+///   • speech boundary      0.00562  (≥ threshold → speech)
+///   • gray zone            0.00251  (−52 dBFS: quiet speech — between thresholds)
+///   • silence boundary     0.00126  (strictly below → silence)
+///   • real silence         0.0001   (noise floor −80 dBFS)
 ///
-/// Важное следствие модели: ЛЮБОЙ речевой буфер возвращает false (речь рвёт
-/// непрерывность тишины, значит «тишина ≥ порога» в этот момент невозможна);
-/// гейт проверяется через `speechGatePassed`, а не через результат feed.
+/// Model consequence: ANY speech buffer returns false (speech breaks the
+/// silence run — 'silence ≥ threshold' impossible that moment); gate is
+/// checked via `speechGatePassed`, not via feed result.
 final class SilenceAutoStopTests: XCTestCase {
 
     // MARK: - Дефолты и гистерезисная пара порогов
 
-    /// Дефолты: рубильник включён, пара порогов −45/−58 дБФС (речь ≥ тишина),
-    /// непрерывная тишина 3 c, grace 2 c, гейт 0.3 c, пол записи 3 c.
-    /// Порог ТИШИНЫ намеренно СТРОЖЕ общего AudioMetrics.nearSilenceThreshold
-    /// (−50 дБФС): тот лежит ВНУТРИ динамики тихой речи (−48.6…−55 дБФС) — из-за
-    /// чего и обрывалась запись; у автоостановки тишина = честный шумовой фон.
+    /// Defaults: switch on, threshold pair −45/−58 dBFS, required silence
+    /// 3 c, grace 2 c, gate 0.3 c, recording floor 3 c. Silence threshold
+    /// DELIBERATELY STRICTER than AudioMetrics.nearSilenceThreshold (−50
+    /// dBFS): the latter lies INSIDE quiet-speech dynamics (−48.6…−55 dBFS) —
+    /// which used to cut recordings; autostop silence = honest noise floor.
     @objc func testDefaultsModel() {
         let config = AutoStopConfig.defaults
         XCTAssertTrue(config.enabled)
@@ -48,17 +48,17 @@ final class SilenceAutoStopTests: XCTestCase {
         XCTAssertEqual(detector.minRecordingDuration, config.minRecordingDuration)
     }
 
-    /// Инвариант гистерезиса зашит и в детектор: речь не может распознаваться
-    /// «тише», чем тишина, — какой бы конфиг ни пришёл, порог речи клампится
-    /// вверх до порога тишины.
+    /// Hysteresis invariant also wired into detector: speech cannot be
+    /// recognized 'quieter' than silence — whatever config arrives, speech
+    /// threshold clamps up to silence threshold.
     @objc func testDetectorInvariantClampsSpeechBelowSilence() {
         let detector = SilenceAutoStopDetector(silenceRMSThreshold: 0.05, speechRMSThreshold: 0.02)
         XCTAssertEqual(detector.speechRMSThreshold, 0.05, "порог речи поднят до порога тишины")
         XCTAssertEqual(detector.silenceRMSThreshold, 0.05)
     }
 
-    /// Тот же инвариант в конфиге: AutoStopConfig.init клампит порог речи
-    /// до порога тишины (защита от ручной сборки конфига в коде).
+    /// Same invariant in config: AutoStopConfig.init clamps speech threshold
+    /// to silence threshold (protection from manual config assembly in code).
     @objc func testConfigInitClampsSpeechBelowSilence() {
         let config = AutoStopConfig(speechRMSThreshold: 0.01, silenceRMSThreshold: 0.02)
         XCTAssertEqual(config.speechRMSThreshold, 0.02, "порог речи поднят до порога тишины")
@@ -72,12 +72,12 @@ final class SilenceAutoStopTests: XCTestCase {
 
     // MARK: - Env-переопределения
 
-    /// Пустое окружение = ровно `.defaults` (совместимость с прогоном без env).
+    /// Empty env = exactly `.defaults` (compat with run without env).
     @objc func testFromEnvironmentDefaultsWhenEmpty() {
         XCTAssertEqual(AutoStopConfig.fromEnvironment([:]), .defaults)
     }
 
-    /// Рубильник выключения фичи.
+    /// Feature master switch.
     @objc func testFromEnvironmentDisabledSwitch() {
         var env = [String: String]()
         env["NANODICTATE_AUTOSTOP_DISABLED"] = "1"
@@ -90,7 +90,7 @@ final class SilenceAutoStopTests: XCTestCase {
         XCTAssertTrue(AutoStopConfig.fromEnvironment(env).enabled, "0 — не признак выключения")
     }
 
-    /// Переопределение длительности непрерывной тишины.
+    /// Override of required silence duration.
     @objc func testFromEnvironmentDurationOverride() {
         var env = [String: String]()
         env["NANODICTATE_AUTOSTOP_DURATION"] = "5.5"
@@ -99,9 +99,9 @@ final class SilenceAutoStopTests: XCTestCase {
         XCTAssertEqual(config.speechRMSThreshold, AutoStopConfig.defaultSpeechRMSThreshold, "остальные поля — дефолты")
     }
 
-    /// Переопределение порога ТИШИНЫ: порог речи клампится вверх, чтобы не
-    /// нарушить инвариант гистерезиса («громкая тишина» и «тихая речь» не могут
-    /// инвертироваться).
+    /// Silence threshold override: speech threshold clamps up to keep
+    /// hysteresis invariant ('loud silence' and 'quiet speech' must not
+    /// invert).
     @objc func testFromEnvironmentSilenceRMSOverride() {
         var env = [String: String]()
         env["NANODICTATE_AUTOSTOP_RMS"] = "0.01"
@@ -110,8 +110,8 @@ final class SilenceAutoStopTests: XCTestCase {
         XCTAssertEqual(config.speechRMSThreshold, 0.01, "порог речи поднят до порога тишины")
     }
 
-    /// Переопределение порога РЕЧИ (новый ключ; порог тишины не трогается,
-    /// пока речь не «провалилась» ниже тишины).
+    /// Speech threshold override (new key; silence threshold untouched while
+    /// speech not 'fallen' below silence).
     @objc func testFromEnvironmentSpeechRMSOverride() {
         var env = [String: String]()
         env["NANODICTATE_AUTOSTOP_SPEECH_RMS"] = "0.02"
@@ -120,8 +120,8 @@ final class SilenceAutoStopTests: XCTestCase {
         XCTAssertEqual(config.silenceRMSThreshold, AutoStopConfig.defaultSilenceRMSThreshold)
     }
 
-    /// Клампинг речи при «перевёрнутой» комбинации: тишина 0.03, речь 0.01 →
-    /// речь поднята до 0.03.
+    /// Speech clamping on 'inverted' combination: silence 0.03, speech
+    /// 0.01 → speech raised to 0.03.
     @objc func testFromEnvironmentSpeechClampedToSilence() {
         var env = [String: String]()
         env["NANODICTATE_AUTOSTOP_RMS"] = "0.03"
@@ -131,8 +131,8 @@ final class SilenceAutoStopTests: XCTestCase {
         XCTAssertEqual(config.speechRMSThreshold, 0.03)
     }
 
-    /// Некорректные значения игнорируются (строго > 0, битые строки — мимо),
-    /// конфиг остаётся на дефолтах.
+    /// Invalid values ignored (strictly > 0 only, broken strings miss),
+    /// config stays on defaults.
     @objc func testFromEnvironmentInvalidValuesIgnored() {
         var env = [String: String]()
         env["NANODICTATE_AUTOSTOP_DURATION"] = "abc"
@@ -145,9 +145,9 @@ final class SilenceAutoStopTests: XCTestCase {
         XCTAssertEqual(AutoStopConfig.fromEnvironment(env), .defaults)
     }
 
-    /// Комбинированный env доезжает до детектора: конфиг → конструктор
-    /// детектора (та же передача, что в AudioService.init) → поведение.
-    /// Единый «сквозной» тест пломбинга без AudioService.
+    /// Combined env reaches detector: config → detector constructor (same
+    /// wiring as AudioService.init) → behavior. Single end-to-end plumbing
+    /// test without AudioService.
     @objc func testConfigurationReachesDetector() {
         let config = AutoStopConfig(
             speechRMSThreshold: 0.03,
@@ -165,7 +165,7 @@ final class SilenceAutoStopTests: XCTestCase {
             minSpeechRun: config.minSpeechRun,
             minRecordingDuration: config.minRecordingDuration
         )
-        // Речь 0.5 c → гейт (0.5 ≥ 0.1), тишина 1.0 c → ровно required → стоп.
+        // Speech 0.5 c → gate (0.5 ≥ 0.1), silence 1.0 c → exactly required → stop.
         XCTAssertFalse(detector.feed(rms: 0.2, duration: 0.5), "речь не останавливает")
         XCTAssertTrue(detector.speechGatePassed)
         XCTAssertTrue(detector.feed(rms: 0.001, duration: 1.0), "тишина ≥ required + гейт + пол пройден")
@@ -173,10 +173,10 @@ final class SilenceAutoStopTests: XCTestCase {
 
     // MARK: - Гейт «речь была» и grace
 
-    /// Главный регрессионный сценарий бага: ТИХАЯ речь (самый центр «серой
-    /// зоны», −52 дБФС — ровно тот уровень, что раньше обрывал запись) НЕ копит
-    /// молчание и НЕ останавливает запись сколько угодно долго. Гистерезис
-    /// держит такой буфер в «без изменения»: ниже порога речи ≠ тишина.
+    /// MAIN regression of the bug: QUIET speech (center of 'gray zone',
+    /// −52 dBFS — exactly the level that used to cut recordings) does NOT
+    /// accumulate silence nor stop the recording, however long. Hysteresis
+    /// keeps such buffer in 'no change': below speech threshold ≠ silence.
     @objc func testQuietSpeechAtMinus52DoesNotFire() {
         var detector = SilenceAutoStopDetector()
         var fired = false
@@ -189,23 +189,23 @@ final class SilenceAutoStopTests: XCTestCase {
         XCTAssertFalse(detector.speechGatePassed, "в серой зоне речь (для гейта) не накапливается")
     }
 
-    /// Сквозной сценарий «спокойная диктовка → конец речи → автостоп»: 2 c
-    /// уверенной речи (гейт), 3 c тихой речи в серой зоне (не тишина!), и
-    /// только после этого настоящая тишина ≥ 3 c останавливает запись. Режет
-    /// паузу после окончания диктовки, а не диктовку.
+    /// End-to-end 'calm dictation → end of speech → autostop': 2 c confident
+    /// speech (gate), 3 c quiet speech in gray zone (NOT silence!), and only
+    /// then real silence ≥ 3 c stops the recording. Cuts pause after
+    /// dictation, not the dictation itself.
     @objc func testQuietTalkThenRealSilenceFiresAtThreeSeconds() {
-        var detector = SilenceAutoStopDetector() // дефолты: grace 2, гейт 0.3, пол 3, тишина 3
-        // Речь 4 × 0.5 = 2.0 c (гейт ≥ 0.3 защёлкнут) — тишина не копится.
+        var detector = SilenceAutoStopDetector() // defaults: grace 2, gate 0.3, floor 3, silence 3
+        // Speech 4 × 0.5 = 2.0 c (gate ≥ 0.3 latched) — silence does not accumulate.
         for _ in 0..<4 {
             XCTAssertFalse(detector.feed(rms: 0.3, duration: 0.5), "речь не останавливает")
         }
         XCTAssertTrue(detector.speechGatePassed)
-        // Тихая речь 6 × 0.5 = 3.0 c в серой зоне — молчание не копится.
+        // Quiet speech 6 × 0.5 = 3.0 c in gray zone — silence not accumulated.
         for _ in 0..<6 {
             XCTAssertFalse(detector.feed(rms: 0.00251, duration: 0.5), "тихая диктовка не режется")
         }
         XCTAssertEqual(detector.silenceDuration, 0)
-        // Настоящая тишина: буферы позже grace-окна копятся, стоп на 3.0 c.
+        // Real silence: buffers after grace window accumulate, stop at 3.0 c.
         var silenceRun: [Bool] = []
         for _ in 0..<8 {
             silenceRun.append(detector.feed(rms: 0.0001, duration: 0.5))
@@ -220,9 +220,9 @@ final class SilenceAutoStopTests: XCTestCase {
         XCTAssertEqual(detector.silenceDuration, 4.0, "все 8 тихих буферов накопились непрерывным отрезком")
     }
 
-    /// Гейт «речь была»: без уверенной речи автостоп невозможен ВООБЩЕ —
-    /// даже если тишина (после grace) превысила 3 c. Чистая тишина с самого
-    /// старта не останавливает пустую запись.
+    /// 'Speech was' gate: without confident speech autostop is impossible AT
+    /// ALL — even if silence (after grace) exceeded 3 c. Pure silence from
+    /// start does not stop an empty recording.
     @objc func testSilenceWithoutSpeechNeverFires() {
         var detector = SilenceAutoStopDetector()
         var fired = false
@@ -234,9 +234,9 @@ final class SilenceAutoStopTests: XCTestCase {
         XCTAssertFalse(detector.speechGatePassed)
     }
 
-    /// Гейт пройден ТОЛЬКО непрерывным отрезком речи ≥ 0.3 c; серая зона
-    /// замораживает отрезок (не обнуляет — тихие слоги «дребезгом» не рвут
-    /// речь), реальная тишина — обнуляет.
+    /// Gate passed ONLY by continuous speech run ≥ 0.3 c; gray zone freezes
+    /// the run (does not zero it — quiet syllables do not 'rattle' and break
+    /// speech), real silence zeroes it.
     @objc func testSpeechGateRequiresMinSpeechRun() {
         var detector = SilenceAutoStopDetector(
             requiredSilenceDuration: 3.0,
@@ -252,8 +252,8 @@ final class SilenceAutoStopTests: XCTestCase {
         XCTAssertTrue(detector.speechGatePassed, "0.2 + 0.2 = 0.4 ≥ 0.3 → защёлкнут")
     }
 
-    /// Гейт защёлкивается навсегда в рамках сеанса: обрыв речи тишиной гейт
-    /// не отзывает — иначе пауза «на подумать» лишила бы автостоп смысла.
+    /// Gate latches forever within session: silence after speech does not
+    /// revoke it — else a 'thinking' pause would defeat autostop.
     @objc func testSpeechGateLatchesOncePassed() {
         var detector = SilenceAutoStopDetector(
             requiredSilenceDuration: 3.0,
@@ -268,9 +268,10 @@ final class SilenceAutoStopTests: XCTestCase {
         XCTAssertEqual(detector.silenceDuration, 0.5)
     }
 
-    /// Grace-период: буферы, начавшиеся до его конца, в тишину НЕ накапливаются
-    /// (обустройство, вдох, клавиатура после старта — не «конец диктовки»);
-    /// накопление начинается с буфера, стартующего ровно в конце grace.
+    /// Grace period: buffers starting before its end do NOT accumulate to
+    /// silence (set-up, breath, keyboard after start — not 'end of
+    /// dictation'); accumulation starts with the buffer starting exactly at
+    /// grace end.
     @objc func testGracePeriodSkipsInitialSilence() {
         var detector = SilenceAutoStopDetector(
             requiredSilenceDuration: 1.0,
@@ -280,30 +281,30 @@ final class SilenceAutoStopTests: XCTestCase {
         )
         XCTAssertFalse(detector.feed(rms: 0.5, duration: 0.5), "речь: гейт (minSpeechRun 0) защёлкнут")
         XCTAssertTrue(detector.speechGatePassed)
-        // Буферы тишины стартуют в 0.5, 1.0, 1.5 (внутри grace) → не копятся.
+        // Silence buffers start at 0.5, 1.0, 1.5 (inside grace) → not accumulated.
         XCTAssertFalse(detector.feed(rms: 0.0001, duration: 0.5))
         XCTAssertFalse(detector.feed(rms: 0.0001, duration: 0.5))
         XCTAssertFalse(detector.feed(rms: 0.0001, duration: 0.5))
         XCTAssertEqual(detector.silenceDuration, 0, "тишина внутри grace не накапливается")
-        // Буфер с началом ровно в 2.0 (конец grace) — уже копится: 0.5 → 1.0.
+        // Buffer starting exactly at 2.0 (grace end) — already counts: 0.5 → 1.0.
         XCTAssertFalse(detector.feed(rms: 0.0001, duration: 0.5), "0.5 c после grace")
         XCTAssertEqual(detector.silenceDuration, 0.5)
         XCTAssertTrue(detector.feed(rms: 0.0001, duration: 0.5), "1.0 c ≥ required → стоп")
         XCTAssertEqual(detector.silenceDuration, 1.0)
     }
 
-    /// Речь внутри grace-окна работает как обычно (гейт копится) — grace
-    /// ограничивает только накопление тишины, не речь.
+    /// Speech inside grace window works as usual (gate accumulates) — grace
+    /// limits only silence accumulation, not speech.
     @objc func testGraceDoesNotBlockSpeechGate() {
-        var detector = SilenceAutoStopDetector() // grace 2.0, гейт 0.3
+        var detector = SilenceAutoStopDetector() // grace 2.0, gate 0.3
         XCTAssertFalse(detector.feed(rms: 0.5, duration: 0.5), "речь в grace: гейт растёт, стопа нет")
         XCTAssertTrue(detector.speechGatePassed, "0.5 ≥ 0.3 → гейт защёлкнут и в grace")
     }
 
     // MARK: - Накопление тишины: непрерывность, границы, пол записи
 
-    /// Реальная тишина останавливает запись ровно по истечении требуемых 3 c
-    /// непрерывного молчания (отсчёт от конца речи, не от старта записи).
+    /// Real silence stops the recording exactly after required 3 c of
+    /// continuous silence (counted from end of speech, not recording start).
     @objc func testRealSilenceFiresAtExactlyRequiredDuration() {
         var detector = SilenceAutoStopDetector(
             requiredSilenceDuration: 3.0,
@@ -314,7 +315,7 @@ final class SilenceAutoStopTests: XCTestCase {
         XCTAssertFalse(detector.feed(rms: 0.5, duration: 0.2))
         XCTAssertFalse(detector.feed(rms: 0.5, duration: 0.2), "речь: 0.4 c → гейт")
         XCTAssertTrue(detector.speechGatePassed)
-        // Тишина: 5 × 0.5 (2.5 c) — молчание есть, но требуемых 3 c нет.
+        // Silence: 5 × 0.5 (2.5 c) — silence present, but required 3 c not reached.
         for _ in 0..<5 {
             XCTAssertFalse(detector.feed(rms: 0.0001, duration: 0.5), "2.5 c тишины < 3.0 c")
         }
@@ -323,8 +324,8 @@ final class SilenceAutoStopTests: XCTestCase {
         XCTAssertEqual(detector.silenceDuration, 3.0, "стоп — ровно на границе, не раньше")
     }
 
-    /// Счётчик тишины — ТОЛЬКО по непрерывному отрезку: межсловные паузы
-    /// < 3 c не суммируются (0.5 c + 0.5 c ≠ 1 c непрерывности).
+    /// Silence counter — ONLY contiguous run: inter-word pauses < 3 c do not
+    /// sum up (0.5 c + 0.5 c ≠ 1 c of continuity).
     @objc func testInterWordPausesDoNotAccumulate() {
         var detector = SilenceAutoStopDetector(
             requiredSilenceDuration: 3.0,
@@ -337,14 +338,14 @@ final class SilenceAutoStopTests: XCTestCase {
             XCTAssertFalse(detector.feed(rms: 0.0001, duration: 0.5), "межсловная пауза")
             XCTAssertEqual(detector.silenceDuration, 0.5, "пауза начинается с нуля после слова")
         }
-        // Финальное слово: тишина сброшена — межсловные паузы < 3 c нигде
-        // не суммировались в непрерывный отрезок.
+        // Final word: silence reset — inter-word pauses < 3 c never summed
+        // into a contiguous run.
         XCTAssertFalse(detector.feed(rms: 0.5, duration: 0.5), "слово")
         XCTAssertEqual(detector.silenceDuration, 0, "после последнего слова тишина сброшена")
     }
 
-    /// Речь обнуляет накопленную тишину: 2 c паузы + слово + 1 c паузы — это
-    /// НЕ 3 c непрерывной тишины; стоп только после полных 3 c после слова.
+    /// Speech zeroes accumulated silence: 2 c pause + word + 1 c pause is NOT
+    /// 3 c of contiguous silence; stop only after full 3 c after the word.
     @objc func testSpeechResetsAccumulatedSilence() {
         var detector = SilenceAutoStopDetector(
             requiredSilenceDuration: 3.0,
@@ -354,23 +355,23 @@ final class SilenceAutoStopTests: XCTestCase {
         )
         XCTAssertFalse(detector.feed(rms: 0.5, duration: 0.4), "речь не останавливает")
         XCTAssertTrue(detector.speechGatePassed)
-        for _ in 0..<4 { _ = detector.feed(rms: 0.0001, duration: 0.5) } // 2.0 c тишины
+        for _ in 0..<4 { _ = detector.feed(rms: 0.0001, duration: 0.5) } // 2.0 c silence
         XCTAssertEqual(detector.silenceDuration, 2.0)
         XCTAssertFalse(detector.feed(rms: 0.9, duration: 0.2), "слово обнуляет накопленную тишину")
         XCTAssertEqual(detector.silenceDuration, 0)
         for _ in 0..<2 { _ = detector.feed(rms: 0.0001, duration: 0.5) } // 1.0 c
         XCTAssertFalse(detector.feed(rms: 0.0001, duration: 0.5), "1.5 c после слова — ещё не 3")
         XCTAssertEqual(detector.silenceDuration, 1.5, "суммирования с прошлой паузой нет: 1.5, не 3.5")
-        // Добираем до 3.0 c: 1.5 → 2.0 → 2.5 → 3.0.
+        // Reach 3.0 c: 1.5 → 2.0 → 2.5 → 3.0.
         XCTAssertFalse(detector.feed(rms: 0.0001, duration: 0.5), "2.0 c")
         XCTAssertFalse(detector.feed(rms: 0.0001, duration: 0.5), "2.5 c")
         XCTAssertTrue(detector.feed(rms: 0.0001, duration: 0.5), "3.0 c непрерывной тишины после слова → стоп")
         XCTAssertEqual(detector.silenceDuration, 3.0)
     }
 
-    /// Гистерезис-зона между порогами не «дребезжит»: накопленные 2 c тишины
-    /// не списываются тихим слогом, но и не растут, пока уровень в серой зоне;
-    /// речь — единственный сброс.
+    /// Hysteresis band between thresholds does not 'rattle': accumulated 2 c
+    /// of silence is not written off by a quiet syllable, but also does not
+    /// grow while level in gray zone; speech is the only reset.
     @objc func testHysteresisBandFreezesState() {
         var detector = SilenceAutoStopDetector(
             requiredSilenceDuration: 3.0,
@@ -380,15 +381,15 @@ final class SilenceAutoStopTests: XCTestCase {
         )
         XCTAssertFalse(detector.feed(rms: 0.5, duration: 0.4), "речь: гейт")
         XCTAssertTrue(detector.speechGatePassed)
-        for _ in 0..<4 { _ = detector.feed(rms: 0.0001, duration: 0.5) } // 2.0 c тишины
+        for _ in 0..<4 { _ = detector.feed(rms: 0.0001, duration: 0.5) } // 2.0 c silence
         var fired = false
         for _ in 0..<6 {
-            if detector.feed(rms: 0.00251, duration: 0.5) { fired = true } // серая зона ×6
+            if detector.feed(rms: 0.00251, duration: 0.5) { fired = true } // gray zone ×6
         }
         XCTAssertFalse(fired, "серая зона не добирает тишину до срабатывания")
         XCTAssertEqual(detector.silenceDuration, 2.0, "серая зона замораживает накопление, не обнуляет")
         XCTAssertEqual(detector.speechRun, 0, "и речи не накапливает")
-        // Речь — сброс тишины, после неё заново 3.0 c → стоп.
+        // Speech — silence reset, then again 3.0 c → stop.
         XCTAssertFalse(detector.feed(rms: 0.5, duration: 0.5), "речь сбрасывает тишину")
         XCTAssertEqual(detector.silenceDuration, 0)
         var fires: [Bool] = []
@@ -397,9 +398,10 @@ final class SilenceAutoStopTests: XCTestCase {
         XCTAssertTrue(fires[5], "3.0 c после речи → стоп")
     }
 
-    /// Строгие границы классификации: RMS РОВНО на пороге речи — уже речь;
-    /// РОВНО на пороге тишины — ещё НЕ тишина (граница «в пользу звука», как
-    /// у AudioMetrics.isNearSilence). Шаг на йоту ниже порога тишины — тишина.
+    /// Strict classification boundaries: RMS EXACTLY at speech threshold —
+    /// already speech; EXACTLY at silence threshold — still NOT silence
+    /// (boundary in favor of sound, like AudioMetrics.isNearSilence). One
+    /// iota below silence threshold — silence.
     @objc func testThresholdBoundarySemantics() {
         var detector = SilenceAutoStopDetector(
             requiredSilenceDuration: 3.0,
@@ -409,20 +411,20 @@ final class SilenceAutoStopTests: XCTestCase {
         )
         XCTAssertFalse(detector.feed(rms: 0.5, duration: 0.4), "речь: гейт")
         for _ in 0..<2 { _ = detector.feed(rms: 0.0001, duration: 0.5) } // 1.0 c тишины
-        // RMS == порог речи → речевой буфер: тишина сброшена.
+        // RMS == speech threshold → speech buffer: silence reset.
         XCTAssertFalse(detector.feed(rms: 0.00562, duration: 0.5))
         XCTAssertEqual(detector.silenceDuration, 0, "буфер на пороге речи = речь")
-        // RMS == порог тишины → серая зона (тишина — СТРОГО ниже порога).
+        // RMS == silence threshold → gray zone (silence — STRICTLY below).
         XCTAssertFalse(detector.feed(rms: 0.00126, duration: 0.5))
         XCTAssertEqual(detector.silenceDuration, 0, "ровно порог тишины ещё не тишина (гистерезисная зона)")
-        // На йоту ниже — накопление пошло.
+        // One iota below — accumulation starts.
         XCTAssertFalse(detector.feed(rms: 0.00125, duration: 0.5))
         XCTAssertEqual(detector.silenceDuration, 0.5)
     }
 
-    /// Минимальная длительность записи — жёсткий пол: даже при крошечном
-    /// required запись не останавливается, пока не прожила minRecordingDuration
-    /// от старта. Защита от патологических конфигов.
+    /// Minimum recording duration — hard floor: even with tiny required,
+    /// recording does not stop before it lived minRecordingDuration from
+    /// start. Protection from pathological configs.
     @objc func testMinimumRecordingDurationBlocksEarlyFire() {
         var detector = SilenceAutoStopDetector(
             requiredSilenceDuration: 1.0,
@@ -433,16 +435,16 @@ final class SilenceAutoStopTests: XCTestCase {
         XCTAssertFalse(detector.feed(rms: 0.5, duration: 0.5), "речь: гейт (0.5 ≥ 0.1)")
         var fires: [Bool] = []
         for _ in 0..<5 { fires.append(detector.feed(rms: 0.0001, duration: 0.5)) }
-        // Тишина ≥ 1.0 c уже с 1.0 c записи, но пол 3.0 c → стоп только на
-        // 5-м тихом буфере (elapsed ровно 3.0).
+        // Silence ≥ 1.0 c from 1.0 c of recording, but floor 3.0 c → stop only on
+        // 5th quiet buffer (elapsed exactly 3.0).
         XCTAssertFalse(fires[1], "тишина 1.0 c есть, а записи всего 1.5 c — пол не пройден")
         XCTAssertFalse(fires[2], "2.0 c записи")
         XCTAssertFalse(fires[3], "2.5 c записи")
         XCTAssertTrue(fires[4], "elapsed ровно 3.0 c → пол пройден, тишина 2.5 ≥ 1.0 → стоп")
     }
 
-    /// Сработавшее состояние держится, пока тишина продолжается (внешний слой
-    /// сам планирует остановку и отбрасывает буферы); накопитель растёт.
+    /// Fired state holds while silence continues (outer layer plans the stop
+    /// and drops buffers); accumulator keeps growing.
     @objc func testFiresStaysWhileSilenceContinues() {
         var detector = SilenceAutoStopDetector(
             requiredSilenceDuration: 3.0,
@@ -460,9 +462,9 @@ final class SilenceAutoStopTests: XCTestCase {
         XCTAssertEqual(detector.silenceDuration, 4.0, "накопитель не замер после срабатывания")
     }
 
-    /// Один длинный тихий буфер (без дробления на ~85-мс куски) после речи
-    /// останавливает запись ровно в 3.0 c — накопление меряется ВРЕМЕНЕМ аудио,
-    /// а не числом буферов (частота колбэков железа плавает).
+    /// One long quiet buffer (no split into ~85-ms chunks) after speech stops
+    /// the recording exactly at 3.0 c — accumulation measures AUDIO TIME, not
+    /// buffer count (hardware callback rate drifts).
     @objc func testSingleLongSilenceBufferFires() {
         var detector = SilenceAutoStopDetector(
             requiredSilenceDuration: 3.0,
@@ -475,8 +477,8 @@ final class SilenceAutoStopTests: XCTestCase {
         XCTAssertEqual(detector.silenceDuration, 3.0)
     }
 
-    /// Защита от отрицательной/нулевой длительности: мусорный duration
-    /// клампится в 0 — накопление не может пойти быстрее или назад.
+    /// Protection from negative/zero duration: garbage duration clamps to 0 —
+    /// accumulation cannot go faster or backwards.
     @objc func testNegativeAndZeroDurationClampedToZero() {
         var detector = SilenceAutoStopDetector()
         XCTAssertFalse(detector.feed(rms: 0.5, duration: -5), "отрицательная длительность клампится в 0")
@@ -488,9 +490,9 @@ final class SilenceAutoStopTests: XCTestCase {
         XCTAssertEqual(detector.silenceDuration, 0)
     }
 
-    /// reset() полностью стирает состояние сеанса: накопленную тишину,
-    /// длительность записи, отрезок речи И гейт (новый сеанс требует новую
-    /// речь). Тишина после reset без нового гейта не останавливает.
+    /// reset() fully clears session state: accumulated silence, recording
+    /// duration, speech run AND gate (new session requires new speech).
+    /// Post-reset silence without new gate does not stop.
     @objc func testResetClearsStateAfterFire() {
         var detector = SilenceAutoStopDetector(
             requiredSilenceDuration: 3.0,

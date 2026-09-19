@@ -9,7 +9,7 @@ final class MockTransport: HTTPTransport, @unchecked Sendable {
     var body: Data
     var sendError: Error?
 
-    /// Если заданы, подставляются в ответ (нужны для Retry-After).
+    /// Set → injected into response (needed for Retry-After).
     var responseHeaders: [String: String] = [:]
 
     /// If set, the first N calls will throw sendError; then normal behavior.
@@ -45,8 +45,8 @@ final class MockTransport: HTTPTransport, @unchecked Sendable {
     }
 }
 
-/// Транспорт с последовательностью HTTP-статусов: отдаёт статусы списком по
-/// очереди, последний — навсегда (проверка ретраев 5xx и терминальности 4xx).
+/// HTTP transport with status sequence: serves statuses in order, last forever
+/// (5xx retry and 4xx terminal checks).
 final class StatusSequenceTransport: HTTPTransport, @unchecked Sendable {
     let statuses: [Int]
     private(set) var requestCount = 0
@@ -58,8 +58,8 @@ final class StatusSequenceTransport: HTTPTransport, @unchecked Sendable {
     }
 }
 
-/// Записывает паузы между ретраями (инъекция retrySleep) — thread-safe, зовётся
-/// из async-контекста.
+/// Records delays between retries (retrySleep injection) — thread-safe,
+/// called from async context.
 final class SleepRecorder {
     private let lock = NSLock()
     private var values: [TimeInterval] = []
@@ -185,15 +185,15 @@ final class TranscriberTests: XCTestCase {
             XCTAssertTrue(bodyText.contains("gigaam-v3"))
 
             // WAV bytes present verbatim
-            // Data.contains(_ other: Data) требует macOS 13 — на 12 используем range.
+            // Data.contains(_:) needs macOS 13 — on 12 use range.
             XCTAssertTrue(body.range(of: self.wavData) != nil)
         }
     }
 
     // MARK: Retry on network error
 
-    /// Сетевая ошибка ретраится до исчерпания попыток (maxAttempts = 4):
-    /// каждая попытка снова даёт .cannotConnectToHost.
+    /// Network error retried until attempts exhausted (maxAttempts = 4):
+    /// each attempt gives .cannotConnectToHost again.
     @objc func testNetworkErrorRetriesUntilExhausted() {
         let transport = MockTransport(status: 0,
                                       body: Data(),
@@ -216,8 +216,8 @@ final class TranscriberTests: XCTestCase {
         }
     }
 
-    /// Паузы между попытками: экспоненциальный backoff 0.5·2^n плюс джиттер
-    /// (0…0.25 с). Ретраи идут не мгновенно и с РАСТУЩЕЙ задержкой.
+    /// Inter-attempt delays: exponential backoff 0.5·2^n plus jitter
+    /// (0…0.25 s). Delays grow monotonically.
     @objc func testBackoffDelaysIncreaseMonotonically() {
         let transport = MockTransport(status: 0,
                                       body: Data(),
@@ -394,7 +394,7 @@ final class TranscriberTests: XCTestCase {
 
     // MARK: - NEW: 429 Retry-After из заголовка ответа
 
-    /// 429 ретраится, а пауза берётся ИЗ заголовка Retry-After, а не из backoff.
+    /// 429 retried; pause taken from Retry-After header, not backoff.
     @objc func test429HonorsRetryAfterHeader() {
         let transport = MockTransport(status: 429, body: Data("rate limited".utf8))
         transport.responseHeaders = ["Retry-After": "3"]
@@ -418,7 +418,7 @@ final class TranscriberTests: XCTestCase {
         XCTAssertEqual(recorder.delays, [3, 3, 3], "каждая пауза = Retry-After 3 с")
     }
 
-    /// Retry-After больше 10 с срезается на 10: суммарный backoff ограничен.
+    /// Retry-After over 10 s capped at 10: total backoff bounded.
     @objc func test429RetryAfterCappedAtTenSeconds() {
         let transport = MockTransport(status: 429, body: Data("slow down".utf8))
         transport.responseHeaders = ["Retry-After": "60"]
@@ -443,8 +443,8 @@ final class TranscriberTests: XCTestCase {
 
     // MARK: - NEW: Retry-After в формате HTTP-date (RFC 7231 §7.1.1.1)
 
-    /// Retry-After датой (IMF-fixdate / RFC 850 / asctime): задержка =
-    /// (дата − сейчас) в секундах, а не nil.
+    /// Retry-After as date (IMF-fixdate / RFC 850 / asctime):
+    /// delay = (date − now) seconds, not nil.
     @objc func testRetryAfterHTTPDateParsedAsDelay() {
         let targetDelay: TimeInterval = 40
         let formats = [
@@ -465,7 +465,7 @@ final class TranscriberTests: XCTestCase {
         }
     }
 
-    /// Не-дата и не-число → nil (тогда дефолтный backoff), а не крах.
+    /// Non-date, non-number → nil (default backoff), no crash.
     @objc func testRetryAfterGarbageReturnsNil() {
         XCTAssertNil(Transcriber.retryAfterSeconds(from: ["Retry-After": "soon!"]))
         XCTAssertNil(Transcriber.retryAfterSeconds(from: ["Retry-After": ""]))
@@ -473,14 +473,14 @@ final class TranscriberTests: XCTestCase {
 
     // MARK: - NEW: отмена во время retrySleep не шлёт повторный POST
 
-    /// Дефолтный retrySleep глотает отмену (try?), поэтому проверка
-    /// Task.isCancelled — в начале итерации ретрай-цикла: после cancelAll
-    /// (первый успех параллельного failover) сиблинг НЕ делает лишний запрос.
+    /// Default retrySleep swallows cancel (try?) — Task.isCancelled checked at
+    /// retry-loop top: after cancelAll (first parallel failover success)
+    /// sibling sends no extra request.
     @objc func testCancelDuringRetrySleepSkipsRepeatRequest() {
         let transport = MockTransport(status: 200, body: Data(#"{"text":"ok"}"#.utf8))
         transport.sendError = URLError(.notConnectedToInternet)
-        transport.failCount = 10 // все попытки падают — если отмена не сработает
-        // БЕЗ инъекции retrySleep: реальный сон (backoff первой попытки ~1 c).
+        transport.failCount = 10 // all attempts fail if cancel not honored
+        // No retrySleep injection: real sleep (first backoff ~1 s).
         let transcriber = Transcriber(baseURL: "https://example.test/v1/audio/transcriptions",
                                       model: "gigaam-v3",
                                       apiKey: "test-key",
@@ -493,7 +493,7 @@ final class TranscriberTests: XCTestCase {
             done.fulfill()
         }
 
-        // Даём первой попытке упасть и уйти в retrySleep, затем отменяем.
+        // Let first attempt fail into retrySleep, then cancel.
         RunLoop.current.run(until: Date().addingTimeInterval(0.3))
         task.cancel()
         wait(for: [done], timeout: 10)
@@ -506,7 +506,7 @@ final class TranscriberTests: XCTestCase {
 
     @objc func testHTTP500RetriedThenSucceeds() {
         let transport = StatusSequenceTransport(statuses: [500, 500, 200])
-        // 500 → ретрай → 500 → ретрай → 200: тело с третьей попытки и есть ответ.
+        // 500 → retry → 500 → retry → 200: third-attempt body is the answer.
         let transcriber = Transcriber(baseURL: "https://example.test/v1/audio/transcriptions",
                                       model: "gigaam-v3",
                                       apiKey: "test-key",
@@ -549,7 +549,7 @@ final class TranscriberTests: XCTestCase {
 
     // MARK: - NEW: Word-таймстампы из verbose_json
 
-    /// Успешный verbose_json-ответ: words[] разбираются в TranscriptionResult.
+    /// Successful verbose_json response: words[] parsed into TranscriptionResult.
     @objc func testSuccessParsesWordTimestamps() {
         let json = #"{"text":"один два","words":[{"word":"один","start":0.1,"end":0.5},{"word":"два","start":0.6,"end":1.0}]}"#
         let transport = MockTransport(status: 200, body: Data(json.utf8))
@@ -567,7 +567,7 @@ final class TranscriberTests: XCTestCase {
         }
     }
 
-    /// Без words[] (обычный text-ответ) — список таймстампов пустой.
+    /// Without words[] (plain text response) — timestamp list empty.
     @objc func testSuccessWithoutWordsKeepsEmptyList() {
         let json = #"{"text":"просто текст"}"#
         let transport = MockTransport(status: 200, body: Data(json.utf8))
@@ -780,9 +780,9 @@ final class TranscriberTests: XCTestCase {
     }
 
     @objc func testNoNetworkInDebug_NoRequestSent_NoInternetError() {
-        // Нет сети, даже при log_level == "debug": preflight рубит запрос до
-        // HTTP — исходящих вызовов нет, ошибка каноническое «Нет интернета».
-        // (Сам дамп и сохранение записи этим тестом не проверяются.)
+        // No network, even with log_level == "debug": preflight blocks
+        // request before HTTP — no outgoing calls, canonical "no internet"
+        // error. Recording dump/save not tested here.
         let transport = MockTransport(status: 200, body: Data())
         let transcriber = Transcriber(baseURL: "https://example.test/v1/audio/transcriptions",
                                       model: "gigaam-v3",
@@ -826,7 +826,7 @@ final class TranscriberTests: XCTestCase {
     // MARK: - NEW: Жёсткий сетевой таймаут (min(config, networkRequestTimeout))
 
     @objc func testTimeoutInterval_CapsByNetworkRequestTimeout() {
-        // Конфиг по умолчанию (120 с) не может поднять сетевой таймаут выше 20 с.
+        // Default config (120 s) cannot raise network timeout above 20 s.
         let transport = MockTransport(status: 200, body: Data(#"{"text":"x"}"#.utf8))
         let transcriber = Transcriber(baseURL: "https://test.api/endpoint",
                                       model: "m",
@@ -848,7 +848,7 @@ final class TranscriberTests: XCTestCase {
     }
 
     @objc func testTimeoutInterval_ConfigSmallerThanCapIsRespected() {
-        // Меньшее значение из конфига (5 с) ОГРАНИЧИВАЕТ сетевой таймаут.
+        // Smaller config value (5 s) caps network timeout.
         let transport = MockTransport(status: 200, body: Data(#"{"text":"x"}"#.utf8))
         let transcriber = Transcriber(baseURL: "https://test.api/endpoint",
                                       model: "m",
@@ -891,7 +891,7 @@ final class TranscriberTests: XCTestCase {
         let transcriber = makeTranscriber(transport: transport)
 
         runAsync("testPromptAbsent") {
-            // Старый путь (chunked = false): prompt не передаётся вообще.
+            // Legacy path (chunked = false): prompt not sent at all.
             _ = try await transcriber.transcribe(wav: self.wavData)
             guard let body = transport.lastRequest?.httpBody,
                   let text = String(data: body, encoding: .utf8) else {
@@ -907,7 +907,7 @@ final class TranscriberTests: XCTestCase {
         let transcriber = makeTranscriber(transport: transport)
 
         runAsync("testPromptEmpty") {
-            // Пустой prompt (нечего давать в контекст) — поля быть не должно.
+            // Empty prompt (nothing to give as context) — no field.
             _ = try await transcriber.transcribe(wav: self.wavData, prompt: "")
             guard let body = transport.lastRequest?.httpBody,
                   let text = String(data: body, encoding: .utf8) else {
@@ -926,13 +926,13 @@ final class TranscriberTests: XCTestCase {
     }
 
     @objc func testReachability_RequiresConnection_ProbeOptimistically() {
-        // Маршрут по требованию (VPN/PPP) — пробуем запрос, таймаут подстрахует.
+        // On-demand route (VPN/PPP) — try request, timeout covers.
         XCTAssertTrue(NetworkReachability.isReachable(status: .requiresConnection, possibleExternalRoute: false))
         XCTAssertTrue(NetworkReachability.isReachable(status: .requiresConnection, possibleExternalRoute: true))
     }
 
     @objc func testReachability_Satisfied_NeedsExternalRoute() {
-        // Одна лишь локальная петля (loopback-only) до внешнего API не достанет.
+        // Loopback-only cannot reach external API.
         XCTAssertTrue(NetworkReachability.isReachable(status: .satisfied, possibleExternalRoute: true))
         XCTAssertFalse(NetworkReachability.isReachable(status: .satisfied, possibleExternalRoute: false))
     }
@@ -963,8 +963,8 @@ final class TranscriberTests: XCTestCase {
         let relay = CookieRelayProvider(origin: "https://proxy.example.com", transport: relayTransport)
 
         runAsync("testCookieRelayHeaders") {
-            // Прогрев токена — первый запрос уходит уже с кукой (тот же
-            // CookieRelayProvider, что в Transcriber: токен живёт в памяти).
+            // Token warm-up — first request already carries cookie (same
+            // CookieRelayProvider as in Transcriber: token in memory).
             _ = await relay.refreshBlocking()
 
             let transcriber = Transcriber(baseURL: "https://proxy.example.com/go/https://api.example/v1/audio/transcriptions",
@@ -1023,8 +1023,8 @@ final class TranscriberTests: XCTestCase {
     }
 
     @objc func testAlwaysChallengeRetriesOnceThenInvalidResponse() {
-        // Оба STT-POST получают челлендж даже со свежей кукой: refresh прошёл
-        // (probe GET принял cookie), но STT-эндпоинт всё равно отвечает челленджем.
+        // Both STT-POSTs face challenge even with fresh cookie: refresh ok
+        // (probe GET accepted cookie), STT endpoint still challenges.
         let stt = CookieRelayMockTransport(challengeBody: cookieRelayChallengeHTML, rejectPostCount: 2)
         let relayTransport = CookieRelayMockTransport(challengeBody: cookieRelayChallengeHTML)
         let transcriber = makeCookieRelayTranscriber(sttTransport: stt, relayTransport: relayTransport)
@@ -1046,8 +1046,8 @@ final class TranscriberTests: XCTestCase {
     }
 
     @objc func testChallengeRefreshFailureThrowsInvalidResponse() {
-        // Probe не принимает свежую куку (honorCookie=false) → refresh не дал
-        // токена → ретрая нет, ошибка с признаком челленджа.
+        // Probe rejects fresh cookie (honorCookie=false) → refresh gave no
+        // token → no retry, error marked as challenge.
         let stt = CookieRelayMockTransport(challengeBody: cookieRelayChallengeHTML, rejectPostCount: 1)
         let relayTransport = CookieRelayMockTransport(challengeBody: cookieRelayChallengeHTML, honorCookie: false)
         let transcriber = makeCookieRelayTranscriber(sttTransport: stt, relayTransport: relayTransport)
@@ -1152,8 +1152,8 @@ final class TranscriberTests: XCTestCase {
     // MARK: - Адаптерный путь (adapterID)
 
     @objc func testAdapterOpenAIResolvesDefaultsAndSendsMultipart() {
-        // Пустые baseURL/model + adapterID "openai" → дефолты адаптера резолвятся
-        // внутри plan(): запрос уходит на api.openai.com с whisper-1 и multipart.
+        // Empty baseURL/model + adapterID "openai" → adapter defaults resolved
+        // in plan(): request goes to api.openai.com with whisper-1, multipart.
         let transport = MockTransport(status: 200, body: Data(#"{"text":"привет"}"#.utf8))
         let transcriber = Transcriber(
             baseURL: "", model: "", apiKey: "sk-openai",
@@ -1177,9 +1177,9 @@ final class TranscriberTests: XCTestCase {
     }
 
     @objc func testAdapterCloudflareRawAudioAndTranscriptPath() {
-        // cloudflare: сырое аудио + Content-Type audio/wav, Bearer,
-        // baseURL как есть (модель зашита в URL), текст извлекается по
-        // transcriptPath ["result","text"] из ответа Workers AI.
+        // cloudflare: raw audio + Content-Type audio/wav, Bearer,
+        // baseURL as-is (model baked into URL), text via
+        // transcriptPath ["result","text"] from Workers AI response.
         let cfJSON = #"{"result":{"text":"привет тайге"}}"#
         let transport = MockTransport(status: 200, body: Data(cfJSON.utf8))
         let transcriber = Transcriber(
@@ -1204,8 +1204,8 @@ final class TranscriberTests: XCTestCase {
         XCTAssertEqual(transport.lastRequest?.httpBody, wavData, "тело = сырое аудио, не multipart")
     }
 
-    /// Cloudflare-адаптер с пустым baseURL: запрос не строится (нет дефолтного
-    /// endpoint) — до HTTP дело не доходит, падает с ошибкой запроса.
+    /// Cloudflare adapter with empty baseURL: no request built (no default
+    /// endpoint) — fails with request error before HTTP.
     @objc func testAdapterCloudflareNegativeMissingBaseURL() {
         let transport = MockTransport(status: 200, body: Data(#"{"result":{"text":"x"}}"#.utf8))
         let transcriber = Transcriber(
@@ -1229,8 +1229,8 @@ final class TranscriberTests: XCTestCase {
         XCTAssertEqual(transport.requestCount, 0, "запрос не строится — HTTP-вызовов нет")
     }
 
-    /// adapterID == nil (провайдер не настроен): transcribe() падает сразу, до
-    /// preflight и построения запроса — HTTP-вызовов нет вовсе.
+    /// adapterID == nil (provider not configured): transcribe() fails
+    /// immediately, before preflight and request build — no HTTP calls.
     @objc func testTranscribeWithoutAdapterIDThrows() {
         let transport = MockTransport(status: 200, body: Data(#"{"text":"x"}"#.utf8))
         let transcriber = Transcriber(

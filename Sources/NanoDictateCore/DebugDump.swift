@@ -2,33 +2,23 @@ import Foundation
 
 // MARK: - Отладочный дамп STT-запросов
 
-/// Сборка и запись отладочного лога транскрибации (`transcriber-debug.log`).
-///
-/// Включается уровнем лога `debug` (см. `Transcriber.logLevel`). Логика сборки
-/// записи — чистая функция `summarize(...)` без I/O; враппер `append(entry:)`
-/// только дописывает готовый текст в конец файла. При `debug` сырые байты аудио
-/// дополнительно сохраняются в `recordingsDirectory` как `recording-*.wav`.
-///
-/// Секреты маскируются всегда: `Authorization` → `Bearer ***`,
-/// `X-Proxy-Key` → `***` (включая кастомное имя из `proxy_key_header` — все
-/// заголовки вне allowlist безопасных замаскированы), в теле ответа затираются
-/// значения вложенных ключей `api_key` / `proxy_key` / `authorization`.
+/// Debug transcription log (`transcriber-debug.log`), enabled at log level debug.
+/// Entry built by pure `summarize`; `append` only writes. At debug, raw audio
+/// also saved as `recording-*.wav`. Secrets always masked: Authorization → "Bearer ***",
+/// headers outside safe allowlist → "***" (custom proxy_key_header names), response
+/// body keys api_key/proxy_key/authorization scrubbed.
 public enum DebugDump {
-  /// Каталог отладочного лога; `~` раскрывается автоматически.
-  /// По умолчанию совпадает с каталогом `Logger` — `~/Library/Logs/NanoDictate`.
+  /// Debug log dir; `~` expanded. Default matches Logger dir.
   public static var dumpDirectory: String = "~/Library/Logs/NanoDictate"
 
-  /// Имя файла отладочного лога транскрибации.
   public static var dumpFileName: String = "transcriber-debug.log"
 
-  /// Каталог сохранения аудиозаписей (`recording-*.wav`). Пишутся только при
-  /// `log_level == "debug"` и только сами сырые байты WAV. Каталог создаётся
-  /// автоматически при записи.
+  /// Audio recordings dir (`recording-*.wav`), written only at debug; created on write.
   public static var recordingsDirectory: String = "~/Library/Logs/NanoDictate/recordings"
 
   private static let lock = NSLock()
 
-  /// Метаданные file-парта multipart-запроса (сырые байты не сохраняются).
+  /// Multipart file-part metadata; raw bytes not saved.
   public struct FilePart {
     public let fieldName: String
     public let filename: String
@@ -43,8 +33,7 @@ public enum DebugDump {
     }
   }
 
-  /// Информация о сохранённой аудиозаписи (путь на диске + размер в байтах).
-  /// Попадает в запись дампа, если при `debug` WAV был сохранён.
+  /// Saved recording (path + byte size); appears in dump when audio saved.
   public struct RecordingInfo {
     public let path: String
     public let byteCount: Int
@@ -57,11 +46,9 @@ public enum DebugDump {
 
   // MARK: - Маскирование
 
-  /// Маскирует значение заголовка по имени (сравнение без учёта регистра).
-  /// Authorization маскируется целиком: `Bearer ***`; X-Proxy-Key — `***`.
-  /// Значение ЛЮБОГО заголовка вне allowlist `safeDumpHeaders` тоже
-  /// маскируется (`***`): имя секретного заголовка может быть кастомным
-  /// (`proxy_key_header`), поэтому «не в списке безопасных» = секрет.
+  /// Mask header value by name (case-insensitive). Authorization whole → "Bearer ***",
+  /// X-Proxy-Key → "***". Anything outside `safeDumpHeaders` masked — secret
+  /// header names may be custom (proxy_key_header).
   public static func maskedHeaderValue(name: String, value: String) -> String {
     let normalized = name.lowercased()
     switch normalized {
@@ -74,10 +61,8 @@ public enum DebugDump {
     }
   }
 
-  /// Заголовки, значения которых безопасно писать в debug-лог как есть.
-  /// Всё, чего нет в этом списке, маскируется (`***`) — кастомное имя
-  /// proxy-заголовка (`proxy_key_header`, например `X-Api-Key`) маскируется
-  /// автоматически, как и любой другой неизвестный заголовок.
+  /// Headers safe to log verbatim; everything else masked — custom proxy
+  /// header (proxy_key_header) auto-masked.
   private static let safeDumpHeaders: Set<String> = [
     "accept", "accept-encoding", "accept-language", "cache-control",
     "connection", "content-length", "content-type", "host", "origin",
@@ -86,16 +71,11 @@ public enum DebugDump {
     "user-agent",
   ]
 
-  /// Маскирует секретные ключи в теле ответа (обычно JSON). Тело сохраняется
-  /// как есть, кроме значений ключей `api_key` / `proxy_key` / `authorization`,
-  /// которые заменяются на `***`. Не-JSON текст тоже обрабатывается регуляркой.
-  /// Никогда не бросает; непредставимый текст возвращается как пустая строка.
+  /// Mask secret keys in response body (api_key/proxy_key/authorization → "***");
+  /// regex works on non-JSON too. Never throws; undecodable → "".
   public static func maskedResponseBody(_ data: Data) -> String {
-    // String(data:encoding:) оставлен намеренно: при невалидном UTF-8 он
-    // даёт nil, а документированный контракт — «непредставимый текст → пустая
-    // строка». String(decoding:as:) заменит повреждённые байты на U+FFFD —
-    // это изменит поведение. Тело ответа STT обычно JSON; битые случаи здесь
-    // просто не логируются.
+    // String(data:encoding:) deliberate: invalid UTF-8 → nil, contract says
+    // unrepresentable → "". String(decoding:as:) inserts U+FFFD — changes behavior.
     // swiftlint:disable:next non_optional_string_data_conversion
     guard !data.isEmpty, let text = String(data: data, encoding: .utf8), !text.isEmpty else {
       return ""
@@ -115,9 +95,8 @@ public enum DebugDump {
 
   // MARK: - Имена файлов аудиозаписей (чистые функции, без I/O)
 
-  /// Имя файла аудиозаписи для даты: `recording-<yyyyMMdd-HHmmss-SSS>.wav`.
-  /// Миллисекунды в имени — защита от коллизий при нескольких записях в одну
-  /// секунду.
+  /// Recording filename: `recording-<yyyyMMdd-HHmmss-SSS>.wav`; milliseconds
+  /// avoid collisions within one second.
   public static func recordingFileName(for date: Date) -> String {
     let formatter = DateFormatter()
     formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -125,7 +104,6 @@ public enum DebugDump {
     return "recording-\(formatter.string(from: date)).wav"
   }
 
-  /// Полный путь к файлу аудиозаписи для даты: `recordingsDirectory` + имя.
   public static func recordingPath(for date: Date) -> String {
     let dir = (recordingsDirectory as NSString).expandingTildeInPath
     return (dir as NSString).appendingPathComponent(recordingFileName(for: date))
@@ -133,13 +111,9 @@ public enum DebugDump {
 
   // MARK: - Сборка записи (чистая функция, без I/O)
 
-  /// Собирает текст одной записи отладочного лога: запрос (метод, URL,
-  /// заголовки с маскировкой, form-поля, метаданные file-парта) и ответ
-  /// (HTTP-статус + тело целиком с маскировкой секретов). Если ответа нет
-  /// (`status`/`responseBody` = nil — транспортная ошибка до HTTP), в секции
-  /// ответа пишется `(no response — transport error)`.
-  // 7 значимых параметров (3 со значениями по умолчанию из 10): разбивка на
-  // две функции разорвёт атомарность одной записи лога — отключение правила.
+  /// One log entry: request (method/url/masked headers/fields/file meta) and
+  /// response (status + masked body). No response → "(no response — transport error)".
+  // 7 of 10 params significant; splitting would break log entry atomicity.
   // swiftlint:disable:next function_parameter_count
   public static func summarize(
     timestamp: Date = Date(),
@@ -197,7 +171,6 @@ public enum DebugDump {
       lines.append("HTTP \(status)")
       lines.append(maskedResponseBody(responseBody ?? Data()))
     } else {
-      // Ответа нет: все попытки запроса упали на транспортном уровне.
       lines.append("HTTP (no response — transport error)")
     }
 
@@ -206,9 +179,8 @@ public enum DebugDump {
 
   // MARK: - Запись в файл (враппер)
 
-  /// Дописывает запись в `dumpDirectory/dumpFileName`. Создаёт каталог и файл
-  /// при необходимости. Никогда не бросает: отладочный лог не должен ломать
-  /// транскрибацию.
+  /// Append entry to `dumpDirectory/dumpFileName`; creates dir/file as needed.
+  /// Never throws — debug log must not break transcription.
   public static func append(entry: String) {
     lock.lock()
     defer { lock.unlock() }
@@ -221,7 +193,7 @@ public enum DebugDump {
       do {
         try fileManager.createDirectory(atPath: expanded, withIntermediateDirectories: true)
       } catch {
-        return  // нет доступа — молча пропускаем
+        return  // no access — skip silently
       }
     }
 
@@ -237,9 +209,8 @@ public enum DebugDump {
     }
   }
 
-  /// Сохраняет аудиозапись (WAV) в файл по пути `path`, создавая каталог при
-  /// необходимости. Никогда не бросает: ошибка записи не должна ломать
-  /// транскрибацию — пишется только в `Logger`.
+  /// Save WAV to `path`, creating dir as needed. Never throws —
+  /// failures only logged; must not break transcription.
   public static func saveRecording(data: Data, to path: String) {
     lock.lock()
     defer { lock.unlock() }

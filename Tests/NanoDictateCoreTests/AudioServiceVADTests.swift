@@ -3,34 +3,33 @@ import AVFoundation
 import AudioEngineGuard
 @testable import NanoDictateCore
 
-/// Тесты live-VAD в AudioService (живая пошаговая диктовка, task #112).
-/// Железа нет — фейковый движок (тот же паттерн, что AudioServiceLifecycleTests).
+/// Live-VAD tests of AudioService (task #112). Fake engine, no hardware
+/// (same pattern as AudioServiceLifecycleTests).
 ///
-/// Проверяется:
-///   • пауза ≥ pauseDuration закрывает уттеренс — сегмент отдаётся КОПИЕЙ,
-///     общий буфер записи не трогается (stop() вернёт ВСЮ запись);
-///   • короткая пауза — внутренний пробел, уттеренс живёт;
-///   • stop() отдаёт «хвост» незакрытого уттеренса (isTail == true), и только
-///     если речь реально шла; cancel() не отдаёт ничего;
-///   • принудительный стоп по лимиту: «хвост» доставляется ДО колбэка лимита;
-///   • VAD сбрасывается между сегментами одного сеанса и между сеансами.
+/// Checks:
+///   • pause ≥ pauseDuration closes utterance — segment delivered as COPY,
+///     shared record untouched (stop() returns WHOLE record);
+///   • short pause — inner gap, utterance stays alive;
+///   • stop() delivers tail of unclosed utterance (isTail == true) only when
+///     speech ran; cancel() delivers nothing;
+///   • limit stop: tail delivered BEFORE limit callback;
+///   • VAD resets between segments of one session and between sessions.
 ///
-/// Pre-/post-roll (задача #139):
-///   • pre-roll 0.5 c: тишина перед первым словом не срезается; отступ НЕ
-///     заезжает в уже доставленный сегмент (клампится liveLastCutIndex);
-///   • пост-ролл 0.25 c: к последней речи добавляется тишина без раздувания
-///     паузой и без выхода за конец записи; «хвост» stop() — БЕЗ пост-ролла;
-///   • граничная пауза: ровно на livePauseSamples уттеренс закрывается; чуть
-///     меньше — продолжается, новая речь его продлевает (второго уттеренса не
-///     открывается); ПОСЛЕ закрытия новая речь открывает НОВЫЙ уттеренс —
-///     вторая порция доставляется отдельным сегментом (живая диктовка).
+/// Pre-/post-roll (task #139):
+///   • pre-roll 0.5 s: silence before first word kept; offset does NOT eat
+///     into delivered segment (clamped at liveLastCutIndex);
+///   • post-roll 0.25 s: silence added to last speech without pause bloat and
+///     past record end; stop() tail — NO post-roll;
+///   • boundary pause: exactly livePauseSamples closes utterance; slightly
+///     less keeps it, later speech extends it (no second utterance opens);
+///     AFTER close new speech opens NEW utterance — second portion delivered
+///     as separate segment (live dictation).
 ///
-/// Замечание о буферных счётчиках: после скачка амплитуды 0.2 → 0.001
-/// пересэмплер (AVAudioConverter) «звенит» — первый буфер тишины после речи
-/// имеет RMS ≈ 0.013 > порога 0.00316 и уходит в речевую ветку. Поэтому
-/// закрывающая пауза «начинается» со ВТОРОГО буфера тишины: 4 чистых буфера
-/// дают накопление 3×1486 ≈ 4458 ≥ 3200. В проде это добавляет к паузе одну
-/// задержку буфера (~90 мс) — несущественно; тесты закладывают запас.
+/// Buffer counters: after amplitude jump 0.2 → 0.001 resampler
+/// (AVAudioConverter) "rings" — first silence buffer after speech has
+/// RMS ≈ 0.013 > 0.00316 and goes to speech branch. Closing pause "starts"
+/// at SECOND silence buffer: 4 clean buffers accumulate 3×1486 ≈ 4458 ≥ 3200.
+/// In prod adds one buffer delay (~90 ms) — negligible; tests reserve margin.
 final class AudioServiceVADTests: XCTestCase {
 
     // MARK: - Фейковый движок
@@ -56,7 +55,7 @@ final class AudioServiceVADTests: XCTestCase {
 
         func removeTap(onBus bus: AVAudioNodeBus) {}
 
-        /// Эмитирует один буфер из tap-колбэка (в проде это делает аудио-поток).
+        /// Emits one buffer via tap callback (prod audio thread does this).
         func emit(_ buffer: AVAudioPCMBuffer) {
             tapBlock?(buffer, AVAudioTime())
         }
@@ -80,12 +79,12 @@ final class AudioServiceVADTests: XCTestCase {
 
     // MARK: - Helpers
 
-    /// Сервис live-VAD с настраиваемой паузой закрытия: тестовый буфер
-    /// 4096 фр. @44.1 кГц ≈ 1486 сэмплов @16 кГц; пауза 0.2 c = порог 3200
-    /// сэмплов (накрывается тремя чистыми буферами тишины). Пауза 1.0 c =
-    /// порог 16000 сэмплов — больше пост-ролла (4000), нужна для проверки
-    /// точной границы пост-ролла без клампинга концом буфера. `autoStop` —
-    /// конфигурация автоостановки по тишине (по умолчанию `.defaults`).
+    /// Live-VAD service with configurable close pause: test buffer 4096 fr
+    /// @44.1 kHz ≈ 1486 samples @16 kHz; pause 0.2 s = threshold 3200 samples
+    /// (covered by three clean silence buffers). Pause 1.0 s = threshold 16000
+    /// — above post-roll (4000), needed for exact post-roll edge without
+    /// buffer-end clamp. `autoStop` — silence auto-stop config (default
+    /// `.defaults`).
     private func makeLiveService(
         engine: FakeEngine,
         pause: TimeInterval = 0.2,
@@ -107,8 +106,8 @@ final class AudioServiceVADTests: XCTestCase {
         return ok
     }
 
-    /// Константный буфер: RMS = |amplitude|. Речь — 0.2 (» порог 0.00316),
-    /// тишина — 0.001 (« порог).
+    /// Constant buffer: RMS = |amplitude|. Speech 0.2 (> threshold 0.00316),
+    /// silence 0.001 (<).
     private func makeBuffer(engine: FakeEngine, amplitude: Float) -> AVAudioPCMBuffer {
         let buffer = AVAudioPCMBuffer(pcmFormat: engine.node.format, frameCapacity: 4096)!
         buffer.frameLength = 4096
@@ -123,16 +122,16 @@ final class AudioServiceVADTests: XCTestCase {
         }
     }
 
-    /// Первый сэмпл с |амплитудой| ≥ threshold — для калибровки pre-roll-отступа
-    /// по фактическому (а не предполагаемому) числу сэмплов в буфере.
+    /// First sample with |amp| ≥ threshold — calibrates pre-roll offset by
+    /// actual (not assumed) buffer sample count.
     private func firstLoudIndex(_ samples: [Int16], threshold: Int = 1000) -> Int? {
         samples.firstIndex { abs(Int($0)) >= threshold }
     }
 
-    /// Ищет сдвиг окна записи, при котором оно в среднем равно сегменту:
-    /// максимизирует долю сэмплов, сошедшихся по знаку с речью (амплитуда 6553)
-    /// и с тишиной (32) одновременно — нормировка на максимум в окне делает
-    /// критерий устойчивым к ±джиттеру тайминга VAD (единицы сэмплов).
+    /// Finds record window shift where it matches segment on average:
+    /// maximizes sample share agreeing with speech (amp 6553) and silence (32)
+    /// at once — max normalization in window keeps criterion robust to VAD
+    /// timing jitter (few samples).
     private func bestWindowOffset(record: [Int16], start: Int, window seg: [Int16], search: Int) -> Int? {
         guard start >= 0, start + seg.count + search <= record.count else { return nil }
         var best: (offset: Int, score: Float) = (0, -1)
@@ -157,10 +156,10 @@ final class AudioServiceVADTests: XCTestCase {
 
     // MARK: - Пауза закрывает уттеренс; сегмент — копия
 
-    /// Речь 2 буфера → пауза 6 буферов (≥ pauseDuration с учётом «звонящего»
-    /// первого буфера тишины): ровно один сегмент, границы = речевые сэмплы
-    /// (без тишины паузы). Сегмент — КОПИЯ: общий буфер не тронут, stop()
-    /// возвращает всю запись, префикс которой равен сегменту, а хвост — тишина.
+    /// Speech 2 buffers → pause 6 (≥ pauseDuration, counting ringing first
+    /// silence buffer): exactly one segment, bounds = speech samples (no pause
+    /// silence). Segment — COPY: shared record untouched, stop() returns whole
+    /// record, prefix equal to segment, tail silence.
     @objc func testPauseClosesUtteranceAndDeliversCopy() {
         let engine = FakeEngine()
         let service = makeLiveService(engine: engine)
@@ -178,15 +177,15 @@ final class AudioServiceVADTests: XCTestCase {
         XCTAssertEqual(box.deliveries.count, 1, "одна пауза — один сегмент")
         XCTAssertFalse(box.deliveries[0].isTail, "сегмент из середины записи — не хвост")
         let seg = box.deliveries[0].samples
-        // 2 буфера речи + звонящий первый буфер тишины (~3 × 1486) + пост-ролл
-        // 0.25 c (4000 сэмплов) — хвост последнего слова не срезается. Пост-ролл
-        // меньше остатка паузы (кламп концом буфера здесь не задевается), поэтому
-        // сегмент — префикс записи, а не вся запись.
+        // 2 speech buffers + ringing first silence buffer (~3 × 1486) +
+        // post-roll 0.25 s (4000 samples) — tail of last word not cut.
+        // Post-roll < pause remainder (no buffer-end clamp here), so segment
+        // is prefix of record, not whole record.
         XCTAssertTrue(seg.count > 2600, "сегмент = речевой блок")
         XCTAssertTrue(seg.count > 7800, "пост-ролл 0.25 c тишины добавлен к речи")
         XCTAssertTrue(seg.count < 9100, "сегмент не раздувается всей паузой (> пост-ролла)")
 
-        // stop(): вся запись (речь + пауза) цела, префикс = сегмент.
+        // stop(): whole record intact, prefix = segment (asserts below).
         let samples = service.stop()
         XCTAssertTrue(samples.count > seg.count, "stop() отдаёт всю запись, сегмент — её префикс")
         XCTAssertEqual(Array(samples.prefix(seg.count)), seg, "речевые сэмплы в общем буфере не пострадали")
@@ -194,9 +193,9 @@ final class AudioServiceVADTests: XCTestCase {
         XCTAssertTrue(tailPart.allSatisfy { abs(Int($0)) < 100 }, "хвост записи — тишина паузы")
     }
 
-    /// Пауза короче pauseDuration — внутренний пробел: уттеренс не рвётся,
-    /// «вздох» между фразами не тайкнет сегмент. Речь 2 → пауза 2 →
-    /// речь 2 → пауза 6: ОДИН сегмент (речь + внутренний пробел), хвоста нет.
+    /// Pause shorter than pauseDuration — inner gap: utterance not broken,
+    /// sigh between phrases does not tick segment. Speech 2 → pause 2 →
+    /// speech 2 → pause 6: ONE segment (speech + inner gap), no tail.
     @objc func testShortInternalPauseKeepsUtteranceAlive() {
         let engine = FakeEngine()
         let service = makeLiveService(engine: engine)
@@ -209,31 +208,30 @@ final class AudioServiceVADTests: XCTestCase {
         }
 
         emit(engine, amplitude: 0.2, count: 2)
-        emit(engine, amplitude: 0.001, count: 2)  // < pauseDuration — внутренний пробел
+        emit(engine, amplitude: 0.001, count: 2)  // < pauseDuration — inner gap
         emit(engine, amplitude: 0.2, count: 2)
-        emit(engine, amplitude: 0.001, count: 6)  // ≥ pauseDuration — закрывает
+        emit(engine, amplitude: 0.001, count: 6)  // ≥ pauseDuration — closes
 
         XCTAssertEqual(box.deliveries.count, 1, "внутренний пробел не рвёт уттеренс")
         XCTAssertFalse(box.deliveries[0].isTail)
         let seg = box.deliveries[0].samples
-        // 4 буфера речи + «звон» пересэмплера (~3–6 × 1486) + пост-ролл 4000.
-        // Обе порции речи — ОДИН сегмент (иначе было бы 2 доставки), длинная
-        // завершающая пауза в сегмент целиком не попадает (пост-ролл обрезан).
-        // Фактический замер на звоне: 15882 (вариант со звенящим закрытием) и
-        // 14396 (вариант с чистой тишиной) — диапазон накрывает оба.
+        // 4 speech buffers + resampler ring (~3–6 × 1486) + post-roll 4000.
+        // Both speech portions — ONE segment (else 2 deliveries), long final
+        // pause not into segment (post-roll cut). Measured: 15882 (ringing
+        // close) and 14396 (clean silence) — range covers both.
         XCTAssertTrue(seg.count > 13900, "сегмент включает и речь после пробела, и пост-ролл")
         XCTAssertTrue(seg.count < 17000, "сегмент не включает длинную паузу")
 
-        // Уттеренс уже закрыт длинной паузой — при стопе «хвоста» нет.
+        // Utterance already closed by long pause — stop yields no tail.
         _ = service.stop()
         XCTAssertEqual(box.deliveries.count, 1)
     }
 
     // MARK: - «Хвост» stop() и cancel()
 
-    /// Незакрытый уттеренс при stop() доставляется как последний сегмент
-    /// (isTail == true) — сэмплы без хвостовой тишины. Тишина без речи
-    /// «хвоста» не даёт.
+    /// Unclosed utterance delivered by stop() as last segment (isTail == true)
+    /// — samples without trailing silence. Silence without speech gives no
+    /// tail.
     @objc func testStopDeliversTailOnlyWhenSpeechWasInProgress() {
         let engine = FakeEngine()
         let service = makeLiveService(engine: engine)
@@ -253,8 +251,8 @@ final class AudioServiceVADTests: XCTestCase {
         let tail = box.deliveries[0].samples
         XCTAssertEqual(tail.count, samples.count, "паузы не было — хвост = вся запись")
 
-        // Новый сеанс, только тишина: уттеренс не начинался — «хвост» не
-        // доставляется (бесполезный STT-запрос пустоты не отправляется).
+        // New session, silence only: no utterance — no tail delivered
+        // (useless STT request of void is not sent).
         guard runStart(service) else {
             XCTFail("повторный старт должен пройти", file: #file, line: #line)
             return
@@ -264,8 +262,8 @@ final class AudioServiceVADTests: XCTestCase {
         XCTAssertEqual(box.deliveries.count, 1, "тишина без речи не даёт ни сегмента, ни хвоста")
     }
 
-    /// Esc (cancel()): данные отбрасываются целиком — ни сегмента, ни хвоста,
-    /// даже если речь шла (и уттеренс был открыт).
+    /// Esc (cancel()): data dropped whole — no segment, no tail, even if
+    /// speech ran (utterance was open).
     @objc func testCancelDeliversNothing() {
         let engine = FakeEngine()
         let service = makeLiveService(engine: engine)
@@ -284,14 +282,14 @@ final class AudioServiceVADTests: XCTestCase {
 
     // MARK: - Принудительный стоп по лимиту
 
-    /// Непрерывная речь до жёсткого лимита объёма (960 000 сэмплов): «хвост»
-    /// (isTail == true) доставляется ДО колбэка onRecordingLimitReached —
-    /// клиент успевает поставить его в очередь распознавания раньше финализации.
+    /// Continuous speech to hard volume limit (960 000 samples): tail
+    /// (isTail == true) delivered BEFORE onRecordingLimitReached callback —
+    /// client queues it for recognition before finalization.
     @objc func testLimitStopDeliversTailBeforeLimitCallback() {
         let engine = FakeEngine()
         let service = makeLiveService(engine: engine)
-        // Единый журнал событий: порядок «хвост → лимит» критичен для живой
-        // диктовки (серийный исполнитель Agent'а обязан увидеть хвост первым).
+        // Single event log: order "tail → limit" critical for live dictation
+        // (Agent's serial executor must see tail first).
         var events: [String] = []
         service.onSpeechSegment = { _, _ in events.append("tail") }
         let limitDone = expectation(description: "limit reached")
@@ -305,8 +303,8 @@ final class AudioServiceVADTests: XCTestCase {
             return
         }
 
-        // ~1486 сэмплов на буфер: 650 буферов гарантированно переходят порог
-        // 960 000 (последний буфер обрезается лимитом; elapsed ≪ 60 с).
+        // ~1486 samples per buffer: 650 buffers certainly cross threshold
+        // 960 000 (last buffer cut by limit; elapsed ≪ 60 s).
         emit(engine, amplitude: 0.2, count: 650)
         wait(for: [limitDone], timeout: 5)
 
@@ -315,18 +313,17 @@ final class AudioServiceVADTests: XCTestCase {
 
     // MARK: - Принудительный стоп по непрерывной тишине (автоостановка ~3 c)
 
-    /// Непрерывная тишина ≥ 3 c в активной записи останавливает её тем же
-    /// путём, что лимит: onAutoStop вызывается на главной очереди с собранными
-    /// сэмплами. Кадр: буфер 4096 фр. @44.1 кГц ≈ 1486 сэмплов @16 кГц ≈ 0.093 c.
+    /// Continuous silence ≥ 3 s in active record stops it same way as limit:
+    /// onAutoStop on main queue with collected samples. Frame: buffer 4096 fr
+    /// @44.1 kHz ≈ 1486 samples @16 kHz ≈ 0.093 s.
     ///
-    /// Модель автоостановки (гистерезис + grace + гейт): амплитуда 0.001 ≪
-    /// порога тишины 0.00126 (−58 дБФС) — чистые тихие буферы; амплитуда 0.2 ≥
-    /// порога речи 0.00562 (−45 дБФС). Минимальный отрезок речи ≥ 0.3 c
-    /// набирается ~4 речевыми буферами (берём 6 для запаса). Дальше — тишина:
-    /// grace 2.0 c пропускает буферы, начавшиеся до конца grace (elapsed < 2 c),
-    /// т.е. первые ~16 тихих буферов; остальные копятся и достигают 3.0 c на
-    /// ~49-м тихом буфере (60 буферов = ~5.6 c — запас на «звон» ресэмплера
-    /// после скачка амплитуды, как в шапке файла).
+    /// Auto-stop model (hysteresis + grace + gate): amplitude 0.001 ≪ silence
+    /// threshold 0.00126 (−58 dBFS) — clean quiet buffers; amplitude 0.2 ≥
+    /// speech threshold 0.00562 (−45 dBFS). Min speech run ≥ 0.3 s ≈ 4 speech
+    /// buffers (take 6 for margin). Then silence: grace 2.0 s skips buffers
+    /// started before grace end (elapsed < 2 s), i.e. first ~16 quiet buffers;
+    /// rest accumulate, reach 3.0 s at ~49th quiet buffer (60 buffers =
+    /// ~5.6 s — margin for resampler ring after amplitude jump, see header).
     @objc func testContinuousSilenceTriggersAutoStop() {
         let engine = FakeEngine()
         let service = makeLiveService(engine: engine)
@@ -347,31 +344,29 @@ final class AudioServiceVADTests: XCTestCase {
             return
         }
 
-        // Речь 6 буферов (~0.6 c; гейт «речь была» защёлкнут) → тишина 60
-        // буферов (~5.6 c): автоостановка срабатывает примерно на 55-м буфере
-        // (после grace-окна и набора 3.0 c тишины); оставшиеся буферы
-        // отбрасываются early-выходом (autoStopScheduled). Elapsed ≪ 60 c —
-        // лимит не мешает.
+        // Speech 6 buffers (~0.6 s; speech gate latched) → silence 60 buffers
+        // (~5.6 s): auto-stop fires ~55th buffer (after grace window and 3.0 s
+        // silence); remaining buffers dropped by early exit (autoStopScheduled).
+        // Elapsed ≪ 60 s — limit does not interfere.
         emit(engine, amplitude: 0.2, count: 6)
         emit(engine, amplitude: 0.001, count: 60)
         wait(for: [autoStopDone], timeout: 5)
 
         XCTAssertTrue(autoStopSamples.count > 2000, "в onAutoStop приходят собранные сэмплы записи, а не пусто")
         XCTAssertTrue(autoStopSamples.count <= 66 * 1486 + 4096, "снимок не раздут: буферы после срабатывания не дописываются")
-        // 3 секунды тишины полностью «съедают» уттеренс закрытием по паузе
-        // live-VAD (0.2 c у хелпера; в проде — 1.0 c): к моменту автоостановки
-        // открытого уттеренса нет — хвост не доставляется, это правильное
-        // поведение (см. handleAutoStop: в live-диктовке финальный проход
-        // работает по снимку, хвост не участвует).
+        // 3 s silence fully "eats" utterance by live-VAD pause close (0.2 s helper;
+        // prod 1.0 s): no open utterance at auto-stop — no tail delivered,
+        // correct behavior (see handleAutoStop: in live dictation final pass
+        // works on snapshot, tail unused).
         XCTAssertEqual(tailDeliveries, 0, "при автоостановке открытого уттеренса быть не может: речь была >3 c назад")
         XCTAssertGreaterThanOrEqual(segmentDeliveries, 1, "уттеренс закрыт live-VAD по паузе ещё ДО автоостановки")
     }
 
-    /// Пауза короче 3 c запись НЕ останавливает: тишина в 6 буферов (~0.5 c)
-    /// не добирает порог и вдобавок целиком лежит внутри grace-окна 2.0 c
-    /// (накопления нет вовсе), после неё продолжается речь, и только явный
-    /// stop() завершает запись со ВСЕМ собранным (включая речь ПОСЛЕ паузы) —
-    /// фича не рвёт запись на задумчивой паузе внутри диктовки.
+    /// Pause shorter than 3 s does NOT stop: silence of 6 buffers (~0.5 s) stays
+    /// below threshold and lies fully inside grace window 2.0 s (no
+    /// accumulation at all), speech resumes after, and only explicit stop()
+    /// ends record with EVERYTHING collected (including speech AFTER pause) —
+    /// feature does not cut record on thoughtful pause inside dictation.
     @objc func testShortSilenceDoesNotStopRecording() {
         let engine = FakeEngine()
         let service = makeLiveService(engine: engine, pause: 1.0)
@@ -387,27 +382,26 @@ final class AudioServiceVADTests: XCTestCase {
             return
         }
 
-        // Речь 2 → пауза 6 буферов (~0.5 c тишины; если первый после скачка
-        // амплитуды «звенит» на ресэмплере — ~0.46 c, всё равно ≪ 3 c)
-        // → снова речь 2.
+        // Speech 2 → pause 6 buffers (~0.5 s silence; if first post-jump buffer
+        // rings on resampler — ~0.46 s, still ≪ 3 s) → speech 2 again.
         emit(engine, amplitude: 0.2, count: 2)
         emit(engine, amplitude: 0.001, count: 6)
         emit(engine, amplitude: 0.2, count: 2)
-        // Явный стоп: не даёт дождаться никакой автоостановки — всё синхронно.
+        // Explicit stop: no auto-stop wait — all synchronous.
         let samples = service.stop()
 
         XCTAssertFalse(autoStopFired, "короткая пауза (< 3 c) не останавливает запись")
-        // Хвост покрывает обе порции речи (пауза 0.5 c < pause 1.0 c — один
-        // уттеренс, с pre-roll / пост-роллом в границах).
+        // Tail covers both speech portions: pause 0.5 s < pause 1.0 s — one
+        // utterance, pre-/post-roll within bounds.
         XCTAssertEqual(tails.count, 1, "стоп отдаёт один незакрытый уттеренс")
         XCTAssertTrue(tails[0].count > 5000, "уттеренс включает речь ПОСЛЕ паузы")
         XCTAssertTrue(samples.count > 4000, "stop возвращает всю запись (речь + пауза)")
     }
 
-    /// Рубильник: конфиг с enabled == false не останавливает запись даже после
-    /// тишины ~4.2 c (45 буферов) — запись живёт до явного стопа. Спасательный
-    /// люк для шумного окружения/длинных диктовок; дефолт не меняется
-    /// (ср. testContinuousSilenceTriggersAutoStop с конфигом по умолчанию).
+    /// Master switch: config with enabled == false does not stop record even
+    /// after silence ~4.2 s (45 buffers) — record lives to explicit stop.
+    /// Escape hatch for noisy env/long dictations; default unchanged
+    /// (cf. testContinuousSilenceTriggersAutoStop with default config).
     @objc func testDisabledAutoStopDoesNotFire() {
         let engine = FakeEngine()
         var disabledConfig = AutoStopConfig.defaults
@@ -425,29 +419,29 @@ final class AudioServiceVADTests: XCTestCase {
             return
         }
 
-        // Речь 2 буфера → тишина 45 буферов (~4.2 c): при выключенной фиче
-        // тишина НЕ завершает запись — итог подводит явный stop().
+        // Speech 2 buffers → silence 45 buffers (~4.2 s): feature off — silence
+        // does NOT end record, explicit stop() sums up.
         emit(engine, amplitude: 0.2, count: 2)
         emit(engine, amplitude: 0.001, count: 45)
         let samples = service.stop()
 
         XCTAssertFalse(autoStopFired, "выключенная фича не останавливает запись по тишине")
-        // Тишина 4.2 c ≫ пауза live-VAD 0.2 c — уттеренс закрылся обычным путём
-        // сегментации (это работает независимо от автоостановки).
+        // Silence 4.2 s ≫ live-VAD pause 0.2 s — utterance closed by normal
+        // segmentation (works regardless of auto-stop).
         XCTAssertGreaterThanOrEqual(segmentDeliveries, 1, "уттеренс закрыт live-VAD по паузе ещё до stop")
-        // Полная запись 47 буферов ≈ 69839 сэмплов: ресэмплер AVAudioConverter
-        // жертвует ~3 сэмпла на priming, поэтому строгая граница «47 × 1486»
-        // (69842) физически недостижима. Нижняя граница «47 × 1480» с запасом
-        // на джиттер конвертера доказывает, что в снимок вошли ВСЕ 47 буферов
-        // (~4.4 c) — никакая автоостановка запись не обрезала.
+        // Whole record 47 buffers ≈ 69839 samples: AVAudioConverter gives up ~3
+        // samples to priming, strict edge "47 × 1486" (69842) physically
+        // unreachable. Lower edge "47 × 1480" with margin for converter
+        // jitter proves snapshot holds ALL 47 buffers (~4.4 s) — no auto-stop
+        // cut the record.
         XCTAssertTrue(samples.count >= 47 * 1480, "stop возвращает всю запись, включая длинную тишину: \(samples.count)")
     }
 
     // MARK: - Сброс VAD между сегментами и между сеансами
 
-    /// Два уттеренса в одном сеансе: после доставки сегмента VAD сбрасывается —
-    /// второй сегмент начинается со своего речевого блока (не срастается со
-    /// старым). Новый сеанс тоже стартует с чистых границ.
+    /// Two utterances in one session: after segment delivery VAD resets —
+    /// second segment starts at its own speech block (not merged with old).
+    /// New session also starts with clean bounds.
     @objc func testVADResetsAfterDeliveryAndAcrossCycles() {
         let engine = FakeEngine()
         let service = makeLiveService(engine: engine)
@@ -459,7 +453,7 @@ final class AudioServiceVADTests: XCTestCase {
             return
         }
 
-        // Сеанс 1: уттеренс 1 (речь 2 → пауза 6), уттеренс 2 (речь 2 → пауза 6).
+        // Session 1: utterance 1 (speech 2 → pause 6), utterance 2 (speech 2 → pause 6).
         emit(engine, amplitude: 0.2, count: 2)
         emit(engine, amplitude: 0.001, count: 6)
         emit(engine, amplitude: 0.2, count: 2)
@@ -468,24 +462,23 @@ final class AudioServiceVADTests: XCTestCase {
         XCTAssertEqual(box.deliveries.count, 2, "два уттеренса — два сегмента")
         XCTAssertFalse(box.deliveries[0].isTail)
         XCTAssertFalse(box.deliveries[1].isTail)
-        // Второй сегмент — ровно свой речевой блок (2 буфера + звон), не
-        // сросшийся с первым уттеренсом (иначе был бы на тысячи сэмплов длиннее).
+        // Second segment — exactly its own speech block (2 buffers + ring), not
+        // merged with first utterance (would be thousands of samples longer).
         let second = box.deliveries[1].samples
-        // Речевой блок (~3 × 1486) + пост-ролл 4000. Граница между сегментами
-        // держится ровно на liveLastCutIndex (конец пост-ролла первого сегмента),
-        // поэтому второй сегмент не срастается ни с первым уттеренсом, ни с
-        // тишиной паузы.
+        // Speech block (~3 × 1486) + post-roll 4000. Segment boundary sits exactly
+        // at liveLastCutIndex (end of first segment post-roll), so second
+        // segment merges with neither first utterance nor pause silence.
         XCTAssertTrue(second.count > 10000, "второй сегмент = свой речевой блок + пост-ролл")
         XCTAssertTrue(second.count < 13000, "второй сегмент не тащит первый уттеренс")
         let first = box.deliveries[0].samples
         XCTAssertTrue(first.count > 7500, "первый сегмент тоже самодостаточен (речь + пост-ролл)")
         XCTAssertTrue(first.count < 9100, "первый сегмент не раздувается паузой")
 
-        // Уттеренс 2 закрыт паузой — стоп без «хвоста».
+        // Utterance 2 closed by pause — stop without tail.
         _ = service.stop()
         XCTAssertEqual(box.deliveries.count, 2)
 
-        // Сеанс 2: новый старт — границы чистые, «хвост» ровно одного буфера.
+        // Session 2: fresh start — clean bounds, tail of exactly one buffer.
         guard runStart(service) else {
             XCTFail("повторный старт должен пройти", file: #file, line: #line)
             return
@@ -502,14 +495,14 @@ final class AudioServiceVADTests: XCTestCase {
 
     // MARK: - Pre-roll 0.5 c: атака первого слова не срезается
 
-    /// Pre-roll: уттеренс начинается НЕ с первого речевого буфера, а на
-    /// 0.5 c (8000 сэмплов) раньше. Тишины перед речью больше pre-roll
-    /// (10 буферов ≈ 14860 > 8000) — отступ полный и не клампится нулём
-    /// записи: сегмент стартует ровно за 8000 сэмплов до атаки первого
-    /// слова и открывается этими 0.5 c чистой тишины.
-    /// Порог firstLoudIndex — 3000 (амплитуда слова 6553), но НЕ 1000:
-    /// с порогом 1000 калибровка ловит «звон» первого речевого
-    /// буфера (амплитуда 32) на границе с тишиной и ошибается на блок.
+    /// Pre-roll: utterance starts NOT at first speech buffer but 0.5 s
+    /// (8000 samples) earlier. Silence before speech > pre-roll (10 buffers ≈
+    /// 14860 > 8000) — offset full, not clamped to record start: segment
+    /// starts exactly 8000 samples before first word attack, opens with these
+    /// 0.5 s of clean silence.
+    /// firstLoudIndex threshold 3000 (word amp 6553), NOT 1000: with 1000
+    /// calibration catches first speech buffer "ring" (amp 32) at silence
+    /// edge and misses by a block.
     @objc func testPreRollCapturesHalfSecondOfSilenceBeforeFirstWord() {
         let engine = FakeEngine()
         let service = makeLiveService(engine: engine)
@@ -521,18 +514,18 @@ final class AudioServiceVADTests: XCTestCase {
             return
         }
 
-        emit(engine, amplitude: 0.001, count: 10)  // тишина до речи (> pre-roll 8000)
+        emit(engine, amplitude: 0.001, count: 10)  // silence before speech (> pre-roll 8000)
         emit(engine, amplitude: 0.2, count: 2)
-        emit(engine, amplitude: 0.001, count: 6)   // закрывает уттеренс
+        emit(engine, amplitude: 0.001, count: 6)   // closes utterance
 
         XCTAssertEqual(box.deliveries.count, 1)
         XCTAssertFalse(box.deliveries[0].isTail)
         let seg = box.deliveries[0].samples
         let samples = service.stop()
 
-        // Калибровка по фактическому буферу: атака речи = первый сэмпл ≥ 3000
-        // («звон» тишины — 32 — порог не проходит). Отступа тишины 14860 ≫ 8000,
-        // поэтому pre-roll полный и клампится только нулём записи.
+        // Calibration by actual buffer: speech attack = first sample ≥ 3000
+        // (silence "ring" 32 does not pass). Silence lead 14860 ≫ 8000, so
+        // pre-roll full, clamped only by record start.
         guard let firstLoud = firstLoudIndex(samples, threshold: 3000) else {
             XCTFail("в записи должна быть речь", file: #file, line: #line)
             return
@@ -542,10 +535,10 @@ final class AudioServiceVADTests: XCTestCase {
         let expectedStart = max(0, firstLoud - 8000)
         XCTAssertTrue(expectedStart > 0, "pre-roll реально ушёл в тишину, а не начался с нуля записи")
 
-        // Граница среза записи и граница, по которой VAD режет сегмент, могут
-        // расходиться на единицы сэмплов (тайминг VAD в буферных индексах vs
-        // сплошной счётчик записи) — поэтому сегмент проверяем по содержимому:
-        // он должен быть окном записи вблизи expectedStart, а не точным срезом.
+        // Record cut edge and VAD segment cut edge may differ by few samples (VAD
+        // timing in buffer indices vs continuous record counter) — check
+        // segment by content: window of record near expectedStart, not exact
+        // slice.
         XCTAssertTrue(seg.count > 15500 && seg.count < 17500, "тишина pre-roll + речь + пост-ролл")
         guard let segAttack = firstLoudIndex(seg, threshold: 3000) else {
             XCTFail("в сегменте должна быть речь", file: #file, line: #line)
@@ -569,9 +562,9 @@ final class AudioServiceVADTests: XCTestCase {
 
     // MARK: - Граничная пауза: ровно на livePauseSamples / чуть меньше
 
-    /// Закрытие РОВНО на границе: накопление тишины 2×1486 = 2972 < 3200 —
-    /// уттеренс жив; следующий же буфер доводит до 4458 ≥ 3200 — закрытие
-    /// происходит ровно в этом блоке (аналог «±1 сэмпл» при крупности 1486).
+    /// Close EXACTLY at boundary: silence accumulation 2×1486 = 2972 < 3200 —
+    /// utterance alive; next buffer reaches 4458 ≥ 3200 — close happens
+    /// exactly in that block (analog of "±1 sample" at 1486 granularity).
     @objc func testPauseClosesExactlyAtThresholdBoundaryBlock() {
         let engine = FakeEngine()
         let service = makeLiveService(engine: engine)
@@ -583,20 +576,20 @@ final class AudioServiceVADTests: XCTestCase {
             return
         }
 
-        // Звонящий первый буфер тишины + 2 чистых = 2972 < 3200: не закрыт.
+        // Ringing first silence buffer + 2 clean = 2972 < 3200: not closed.
         emit(engine, amplitude: 0.2, count: 2)
         emit(engine, amplitude: 0.001, count: 3)
         XCTAssertEqual(box.deliveries.count, 0, "накопленная пауза < livePauseSamples — не закрыт")
 
-        // Ещё один чистый буфер: 4458 ≥ 3200 — закрытие РОВНО в этом блоке.
+        // One more clean buffer: 4458 ≥ 3200 — closes exactly in this block.
         emit(engine, amplitude: 0.001, count: 1)
         XCTAssertEqual(box.deliveries.count, 1, "следующий блок тишины закрыл уттеренс сразу")
         XCTAssertFalse(box.deliveries[0].isTail)
     }
 
-    /// Пауза «чуть меньше» порога НЕ закрывает уттеренс: новая речь после неё
-    /// продолжает ТОТ ЖЕ уттеренс (единый сегмент на обе порции), второй
-    /// уттеренс внутри одного живого не открывается.
+    /// Pause "just below" threshold does NOT close: new speech after it
+    /// continues SAME utterance (single segment for both portions); second
+    /// utterance inside one live not opened.
     @objc func testPauseJustBelowThresholdKeepsUtteranceAndSpeechExtendsIt() {
         let engine = FakeEngine()
         let service = makeLiveService(engine: engine)
@@ -609,19 +602,19 @@ final class AudioServiceVADTests: XCTestCase {
         }
 
         emit(engine, amplitude: 0.2, count: 2)
-        emit(engine, amplitude: 0.001, count: 3)  // 2972 < 3200 — НЕ закрывает
+        emit(engine, amplitude: 0.001, count: 3)  // 2972 < 3200 — does not close
         XCTAssertEqual(box.deliveries.count, 0, "пауза чуть меньше порога — уттеренс продолжается")
 
-        emit(engine, amplitude: 0.2, count: 2)    // речь продлевает уттеренс
+        emit(engine, amplitude: 0.2, count: 2)    // speech extends utterance
         XCTAssertEqual(box.deliveries.count, 0, "новая речь внутри уттеренса — второй НЕ открывается")
 
-        emit(engine, amplitude: 0.001, count: 6)  // закрывает
+        emit(engine, amplitude: 0.001, count: 6)  // closes
         XCTAssertEqual(box.deliveries.count, 1, "обе порции речи — один сегмент")
         let seg = box.deliveries[0].samples
-        // Две порции речи (≈6×1486) + пост-ролл 4000. Диапазон 13900…17000
-        // накрывает обе реализации звона закрывающей паузы (замеры 14396 и
-        // 15882) и гарантирует, что продление речи учтено: без второй порции
-        // сюда не дотянуться (≈8452 уже с пост-роллом).
+        // Two speech portions (≈6×1486) + post-roll 4000. Range 13900…17000 covers
+        // both ring implementations of closing pause (14396, 15882) and
+        // guarantees extension counted: second portion alone ≈8452 with
+        // post-roll — unreachable.
         XCTAssertTrue(seg.count > 13900, "сегмент включает речь и ПОСЛЕ внутренней паузы")
         XCTAssertTrue(seg.count < 17000, "сегмент не включает длинную паузу")
 
@@ -631,9 +624,9 @@ final class AudioServiceVADTests: XCTestCase {
 
     // MARK: - Ключевой сценарий живой диктовки: «и-и-и чуть-чуть ещё сказал»
 
-    /// ПОСЛЕ закрытия (пауза ≥ порога) новая речь открывает НОВЫЙ уттеренс —
-    /// вторая порция доставляется ОТДЕЛЬНЫМ сегментом, а не теряется и не
-    /// сливается с первой (регресс: «сказал чуть-чуть ещё — и ничего»).
+    /// AFTER closing (pause ≥ threshold) new speech opens NEW utterance —
+    /// second portion delivered as SEPARATE segment, not lost, not merged
+    /// (regression: "said a bit more — and nothing").
     @objc func testAfterLongPauseNewSpeechDeliversSeparateSegment() {
         let engine = FakeEngine()
         let service = makeLiveService(engine: engine)
@@ -649,7 +642,7 @@ final class AudioServiceVADTests: XCTestCase {
         emit(engine, amplitude: 0.001, count: 6)
         XCTAssertEqual(box.deliveries.count, 1, "первая порция доставлена")
 
-        emit(engine, amplitude: 0.2, count: 2)    // «чуть-чуть ещё» ПОСЛЕ закрытия
+        emit(engine, amplitude: 0.2, count: 2)    // "a bit more" AFTER closing
         emit(engine, amplitude: 0.001, count: 6)
         XCTAssertEqual(box.deliveries.count, 2, "вторая порция доставлена ОТДЕЛЬНЫМ сегментом")
 
@@ -663,16 +656,16 @@ final class AudioServiceVADTests: XCTestCase {
         XCTAssertTrue(seg2.contains { abs(Int($0)) >= 3000 },
             "вторая порция содержит реальную речь — не потеряна (жалоба «ничего не происходило»)")
 
-        // Оба сегмента закрыты паузами — стоп не даёт ни «хвоста», ни дублей.
+        // Both segments closed by pauses — stop gives no tail, no duplicates.
         _ = service.stop()
         XCTAssertEqual(box.deliveries.count, 2)
     }
 
-    /// Pre-roll не заезжает в уже доставленный сегмент: второй уттеренс после
-    /// длинной паузы начинается РОВНО на liveLastCutIndex (конец пост-ролла
-    /// первого), а не на sampleStart − 8000. Без клампа вторая порция началась
-    /// бы на ~2,4k сэмплов раньше и задублировала доставленное аудио: проверка
-    /// непрерывности по полной записи (без разрыва и наложения) это ловит.
+    /// Pre-roll does not eat into delivered segment: second utterance after long
+    /// pause starts EXACTLY at liveLastCutIndex (end of first post-roll), not
+    /// at sampleStart − 8000. Without clamp second portion would start ~2.4k
+    /// samples earlier and duplicate delivered audio: continuity check over
+    /// whole record (no gap, no overlap) catches it.
     @objc func testPreRollDoesNotOverlapPreviouslyDeliveredSegment() {
         let engine = FakeEngine()
         let service = makeLiveService(engine: engine)
@@ -705,9 +698,9 @@ final class AudioServiceVADTests: XCTestCase {
 
     // MARK: - Post-roll 0.25 c: точная граница и конец буфера
 
-    /// Точная граница пост-ролла: пауза закрытия 1.0 c (порог 16000) больше
-    /// пост-ролла (4000), клампинг концом буфера не вмешивается — сегмент
-    /// заканчивается ровно через 4000 сэмплов тишины после последней речи.
+    /// Exact post-roll edge: closing pause 1.0 s (threshold 16000) > post-roll
+    /// (4000), buffer-end clamp does not interfere — segment ends exactly
+    /// through 4000 samples of silence after last speech.
     @objc func testPostRollAddsExactlyQuarterSecondOfSilence() {
         let engine = FakeEngine()
         let service = makeLiveService(engine: engine, pause: 1.0)
@@ -720,7 +713,7 @@ final class AudioServiceVADTests: XCTestCase {
         }
 
         emit(engine, amplitude: 0.2, count: 2)
-        emit(engine, amplitude: 0.001, count: 15)  // ≈ 22290 > порог 16000 — закрывает
+        emit(engine, amplitude: 0.001, count: 15)  // ≈ 22290 > 16000 — closes
 
         XCTAssertEqual(box.deliveries.count, 1)
         let seg = box.deliveries[0].samples
@@ -734,10 +727,9 @@ final class AudioServiceVADTests: XCTestCase {
         XCTAssertEqual(seg, Array(samples.prefix(seg.count)), "сегмент — префикс записи, без хвостовой паузы")
     }
 
-    /// Границы сегмента не выходят за запись: live-сегмент — префикс записи,
-    /// «хвост» стопа продолжает запись ровно со среза. Речь, дошедшая до самого
-    /// конца буфера записи, уходит в «хвост» целиком (без обрезки и без
-    /// пост-ролла сверх конца).
+    /// Segment bounds never exceed record: live segment — prefix of record,
+    /// stop tail continues record exactly at cut. Speech reaching record end
+    /// goes to tail whole (no cut, no post-roll beyond end).
     @objc func testDeliveredSegmentsStayWithinRecordBounds() {
         let engine = FakeEngine()
         let service = makeLiveService(engine: engine)
@@ -750,9 +742,9 @@ final class AudioServiceVADTests: XCTestCase {
         }
 
         emit(engine, amplitude: 0.2, count: 2)
-        emit(engine, amplitude: 0.001, count: 6)   // закрывает сегмент 1
-        emit(engine, amplitude: 0.2, count: 2)     // речь до самого конца записи
-        let samples = service.stop()               // стоп на открытом уттеренсе
+        emit(engine, amplitude: 0.001, count: 6)   // closes segment 1
+        emit(engine, amplitude: 0.2, count: 2)     // speech to record end
+        let samples = service.stop()               // stop on open utterance
 
         XCTAssertEqual(box.deliveries.count, 2, "сегмент 1 (live) + «хвост» 2 (стоп)")
         let seg1 = box.deliveries[0].samples
@@ -768,8 +760,8 @@ final class AudioServiceVADTests: XCTestCase {
 
     // MARK: - «Хвост» stop() без пост-ролла
 
-    /// Пост-ролл применяется ТОЛЬКО к live-закрытию; «хвост» stop() режется по
-    /// последней речи (сэмплы тишины паузы и пост-ролла в него не попадают).
+    /// Post-roll applied ONLY to live close; stop() tail cut at last speech
+    /// (pause silence and post-roll samples do not get in).
     @objc func testTailHasNoPostRoll() {
         let engine = FakeEngine()
         let service = makeLiveService(engine: engine)
@@ -782,14 +774,14 @@ final class AudioServiceVADTests: XCTestCase {
         }
 
         emit(engine, amplitude: 0.2, count: 2)
-        emit(engine, amplitude: 0.001, count: 2)  // пауза НЕ закрыла: стоп на открытом уттеренсе
+        emit(engine, amplitude: 0.001, count: 2)  // pause did NOT close: stop on open utterance
         let samples = service.stop()
 
         XCTAssertEqual(box.deliveries.count, 1)
         XCTAssertTrue(box.deliveries[0].isTail, "незакрытый уттеренс — «хвост» stop()")
         let tail = box.deliveries[0].samples
-        // Речь + звонящий буфер тишины (~3×1486). Примени пост-ролл — было бы
-        // ≥5944 (весь буфер) — диапазон это ловит.
+        // Speech + ringing silence buffer (~3×1486). Apply post-roll — would be
+        // ≥5944 (whole buffer) — range catches it.
         XCTAssertTrue(tail.count > 4200 && tail.count < 4900, "«хвост» без пост-ролла")
         XCTAssertEqual(tail, Array(samples.prefix(tail.count)), "«хвост» — префикс записи")
         XCTAssertTrue(tail.count < samples.count, "тишина паузы (и пост-ролл) в «хвост» не попала")
@@ -797,10 +789,10 @@ final class AudioServiceVADTests: XCTestCase {
 
     // MARK: - Сброс liveLastCutIndex между сеансами
 
-    /// Pre-roll-кламп liveLastCutIndex живёт ТОЛЬКО внутри сеанса: новый сеанс
-    /// начинает с чистых границ. Если бы срез не сбрасывался между сеансами,
-    /// «хвост» второго сеанса зажался бы старым срезом за концом буфера и вышел
-    /// бы пустым (потеря первой реплики).
+    /// liveLastCutIndex pre-roll clamp lives ONLY inside session: new session
+    /// starts with clean bounds. If cut were kept across sessions, second
+    /// session tail would be clamped by old cut past buffer end and come out
+    /// empty (first reply lost).
     @objc func testLiveLastCutIndexResetsOnNewRecording() {
         let engine = FakeEngine()
         let service = makeLiveService(engine: engine)
@@ -813,9 +805,9 @@ final class AudioServiceVADTests: XCTestCase {
         }
 
         emit(engine, amplitude: 0.2, count: 2)
-        emit(engine, amplitude: 0.001, count: 6)   // сегмент доставлен → liveLastCutIndex = пост-ролл
+        emit(engine, amplitude: 0.001, count: 6)   // segment delivered → liveLastCutIndex = post-roll
         XCTAssertEqual(box.deliveries.count, 1)
-        _ = service.stop()                          // уттеренс закрыт паузой — «хвоста» нет
+        _ = service.stop()                          // closed by pause — no tail
 
         guard runStart(service) else {
             XCTFail("повторный старт должен пройти", file: #file, line: #line)
@@ -833,13 +825,12 @@ final class AudioServiceVADTests: XCTestCase {
 
     // MARK: - Чанки при непрерывной речи (task #142)
 
-    /// Непрерывная речь длиннее окна (35 буферов × 1486 ≈ 52010 ≥ 48000) +
-    /// микро-пауза (4 буфера тишины → с учётом звонящего первого буфера
-    /// накопленные 3×1486 = 4458 ≥ 4000) → чанк доставляется РОВНО один, ДО
-    /// полной паузы 1 c (4458 ≪ 16000): текст выводится, пока человек говорит.
-    /// Пауза 1.0 c выбрана, чтобы полная пауза НЕ сработала раньше чанка
-    /// (для дефолтной 0.2 c порог 3200 меньше микро-паузы 4000 — чанк не был
-    /// бы различим от обычного закрытия).
+    /// Continuous speech longer than window (35 buffers × 1486 ≈ 52010 ≥ 48000)
+    /// + micro-pause (4 silence buffers → with ringing first buffer
+    /// accumulated 3×1486 = 4458 ≥ 4000) → chunk delivered EXACTLY one, before
+    /// full 1 s pause: text shown while person talks. Pause 1.0 s chosen so
+    /// full pause does NOT fire before chunk (for default 0.2 s threshold 3200
+    /// < micro-pause 4000 — chunk indistinguishable from normal close).
     @objc func testContinuousSpeechDeliversChunkOnMicroPause() {
         let engine = FakeEngine()
         let service = makeLiveService(engine: engine, pause: 1.0)
@@ -851,15 +842,15 @@ final class AudioServiceVADTests: XCTestCase {
             return
         }
 
-        emit(engine, amplitude: 0.2, count: 35)      // речь ≈ 52010 ≥ окно 48000
-        emit(engine, amplitude: 0.001, count: 4)     // микро-пауза 4458 ≥ 4000
+        emit(engine, amplitude: 0.2, count: 35)      // speech ≈ 52010 ≥ window 48000
+        emit(engine, amplitude: 0.001, count: 4)     // micro-pause 4458 ≥ 4000
 
         XCTAssertEqual(box.deliveries.count, 1, "чанк доставлен на микро-паузе — ДО полной паузы 1 c")
         XCTAssertFalse(box.deliveries[0].isTail, "чанк из середины речи — не хвост")
         let seg = box.deliveries[0].samples
-        // Речевой блок (35 речь + звонящий буфер тишины = 36×1486 ≈ 53496) +
-        // пост-ролл 4000 ≈ 57496. Диапазон 55000…60000 не дотягивается ни без
-        // пост-ролла, ни при затягивании чанка всей паузой.
+        // Speech block (35 speech + ringing silence buffer = 36×1486 ≈ 53496) +
+        // post-roll 4000 ≈ 57496. Range 55000…60000 unreachable without
+        // post-roll or with chunk stretched by whole pause.
         XCTAssertTrue(seg.count > 55000 && seg.count < 60000, "чанк = речь + пост-ролл 0.25 c")
         guard let attack = firstLoudIndex(seg, threshold: 3000) else {
             XCTFail("в чанке должна быть речь", file: #file, line: #line)
@@ -868,16 +859,16 @@ final class AudioServiceVADTests: XCTestCase {
         XCTAssertTrue(attack < 100, "чанк начинается с речи — атака не срезана")
         XCTAssertTrue(seg.suffix(4000).allSatisfy { abs(Int($0)) < 100 },
             "пост-ролл 0.25 c тишины сохранён в конце чанка")
-        // Чанк вырезан на микро-паузе → VAD сброшен, при стопе «хвоста» нет.
+        // Chunk cut on micro-pause → VAD reset, stop gives no tail.
         _ = service.stop()
         XCTAssertEqual(box.deliveries.count, 1)
     }
 
-    /// Речь КОРОЧЕ окна (10 буферов ≈ 14860 < 48000): микро-пауза 4458 ≥ 4000
-    /// НЕ режет — уттеренс живёт, последующая речь продлевает ТОТ ЖЕ уттеренс
-    /// (аналог testShortInternalPauseKeepsUtteranceAlive: межсловный пробел не
-    /// тайкает сегмент). Закрывает только полная пауза 1 c — единый сегмент
-    /// на обе порции речи.
+    /// Speech SHORTER than window (10 buffers ≈ 14860 < 48000): micro-pause
+    /// 4458 ≥ 4000 does NOT cut — utterance lives, later speech extends SAME
+    /// utterance (cf. testShortInternalPauseKeepsUtteranceAlive: word-gap does
+    /// not tick segment). Only full 1 s pause closes — one segment over both
+    /// speech portions.
     @objc func testShortSpeechMicroPauseDoesNotDeliver() {
         let engine = FakeEngine()
         let service = makeLiveService(engine: engine, pause: 1.0)
@@ -890,19 +881,19 @@ final class AudioServiceVADTests: XCTestCase {
         }
 
         emit(engine, amplitude: 0.2, count: 10)
-        emit(engine, amplitude: 0.001, count: 4)     // микро-пауза, но речь < окна
+        emit(engine, amplitude: 0.001, count: 4)     // micro-pause, but speech < window
         XCTAssertEqual(box.deliveries.count, 0, "речь < окна — микро-пауза НЕ режет")
 
-        emit(engine, amplitude: 0.2, count: 3)       // речь продлевает ТОТ ЖЕ уттеренс
+        emit(engine, amplitude: 0.2, count: 3)       // speech extends SAME utterance
         XCTAssertEqual(box.deliveries.count, 0, "новой речи внутри живого уттеренса — второй не открывается")
 
-        emit(engine, amplitude: 0.001, count: 12)    // ≈ 16346 ≥ 16000 — полная пауза закрывает
+        emit(engine, amplitude: 0.001, count: 12)    // ≈ 16346 ≥ 16000 — full pause closes
         XCTAssertEqual(box.deliveries.count, 1, "обе порции речи закрыты ОДНИМ сегментом")
         XCTAssertFalse(box.deliveries[0].isTail)
         let seg = box.deliveries[0].samples
-        // Речь (10 + звон + 3 = 14×1486 ≈ 20804) + внутренняя пауза (4×1486)
-        // + пост-ролл 4000 ≈ 30748. Диапазон 28000…33000 гарантирует, что ОБЕ
-        // порции речи в сегменте (только вторая порция — ~8452, не дотянуться).
+        // Speech (10 + ring + 3 = 14×1486 ≈ 20804) + inner pause (4×1486) +
+        // post-roll 4000 ≈ 30748. Range 28000…33000 guarantees BOTH speech
+        // portions in segment (only second portion — ~8452, unreachable).
         XCTAssertTrue(seg.count > 28000 && seg.count < 33000, "обе порции речи — один сегмент")
         guard let attack = firstLoudIndex(seg, threshold: 3000) else {
             XCTFail("в сегменте должна быть речь", file: #file, line: #line)
@@ -916,11 +907,11 @@ final class AudioServiceVADTests: XCTestCase {
         XCTAssertEqual(box.deliveries.count, 1, "уттеренс закрыт полной паузой — хвоста нет")
     }
 
-    /// Граница окна РОВНО: 31 буфер × 1486 = 46066 (+ звон первого буфера
-    /// тишины 1486 = 47552) < 48000 — микро-пауза НЕ режет, уттеренс живёт;
-    /// следующий буфер речи доводит накопление до 49038 ≥ 48000 — ближайшая
-    /// микро-пауза режет чанк. Обе стороны границы «48000 ± буфер» в одном
-    /// тесте: ниже — молчание, от пересечения — доставка.
+    /// Window edge EXACTLY: 31 buffers × 1486 = 46066 (+ ringing first silence
+    /// buffer 1486 = 47552) < 48000 — micro-pause does NOT cut, utterance
+    /// lives; next speech buffer reaches 49038 ≥ 48000 — nearest micro-pause
+    /// cuts chunk. Both sides of "48000 ± buffer" in one test: below —
+    /// silence, crossing — delivery.
     @objc func testChunkBoundaryExactlyAtWindow() {
         let engine = FakeEngine()
         let service = makeLiveService(engine: engine, pause: 1.0)
@@ -932,20 +923,20 @@ final class AudioServiceVADTests: XCTestCase {
             return
         }
 
-        // 31 буфер речи = 46066, + звон = 47552 < 48000: до окна не дотянулись.
+        // 31 speech buffers = 46066, + ring = 47552 < 48000: below window.
         emit(engine, amplitude: 0.2, count: 31)
-        emit(engine, amplitude: 0.001, count: 4)     // микро-пауза 4458 ≥ 4000
+        emit(engine, amplitude: 0.001, count: 4)     // micro-pause 4458 ≥ 4000
         XCTAssertEqual(box.deliveries.count, 0, "накопленная речь чуть ниже окна — микро-пауза не режет")
 
-        // +1 буфер речи: 49038 ≥ 48000 — окно пересечено, микро-пауза режет.
+        // +1 speech buffer: 49038 ≥ 48000 — window crossed, micro-pause cuts.
         emit(engine, amplitude: 0.2, count: 1)
         emit(engine, amplitude: 0.001, count: 4)
         XCTAssertEqual(box.deliveries.count, 1, "речь пересекла окно — ближайшая микро-пауза режет чанк")
         XCTAssertFalse(box.deliveries[0].isTail)
         let seg = box.deliveries[0].samples
-        // Речь от старта (31 + звон + 1 = 33×1486 ≈ 49038; со звоном второго
-        // блока тишины — 34×1486 ≈ 50524) + пост-ролл 4000. Замеры 57496…58982
-        // (две реализации звона закрывающего блока): диапазон накрывает оба.
+        // Speech from start (31 + ring + 1 = 33×1486 ≈ 49038; with second silence
+        // block ring — 34×1486 ≈ 50524) + post-roll 4000. Measured 57496…
+        // 58982 (two ring implementations of closing block): range covers both.
         XCTAssertTrue(seg.count > 56000 && seg.count < 62000, "чанк = вся речь от старта + пост-ролл 0.25 c")
         XCTAssertTrue(seg.contains { abs(Int($0)) >= 3000 }, "чанк содержит речь от начала записи")
 
@@ -953,11 +944,11 @@ final class AudioServiceVADTests: XCTestCase {
         XCTAssertEqual(box.deliveries.count, 1)
     }
 
-    /// После чанка новый речевой блок стартует РОВНО со среза первого чанка
-    /// (liveLastCutIndex = конец пост-ролла): «хвост» стопа продолжает запись
-    /// без наложения на уже доставленный чанк и без потери — ровно та же
-    /// проверка непрерывности, что testPreRollDoesNotOverlapPreviouslyDeliveredSegment,
-    /// но для чанка на микро-паузе.
+    /// After chunk new speech block starts EXACTLY at first chunk cut
+    /// (liveLastCutIndex = post-roll end): stop tail continues record with no
+    /// overlap onto delivered chunk and no loss — same continuity check as
+    /// testPreRollDoesNotOverlapPreviouslyDeliveredSegment, but for
+    /// micro-pause chunk.
     @objc func testChunkAfterDeliveryNextSpeechNoOverlap() {
         let engine = FakeEngine()
         let service = makeLiveService(engine: engine, pause: 1.0)
@@ -969,12 +960,12 @@ final class AudioServiceVADTests: XCTestCase {
             return
         }
 
-        emit(engine, amplitude: 0.2, count: 35)      // чанк 1 ≈ 57496 (см. первый тест)
-        emit(engine, amplitude: 0.001, count: 4)     // микро-пауза — чанк доставлен
+        emit(engine, amplitude: 0.2, count: 35)      // chunk 1 ≈ 57496 (see first test)
+        emit(engine, amplitude: 0.001, count: 4)     // micro-pause — chunk delivered
         XCTAssertEqual(box.deliveries.count, 1, "чанк 1 доставлен на микро-паузе")
 
-        emit(engine, amplitude: 0.2, count: 2)       // «ещё сказал» после чанка
-        let samples = service.stop()                 // стоп на открытом уттеренсе — «хвост»
+        emit(engine, amplitude: 0.2, count: 2)       // "said more" after chunk
+        let samples = service.stop()                 // stop on open utterance — tail
 
         XCTAssertEqual(box.deliveries.count, 2, "чанк 1 + «хвост» стопа")
         XCTAssertFalse(box.deliveries[0].isTail)
@@ -982,9 +973,9 @@ final class AudioServiceVADTests: XCTestCase {
         let seg1 = box.deliveries[0].samples
         let tail = box.deliveries[1].samples
 
-        // Непрерывность по полной записи: хвост начинается РОВНО со среза
-        // чанка (конец пост-ролла), а не раньше (ранее — наложение/дубль) и
-        // не позже (ранее доставленное не теряется).
+        // Continuity over whole record: tail starts EXACTLY at chunk cut (post-roll
+        // end), not earlier (earlier — overlap/duplicate) and not later
+        // (earlier delivered not lost).
         XCTAssertEqual(seg1, Array(samples.prefix(seg1.count)), "чанк 1 — префикс записи")
         XCTAssertEqual(tail, Array(samples.dropFirst(seg1.count)), "«хвост» продолжает запись со среза чанка — без наложения")
         XCTAssertEqual(seg1.count + tail.count, samples.count, "чанк + «хвост» = вся запись, без потерь")

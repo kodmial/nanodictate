@@ -3,42 +3,42 @@ import Foundation
 // MARK: - По-словный diff для финального прохода пошаговой диктовки
 
 //
-// Сравнивает уже-вставленный (чанками) текст с финальным текстом всего WAV и
-// выделяет ОДИН непрерывный диапазон изменений (префикс/суффикс по общим
-// словам, как рекурсивный LCS по словам). Один диапазон — одно клавиатурное
-// действие в конце вставленного текста: undo пользователя не ломается.
+// Diffs already-inserted (chunked) text vs final text of whole WAV and emits
+// ONE contiguous change range (prefix/suffix over common words, recursive LCS
+// over words). One range = one keyboard action at end of inserted text: user
+// undo stays intact.
 //
-// Гранулярность — слова: даже точечная правка внутри слова целиком меняет это
-// слово («карова» → «корова» заменяет слово). Это намеренно: на клавиатуре
-// проще заменить целое слово, чем попасть в одну букву.
+// Granularity — words: even a point fix inside a word replaces that whole word
+// ("карова" → "корова" replaces the word). Deliberate: on keyboard, replacing
+// a whole word beats hitting a single letter.
 
 public enum WordDiff {
-  /// Результат diff: изменённый диапазон + «хвосты» для одного действия
-  /// replaceRange (backspace хвоста старого текста, печать хвоста нового).
+  /// Diff result: changed range + "tails" for one replaceRange action
+  /// (backspace over old text tail, print new text tail).
   public struct Change: Equatable {
-    /// Вставленный (чанками) текст.
+    /// Inserted (chunked) text.
     public let oldText: String
-    /// Финальный текст (весь WAV одним запросом).
+    /// Final text (whole WAV in one request).
     public let newText: String
 
-    /// Только изменённые слова старого текста (между общим префиксом и
-    /// общим суффиксом), через один пробел. Пусто — чистая вставка.
+    /// Only changed words of old text (between common prefix and common
+    /// suffix), single-spaced. Empty — pure insertion.
     public let spanOld: String
-    /// Изменённые слова нового текста. Пусто — чистое удаление.
+    /// Changed words of new text. Empty — pure deletion.
     public let spanNew: String
-    /// Символьный offset начала расхождения в `oldText` (после общего
-    /// префикса) — для расчёта количества backspace.
+    /// Char offset of divergence start in `oldText` (after common prefix) —
+    /// for backspace count.
     public let spanStartOld: Int
-    /// Символьный offset начала расхождения в `newText`.
+    /// Char offset of divergence start in `newText`.
     public let spanStartNew: Int
 
-    /// Хвост старого текста от начала расхождения до конца: ровно то, что
-    /// уйдёт под backspace (одно действие).
+    /// Old text tail from divergence start to end: exactly what backspace
+    /// removes (one action).
     public var tailOld: String {
       String(oldText[oldText.index(oldText.startIndex, offsetBy: spanStartOld)...])
     }
 
-    /// Хвост нового текста от начала расхождения до конца: что печатать.
+    /// New text tail from divergence start to end: what to print.
     public var tailNew: String {
       String(newText[newText.index(newText.startIndex, offsetBy: spanStartNew)...])
     }
@@ -60,21 +60,21 @@ public enum WordDiff {
     }
   }
 
-  /// По-словный diff между вставленным и финальным текстом.
-  /// nil — изменений нет (тексты совпали по словам).
+  /// Word-level diff between inserted and final text.
+  /// nil — no changes (texts match word-wise).
   public static func change(old: String, new: String) -> Change? {
     guard old != new else { return nil }
     let oldWords = words(old)
     let newWords = words(new)
 
-    // Общий префикс по словам.
+    // Common prefix by words.
     var prefix = 0
     while prefix < oldWords.count, prefix < newWords.count,
       oldWords[prefix] == newWords[prefix]
     {  // swiftlint:disable:this opening_brace
       prefix += 1
     }
-    // Общий суффикс по словам (не пересекая префикс).
+    // Common suffix by words (not crossing prefix).
     var suffix = 0
     while suffix < oldWords.count - prefix, suffix < newWords.count - prefix,
       oldWords[oldWords.count - 1 - suffix] == newWords[newWords.count - 1 - suffix]
@@ -82,7 +82,7 @@ public enum WordDiff {
       suffix += 1
     }
 
-    // Слова совпали (различие только в пробелах/регистре вне слов) — не трогаем.
+    // Words equal — only whitespace/case differ outside words; leave as-is.
     if prefix == oldWords.count, prefix == newWords.count {
       return nil
     }
@@ -100,24 +100,23 @@ public enum WordDiff {
     )
   }
 
-  /// Разбиение на слова (run-ы не-пробелов).
+  /// Split into words (non-whitespace runs).
   private static func words(_ text: String) -> [String] {
     text.split { $0.isWhitespace }.map(String.init)
   }
 
-  /// Хвост текста после первых `wordCount` слов — по СИМВОЛЬНОМУ смещению
-  /// (не реконструкция из токенов: внутренняя пунктуация/пробелы целы).
-  /// Один пробел (или несколько) после последнего вырезанного слова остаётся
-  /// хвосту — вызывающий (временнáя сшивка сегментов) обрезает ведущие
-  /// пробелы сам. `wordCount >= числа слов` → пустая строка.
+  /// Text tail after first `wordCount` words — by CHARACTER offset (not token
+  /// reconstruction: inner punctuation/whitespace intact). One (or more) space
+  /// after last cut word stays on tail — caller (temporal segment stitching)
+  /// trims leading spaces itself. `wordCount >= word count` → empty string.
   public static func tailAfterWords(_ wordCount: Int, in text: String) -> String {
     let offset = offsetAfter(words: wordCount, in: text)
     guard offset < text.count else { return "" }
     return String(text[text.index(text.startIndex, offsetBy: offset)...])
   }
 
-  /// Символьный offset сразу после конца n-го слова (n = 0 → 0).
-  /// Пробелы после последнего общего слова остаются «хвосту».
+  /// Char offset right after end of n-th word (n = 0 → 0).
+  /// Spaces after last common word stay on "tail".
   private static func offsetAfter(words wordCount: Int, in text: String) -> Int {
     guard wordCount > 0 else { return 0 }
     let chars = Array(text)

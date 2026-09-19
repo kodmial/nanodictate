@@ -1,23 +1,17 @@
 import CoreGraphics
 import Foundation
 
-/// Состояния цикла диктовки. Объявлены в ядре (а не в Agent-таргете), чтобы
-/// решение о жизненном цикле оверлея было чистым и покрывалось юнит-тестами
-/// без запуска агента.
+/// Dictation cycle states; in core so overlay lifecycle stays pure and unit-testable.
 public enum NanoDictateState {
   case idle
   case recording
   case transcribing
 }
 
-/// Чистая логика жизненного цикла оверлея: когда его можно прятать.
-///
-/// Оверлей живёт ВЕСЬ цикл записи/распознавания и прячется только из
-/// терминальных точек (стоп/ошибка/вставка/отмена/лимит). Скрытие разрешено
-/// только вне активного цикла (idle); во время recording/transcribing hide
-/// запрещён — иначе пользователь потеряет индикатор посреди сеанса.
+/// Pure overlay hide rules: lives whole cycle, hides only at terminal points
+/// (stop/error/insert/cancel/limit); never mid-recording/transcribing.
 public enum OverlayLifecycle {
-  /// Можно ли прятать оверлей в состоянии `currentState`.
+  /// May overlay hide in `currentState`?
   public static func shouldHide(currentState: NanoDictateState) -> Bool {
     switch currentState {
     case .idle:
@@ -27,13 +21,8 @@ public enum OverlayLifecycle {
     }
   }
 
-  /// Планирует скрытие оверлея с задержкой `delay` (оставляет на экране
-  /// финальный статус «Завершаю…»/«Отменено»), но к моменту срабатывания
-  /// перепроверяет состояние через `stateProvider`: если цикл уже начат
-  /// заново (.recording/.transcribing) — оверлей остаётся видимым весь
-  /// новый цикл, hide не вызывается.
-  ///
-  /// Контракт: одно планирование → не более одного вызова `hide()`.
+  /// Hide after delay, re-checking state at fire: new cycle keeps overlay visible.
+  /// Contract: one schedule → at most one `hide()`.
   public static func scheduleHide(
     after delay: TimeInterval,
     stateProvider: @escaping () -> NanoDictateState,

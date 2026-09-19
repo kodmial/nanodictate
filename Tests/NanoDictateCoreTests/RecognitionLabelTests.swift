@@ -2,15 +2,13 @@ import Foundation
 import AppKit
 @testable import NanoDictateCore
 
-/// Тесты метки оверлея «через что идёт распознавание» (RecognitionLabel).
+/// Tests of overlay "what recognition goes through" label (RecognitionLabel).
 ///
-/// КРИТИЧЕСКОЕ требование: метка обязана браться из ТОГО ЖЕ разрешённого
-/// (resolved) провайдера, из которого агент строит реальный запросный путь
-/// (Transcriber + транспорт), а НЕ перечитываться из config.toml в момент
-/// показа оверлея и не хардкодиться. Единый источник истины — resolved-конфиг
-/// сессии: в агенте это `resolvedConfig` (тот же объект, из которого в init
-/// собран Transcriber), здесь — config, полученный `AppConfig.parse` с тем же
-/// резолвом `active_provider`.
+/// CRITICAL: label MUST come from the SAME resolved provider the agent uses
+/// to build the real request path (Transcriber + transport) — NOT re-read
+/// from config.toml at overlay time, NOT hardcoded. Single source of truth:
+/// session resolved config (`resolvedConfig` in agent; here config from
+/// `AppConfig.parse` with the same `active_provider` resolution).
 final class RecognitionLabelTests: XCTestCase {
 
     override func setUp() {
@@ -36,8 +34,8 @@ final class RecognitionLabelTests: XCTestCase {
     // MARK: - (а) Жёсткая связка: метка == провайдер/модель того же resolved-провайдера
 
     @objc func testLabelMatchesResolvedActiveProvider() throws {
-        // active_provider = "gigaam": effective-конфиг берёт поля секции gigaam
-        // (как агент при построении Transcriber) — метка обязана называть её.
+        // active_provider = "gigaam": effective config takes gigaam section fields
+        // (like agent building Transcriber) — label must name it.
         let config = try AppConfig.parse(Self.twoProvidersTOML)
 
         XCTAssertEqual(config.activeProvider, "gigaam")
@@ -47,8 +45,8 @@ final class RecognitionLabelTests: XCTestCase {
     }
 
     @objc func testLabelChangesWhenActiveProviderChanges() throws {
-        // Смена активного провайдера в тестовом конфиге обязана менять метку:
-        // ярлык следует за resolved-провайдером, а не зашит константой.
+        // Changing active provider must change the label:
+        // label follows resolved provider, not a hardcoded constant.
         let content = Self.twoProvidersTOML.replacingOccurrences(
             of: "active_provider = \"gigaam\"",
             with: "active_provider = \"groq\""
@@ -62,25 +60,24 @@ final class RecognitionLabelTests: XCTestCase {
     }
 
     @objc func testLabelDerivedFromSameResolvedFieldsAsTranscriber() throws {
-        // Жёсткая связка на уровне значений: метка строится из тех же
-        // resolved-полей (config.activeProvider / config.model / config.transport),
-        // что агент кладёт в Transcriber. Сверка с ручной сборкой из них же —
-        // расхождение невозможно, пока источник один.
+        // Value-level binding: label built from same resolved fields
+        // (activeProvider / model / transport) agent puts in Transcriber.
+        // Cross-check vs manual build — drift impossible while source is single.
         let config = try AppConfig.parse(Self.twoProvidersTOML)
 
         let manual = RecognitionLabel.build(
-            provider: config.activeProvider, // разрешённый id активной секции
+            provider: config.activeProvider, // resolved id of active section
             model: config.model,
             route: RecognitionLabel.route(transport: config.transport)
         )
         XCTAssertEqual(RecognitionLabel.forSession(config), manual)
-        // Модель/транспорт метки — ровно те, что в effective-конфиге (source of truth).
+        // Label model/transport — exactly those in effective config (source of truth).
         XCTAssertTrue(RecognitionLabel.forSession(config).contains(config.model))
     }
 
     @objc func testLabelUsesFirstProvider_WhenNoActiveProvider() throws {
-        // Секции без active_provider (документированный сценарий) — активен
-        // первый по порядку. Тот же резолв, что в resolveActiveProvider.
+        // Sections without active_provider (documented scenario): first in order
+        // active. Same resolution as in resolveActiveProvider.
         let content = """
         [providers.groq]
         base_url = "https://groq.test/v1"
@@ -101,7 +98,7 @@ final class RecognitionLabelTests: XCTestCase {
     }
 
     @objc func testActiveProviderID_FollowsResolutionRules() throws {
-        // Явный active_provider → он; пусто + секции → первый; legacy без секций → nil.
+        // Explicit active_provider → it; empty + sections → first; legacy without sections → nil.
         let withActive = try AppConfig.parse(Self.twoProvidersTOML)
         XCTAssertEqual(RecognitionLabel.activeProviderID(in: withActive), "gigaam")
 
@@ -122,9 +119,9 @@ final class RecognitionLabelTests: XCTestCase {
     // MARK: - Отображаемое имя провайдера (name из конфига, фоллбэк на id)
 
     @objc func testLabel_UsesProviderDisplayNameFromConfig() throws {
-        // name = "MWS" у секции gigaam: метка показывает displayName, а не
-        // «лживый» id («GigaAM») — имя берётся из ТОЙ ЖЕ секции, чьи поля
-        // агент скопировал в effective-конфиг. Итог: «MWS · gigaam-v3».
+        // name = "MWS" on gigaam section: label shows displayName, not "lying" id
+        // ("GigaAM") — name taken from the SAME section whose fields agent
+        // copied into effective config. Result: "MWS · gigaam-v3".
         let config = try AppConfig.parse("""
         active_provider = "gigaam"
 
@@ -138,7 +135,7 @@ final class RecognitionLabelTests: XCTestCase {
         XCTAssertEqual(RecognitionLabel.forSession(config), "MWS · gigaam-v3")
         XCTAssertEqual(RecognitionLabel.displayName(for: "gigaam", in: config), "MWS")
 
-        // Раздельные части шапки — тем же displayName.
+        // Split header parts — same displayName.
         let parts = RecognitionLabel.sessionParts(config)
         XCTAssertEqual(parts.provider, "MWS")
         XCTAssertEqual(parts.model, "gigaam-v3")
@@ -146,7 +143,7 @@ final class RecognitionLabelTests: XCTestCase {
     }
 
     @objc func testLabel_FallsBackToProviderID_WhenNameEmpty() throws {
-        // name пустой — фоллбэк на id: метка не пропадает и не врёт.
+        // Empty name → fallback to id: label not lost, not lying.
         let config = try AppConfig.parse("""
         active_provider = "gigaam"
 
@@ -162,7 +159,7 @@ final class RecognitionLabelTests: XCTestCase {
     }
 
     @objc func testLabel_FallsBackToProviderID_WhenNameWhitespaceOnly() throws {
-        // Пробельный name == пустой: на метку не влияет.
+        // Whitespace-only name == empty: no effect on label.
         let config = try AppConfig.parse("""
         active_provider = "gigaam"
 
@@ -176,8 +173,8 @@ final class RecognitionLabelTests: XCTestCase {
     }
 
     @objc func testLabel_FallsBackToProviderID_WhenNameAbsent() {
-        // name не задан вовсе (двухпровайдерный кейс) — id остаётся меткой:
-        // существующие ярлыки не меняются без явного name в конфиге.
+        // No name at all (two-provider case): id stays the label —
+        // existing labels unchanged without explicit name in config.
         let config = try? AppConfig.parse(Self.twoProvidersTOML)
         XCTAssertEqual(config.map(RecognitionLabel.forSession) ?? "", "gigaam · gigaam-v3")
         XCTAssertEqual(RecognitionLabel.displayName(for: "gigaam", in: config ?? AppConfig.defaults), "gigaam")
@@ -199,8 +196,8 @@ final class RecognitionLabelTests: XCTestCase {
     }
 
     @objc func testLabelFallback_EmptyModelWithRelayKeepsRoute() throws {
-        // Пустая модель при relay-транспорте: маршрут остаётся («через что реально
-        // идёт запрос»), модель не показывается.
+        // Empty model with relay transport: route stays ("through what the request
+        // really goes"), model not shown.
         let config = try AppConfig.parse("""
         active_provider = "groq"
 
@@ -213,7 +210,7 @@ final class RecognitionLabelTests: XCTestCase {
     }
 
     @objc func testLabelFallback_NoProviderResolvedShowsDash() throws {
-        // Чистый legacy-конфиг (секций нет) — провайдер не разрешился вовсе: «—».
+        // Pure legacy config (no sections): provider unresolved — "—".
         let legacy = try AppConfig.parse("""
         base_url = "https://legacy.test/v1"
         model = "gigaam-v3"
@@ -221,13 +218,13 @@ final class RecognitionLabelTests: XCTestCase {
         XCTAssertTrue(legacy.providers.isEmpty)
         XCTAssertEqual(RecognitionLabel.forSession(legacy), "—")
 
-        // И дефолтный конфиг (нет файла) — тоже «—», а не секреты/модель.
+        // Default config (no file) — also "—", not secrets/model.
         let defaults = AppConfig.defaults
         XCTAssertEqual(RecognitionLabel.forSession(defaults), "—")
     }
 
     @objc func testLabelFallback_EmptyTransportIsDirect() throws {
-        // transport пустой/отсутствует → прямой маршрут, без стрелки.
+        // Empty/missing transport → direct route, no arrow.
         let config = try AppConfig.parse(Self.twoProvidersTOML)
         XCTAssertEqual(config.transport, "", "у gigaam транспорт не задан — наследует пустой корневой")
         XCTAssertEqual(RecognitionLabel.route(transport: config.transport), .direct)
@@ -238,9 +235,9 @@ final class RecognitionLabelTests: XCTestCase {
     }
 
     @objc func testLabelUsesResolvedTransport_InheritedFromRoot() throws {
-        // Транспорт секции не задан, но корневой задан — effective transport
-        // наследует корневой (та же логика Config.apply, из которой агент
-        // решает про CookieRelayProvider). Метка показывает реальный маршрут.
+        // Section transport unset, root set: effective transport inherits root
+        // (Config.apply logic agent uses for CookieRelayProvider).
+        // Label shows the real route.
         let content = """
         transport = "infinityfree"
         active_provider = "gigaam"
@@ -256,9 +253,8 @@ final class RecognitionLabelTests: XCTestCase {
 
     // MARK: - Примитивы построителя
 
-    // displayProviderName/serverName удалены: мёртвый код в проде (не
-    // участвуют в forSession/build — ярлык строится из id-провайдера,
-    // а не отображаемого имени/host).
+    // displayProviderName/serverName removed: dead prod code (not in
+    // forSession/build — label built from provider id, not display name/host).
 
     @objc func testBuild_DirectAndEmptyModel() {
         XCTAssertEqual(RecognitionLabel.build(provider: "gigaam", model: "gigaam-v3"), "gigaam · gigaam-v3")
@@ -294,14 +290,14 @@ final class RecognitionLabelTests: XCTestCase {
         controller.setSTTLabel("gigaam · gigaam-v3")
         XCTAssertEqual(controller.testState?.sttLabel, "gigaam · gigaam-v3")
 
-        // Смена значения (новая сессия) — состояние обновляется, панель не трогается.
+        // Changed value (new session): state updates, panel untouched.
         controller.setSTTLabel("cookie-relay→groq · whisper-large-v3")
         XCTAssertEqual(controller.testState?.sttLabel, "cookie-relay→groq · whisper-large-v3")
         controller.hide()
     }
 
     @objc func testSetSTTLabel_EmptyHidesLabelInState() {
-        // Пустая строка — ярлык скрыт (вью показывает Text только при непустом).
+        // Empty string — label hidden (view shows Text only when non-empty).
         let controller = OverlayController()
         controller.setSTTLabel("")
         XCTAssertEqual(controller.testState?.sttLabel, "")
@@ -309,9 +305,9 @@ final class RecognitionLabelTests: XCTestCase {
     }
 
     @objc func testResetPhaseAndHide_ClearSTTLabel() {
-        // Метка живёт только в течение цикла: resetPhase() (терминальные точки
-        // цикла, включая undo-путь «Отмена вставки») и hide() обязаны сбрасывать
-        // sttLabel, чтобы на панели статуса не оставалась метка ПРОШЛОЙ сессии.
+        // Label lives only within a cycle: resetPhase() (terminal cycle points,
+        // incl. undo path "cancel insert") and hide() must clear sttLabel —
+        // no LAST-session label left on the status panel.
         let controller = OverlayController()
         controller.setSTTLabel("gigaam · gigaam-v3")
         controller.resetPhase()
@@ -325,12 +321,12 @@ final class RecognitionLabelTests: XCTestCase {
     // MARK: - parts() — раздельные части шапки {provider, model}
 
     @objc func testSessionParts_DirectRoute() throws {
-        // Значения те же, что in forSession, но раздельно.
+        // Same values as forSession, but split apart.
         let config = try AppConfig.parse(Self.twoProvidersTOML)
         let parts = RecognitionLabel.sessionParts(config)
         XCTAssertEqual(parts.provider, "gigaam")
         XCTAssertEqual(parts.model, "gigaam-v3")
-        // Склейка частей с разделителем == строка forSession (не разойдутся).
+        // Parts joined with separator == forSession string (cannot drift apart).
         XCTAssertEqual("\(parts.provider) · \(parts.model)", RecognitionLabel.forSession(config))
     }
 
@@ -379,8 +375,8 @@ final class RecognitionLabelTests: XCTestCase {
     }
 
     @objc func testParts_FromSessionLabel() {
-        // Рендер шапки идёт из строки сессии (setSTTLabel) — разбор обратно
-        // на {provider, model} без потерь.
+        // Header renders from session string (setSTTLabel) — parsed back
+        // to {provider, model} without loss.
         let label = RecognitionLabel.build(provider: "groq", model: "whisper-large-v3", route: .relay("cookie-relay"))
         XCTAssertEqual(label, "cookie-relay→groq · whisper-large-v3")
         let parts = RecognitionLabel.parts(fromLabel: label)
@@ -389,7 +385,7 @@ final class RecognitionLabelTests: XCTestCase {
     }
 
     @objc func testParts_FromLabelWithoutSeparator() {
-        // Legacy «—» и одиночный провайдер без модели: вся строка — провайдер.
+        // Legacy "—" and lone provider without model: whole string is provider.
         XCTAssertEqual(RecognitionLabel.parts(fromLabel: "—"),
                        RecognitionLabel.RecognitionLabelParts(provider: "—", model: ""))
         XCTAssertEqual(RecognitionLabel.parts(fromLabel: "gigaam"),
@@ -404,7 +400,7 @@ final class RecognitionLabelTests: XCTestCase {
     }
 
     @objc func testParts_RoundTripWithForSession() throws {
-        // Полный круг: sessionParts → build-склейка → parts(fromLabel:) == исходные.
+        // Full round: sessionParts → build join → parts(fromLabel:) == original.
         for content in [Self.twoProvidersTOML,
                         Self.twoProvidersTOML.replacingOccurrences(of: "gigaam", with: "groq")] {
             guard let config = try? AppConfig.parse(content) else { continue }

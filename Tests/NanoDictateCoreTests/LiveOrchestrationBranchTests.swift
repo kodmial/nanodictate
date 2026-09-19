@@ -3,29 +3,27 @@ import Foundation
 
 // MARK: - Полное структурное покрытие live-оркестрации (замечание ревью #112)
 //
-// LiveSegmentFailureTests покрыл только ветку segmentCount == 0. Здесь —
-// остальные ветки finishLiveRun и обработчиков (main.swift:832-1090):
-//   1) single-segment-skip (единственный сегмент + «хвост», без сбоев);
-//   2) tail-порядок («хвост» доставляется ДО finishLiveRun);
-//   3) watchdog-бюджет (превышение времени → failTranscription);
-//   4) отмена live-цикла (Esc: liveSession += 1, liveRunState = nil);
-//   5) пустой текст сегмента (STT вернул "" — НЕ выставляет anySegmentFailed).
+// LiveSegmentFailureTests covers only segmentCount == 0 branch. Here — the
+// rest of finishLiveRun and handler branches (main.swift:832-1090):
+//   1) single-segment-skip (one segment + tail, no failures);
+//   2) tail order (tail delivered BEFORE finishLiveRun);
+//   3) watchdog budget (timeout → failTranscription);
+//   4) live-run cancel (Esc: liveSession += 1, liveRunState = nil);
+//   5) empty segment text (STT "" — does NOT set anySegmentFailed).
 //
-// Логика приватная и живёт в executable-таргете NanoDictateAgent (тест-таргет
-// зависит только от NanoDictateCore), поэтому тестируется структурно — по
-// исходнику Sources/NanoDictateAgent/main.swift (тот же приём, что в
-// OverlayLifecycleTests / LiveSegmentFailureTests). Пустой STT-результат
-// дополнительно проверяется поведенчески напрямую в NanoDictateCore
-// (ChunkedPipeline.recognizeSegment — публичный).
+// Logic is private in executable target NanoDictateAgent (test target depends
+// only on NanoDictateCore), so tested structurally against
+// Sources/NanoDictateAgent/main.swift (same trick as
+// OverlayLifecycleTests / LiveSegmentFailureTests). Empty STT result also
+// checked behaviorally in NanoDictateCore (ChunkedPipeline.recognizeSegment — public).
 
 final class LiveOrchestrationBranchTests: XCTestCase {
 
     // MARK: - 1. single-segment-skip (finishLiveRun)
 
-    /// «Один сегмент без пауз»: единственный сегмент + «хвост» покрывает
-    /// запись до конца + не было сбоев → финальный проход ПРОПУСКАЕТСЯ,
-    /// но накопленный текст сегмента НЕ теряется (insertedText берётся из
-    /// runState.insertedText и уходит в completeChunkedInsertion).
+    /// One segment without pauses: single segment + tail covers full recording,
+    /// no failures → final pass SKIPPED, but accumulated segment text NOT lost
+    /// (insertedText from runState.insertedText goes into completeChunkedInsertion).
     @objc func testSingleSegmentSkip_PreservesTextAndSkipsFinalPass() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -55,10 +53,10 @@ final class LiveOrchestrationBranchTests: XCTestCase {
         )
     }
 
-    /// Паритет single-segment-skip: если «хвост» НЕ доставлен или сегмент
-    /// сбоил — условие пропуска не выполнено, и путь обязан упасть в общий
-    /// финальный проход ChunkedPipeline.finalize (который докрутит фразу по
-    /// всему WAV). В finishLiveRun ровно один такой разветвитель.
+    /// single-segment-skip parity: tail NOT delivered or segment failed — skip
+    /// condition unmet, path must fall into common final pass
+    /// ChunkedPipeline.finalize (finishes phrase over whole WAV). Only one
+    /// such branch in finishLiveRun.
     @objc func testSingleSegmentSkip_FallsBackToFinalize_WhenTailMissingOrFailed() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -81,11 +79,10 @@ final class LiveOrchestrationBranchTests: XCTestCase {
 
     // MARK: - 2. tail-порядок (tail → finalize)
 
-    /// При 2-м Alt (liveFinalize): синхронный audio.stop() отдаёт «хвост»
-    /// колбэком ДО возврата, и только ПОСЛЕ него finishLiveRun встаёт в
-    /// liveExecutor — серийная очередь гарантирует порядок tail → finalize.
-    /// Структурно: вызов audio.stop() в теле liveFinalize стоит РАНЬШЕ
-    /// submit-а finishLiveRun.
+    /// 2nd Alt (liveFinalize): sync audio.stop() delivers tail via callback
+    /// BEFORE return, then finishLiveRun submits to liveExecutor — serial
+    /// queue guarantees tail → finalize order. Structurally: audio.stop()
+    /// in liveFinalize body precedes finishLiveRun submit.
     @objc func testTailDeliveredBeforeFinalizeSubmit_ManualStop() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -107,12 +104,11 @@ final class LiveOrchestrationBranchTests: XCTestCase {
         )
     }
 
-    /// Лимитный путь (liveFinalizeFromSamples): «хвост» уже доставлен
-    /// onSpeechSegment ДО вызова (performLimitStop: tail → onRecordingLimitReached),
-    /// поэтому здесь НЕ должно быть audio.stop() и повторного снятия «хвоста» —
-    /// только страж и submit finishLiveRun. Контракт порядка зафиксирован
-    /// комментарием в handleRecordingLimitReached (той же функции, что
-    /// вызывает liveFinalizeFromSamples), а не в док-комментарии над ней.
+    /// Limit path (liveFinalizeFromSamples): tail already delivered by
+    /// onSpeechSegment before call (performLimitStop: tail → onRecordingLimitReached),
+    /// so no audio.stop() or second tail here — only guard and finishLiveRun
+    /// submit. Order contract fixed by comment in handleRecordingLimitReached
+    /// (same function that calls liveFinalizeFromSamples), not in doc above it.
     @objc func testTailDeliveredBeforeFinalizeSubmit_LimitPathHasNoSecondStop() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -124,17 +120,17 @@ final class LiveOrchestrationBranchTests: XCTestCase {
             body.contains("finishLiveRun(samples: samples, session: session, runState: runState)"),
             "лимитный путь обязан финализировать через тот же finishLiveRun"
         )
-        // Контракт «tail → onRecordingLimitReached» виден на стороне потребителя:
-        // handleRecordingLimitReached комментирует, что «хвост» уже отдан
-        // колбэком onSpeechSegment ДО вызова лимита, и сам audio.stop() не зовёт.
+        // Contract "tail → onRecordingLimitReached" visible on consumer side:
+        // handleRecordingLimitReached comments tail already delivered by
+        // onSpeechSegment before limit call, and does not call audio.stop() itself.
         let limitBody = Self.functionBody(named: "handleRecordingLimitReached", in: source)
         XCTAssertTrue(
             limitBody.contains("«хвост» уже отдан колбэком onSpeechSegment ДО"),
             "contract: клиент знает, что «хвост» доставлен ДО колбэка лимита"
         )
-        // Единственное упоминание audio.stop() — комментарий «(без audio.stop())»:
-        // реального повторного останова в лимитном пути нет (теardown случился
-        // в performLimitStop до колбэка лимита).
+        // Only audio.stop() mention is the "no audio.stop()" comment: no real
+        // second stop on limit path (teardown happened in performLimitStop
+        // before limit callback).
         let stopMentions = limitBody.components(separatedBy: "audio.stop()").count - 1
         XCTAssertEqual(
             stopMentions, 1,
@@ -150,8 +146,8 @@ final class LiveOrchestrationBranchTests: XCTestCase {
         )
     }
 
-    /// «Хвост» помечается флагом именно при доставке (isTail == true) — этот
-    /// флаг разблокирует single-segment-skip; без него финальный проход обязателен.
+    /// Tail flagged exactly at delivery (isTail == true) — unlocks
+    /// single-segment-skip; without it final pass is mandatory.
     @objc func testTailFlag_SetOnlyWhenIsTailDelivered() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -166,9 +162,9 @@ final class LiveOrchestrationBranchTests: XCTestCase {
         )
     }
 
-    /// Сегменты и «хвост» (subscribeLiveNanoDictate) идут в ТУ ЖЕ серийную
-    /// очередь liveExecutor, что и finishLiveRun — очередь сохраняет порядок
-    /// доставки (tail → finalize), и страж сессии стоит на входе.
+    /// Segments and tail (subscribeLiveNanoDictate) go to THE SAME serial
+    /// liveExecutor queue as finishLiveRun — queue keeps delivery order
+    /// (tail → finalize), session guard at entry.
     @objc func testSegmentsAndFinalize_ShareSerialExecutor() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -196,10 +192,10 @@ final class LiveOrchestrationBranchTests: XCTestCase {
 
     // MARK: - 3. watchdog-бюджет (liveFinalize / liveFinalizeFromSamples)
 
-    /// Страж фазы «обработка»: бюджет живого цикла масштабируется числом
-    /// запросов (незавершённые сегменты + «хвост» + финальный проход), и по
-    /// превышении сторожевого таймера цикл завершается явной failTranscription
-    /// («Таймаут STT»). Блок существует в ОБОИХ путях финализации.
+    /// Processing-phase guard: live-cycle budget scales with request count
+    /// (pending segments + tail + final pass); on timeout cycle ends with
+    /// explicit failTranscription (sttTimeoutMessage). Block exists in BOTH
+    /// finalize paths.
     @objc func testWatchdogBudget_BothFinalizePaths() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -227,10 +223,9 @@ final class LiveOrchestrationBranchTests: XCTestCase {
         }
     }
 
-    /// guard-ы сторожа: failTranscription при превышении бюджета срабатывает
-    /// ТОЛЬКО если цикл не сменился (processingSession == session) и всё ещё
-    /// фазе транскрибации (state == .transcribing). Новый цикл / уже
-    /// завершённый цикл не получают ложный таймаут.
+    /// Watchdog guards: failTranscription fires ONLY if cycle unchanged
+    /// (processingSession == session) and still transcribing
+    /// (state == .transcribing). New/ended cycle gets no spurious timeout.
     @objc func testWatchdog_GuardsPreventSpuriousTimeout() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -261,11 +256,11 @@ final class LiveOrchestrationBranchTests: XCTestCase {
 
     // MARK: - 4. Отмена live-цикла (Esc / handleCancel)
 
-    /// Esc во время записи аннулирует ЖИВОЙ цикл: audio.cancel() + liveSession
-    /// += 1 + liveRunState = nil. Уже напечатанные сегменты НЕ удаляются
-    /// (в handleCancel нет ни одного обращения к Inserter) — отмена лишь
-    /// запрещает ВСТАВКУ ещё не обработанных сегментов (страж liveSession у
-    /// живого runState протухает). Терминальный хвост — «Отменено» + hide.
+    /// Esc during recording annuls LIVE cycle: audio.cancel() + liveSession += 1
+    /// + liveRunState = nil. Printed segments NOT removed (handleCancel never
+    /// touches Inserter) — cancel only blocks INSERT of unprocessed segments
+    /// (liveSession guard on live runState goes stale). Terminal tail —
+    /// "Отменено" overlay + hide.
     @objc func testCancel_RecordingAnnulsLiveCycle() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -283,8 +278,8 @@ final class LiveOrchestrationBranchTests: XCTestCase {
         XCTAssertTrue(body.contains("state = .idle"), "отмена возвращает агента в idle")
     }
 
-    /// Esc во время transcribing: ставится токен отмены cancelRecognition —
-    /// результат вернувшегося STT-запроса не вставляется.
+    /// Esc during transcribing: sets cancelRecognition token — returning
+    /// STT request result not inserted.
     @objc func testCancel_TranscribingSetsCancelRecognition() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -294,10 +289,10 @@ final class LiveOrchestrationBranchTests: XCTestCase {
         XCTAssertTrue(body.contains("cancelRecognition = true"), "отмена фазы транскрибации ставит токен отмены")
     }
 
-    /// Судьба уже-напечатанного и отменённого runState: оба main-блока
-    /// handleLiveSegment (статус оверлея И инкрементальная вставка Inserter.append)
-    /// стражуются сессионным токеном — после отмены (liveSession сменился)
-    /// сегмент старого runState пропускается, что уже напечатано — остаётся.
+    /// Fate of printed + cancelled runState: both main handleLiveSegment blocks
+    /// (overlay status AND incremental Inserter.append) guarded by session
+    /// token — after cancel (liveSession changed) old runState segment skipped,
+    /// already printed stays.
     @objc func testCancel_InFlightSegmentGuardedFromInsert() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -317,10 +312,10 @@ final class LiveOrchestrationBranchTests: XCTestCase {
 
     // MARK: - 5. Пустой текст сегмента (STT вернул "" без исключения)
 
-    /// Текущее поведение: пустой результат STT НЕ считается сбоем — в успешной
-    /// части handleLiveSegment (до catch) нет ни одной записи в anySegmentFailed;
-    /// накопление идёт безусловно (пустая строка добавляется к insertedText,
-    /// promptParts, segmentCount). Флаг сбоя выставляется ТОЛЬКО в catch.
+    /// Current behavior: empty STT result NOT a failure — successful part of
+    /// handleLiveSegment (before catch) never writes anySegmentFailed;
+    /// accumulation unconditional (empty string added to insertedText,
+    /// promptParts, segmentCount). Failure flag set ONLY in catch.
     @objc func testEmptySegment_DoesNotMarkFailure_Structurally() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -351,9 +346,9 @@ final class LiveOrchestrationBranchTests: XCTestCase {
         )
     }
 
-    /// Поведенческая фиксация (NanoDictateCore доступен напрямую): recognizeSegment
-    /// при пустом STT-ответе НЕ бросает и возвращает пустые insertText/promptText —
-    /// «пустой текст» легитимный успех, обрабатывается структурой, а не ошибкой.
+    /// Behavioral pin (NanoDictateCore reachable directly): recognizeSegment on
+    /// empty STT response does NOT throw, returns empty insertText/promptText —
+    /// empty text is legitimate success, handled by structure, not error.
     @objc func testRecognizeSegment_EmptyTranscript_NoThrowNoFailure() {
         runAsync("testRecognizeSegment_EmptyTranscript_NoThrowNoFailure") {
             let result = try await ChunkedPipeline.recognizeSegment(
@@ -365,7 +360,7 @@ final class LiveOrchestrationBranchTests: XCTestCase {
             )
             XCTAssertEqual(result.insertText, "", "пустой STT-ответ даёт пустой insertText")
             XCTAssertEqual(result.promptText, "", "пустой STT-ответ даёт пустой promptText")
-            // Финализация пустоты тоже пустая — без капитализации и точки.
+            // Empty finalization also empty — no capitalization, no period.
             XCTAssertEqual(TextRefinement.finalize(""), "")
             XCTAssertEqual(TextRefinement.finalize("   \n\t "), "")
         }
@@ -373,8 +368,8 @@ final class LiveOrchestrationBranchTests: XCTestCase {
 
     // MARK: - Helpers (зеркало OverlayLifecycleTests / LiveSegmentFailureTests)
 
-    /// Ветка single-segment-skip из finishLiveRun (от условия пропуска до
-    /// финального прохода). Пустая строка, если ветка не найдена.
+    /// single-segment-skip branch from finishLiveRun (from skip condition to
+    /// final pass). Empty string if branch not found.
     private static func singleSegmentSkipBranch(in source: String) -> String {
         let body = functionBody(named: "finishLiveRun", in: source)
         return substring(
@@ -384,7 +379,7 @@ final class LiveOrchestrationBranchTests: XCTestCase {
         )
     }
 
-    /// Загружает исходник агента (для структурных проверок).
+    /// Loads agent source (for structural checks).
     private static func agentMainSource() -> String? {
         let fileDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         let candidates = [
@@ -402,8 +397,8 @@ final class LiveOrchestrationBranchTests: XCTestCase {
         return source
     }
 
-    /// Возвращает тело функции (от «func NAME(» до следующей функции/секции
-    /// на том же уровне отступа). Если функция не найдена — пустая строка.
+    /// Returns function body (from "func NAME(" to next function/section at same
+    /// indent). Empty string if function not found.
     private static func functionBody(named name: String, in source: String) -> String {
         guard let range = source.range(of: "func \(name)(") else { return "" }
         let tail = source[range.lowerBound...]
@@ -416,16 +411,16 @@ final class LiveOrchestrationBranchTests: XCTestCase {
         return String(tail)
     }
 
-    /// Подстрока между первым вхождением from и первым вхождением to ПОСЛЕ
-    /// него (границы не включаются). Пустая строка — если маркеры не найдены.
+    /// Substring between first from and first to AFTER it (bounds excluded).
+    /// Empty string if markers not found.
     private static func substring(from: String, to: String, in text: String) -> String {
         guard let start = text.range(of: from)?.upperBound,
               let end = text[start...].range(of: to)?.lowerBound else { return "" }
         return String(text[start..<end])
     }
 
-    /// Runs an async closure to completion inside a synchronous test method
-    /// (тот же приём, что в TranscriberTests).
+    /// Runs async closure to completion in a synchronous test method
+    /// (same trick as in TranscriberTests).
     private func runAsync(_ testName: String, _ body: @escaping () async throws -> Void) {
         let expectation = expectation(description: testName)
         Task {

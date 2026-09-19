@@ -2,82 +2,74 @@ import Foundation
 
 // MARK: - Автоостановка записи по непрерывной тишине (~3 c)
 
-/// Конфигурация автоостановки записи по тишине.
+/// Auto-stop config: ~3 s of continuous silence = "user finished speaking,
+/// awaiting result" — recording stops, recognition runs the same path as
+/// manual double Alt+Alt.
 ///
-/// Идея фичи: когда распознавание включено двойным Alt (агент слушает
-/// микрофон), непрерывная тишина ~3 секунды означает «пользователь закончил
-/// говорить и ждёт результат» — запись останавливается автоматически, и
-/// запускается распознавание тем же путём, что ручное повторное Alt+Alt.
+/// Silence model — RMS with HYSTERESIS (two thresholds instead of one):
+/// buffer with RMS ≥ speechRMSThreshold — speech; RMS < silenceRMSThreshold —
+/// silence; level between (−58…−45 dBFS) is a gray zone where state does NOT
+/// change (no classification jitter on quiet syllables / inter-word gaps of
+/// quiet dictation).
 ///
-/// Модель тишины — RMS с ГИСТЕРЕЗИСОМ (два порога вместо одного): буфер с
-/// RMS ≥ `speechRMSThreshold` — речь; буфер с RMS < `silenceRMSThreshold` —
-/// тишина; уровень между порогами (‑58…‑45 dBFS) — «серая зона», в которой
-/// состояние НЕ меняется (нет дребезга классификации на тихих слогах и
-/// межсловных пробелах тихой диктовки).
-///
-/// Почему пороги не совпадают с общим `AudioMetrics.nearSilenceThreshold`
-/// (−50 dBFS): этот порог удобен для сегментации/VAD, где «тишина» должна
-/// ловиться раньше и резать чанки на паузах, но как порог ОСТАНОВКИ записи
-/// он лежит ВНУТРИ динамики тихой речи (реальные −48.6…−55 dBFS) — из-за
-/// этого спокойная диктовка обрывалась «через 3 секунды». У автоостановки
-/// своя пара порогов: тишина считается только на реальном шумовом фоне
-/// (−58 dBFS ≈ тихие сэмплы, в проде −82…−90), а речью считается уверенный
-/// сигнал (−45 dBFS и громче). Диапазон −58…−45 dBFS — гистерезисная зона
-/// «не меняем решение», специально подобранная под динамику пользователя.
+/// Why thresholds differ from shared AudioMetrics.nearSilenceThreshold
+/// (−50 dBFS): that threshold suits segmentation/VAD, which must catch
+/// silence early and cut chunks on pauses, but as a STOP threshold it lies
+/// INSIDE quiet-speech dynamics (real −48.6…−55 dBFS) — calm dictation got
+/// cut off "after 3 seconds". Autostop owns the pair: silence only on the
+/// real noise floor (−58 dBFS ≈ quiet samples, prod −82…−90), speech only on
+/// confident signal (−45 dBFS and louder). The −58…−45 dBFS range is the
+/// deliberate no-change band, tuned to the user's dynamics.
 public struct AutoStopConfig: Equatable {
   // MARK: Значения по умолчанию (единый источник правды для конфига и детектора)
 
-  /// Речь ≥ −45 dBFS (линейно ≈ 0.00562): уверенный сигнал — пики тихой
-  /// речи пользователя (−20…−35 dBFS) лежат заметно выше.
+  /// Speech ≥ −45 dBFS (linear ≈ 0.00562): confident signal; quiet-speech
+  /// peaks (−20…−35 dBFS) sit far above.
   public static let defaultSpeechRMSThreshold: Float = 0.00562
 
-  /// Тишина < −58 dBFS (линейно ≈ 0.00126): реальный шумовой фон/пауза.
-  /// Ниже уровня тихой речи −48.6…−55 dBFS — спокойная диктовка не
-  /// классифицируется как молчание.
+  /// Silence < −58 dBFS (linear ≈ 0.00126): real noise floor/pause. Below
+  /// quiet-speech level — calm dictation never reads as silence.
   public static let defaultSilenceRMSThreshold: Float = 0.00126
 
-  /// Grace-период после старта записи: первые 2 c не копят тишину
-  /// (обустройство, клавиатура, вдох перед фразой — не «конец диктовки»).
+  /// First 2 s after recording start don't accumulate silence (setup,
+  /// breath before phrase — not "end of dictation").
   public static let defaultGracePeriod: TimeInterval = 2.0
 
-  /// Гейт «речь была»: автостоп невозможен, пока не накоплен непрерывный
-  /// отрезок речи ≥ 0.3 c — «защёлкивается» навсегда в рамках сеанса.
+  /// Speech gate: autostop impossible until ≥ 0.3 s of continuous speech —
+  /// latched forever within the session.
   public static let defaultMinSpeechRun: TimeInterval = 0.3
 
-  /// Минимальная длительность записи до возможного автостопа: 3 c —
-  /// жёсткий пол независимо от остальных порогов (защита от
-  /// патологических конфигов с крошечным requiredSilenceDuration).
+  /// 3 s floor before autostop, independent of other thresholds — guards
+  /// pathological configs with tiny requiredSilenceDuration.
   public static let defaultMinRecordingDuration: TimeInterval = 3.0
 
-  /// Рубильник фичи: `false` полностью выключает автоостановку (запись живёт
-  /// до ручного Alt+Alt или 60-секундного лимита — поведение до фичи).
-  /// Спасательный люк для шумного окружения/длинных диктовок/PTT; по
-  /// умолчанию включено — ровно по задаче.
+  /// Feature kill switch: `false` disables autostop completely (recording
+  /// lives till manual Alt+Alt or the 60 s limit — pre-feature behavior).
+  /// Escape hatch for noisy rooms / long dictation / PTT; default on.
   public var enabled: Bool
 
-  /// Порог РЕЧИ одного буфера: RMS ≥ порога → речь (сброс тишины).
+  /// Buffer RMS ≥ this → speech (resets silence).
   public var speechRMSThreshold: Float
 
-  /// Порог ТИШИНЫ одного буфера: RMS СТРОГО ниже порога → молчание
-  /// (согласовано с `AudioMetrics.isNearSilence`: граница «в пользу» звука).
-  /// Между `speechRMSThreshold` и `silenceRMSThreshold` — гистерезис: буфер
-  /// не меняет текущее состояние классификации.
+  /// Buffer RMS strictly below → silence (consistent with
+  /// `AudioMetrics.isNearSilence`: boundary favors sound). Between the two
+  /// thresholds — hysteresis: buffer never changes classification.
   public var silenceRMSThreshold: Float
 
-  /// Минимальная длительность НЕПРЕРЫВНОЙ тишины (сек) для срабатывания.
-  /// Фича-требование: ~3 секунды; паузы < 3 c не останавливают запись.
+  /// Continuous-silence duration (s) required to fire. Feature spec: ~3 s;
+  /// pauses < 3 s don't stop recording.
   public var requiredSilenceDuration: TimeInterval
 
-  /// Grace-период после старта записи: буферы, начавшиеся раньше этого
-  /// времени (сек с начала аудио), в тишину не накапливаются.
+  /// Buffers starting inside this window (s from audio start) don't
+  /// accumulate silence.
   public var gracePeriod: TimeInterval
 
-  /// Гейт «речь была»: автостоп не сработает, пока непрерывный отрезок речи
-  /// не достиг этой длительности (сек) хотя бы один раз за сеанс.
+  /// Autostop won't fire until continuous speech reaches this duration (s)
+  /// at least once per session.
   public var minSpeechRun: TimeInterval
 
-  /// Минимальная длительность записи (сек) до возможного автостопа — жёсткий
-  /// пол независимо от остальных порогов.
+  /// Recording duration floor (s) before autostop — hard, independent of
+  /// other thresholds.
   public var minRecordingDuration: TimeInterval
 
   public init(
@@ -90,7 +82,7 @@ public struct AutoStopConfig: Equatable {
     minRecordingDuration: TimeInterval = AutoStopConfig.defaultMinRecordingDuration
   ) {
     self.enabled = enabled
-    // Инвариант гистерезиса: порог речи не ниже порога тишины.
+    // Hysteresis invariant: speech threshold never below silence threshold.
     self.speechRMSThreshold = max(speechRMSThreshold, silenceRMSThreshold)
     self.silenceRMSThreshold = silenceRMSThreshold
     self.requiredSilenceDuration = requiredSilenceDuration
@@ -99,27 +91,23 @@ public struct AutoStopConfig: Equatable {
     self.minRecordingDuration = minRecordingDuration
   }
 
-  /// Конфигурация по умолчанию: включено, гистерезис −45/−58 dBFS,
-  /// непрерывная тишина 3 c, grace 2 c, гейт 0.3 c, пол записи 3 c.
+  /// Defaults: on, −45/−58 dBFS, 3 s silence, 2 s grace, 0.3 s gate, 3 s floor.
   public static let defaults = AutoStopConfig()
 
-  /// Фабрика из окружения — пломбинг конфига из Agent без правки конфиг-файлов
-  /// (тот же путь, что `NANODICTATE_API_KEY` в `Config.swift`/`RetryProvider`).
-  ///
-  /// Пустое окружение даёт ровно `.defaults`. Переопределения (все
-  /// опциональны, некорректные значения игнорируются и оставляют значение
-  /// по умолчанию):
-  ///   • `NANODICTATE_AUTOSTOP_DISABLED=1` (или `true`) — рубильник: фича
-  ///     выключена вовсе, любая пауза не останавливает запись;
-  ///   • `NANODICTATE_AUTOSTOP_DURATION=5` — порог непрерывной тишины в
-  ///     секундах (Double, строго > 0);
-  ///   • `NANODICTATE_AUTOSTOP_RMS=0.01` — порог ТИШИНЫ в линейной шкале
-  ///     (Float, строго > 0; −58 дБФС ≈ 0.00126);
-  ///   • `NANODICTATE_AUTOSTOP_SPEECH_RMS=0.02` — порог РЕЧИ в линейной
-  ///     шкале (Float, строго > 0; −45 дБФС ≈ 0.00562).
-  /// Порог речи всегда клампится вверх до порога тишины (инвариант
-  /// гистерезиса не нарушается ни при какой комбинации ключей).
-  /// Значения провайдеров/конфиг-файлов здесь не затрагиваются.
+  /// Env seal for config from Agent, without config-file edits (same path
+  /// as `NANODICTATE_API_KEY` in `Config.swift`/`RetryProvider`). Empty env
+  /// gives exactly `.defaults`. Overrides all optional; bad values ignored,
+  /// default kept:
+  ///   • `NANODICTATE_AUTOSTOP_DISABLED=1` (or `true`) — kill switch: no
+  ///     pause ever stops recording;
+  ///   • `NANODICTATE_AUTOSTOP_DURATION=5` — silence threshold, seconds,
+  ///     strictly > 0;
+  ///   • `NANODICTATE_AUTOSTOP_RMS=0.01` — SILENCE threshold, linear scale,
+  ///     strictly > 0 (−58 dBFS ≈ 0.00126);
+  ///   • `NANODICTATE_AUTOSTOP_SPEECH_RMS=0.02` — SPEECH threshold, linear
+  ///     scale, strictly > 0 (−45 dBFS ≈ 0.00562).
+  /// Speech always clamps up to the silence threshold (hysteresis invariant
+  /// holds for any key combination). Provider/config-file values untouched.
   public static func fromEnvironment(
     _ env: [String: String] = ProcessInfo.processInfo.environment
   ) -> AutoStopConfig {
@@ -141,80 +129,68 @@ public struct AutoStopConfig: Equatable {
     {  // swiftlint:disable:this opening_brace
       config.speechRMSThreshold = value
     }
-    // Инвариант: речь не может распознаваться «тише», чем тишина.
+    // Invariant: speech cannot be recognized quieter than silence.
     if config.speechRMSThreshold < config.silenceRMSThreshold {
       config.speechRMSThreshold = config.silenceRMSThreshold
     }
     return config
   }
 
-  /// Признак «фича выключена» для `NANODICTATE_AUTOSTOP_DISABLED`.
   private static func parseDisabledFlag(_ raw: String) -> Bool {
     raw == "1" || raw == "true" || raw == "TRUE"
   }
 }
 
-/// Чистый детектор автоостановки: накапливает длительность НЕПРЕРЫВНОЙ
-/// тишины, защищённой от ложных срабатываний (гистерезис, grace, гейт «речь
-/// была», минимальная длительность записи). Никакого I/O — только математика,
-/// поэтому логика полностью юнит-тестируема.
+/// Pure autostop detector: accumulates CONTINUOUS silence, shielded against
+/// false triggers (hysteresis, grace, speech gate, min recording duration).
+/// No I/O — math only, fully unit-testable.
 ///
-/// Питается из цикла записи (AudioService.process): для каждого буфера —
-/// его RMS (0...1, как в level-метриках) и его РЕАЛЬНАЯ длительность
-/// (фреймы конвертированного буфера / 16000). Накопление идёт по фактической
-/// длительности, а не по счётчику буферов: частота колбэков зависит от
-/// частоты дискретизации железа (~85 мс @ 48 кГц, ~93 мс @ 44.1 кГц,
-/// ~256 мс @ 16 кГц) — по буферам «3 секунды» не меряются, по времени — да.
+/// Fed from the recording loop (AudioService.process): per buffer its RMS
+/// (0...1, as in level metrics) and its REAL duration (converted frames /
+/// 16000). Accumulation counts actual duration, not buffer count: callback
+/// frequency tracks the hardware sample rate (~85 ms @ 48 kHz, ~93 ms
+/// @ 44.1 kHz, ~256 ms @ 16 kHz) — "3 seconds" measure by time, not buffers.
 ///
-/// Модель решения (см. AutoStopConfig):
-///   • РЕЧЬ (RMS ≥ speechRMSThreshold): обнуляет накопитель тишины, копит
-///     отрезок речи для гейта. Один речевой буфер рвёт непрерывность тишины.
-///   • ТИШИНА (RMS < silenceRMSThreshold): накапливается, НО только вне
-///     grace-периода и только непрерывным отрезком (любой речевой буфер
-///     сбрасывает — межсловные паузы не суммируются).
-///   • СЕРАЯ ЗОНА (между порогами): гистерезис — состояние классификации
-///     не меняется (накопление не идёт, сброса нет), чтобы тихие слоги и
-///     межсловные пробелы не «дребезжали» между речью и тишиной.
+/// Decision model (see AutoStopConfig):
+///   • SPEECH (RMS ≥ speech threshold): resets the silence accumulator,
+///     grows the speech run for the gate. One speech buffer breaks silence.
+///   • SILENCE (RMS < silence threshold): accumulates, but only outside
+///     grace and as a continuous run (any speech buffer resets — inter-word
+///     pauses don't sum).
+///   • GRAY ZONE (between thresholds): hysteresis — classification state
+///     unchanged (no accumulation, no reset).
 ///
-/// Семантика результата: `feed` возвращает true, когда выполнены ВСЕ условия
-/// (гейт «речь была» пройден + запись ≥ minRecordingDuration + накопленная
-/// НЕПРЕРЫВНАЯ тишина ≥ requiredSilenceDuration). Возвращает true и на
-/// последующих тихих буферах, пока накопитель не сброшен речью или `reset()`.
-/// Защёлку «сработало один раз» держит внешний слой (AudioService помечает
-/// остановку запланированной): у детектора ответственность — только честно
-/// отвечать «тишина сейчас ≥ порога или нет».
+/// Result semantics: `feed` returns true when ALL conditions hold (speech
+/// gate passed + recording ≥ minRecordingDuration + accumulated CONTINUOUS
+/// silence ≥ requiredSilenceDuration); stays true on later quiet buffers
+/// until speech or `reset()`. The one-shot latch lives outside
+/// (AudioService marks the stop scheduled); the detector only answers
+/// honestly "is silence ≥ threshold or not".
 public struct SilenceAutoStopDetector {
-  /// Порог речи буфера (см. AutoStopConfig.speechRMSThreshold).
   public let speechRMSThreshold: Float
 
-  /// Порог тишины буфера (см. AutoStopConfig.silenceRMSThreshold).
   public let silenceRMSThreshold: Float
 
-  /// Требуемая длительность непрерывной тишины (см. AutoStopConfig).
   public let requiredSilenceDuration: TimeInterval
 
-  /// Grace-период после старта записи (см. AutoStopConfig.gracePeriod).
   public let gracePeriod: TimeInterval
 
-  /// Гейт «речь была»: минимальный непрерывный отрезок речи (см. AutoStopConfig).
   public let minSpeechRun: TimeInterval
 
-  /// Минимальная длительность записи до срабатывания (см. AutoStopConfig).
   public let minRecordingDuration: TimeInterval
 
-  /// Накопленная длительность текущей НЕПРЕРЫВНОЙ тишины (сек).
-  /// Доступно на чтение для диагностики и тестов.
+  /// Accumulated CONTINUOUS silence (s); readable for diagnostics and tests.
   public private(set) var silenceDuration: TimeInterval
 
-  /// Суммарное аудио-время, скормленное детектору (сек) — «длительность записи».
+  /// Total audio time fed to the detector (s) — "recording duration".
   public private(set) var elapsed: TimeInterval
 
-  /// Длительность текущего непрерывного отрезка речи (сек). Серая зона
-  /// (между порогами) его не обнуляет — тихие слоги не рвут отрезок речи.
+  /// Current continuous speech run (s). Gray zone doesn't reset it —
+  /// quiet syllables don't break the run.
   public private(set) var speechRun: TimeInterval
 
-  /// Гейт «речь была»: защёлкнут, когда отрезок речи достиг `minSpeechRun`.
-  /// Автостоп невозможен до первого защёлкивания в рамках сеанса.
+  /// "Speech happened" gate: latched when the run reaches `minSpeechRun`.
+  /// Autostop impossible before the first latch within a session.
   public private(set) var speechGatePassed: Bool
 
   public init(
@@ -225,7 +201,7 @@ public struct SilenceAutoStopDetector {
     minSpeechRun: TimeInterval = AutoStopConfig.defaultMinSpeechRun,
     minRecordingDuration: TimeInterval = AutoStopConfig.defaultMinRecordingDuration
   ) {
-    // Инвариант гистерезиса: порог речи не ниже порога тишины.
+    // Hysteresis invariant: speech threshold never below silence threshold.
     self.speechRMSThreshold = max(speechRMSThreshold, silenceRMSThreshold)
     self.silenceRMSThreshold = silenceRMSThreshold
     self.requiredSilenceDuration = requiredSilenceDuration
@@ -238,59 +214,56 @@ public struct SilenceAutoStopDetector {
     speechGatePassed = false
   }
 
-  /// Кормит детектор одним буфером.
+  /// Feeds the detector one buffer.
   ///
   /// - Parameters:
-  ///   - rms: линейный RMS буфера (0...1). Буфер молчит, если RMS СТРОГО
-  ///     ниже `silenceRMSThreshold`, говорит — если ≥ `speechRMSThreshold`;
-  ///     между порогами состояние не меняется (гистерезис).
-  ///   - duration: реальная длительность буфера в секундах. Отрицательная
-  ///     длительность (защита от мусорного ввода) клампится в 0 — накопление
-  ///     не может пойти назад.
-  /// - Returns: `true`, когда выполнены все условия остановки: гейт «речь
-  ///   была» пройден, запись длится ≥ `minRecordingDuration`, и накопленная
-  ///   непрерывная тишина ≥ `requiredSilenceDuration`. Возвращает `true` и на
-  ///   последующих тихих/нейтральных буферах, пока накопитель не сброшен
-  ///   речью или `reset()`.
+  ///   - rms: linear buffer RMS (0...1). Strictly below silenceRMSThreshold —
+  ///     silence; ≥ speechRMSThreshold — speech; between the thresholds —
+  ///     state unchanged (hysteresis).
+  ///   - duration: real buffer duration in seconds. Negative duration
+  ///     clamps to 0 — accumulation never goes backward.
+  /// - Returns: true when all stop conditions hold: speech gate passed,
+  ///   recording ≥ `minRecordingDuration`, accumulated CONTINUOUS silence ≥
+  ///   `requiredSilenceDuration`. Stays true on later quiet/neutral buffers
+  ///   until speech or `reset()` resets the accumulator.
   @discardableResult
   public mutating func feed(rms: Float, duration: TimeInterval) -> Bool {
     let effectiveDuration = max(0, duration)
-    // Буфер, начавшийся до конца grace-периода, в тишину не накапливается
-    // (речь при этом копится — гейт может пройти и внутри grace).
+    // Buffer starting inside grace: no silence accumulation, but speech still
+    // counts — the gate can pass within grace.
     let bufferStartsInGrace = elapsed < gracePeriod
     elapsed += effectiveDuration
 
     if rms >= speechRMSThreshold {
-      // Речь: непрерывность тишины прервана — накопитель обнуляется;
-      // отрезок речи растёт и при достижении minSpeechRun защёлкивает гейт.
+      // Speech: silence continuity broken, accumulator reset; speech run grows,
+      // latches the gate at minSpeechRun.
       speechRun += effectiveDuration
       if !speechGatePassed, speechRun >= minSpeechRun {
         speechGatePassed = true
       }
       silenceDuration = 0
     } else if rms < silenceRMSThreshold {
-      // Тишина: непрерывность речи прервана; накопление — только вне
-      // grace-периода, непрерывным отрезком.
+      // Silence: speech continuity broken; accumulates only outside grace, as a
+      // continuous run.
       speechRun = 0
       if !bufferStartsInGrace {
         silenceDuration += effectiveDuration
       }
     }
-    // Между порогами — гистерезис: состояние не меняется (ни накопление,
-    // ни сброс) — тихие слоги не «дребезжат» классификацией.
+    // Between thresholds — hysteresis: no accumulation, no reset — quiet
+    // syllables don't jitter classification.
 
     return canStop
   }
 
-  /// Все условия остановки: речь когда-либо была, запись не короче пола,
-  /// непрерывная тишина достигла порога.
+  /// All stop conditions: speech once present, recording ≥ floor, continuous
+  /// silence reached the threshold.
   private var canStop: Bool {
     guard speechGatePassed else { return false }
     guard elapsed >= minRecordingDuration else { return false }
     return silenceDuration >= requiredSilenceDuration
   }
 
-  /// Сбрасывает всё состояние (новый сеанс записи).
   public mutating func reset() {
     silenceDuration = 0
     elapsed = 0

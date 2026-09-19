@@ -33,14 +33,16 @@ func runProcess(_ launchPath: String, _ args: [String]) -> (  // swiftlint:disab
 /// User GUI domain for launchctl, e.g. "gui/501".
 let guiDomain = "gui/\(getuid())"
 
-/// Имя сервиса LaunchAgent (Label plist, target launchctl print/bootstrap/bootout).
+/// LaunchAgent service name (plist Label, the target of
+/// launchctl print/bootstrap/bootout).
 let agentServiceName = "com.nanodictate.agent"
 
-/// Абсолютный (realpath) путь к бинарю агента для регистрации службы:
-/// NANODICTATE_AGENT_BIN → sibling NanoDictateAgent у realpath вызванного CLI
-/// → sibling у сырого argv[0] (dev-сборка). Один демон при любом способе
-/// установки: brew/port вызывают CLI через симлинк — realpath сохраняет
-/// Cellar/opt/local путь, не протухающий до следующего `start`.
+/// Absolute (realpath) path to the agent binary for service registration:
+/// NANODICTATE_AGENT_BIN → NanoDictateAgent sibling of the realpath of the
+/// invoked CLI → sibling of the raw argv[0] (dev build). One daemon for any
+/// install method: brew/port invoke the CLI through a symlink — realpath
+/// keeps the Cellar/opt/local path that does not go stale until the next
+/// `start`.
 func findAgentBinaryPath() -> String {
   return resolveAgentBinaryPath(invokedBinary: CommandLine.arguments[0])
 }
@@ -66,10 +68,11 @@ func cmdStart() -> Int32 {
   }
   let logPath = logsDir.appendingPathComponent("agent.log").path
 
-  // Полный takeover: прежний plist перечитывается, старый процесс выгружается
-  // (терпимо к «службы нет»), канонический plist перезаписывается и служба
-  // загружается заново. Повторный start уже запущенного агента корректно
-  // меняет владельца/путь (launchd держит план из plist на момент bootstrap).
+  // Full takeover: the previous plist is re-read, the old process is
+  // unloaded (tolerant to "no such service"), the canonical plist is
+  // overwritten and the service is loaded again. A repeated start of an
+  // already running agent correctly changes owner/path (launchd keeps the
+  // plan from the plist as of bootstrap time).
   let installer = AgentInstaller(launchctl: Launchctl(run: runProcess))
   let result = installer.install(agentBinary: agentBinary, logPath: logPath)
 
@@ -148,9 +151,9 @@ func cmdStatus() -> Int32 {
   return running ? 0 : 1
 }
 
-/// Маскировка секретов в сыром тексте конфиг-файла: api_key / proxy_key —
-/// значения в кавычках заменяются на maskSecret (первые 4 + "***" +
-/// последние 4). Пустые значения остаются пустыми.
+/// Masks secrets in a raw config-file text: api_key / proxy_key — values in
+/// quotes are replaced with maskSecret (first 4 + "***" + last 4). Empty
+/// values stay empty.
 func maskFileSecrets(in content: String) -> String {
   var lines: [String] = []
   for line in content.components(separatedBy: .newlines) {
@@ -174,12 +177,12 @@ func maskFileSecrets(in content: String) -> String {
   return lines.joined(separator: "\n")
 }
 
-/// "(пусто)" для пустых секретов, иначе — первые 4 + "***" + последние 4 символа.
+/// "(empty)" for empty secrets, otherwise — first 4 + "***" + last 4 chars.
 func secretDisplay(_ secret: String) -> String {
   secret.isEmpty ? L10n.tr("cli.placeholder.empty") : AppConfig.maskSecret(secret)
 }
 
-/// Спросить в TTY, перезаписывать ли существующий конфиг. В пайпе — false.
+/// Asks in a TTY whether to overwrite the existing config. In a pipe — false.
 func configOverwriteConfirmed(_ path: String) -> Bool {
   guard isTTY(), stdinIsTTY() else { return false }
   eprint(String(format: L10n.tr("cli.config.overwrite"), path))
@@ -187,8 +190,9 @@ func configOverwriteConfirmed(_ path: String) -> Bool {
   return answer == "y" || answer == "yes"
 }
 
-/// Записать канон (config.example.toml) в конфиг (создаёт директорию при
-/// необходимости) с правами 0600. Канон недоступен — понятная ошибка.
+/// Writes the canon (config.example.toml) into the config (creating the
+/// directory when needed) with 0600 permissions. Canon unavailable — a clear
+/// error.
 func writeConfigTemplate(path: String) -> Int32 {
   guard let example = AppConfig.exampleContent() else {
     eprint(L10n.tr("cli.config.example.notfound"))
@@ -210,10 +214,11 @@ func writeConfigTemplate(path: String) -> Int32 {
   return 0
 }
 
-/// `config set-key <провайдер> [ключ] [--stdin]` — api_key точечной правкой
-/// секции `[providers.<id>]`. Ключ не передан: читается из stdin (при --stdin
-/// или пайпе), иначе — ввод с клавиатуры. Предупреждает, если активна
-/// env-переменная NANODICTATE_API_KEY (она приоритетнее файла).
+/// `config set-key <provider> [key] [--stdin]` — api_key by a pointed
+/// edit of the `[providers.<id>]` section. Key not passed: read from stdin
+/// (with --stdin or in a pipe), otherwise — keyboard input. Warns when the
+/// NANODICTATE_API_KEY env variable is active (it takes priority over the
+/// file).
 func cmdConfigSetKey(path: String, args: [String]) -> Int32 {
   guard let providerID = args.first else {
     eprint(L10n.tr("cli.setkey.usage"))
@@ -254,8 +259,8 @@ func cmdConfigSetKey(path: String, args: [String]) -> Int32 {
   }
 
   do {
-    // writeProviderKeyValue ждёт значение в формате строки конфига (с кавычками),
-    // как writeKeyValue для строк (ср. writeActiveProvider).
+    // writeProviderKeyValue expects a value in config-string format (with
+    // quotes), like writeKeyValue for strings (cf. writeActiveProvider).
     try AppConfig.writeProviderKeyValue(
       providerID: providerID, key: "api_key", value: "\"\(value)\"", to: path)
   } catch {
@@ -266,7 +271,7 @@ func cmdConfigSetKey(path: String, args: [String]) -> Int32 {
   return 0
 }
 
-/// Терминальный ли stdin (для ввода ключа с клавиатуры vs пайп).
+/// Is stdin a terminal (for entering a key from the keyboard vs a pipe).
 func stdinIsTTY() -> Bool {
   isatty(STDIN_FILENO) == 1
 }
@@ -276,13 +281,14 @@ func cmdConfig(_ args: [String]) -> Int32 {
   let fileManager = FileManager.default
   var exists = fileManager.fileExists(atPath: path)
 
-  // `config path` — алиас `config --path`.
+  // `config path` — an alias of `config --path`.
   if args.first?.lowercased() == "path" || args.contains("--path") {
     print(path)
     return 0
   }
 
-  // `config init [--force]` — создать шаблон (без подтверждения не перезаписывает).
+  // `config init [--force]` — create the template (does not overwrite
+  // without confirmation).
   if args.first?.lowercased() == "init" {
     guard !exists || args.contains("--force") || configOverwriteConfirmed(path) else {
       eprint(String(format: L10n.tr("cli.config.exists"), path))
@@ -292,17 +298,18 @@ func cmdConfig(_ args: [String]) -> Int32 {
     return writeConfigTemplate(path: path)
   }
 
-  // `config set-key <провайдер> [ключ]` — точечная правка api_key в секции.
+  // `config set-key <provider> [key]` — a pointed api_key edit in a section.
   if args.first?.lowercased() == "set-key" {
     return cmdConfigSetKey(path: path, args: Array(args.dropFirst()))
   }
 
   do {
     let config = try AppConfig.load(from: nil)
-    // load() на свежей машине сам создаёт файл (автокопия канона) — exists,
-    // посчитанный выше ДО load, устарел; перечитываем для веток --show-file
-    // и инфо-вывода, иначе печатали бы «Config not found» при уже созданном
-    // файле, а --show-file показывал бы текст ошибки вместо содержимого.
+    // load() on a fresh machine creates the file itself (auto-copy of the
+    // canon) — exists, computed above BEFORE load, is stale; re-read it for
+    // the --show-file branch and the info output, otherwise we would print
+    // "Config not found" with the file already created, and --show-file
+    // would show the error text instead of the content.
     exists = fileManager.fileExists(atPath: path)
 
     if args.contains("--show-file") {
@@ -382,10 +389,11 @@ func providerUse(_ name: String, _ args: [String]) -> Int32 {
   return restartAgentIfNeeded(args)
 }
 
-/// Перезапуск агента (--no-restart пропускает). Общий для команд, меняющих
-/// конфиг: provider use и routing set/unset. Канонический plist перезаписывается
-/// (путь не протухает после обновления менеджера), затем kickstart -k;
-/// если служба не загружена — полная установка (bootout → bootstrap).
+/// Agent restart (--no-restart skips it). Common for config-changing
+  /// commands: provider use and routing set/unset. The canonical plist is
+  /// overwritten (the path does not go stale after a manager update), then
+  /// kickstart -k; if the service is not loaded — a full install
+/// (bootout → bootstrap).
 func restartAgentIfNeeded(_ args: [String]) -> Int32 {
   if args.contains("--no-restart") {
     print(L10n.tr("cli.provider.norestart"))
@@ -484,8 +492,8 @@ func cmdProvider(_ args: [String]) -> Int32 {
     return providerList()
   case "use", "set":
     let rest = Array(args.dropFirst())
-    // --no-restart не позиционный: распознаётся в любом месте (в т.ч.
-    // до имени — иначе уходит в валидацию как невалидный id).
+    // --no-restart is not positional: recognized anywhere (incl. before the
+    // name — otherwise it would go into validation as an invalid id).
     guard let name = rest.first(where: { $0 != "--no-restart" }) else {
       eprint(L10n.tr("usage.provider.use"))
       return 1
@@ -505,11 +513,12 @@ func cmdProvider(_ args: [String]) -> Int32 {
   }
 }
 
-// MARK: - Маршрутизация STT по ролям ([routing])
+// MARK: - STT routing by roles ([routing])
 
-/// `nanodictate routing [show]`: роли из секции [routing] и их effective-значения
-/// (фолбэк на активного провайдера при пустой/неизвестной роли). Толерантный
-/// разбор как у provider list — показ работает даже при stale active_provider.
+  /// `nanodictate routing [show]`: roles from the [routing] section and
+/// their effective values (fallback to the active provider on an
+/// empty/unknown role). Tolerant parsing like provider list — the display
+/// works even with a stale active_provider.
 func routingShow() -> Int32 {
   let path = AppConfig.defaultPath()
   guard FileManager.default.fileExists(atPath: path) else {
@@ -517,8 +526,9 @@ func routingShow() -> Int32 {
     return 0
   }
   let (activeID, providers) = (try? AppConfig.loadProvidersOnly(from: nil)) ?? ("", [])
-  // routing парсится только в полном разборе (грубый откат на дефолты при
-  // сломанном active_provider — чинится командой provider use).
+  // routing is parsed only in the full parse (a coarse fallback to the
+  // defaults with a broken active_provider — fixed by the provider use
+  // command).
   let config = (try? AppConfig.load(from: nil)) ?? AppConfig.defaults
   let ids = providers.map(\.id)
   let seg = config.routing.segmentProvider
@@ -538,7 +548,7 @@ func routingShow() -> Int32 {
   return 0
 }
 
-/// Ключ роли в конфиге ([routing]); nil — неизвестная роль.
+/// Role key in the config ([routing]); nil — unknown role.
 func routingKey(for role: String) -> String? {
   switch role {
   case "segment": return "segment_provider"
@@ -547,10 +557,10 @@ func routingKey(for role: String) -> String? {
   }
 }
 
-/// `nanodictate routing set segment|final <id> [--no-restart]`: точечная правка
-/// ключа роли в [routing]. Валидация id по секциям [providers.X] как в
-/// provider use; атомарная запись + chmod 600; перезапуск агента (кроме
-/// --no-restart). Роль действует с перезапуска агента.
+/// `nanodictate routing set segment|final <id> [--no-restart]`: point edit
+/// of a role key in [routing]. Id validation against [providers.X] sections
+/// like provider use; atomic write + chmod 600; agent restart (unless
+/// --no-restart). The role takes effect on agent restart.
 func routingSet(role: String, providerID: String, args: [String]) -> Int32 {
   guard let key = routingKey(for: role) else {
     eprint(L10n.tr("cli.routing.usage"))
@@ -576,8 +586,9 @@ func routingSet(role: String, providerID: String, args: [String]) -> Int32 {
   return restartAgentIfNeeded(args)
 }
 
-/// `nanodictate routing unset segment|final [--no-restart]`: очистка роли
-/// (пишется пустое значение — резолвер фолбэчит на активного провайдера).
+/// `nanodictate routing unset segment|final [--no-restart]`: clear a role
+/// (an empty value is written — the resolver falls back to the active
+/// provider).
 func routingUnset(role: String, args: [String]) -> Int32 {
   guard let key = routingKey(for: role) else {
     eprint(L10n.tr("cli.routing.unset.usage"))
@@ -599,8 +610,8 @@ func cmdRouting(_ args: [String]) -> Int32 {
     return routingShow()
   case "set":
     let rest = Array(args.dropFirst())
-    // --no-restart не позиционный: распознаётся в любом месте (в т.ч.
-    // до роли/имени — иначе уходит в валидацию как невалидный id).
+    // --no-restart is not positional: recognized anywhere (incl. before
+    // the role/name — otherwise it would go into validation as an invalid id).
     let positional = rest.filter { $0 != "--no-restart" }
     guard let role = positional.first, let providerID = positional.dropFirst().first else {
       eprint(L10n.tr("cli.routing.usage"))
@@ -623,8 +634,8 @@ func cmdRouting(_ args: [String]) -> Int32 {
 
 // swiftlint:disable:next cyclomatic_complexity function_body_length
 func cmdTranscribe(_ args: [String]) -> Int32 {
-  // Пакетные флаги (--provider/--out/--max-segment/--overlap/--no-progress/
-  // --resume) включают пакетный режим; без них — разовая расшифровка как раньше.
+  // Batch flags (--provider/--out/--max-segment/--overlap/--no-progress/
+  // --resume) switch to batch mode; without them — one-shot transcription as before.
   var batch = BatchTranscribeOptions()
   var batchRequested = false
   var file: String?
@@ -726,9 +737,9 @@ struct BatchTranscribeOptions {
   var overlap: TimeInterval = 2.5
   var maxConcurrent = 1
   var showProgress = true
-  // По умолчанию ВКЛЮЧЕНО: резать по паузам речи ≥ 0.3 с (рекомендация
-  // «Практики длинной речи»). --no-cut-at-pauses — обратно к фиксированной
-  // длине (для совместимости с чекпоинтами старых прогонов).
+  // ON by default: split at speech pauses ≥ 0.3 s (per the "Long speech
+  // practice" guide). --no-cut-at-pauses reverts to fixed-length chunks
+  // (for compatibility with old-run checkpoints).
   var cutAtPauses = true
   var resume = false
   var json = false
@@ -747,8 +758,8 @@ func formatClock(_ seconds: TimeInterval) -> String {
   return String(format: "%02d:%02d", totalSeconds / 60, totalSeconds % 60)
 }
 
-/// Стабильный отпечаток строки (djb2 по UTF-8 байтам) для ключа чекпоинта.
-/// `String.hashValue` не годится: рандомизирован между процессами.
+/// Stable string stamp (djb2 over UTF-8 bytes) for a checkpoint key.
+/// `String.hashValue` is not suitable: randomized across processes.
 func stableCheckpointStamp(_ string: String) -> String {
   var hash: UInt64 = 5381
   for byte in string.utf8 {
@@ -757,12 +768,12 @@ func stableCheckpointStamp(_ string: String) -> String {
   return String(hash, radix: 16)
 }
 
-/// Одна строка прогресса пакетного режима в stderr, перезаписываемая \r
-/// (без \n до завершения). Один общий экземпляр на прогон — атомарные
-/// перерисовки под NSLock. Формат:
-///   [12/84] ████████████░░░░░░░░░░ 33% · ~4 мин осталось · средн. 7.2с/чанк
-/// finish() ставит перевод строки (перед итогами/ошибками); повторный
-/// finish() — no-op. Выключен (--no-progress) — не пишет ничего.
+/// One batch-mode progress line on stderr, rewritten with \r
+/// (no \n until done). One shared instance per run — atomic redraws
+/// under NSLock. Format:
+///   [12/84] ████████████░░░░░░░░░░ 33% · ~4 min left · avg 7.2s/chunk
+/// finish() emits a newline (before the summary/errors); a repeated
+/// finish() is a no-op. When disabled (--no-progress) it writes nothing.
 final class BatchProgressBar {
   private let lock = NSLock()
   private let enabled: Bool
@@ -774,8 +785,8 @@ final class BatchProgressBar {
     self.width = width
   }
 
-  /// Перерисовать строку. `completed` — число готовых чанков (N из [N/M]),
-  /// `elapsed` — секунд с начала прогона.
+  /// Redraw the line. `completed` — count of finished chunks (N of [N/M]),
+  /// `elapsed` — seconds since the run start.
   func update(completed: Int, total: Int, elapsed: TimeInterval) {
     lock.lock()
     defer { lock.unlock() }
@@ -798,7 +809,7 @@ final class BatchProgressBar {
     FileHandle.standardError.write(Data(line.utf8))
   }
 
-  /// Закрыть строку переводом строки (до итога/ошибки). Идемпотентна.
+  /// Close the line with a newline (before the summary/error). Idempotent.
   func finish() {
     lock.lock()
     defer { lock.unlock() }
@@ -807,8 +818,8 @@ final class BatchProgressBar {
     FileHandle.standardError.write(Data("\u{1B}[2K\r\n".utf8))
   }
 
-  /// «~45 сек» / «~4 мин» / «~1 ч 12 мин» (округление вверх — не обещаем
-  /// лишнего времени).
+  /// "~45 sec" / "~4 min" / "~1 h 12 min" (rounded up — we do not promise
+  /// extra time).
   private static func etaText(_ seconds: TimeInterval) -> String {
     let totalSeconds = Int(seconds.rounded(.up))
     if totalSeconds < 60 {
@@ -831,7 +842,7 @@ final class BatchProgressBar {
 func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int32 {
   let fileManager = FileManager.default
 
-  // 1. Конфиг и провайдер (всё из config.toml, ничего не зашито).
+  // 1. Config and provider (all from config.toml, nothing hardcoded).
   let config: AppConfig
   do { config = try AppConfig.load(from: nil) } catch {
     eprint(String(format: L10n.tr("cli.flag.configload"), "\(error)"))
@@ -840,9 +851,9 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
   // swiftlint:disable:next trailing_closure
   var provider = config.providers.first(where: { $0.id == options.providerID })
   if provider == nil, options.providerID == "gigaam" {
-    // Канон (config.example.toml) секции gigaam не содержит — в нём активен
-    // airubiz: фолбэк на активного провайдера, иначе — первого доступного,
-    // чтобы batch-режим работал out-of-box без правки флага.
+    // Canon (config.example.toml) has no gigaam section — airubiz is
+    // active there: fall back to the active provider, else the first
+    // available, so batch mode works out-of-the-box without a flag edit.
     let active: AppConfig.Provider? = (try? ProviderStore.loadProviders())
       .flatMap { list in
         // swiftlint:disable:next trailing_closure
@@ -867,10 +878,10 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
     return 1
   }
 
-  // 2. Приведение к 16 кГц моно PCM16 WAV, СТРИМИНГ без загрузки в RAM.
-  // Пробуем открыть вход напрямую (read-окна по требованию из файла):
-  // если это не PCM16 WAV или не 16 кГц моно — afconvert во временный файл
-  // (временный живёт до конца прогона — run(fileURL:) читает из него окна).
+  // 2. Convert to 16 kHz mono PCM16 WAV, STREAMING without loading into RAM.
+  // Try to open the input directly (on-demand read windows from the file):
+  // if not PCM16 WAV or not 16 kHz mono — afconvert to a temp file
+  // (the temp lives until the run ends — run(fileURL:) reads windows from it).
   let inputURL = URL(fileURLWithPath: file)
   var wavURL = inputURL
   var tempWavURL: URL?
@@ -881,15 +892,15 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
     guard probe.sampleRate == 16000, probe.channels == 1 else {
       throw WAVFilePCMBatchContent.WAVFileError.invalidWAV
     }
-    // Пробник нужен ТОЛЬКО для сводки (sampleCount/sampleRate): берём
-    // значения и отпускаем объект — его FileHandle закрывается в deinit,
-    // а run(fileURL:) открывает файл заново собственными read-окнами.
+    // The probe is needed ONLY for the summary (sampleCount/sampleRate):
+    // take the values and release the object — its FileHandle closes in
+    // deinit, and run(fileURL:) reopens the file with its own read windows.
     wavSampleCount = probe.sampleCount
     wavSampleRate = probe.sampleRate
   } catch {
-    // Причина отказа пробника:
-    // fileNotFound/ioError — файл физически недоступен, конвертация
-    // afconvert не поможет — показываем исходную ошибку и выходим.
+    // Why the probe failed:
+    // fileNotFound/ioError — the file is physically unavailable, afconvert
+    // conversion will not help — show the original error and exit.
     if let probeError = error as? WAVFilePCMBatchContent.WAVFileError,
       case .fileNotFound = probeError
     {  // swiftlint:disable:this opening_brace
@@ -902,9 +913,9 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
       eprint(String(format: L10n.tr("cli.transcribe.readerror"), file, message))
       return 1
     }
-    // invalidWAV (не PCM16 WAV / не 16 кГц моно) — штатный случай:
-    // afconvert во временный файл (временный живёт до конца прогона —
-    // run(fileURL:) читает из него окна).
+    // invalidWAV (not PCM16 WAV / not 16 kHz mono) — regular case:
+    // afconvert to a temp file (the temp lives until the run ends —
+    // run(fileURL:) reads windows from it).
     let converted = fileManager.temporaryDirectory.appendingPathComponent(
       "nanodictate-batch-\(UUID().uuidString).wav")
     let conv = runProcess(
@@ -926,27 +937,27 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
     wavSampleRate = content.sampleRate
   }
 
-  // Неизменяемые копии для захвата в Task (var нельзя захватывать в
-  // @Sendable-замыкание): после этого блока ни wavURL, ни tempWavURL,
-  // ни счётчики сводки уже не меняются.
+  // Immutable copies for capture in the Task (var cannot be captured in an
+  // @Sendable closure): after this block neither wavURL, tempWavURL,
+  // nor the summary counters change.
   let batchWavURL = wavURL
   let tempWavForCleanup = tempWavURL
   let batchSampleCount = wavSampleCount
   let batchSampleRate = wavSampleRate
 
-  // 3. Чекпоинт: рядом с --out, иначе стабильный путь во временной папке.
-  // Ключ временного чекпоинта учитывает ОТПЕЧАТОК ПОЛНОГО ПУТИ файла
-  // (разные файлы с одинаковым именем не сталкиваются) + провайдера +
-  // maxSegment + overlap (нарезка чанков зависит от обоих).
+  // 3. Checkpoint: next to --out, else a stable path in the temp folder.
+  // The temp checkpoint key includes the STAMP OF THE FULL FILE PATH
+  // (different files with the same name do not collide) + the provider +
+  // maxSegment + overlap (chunking depends on both).
   let checkpointPath: String
   if let out = options.outPath {
     checkpointPath = out + ".checkpoint.json"
   } else {
-    // Нарезка зависит от нарезочных параметров; выравнивание на паузы
-    // (--cut-at-pauses, по умолчанию ВКЛЮЧЕНО) задаёт другие границы —
-    // суффикс "-pause" в ключе чекпоинта. Старые чекпоинты без суффикса
-    // (фиксированная нарезка, до внедрения паузного выравнивания)
-    // заведомо несовместимы и корректно игнорируются resume.
+    // Chunking depends on the chunking parameters; pause alignment
+    // (--cut-at-pauses, ON by default) sets different boundaries —
+    // the "-pause" suffix in the checkpoint key. Old checkpoints without
+    // the suffix (fixed chunking, before pause alignment landed) are
+    // inherently incompatible and correctly ignored by resume.
     let pauseFactor = options.cutAtPauses ? "-pause" : ""
     let checkpointName =
       "nanodictate-batch-\(stableCheckpointStamp(inputURL.path))-\(provider.id)-"
@@ -966,11 +977,12 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
     }
   }
 
-  // 4. Реальный транспорт чанка: запрос по полям провайдера + Retry-After.
-  // Env-ключ скоуплен на АКТИВНОГО провайдера (та же конвенция активного id,
-  // что в NanoDictateAgent: пустой active_provider → первый по порядку):
-  // явный --provider с собственным ключом получает свой ключ, без ключа —
-  // пусто (запрос падает штатно), env-ключ чужим секциям не утекает.
+  // 4. Real chunk transport: request by provider fields + Retry-After.
+  // The env key is scoped to the ACTIVE provider (the same active-id
+  // convention as in NanoDictateAgent: empty active_provider → first in
+  // order): an explicit --provider with its own key gets its key, without
+  // a key — empty (the request fails normally), the env key does not leak
+  // to foreign sections.
   let transport = URLSessionBatchTransport()
   let activeAdapterID: String? =
     config.activeProvider.isEmpty
@@ -1021,11 +1033,11 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
     }
   }
 
-  // 4b. Один общий прогресс-бар на прогон (атомарные перерисовки).
+  // 4b. One shared progress bar per run (atomic redraws).
   let progressBar = BatchProgressBar(enabled: options.showProgress)
 
   Task {
-    defer { progressBar.finish() }  // перевести строку при любом исходе
+    defer { progressBar.finish() }  // newline on any outcome
     do {
       let outcome = try await BatchTranscriber.run(
         fileURL: batchWavURL,
@@ -1049,8 +1061,8 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
         }
       )
 
-      // 5. Текст: в --out (атомарно) или в stdout. В файл — с завершающим
-      // переводом строки (пустой текст — пустой файл, без голого \n).
+      // 5. Text: to --out (atomically) or to stdout. To a file — with a
+      // trailing newline (empty text — empty file, no bare \n).
       if let out = options.outPath {
         do {
           let content = outcome.text.isEmpty ? outcome.text : outcome.text + "\n"
@@ -1068,9 +1080,9 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
 
       if let tempWav = tempWavForCleanup {
         try? FileManager.default.removeItem(at: tempWav)
-      }  // read-окна отработали
+      }  // read windows done
 
-      // 6. Итог в stderr.
+      // 6. Summary to stderr.
       let duration = Double(batchSampleCount) / Double(batchSampleRate)
       var summary = String(
         format: L10n.tr("progress.summary"),
@@ -1088,8 +1100,8 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
       eprint(summary)
       eprint(String(format: L10n.tr("progress.checkpoint"), checkpointPath))
 
-      // 7. --json: как в разовом режиме — transcription_raw.json рядом с ФАЙЛ
-      // (в пакетном режиме это копия чекпоинта с текстами чанков).
+      // 7. --json: as in one-shot mode — transcription_raw.json next to the FILE
+      // (in batch mode this is a copy of the checkpoint with chunk texts).
       if options.json {
         let rawURL = inputURL.deletingLastPathComponent().appendingPathComponent(
           "transcription_raw.json")
@@ -1158,8 +1170,8 @@ func cmdTranscribeLegacy(_ file: String, json: Bool) -> Int32 {
     return 1
   }
 
-  // Активный провайдер = адаптер запроса (как в NanoDictateAgent): при пустом
-  // active_provider — первый провайдер по порядку, иначе его id.
+  // Active provider = request adapter (as in NanoDictateAgent): on an empty
+  // active_provider — the first provider in order, else its id.
   let activeAdapterID: String? =
     config.activeProvider.isEmpty
     ? config.providers.first?.id
@@ -1181,8 +1193,9 @@ func cmdTranscribeLegacy(_ file: String, json: Bool) -> Int32 {
     proxyPassword: config.proxyPassword,
     adapterID: activeAdapterID
   )
-  // Данные всегда WAV (не-WAV конвертируется выше); сервер строг к расширению,
-  // поэтому в multipart-поле файла всегда слать "audio.wav", а не исходное имя.
+  // Data is always WAV (non-WAV is converted above); the server is strict
+  // about the extension, so the multipart file field always sends
+  // "audio.wav", not the original name.
   let filename = "audio.wav"
   let rawURL = inputURL.deletingLastPathComponent().appendingPathComponent("transcription_raw.json")
 
@@ -1224,10 +1237,10 @@ func cmdLogs() -> Int32 {
   return 0
 }
 
-// MARK: - Последний текст и retry другим провайдером
+// MARK: - Last text and retry with another provider
 
-/// `nanodictate last`: последний распознанный текст из маркера LAST_TEXT в логе
-/// агента (пишется при каждой успешной вставке, включая retry).
+/// `nanodictate last`: the last recognized text from the LAST_TEXT marker in
+/// the agent log (written on every successful insert, retry included).
 func cmdLast() -> Int32 {
   let logURL = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Logs/NanoDictate/agent.log")
@@ -1249,10 +1262,11 @@ func cmdLast() -> Int32 {
   return 0
 }
 
-/// `nanodictate retry <provider>`: просит агента повторить распознавание
-/// последнего WAV (он у агента в памяти) указанным провайдером. Через
-/// DistributedNotificationCenter — вставку выполняет САМ агент (у него уже
-/// есть право «Доступность» и знакомый путь вставки/ревью).
+/// `nanodictate retry <provider>`: asks the agent to re-recognize the last
+/// WAV (it lives in the agent's memory) with the given provider. Via
+/// DistributedNotificationCenter — the insert is done by the AGENT itself
+/// (it already has the Accessibility right and the familiar
+/// insert/review path).
 func cmdRetry(_ name: String) -> Int32 {
   let providers: [AppConfig.Provider]
   do {
@@ -1284,7 +1298,7 @@ func cmdRetry(_ name: String) -> Int32 {
   return 0
 }
 
-/// Список id провайдеров одной строкой (подсказка для usage retry).
+/// Provider ids in one line (hint for retry usage).
 func providerNamesText() -> String {
   let ids = (try? AppConfig.loadProvidersOnly(from: nil).providers.map(\.id)) ?? []
   return ids.isEmpty ? L10n.tr("cli.provider.nosections") : ids.joined(separator: ", ")
@@ -1338,7 +1352,7 @@ let uiLanguage = (try? AppConfig.load(from: nil))?.uiLanguage
 L10n.language = uiLanguage == "ru" ? .ru : .en
 
 guard let command = args.first?.lowercased() else {
-  // Без команды в интерактивном терминале — лёгкое меню; в пайпе/скрипте — usage.
+  // No command in an interactive terminal — a light menu; in a pipe/script — usage.
   if MenuGate.shouldRunMenu(hasCommand: false, tty: isTTY()) {
     exit(runMenu())
   }

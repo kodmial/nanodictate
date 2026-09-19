@@ -2,31 +2,29 @@ import Foundation
 
 // MARK: - Анти-штормовый сторож TCC-запросов микрофона
 
-/// Анти-штормовый сторож системных запросов доступа к микрофону (TCC).
+/// Anti-storm guard for microphone TCC requests.
 ///
-/// Проблема: у фонового агента без бандла окно системного диалога может не
-/// отобразиться вовсе, колбэк `requestAccess` не приходит, и каждый Alt+Alt
-/// открывает НОВЫЙ запрос доступа. Серия повторных диалогов клинит tccd
-/// (системный центр разрешений) и замораживает всю машину. После N таймаутов
-/// запроса в окне 6 часов новый запрос доступа блокируется — пользователь
-/// вместо диалога получает инструкцию «включите микрофон в System Settings».
+/// Problem: bundle-less background agent — system dialog window may not show,
+/// `requestAccess` callback never comes, each Alt+Alt opens a NEW access
+/// request. Repeated dialogs jam tccd (permission center) and freeze the whole
+/// machine. After N request timeouts in a 6h window, new access requests are
+/// blocked — user gets "enable mic in System Settings" instruction instead.
 ///
-/// Состояние персистентно (переживает перезапуск агента): файл
+/// State persistent (survives agent restart): file
 /// `~/Library/Application Support/NanoDictate/mic-request-state.json`
-/// (путь инжектируется через init — тесты пишут во временную папку).
-/// Запись атомарная, повреждённый/отсутствующий файл трактуется как свежее
-/// состояние (запрос разрешён). Тип не бросает ошибок наружу: анти-шторм —
-/// вспомогательный механизм, его сбой не должен ломать запись.
+/// (path injected via init — tests write into temp dir). Atomic writes;
+/// corrupt/missing file treated as fresh state (request allowed). Never throws
+/// outward: anti-storm is auxiliary, its failure must not break recording.
 public struct MicRequestPolicy {
-  /// Порог срабатывания сторожа: N таймаутов в окне.
+  /// Watchdog threshold: N timeouts in window.
   public static let maxTimeoutsInWindow = 3
-  /// Окно, внутри которого считаются таймауты: 6 часов в секундах.
+  /// Window within which timeouts count: 6 hours in seconds.
   public static let windowDuration: TimeInterval = 6 * 3600
 
-  /// URL файла состояния; nil — только память (персистенция выключена).
+  /// State file URL; nil — memory only (persistence off).
   private let fileURL: URL?
-  /// Моменты таймаутов запроса. Могут быть и старше окна — они отсеиваются
-  /// при подсчёте (сброс «по времени») и не подрезаются до следующей записи.
+  /// Request timeout moments. May be older than window — filtered on count
+  /// (time-based reset), not trimmed until next save.
   private var timeoutTimestamps: [Date]
 
   public init(fileURL: URL?) {
@@ -37,7 +35,7 @@ public struct MicRequestPolicy {
     }
   }
 
-  /// Файл состояния по умолчанию: Application Support/NanoDictate.
+  /// Default state file: Application Support/NanoDictate.
   public static func defaultFileURL() -> URL {
     let base =
       FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -46,23 +44,22 @@ public struct MicRequestPolicy {
     return base.appendingPathComponent("NanoDictate/mic-request-state.json", isDirectory: false)
   }
 
-  /// Разрешён ли НОВЫЙ запрос доступа: таймаутов внутри текущего окна меньше
-  /// порога. Сторож non-mutating: проверка сама по себе ничего не меняет.
+  /// Whether a NEW access request allowed: timeouts inside current window below
+  /// threshold. Guard non-mutating: check changes nothing by itself.
   public func allowRequest(now: Date) -> Bool {
     timeouts(inWindow: now).count < Self.maxTimeoutsInWindow
   }
 
-  /// Зафиксировать таймаут запроса (колбэк requestAccess не пришёл): таймаут
-  /// дописывается в окно — после maxTimeoutsInWindow повторов запрос доступа
-  /// блокируется (см. allowRequest). Устаревшие таймауты подрезаются, новое
-  /// состояние персистится.
+  /// Record request timeout (requestAccess callback never came): timeout added
+  /// to window — after maxTimeoutsInWindow repeats access request blocked
+  /// (see allowRequest). Stale timeouts trimmed, state persisted.
   public mutating func recordTimeout(now: Date) {
     timeoutTimestamps = timeouts(inWindow: now) + [now]
     persist()
   }
 
-  /// Грант доступа получен — счётчик таймаутов сбрасывается: проблема решена,
-  /// шторм больше не актуален. Состояние персистится.
+  /// Access granted — timeout counter reset: problem solved, storm no longer
+  /// relevant. State persisted.
   public mutating func recordGranted(now _: Date) {
     timeoutTimestamps = []
     persist()
@@ -70,13 +67,13 @@ public struct MicRequestPolicy {
 
   // MARK: - Private
 
-  /// Таймауты, ещё живущие внутри окна (now - t < windowDuration).
+  /// Timeouts still alive inside window (now - t < windowDuration).
   private func timeouts(inWindow now: Date) -> [Date] {
     timeoutTimestamps.filter { now.timeIntervalSince($0) < Self.windowDuration }
   }
 
-  /// Загрузка состояния. Отсутствующий или повреждённый файл — свежее
-  /// состояние (пустой список): мусор в файле не должен ломать сторож.
+  /// Load state. Missing or corrupted file — fresh state (empty list):
+  /// garbage in file must not break the guard.
   private static func loadState(from url: URL) -> [Date] {
     guard
       let data = try? Data(contentsOf: url),
@@ -87,10 +84,10 @@ public struct MicRequestPolicy {
     return state.timeoutTimestamps.map { Date(timeIntervalSince1970: $0) }
   }
 
-  /// Атомарная персистенция: каталог создаётся при необходимости, файл
-  /// пишется через `.atomic` (rename — читатель видит либо старое, либо
-  /// новое состояние, никогда «полузапись»). Сбой записи не роняет сторож:
-  /// счётчик остаётся в памяти до следующего успешного сохранения.
+  /// Atomic persistence: dir created as needed, file written via `.atomic`
+  /// (rename — reader sees either old or new state, never "half-write").
+  /// Write failure does not break guard: counter stays in memory until next
+  /// successful save.
   private func persist() {
     guard let fileURL else { return }
     do {
@@ -105,7 +102,7 @@ public struct MicRequestPolicy {
     }
   }
 
-  /// Формат файла состояния (JSON): моменты таймаутов в epoch-секундах.
+  /// State file format (JSON): timeout moments in epoch seconds.
   private struct State: Codable {
     var timeoutTimestamps: [Double]
   }

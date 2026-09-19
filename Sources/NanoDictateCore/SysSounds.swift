@@ -2,19 +2,17 @@
 //  SysSounds.swift
 //  NanoDictateCore
 //
-//  Короткие системные звуки начала/окончания диктовки + файловый логгер.
-//  Только AppKit + Foundation (macOS 12, Swift 5.7).
+//  Short dictation start/end system sounds + file logger.
+//  AppKit + Foundation only (macOS 12, Swift 5.7).
 //
-//  Звуки берутся из системных звуков macOS через NSSound(named:):
-//  файлы лежат в /System/Library/Sounds/*.aiff (Tink, Pop, Ping и др.).
-//  Числовые SystemSoundID из iOS-каталога macOS молча игнорирует,
-//  поэтому играем именно через NSSound.
+//  Sounds via NSSound(named:) from macOS system sounds:
+//  files in /System/Library/Sounds/*.aiff (Tink, Pop, Ping...).
+//  Numeric SystemSoundID from iOS catalog silently ignored by macOS —
+//  play via NSSound.
 //
-//  Защита от повторного переигрывания: перед play() останавливаем предыдущее
-//  воспроизведение (NSSound.stop), а если запрошен тот же самый звук и он ещё
-//  играет (NSSound.isPlaying) — повторно не запускаем, чтобы не накладывать
-//  звук сам на себя (перезапуск того же звука допустим только после того,
-//  как он завершился).
+//  Replay protection: before play() stop previous (NSSound.stop); same
+//  sound still playing (isPlaying) — no restart, no self-overlap
+//  (restart of same sound allowed only after it finished).
 //
 
 import AppKit
@@ -22,48 +20,47 @@ import Foundation
 
 // MARK: - Системные звуки
 
-/// Воспроизводит короткие системные звуки macOS через NSSound.
+/// Plays short macOS system sounds via NSSound.
 public final class SysSounds {
-  /// `enabled == false` — полностью молчит.
+  /// `enabled == false` — completely silent.
   public var enabled: Bool
 
-  /// Системные звуки macOS (имена файлов без расширения из /System/Library/Sounds).
+  /// macOS system sounds (filenames w/o extension from /System/Library/Sounds).
   private static let startSoundName = "Tink"
   private static let endSoundName = "Pop"
   private static let cancelSoundName = "Ping"
-  /// Классический «звук ошибки» macOS — для сетевых сбоев (нет интернета /
-  /// таймаут STT).
+  /// macOS classic "error sound" — network failures (no internet / STT timeout).
   private static let errorSoundName = "Basso"
 
   // MARK: Новые кейсы (быстрые UX-победы). Каждый — отдельный кейс с дефолтным
 
   // поведением: существующие кейсы/методы (start/end/cancel/error) НЕ меняются.
 
-  /// Звук успешного завершения ПОСЛЕ вставки текста. Дефолт — тот же Pop,
-  /// что у playEnd, но отдельный кейс/метод: новая очередь «вставка → звук»
-  /// закреплена за ним, старый playEnd не трогается.
+  /// Success sound AFTER text insertion. Default same Pop as playEnd, but a
+  /// separate case/method: new queue "insert then sound" pinned to it, old
+  /// playEnd untouched.
   private static let completionAfterInsertSoundName = "Pop"
-  /// Звук «пустого результата»: STT вернул меньше двух слов — текст не
-  /// вставляем, вместо успеха играем Funk (не Basso — это не ошибка).
+  /// "Empty result" sound: STT returned under two words — nothing inserted,
+  /// Funk instead of success (not Basso — this is not an error).
   private static let emptyResultSoundName = "Funk"
-  /// Звук отката последней вставки (undo двойным Alt).
+  /// Last insertion undo sound (double-Alt undo).
   private static let undoSoundName = "Pop"
 
-  // Ленивый кэш: NSSound создаётся один раз на имя и переиспользуется.
-  // Один кэш на все имена — классические start/end/cancel/error и новые
-  // кейсы (completionAfterInsert/emptyResult/undo).
+  // Lazy cache: NSSound created once per name, reused. One cache for all —
+  // classic start/end/cancel/error and new cases (completionAfterInsert/
+  // emptyResult/undo).
   private var soundsByName: [String: NSSound] = [:]
 
-  /// Звук, который сейчас играет (останавливаем его при смене звука).
+  /// Sound currently playing (stopped on sound change).
   private var playingSound: NSSound?
 
-  /// Имя звука, помеченного играющим (internal — читается тестами).
+  /// Name of sound marked playing (internal — tests read it).
   private(set) var playingName: String?
 
-  /// Метка последнего запрошенного звука (start/end/cancel/error/
-  /// completionAfterInsert/emptyResult/undo). Даёт тестам различать разные
-  /// кейсы с одним и тем же звуком ("Pop" у end и completionAfterInsert),
-  /// тогда как playingName хранит только имя файла.
+  /// Label of last requested sound (start/end/cancel/error/
+  /// completionAfterInsert/emptyResult/undo). Lets tests distinguish cases
+  /// sharing one sound ("Pop" for end and completionAfterInsert), while
+  /// playingName stores only the filename.
   private(set) var lastPlayedLabel: String?
 
   private let lock = NSLock()
@@ -72,63 +69,60 @@ public final class SysSounds {
     self.enabled = enabled
   }
 
-  /// Начало диктовки.
   public func playStart() {
     play(Self.startSoundName, label: "start")
   }
 
-  /// Удачное завершение (текст вставлен).
+  /// Successful finish (text inserted).
   public func playEnd() {
     play(Self.endSoundName, label: "end")
   }
 
-  /// Отмена (Esc).
+  /// Cancel (Esc).
   public func playCancel() {
     play(Self.cancelSoundName, label: "cancel")
   }
 
-  /// Ошибка диктовки (нет интернета / таймаут STT).
+  /// Dictation error (no internet / STT timeout).
   public func playError() {
     play(Self.errorSoundName, label: "error")
   }
 
   // MARK: Новые методы (UX quick wins)
 
-  /// Звук завершения ПОСЛЕ вставки текста (а не до неё). Вызывается из
-  /// completeInsertion после Inserter.insert, чтобы пользователь слышал
-  /// звук только когда текст гарантированно вставлен.
+  /// Finish sound AFTER text insertion (not before). Called from
+  /// completeInsertion after Inserter.insert — user hears it only when text
+  /// is confirmed inserted.
   public func playCompletionAfterInsert() {
     play(Self.completionAfterInsertSoundName, label: "completionAfterInsert")
   }
 
-  /// Звук «пустого результата»: STT вернул <2 слов — ничего не вставляем.
-  /// Отдельный от ошибки микрофона (Basso): «пустота» ≠ сбой.
+  /// "Empty result" sound: STT returned <2 words — nothing inserted. Distinct
+  /// from mic failure (Basso): emptiness ≠ failure.
   public func playEmptyResult() {
     play(Self.emptyResultSoundName, label: "emptyResult")
   }
 
-  /// Звук отката последней вставки (undo двойным Alt в пределах окна).
+  /// Last insertion undo sound (double-Alt undo within window).
   public func playUndo() {
     play(Self.undoSoundName, label: "undo")
   }
 
-  /// Защита от дублей: пропустить ли повторное воспроизведение `name`.
-  /// Пропускаем только тогда, когда это тот же самый звук и он действительно
-  /// ещё играет — иначе звук с тем же именем можно играть повторно.
+  /// Duplicate protection: skip replay of `name` only when it is the same
+  /// sound and still playing — else same-name sound replayable.
   func shouldSkipReplay(of name: String, currentlyPlaying: Bool) -> Bool {
     playingName == name && currentlyPlaying
   }
 
   private func play(_ name: String, label: String) {
-    guard enabled else { return }  // enabled == false — полный no-op
+    guard enabled else { return }  // disabled — full no-op
     Logger.log("sounds: \(label)", level: "debug")
 
-    // Тестовый раннер (NANODICTATE_TESTS=1): реальный системный звук НЕ
-    // проигрываем — пользователя ничем не тревожим. Но намерение звука
-    // фиксируем (playingName, lastPlayedLabel), потому что на них
-    // строятся тесты: какой звук вызывается и защита от повторного
-    // переигрывания. lastPlayedLabel различает кейсы с одним звуком
-    // (end и completionAfterInsert оба "Pop", но разные лейблы).
+    // Test runner (NANODICTATE_TESTS=1): real system sound NOT played — no
+    // user disturbance. Sound intent still recorded (playingName,
+    // lastPlayedLabel) — tests build on them: which sound called, replay
+    // protection. lastPlayedLabel distinguishes cases sharing one sound
+    // (end and completionAfterInsert both "Pop", different labels).
     if RuntimeEnvironment.isTestRun {
       lock.lock()
       defer { lock.unlock() }
@@ -142,19 +136,18 @@ public final class SysSounds {
     defer { lock.unlock() }
 
     guard let sound = sound(name: name) else {
-      // Звук не найден в системном каталоге — молча пропускаем
-      // (как раньше AudioServices молча игнорировал SystemSoundID).
-      // Диагностика причины тишины — на уровне debug.
+      // Sound missing from system catalog — silently skipped (as
+      // AudioServices silently ignored SystemSoundID). Silence diagnosis
+      // stays at debug level.
       Logger.log("sounds: \(name) not found in system catalog — skipped", level: "debug")
       return
     }
 
-    // Не перезапускаем тот же звук, если он ещё играет.
     guard !shouldSkipReplay(of: name, currentlyPlaying: sound.isPlaying) else {
       return
     }
 
-    // Звук сменился и ещё играет — останавливаем предыдущее воспроизведение.
+    // Sound changed while previous still playing — stop it.
     if let current = playingSound, current !== sound, current.isPlaying {
       current.stop()
     }
@@ -177,23 +170,22 @@ public final class SysSounds {
 
 // MARK: - Логгер
 
-/// Простейший потокобезопасный файловый логгер: append в `<logDirectory>/agent.log`.
+/// Minimal thread-safe file logger: appends to `<logDirectory>/agent.log`.
 public enum Logger {
-  /// Каталог логов; `~` раскрывается автоматически.
+  /// Logs directory; `~` expanded automatically.
   public static var logDirectory: String = "~/Library/Logs/NanoDictate"
 
   private static let lock = NSLock()
 
-  /// Пишет строку `yyyy-MM-dd HH:mm:ss [level] message` в конец agent.log.
-  /// Создаёт каталог и файл при необходимости. Никогда не бросает исключений.
+  /// Appends `yyyy-MM-dd HH:mm:ss [level] message` to agent.log. Creates
+  /// dir/file as needed. Never throws.
   public static func log(_ message: String, level: String = "info") {
     lock.lock()
     defer { lock.unlock() }
 
-    // Тестовый раннер: боевой ~/Library/Logs/NanoDictate/agent.log не
-    // трогаем — тестовые строки уходят в /tmp/nanodictate-tests/agent.log.
-    // Если какой-то тест сам перенаправил logDirectory (LoggerTests) —
-    // уважаем его настройку.
+    // Test runner: prod ~/Library/Logs/NanoDictate/agent.log untouched —
+    // test lines go to /tmp/nanodictate-tests/agent.log. If a test
+    // redirected logDirectory itself (LoggerTests) — respect it.
     var effectiveDirectory = logDirectory
     if RuntimeEnvironment.isTestRun, logDirectory == "~/Library/Logs/NanoDictate" {
       effectiveDirectory = "/tmp/nanodictate-tests"
@@ -207,7 +199,7 @@ public enum Logger {
       do {
         try fileManager.createDirectory(atPath: expanded, withIntermediateDirectories: true)
       } catch {
-        return  // нет доступа к каталогу логов — молча пропускаем
+        return  // no access to log dir — silent skip
       }
     }
 

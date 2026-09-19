@@ -1,18 +1,16 @@
 import Foundation
 @testable import NanoDictateCore
 
-/// Cooldown микрофонных ошибок: первый показ всегда разрешён, повторные
-/// в пределах интервала подавляются, по истечении интервала — снова разрешены.
+/// Mic error cooldown: first always allowed, repeats within interval suppressed,
+/// after the interval — allowed again.
 final class MicErrorCooldownTests: XCTestCase {
 
-    /// Первый вызов всегда разрешён — даже в момент 0.0 (sentinel-ноль не
-    /// должен «съедать» следующий тап, ср. DoubleAltDetector).
+    /// First call allowed even at 0.0: sentinel zero must not eat next tap (cf. DoubleAltDetector).
     @objc func testFirstCallAlwaysAllowed() {
         var cooldown = MicErrorCooldown(interval: 3.0)
         XCTAssertTrue(cooldown.allow(at: 0))
     }
 
-    /// Повторный вызов в пределах интервала подавляется и не меняет состояние.
     @objc func testSecondWithinIntervalIsSuppressed() {
         var cooldown = MicErrorCooldown(interval: 3.0)
         XCTAssertTrue(cooldown.allow(at: 100))
@@ -20,30 +18,27 @@ final class MicErrorCooldownTests: XCTestCase {
         XCTAssertFalse(cooldown.allow(at: 102.999))
     }
 
-    /// Событие ровно на границе интервала разрешено (допуск на Double).
+    /// Event exactly at the interval boundary is allowed (Double tolerance).
     @objc func testExactlyAtIntervalIsAllowed() {
         var cooldown = MicErrorCooldown(interval: 3.0)
         XCTAssertTrue(cooldown.allow(at: 100))
         XCTAssertTrue(cooldown.allow(at: 103))
     }
 
-    /// После истечения интервала событие снова разрешено и интервал
-    /// отсчитывается заново от этого момента.
     @objc func testAfterIntervalIsAllowedAndResets() {
         var cooldown = MicErrorCooldown(interval: 3.0)
         XCTAssertTrue(cooldown.allow(at: 100))
         XCTAssertTrue(cooldown.allow(at: 103.5))
-        XCTAssertFalse(cooldown.allow(at: 104))   // 0.5 с < 3 с от 103.5
-        XCTAssertTrue(cooldown.allow(at: 106.5))  // 3 с прошло
+        XCTAssertFalse(cooldown.allow(at: 104))
+        XCTAssertTrue(cooldown.allow(at: 106.5))
     }
 
-    /// Подавленные вызовы НЕ сдвигают «последний показ»: частые Alt+Alt не
-    /// растягивают окно подавления бесконечно.
+    /// Suppressed calls do not shift last-show: rapid Alt+Alt must not stretch the window.
     @objc func testSuppressedCallsDoNotExtendWindow() {
         var cooldown = MicErrorCooldown(interval: 3.0)
         XCTAssertTrue(cooldown.allow(at: 10))
-        _ = cooldown.allow(at: 10.1) // подавлен
-        _ = cooldown.allow(at: 10.2) // подавлен
-        XCTAssertTrue(cooldown.allow(at: 13)) // ровно 3 с от 10.0 — разрешено
+        _ = cooldown.allow(at: 10.1)
+        _ = cooldown.allow(at: 10.2)
+        XCTAssertTrue(cooldown.allow(at: 13))
     }
 }

@@ -23,7 +23,7 @@ final class WordDiffTests: XCTestCase {
         XCTAssertEqual(change.spanNew, "два")
         XCTAssertEqual(change.tailOld, " три.")
         XCTAssertEqual(change.tailNew, " два три.")
-        XCTAssertEqual(change.spanStartOld, 4)   // после "Один "
+        XCTAssertEqual(change.spanStartOld, 4)   // after "Один "
         XCTAssertEqual(change.spanStartNew, 4)
     }
 
@@ -41,16 +41,15 @@ final class WordDiffTests: XCTestCase {
         let result = WordDiff.change(old: "Было слово.", new: "Стало слово.")
         XCTAssertNotNil(result)
         let change = result!
-        // words("Было слово.") = ["Было", "слово."]; words("Стало слово.") = ["Стало", "слово."]
-        // prefix = 0 (слова на позиции 0 разные), suffix = 1 (последнее совпадает)
+        // prefix=0 (first words differ), suffix=1 (last word matches)
         XCTAssertEqual(change.spanOld, "Было")
         XCTAssertEqual(change.spanNew, "Стало")
-        XCTAssertEqual(change.tailOld, "Было слово.") // от spanStartOld=0 до конца
+        XCTAssertEqual(change.tailOld, "Было слово.") // from spanStartOld=0 to end
         XCTAssertEqual(change.tailNew, "Стало слово.")
     }
 
     @objc func testAddAtEnd() {
-        // Добавленное слово в конце: префикс совпадает целиком, спан пустой старый.
+        // Appended word: prefix fully matches, old span empty.
         let result = WordDiff.change(old: "Один два", new: "Один два три")
         XCTAssertNotNil(result)
         let change = result!
@@ -86,7 +85,7 @@ final class WordDiffTests: XCTestCase {
         let result = WordDiff.change(old: "Привет мир.", new: "привет мир.")
         XCTAssertNotNil(result)
         let change = result!
-        // Слова ["привет", "мир."] vs ["Привет", "мир."] — suffix 1 "мир." совпадает
+        // Suffix 1 ("мир.") matches despite case difference.
         XCTAssertEqual(change.spanOld, "Привет")
         XCTAssertEqual(change.spanNew, "привет")
     }

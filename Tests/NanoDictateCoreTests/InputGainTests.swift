@@ -2,33 +2,31 @@ import Foundation
 import AVFoundation
 @testable import NanoDictateCore
 
-/// Юнит-тесты цифрового усиления входа (AGC) — см. InputGain.swift.
+/// Unit tests for digital input gain (AGC) — see InputGain.swift.
 ///
-/// Задача фичи: штатный вход речи лежит в районе −55…−40 dBFS и диктовка пишет
-/// тихий сигнал; AGC доводит текущий RMS буфера до целевого `targetRmsDb`
-/// (−20 dBFS), но не более чем на `maxGainDb` (+30 дБ). Требования, которые
-/// проверяются здесь напрямую на чистой математике (без аудио-железа):
+/// Feature task: speech input sits at −55…−40 dBFS, dictation records quiet
+/// signal; AGC drives current buffer RMS to `targetRmsDb` (−20 dBFS), capped
+/// at `maxGainDb` (+30 dB). Requirements checked on pure math, no audio hardware:
 ///
-///   (а) тихий вход (RMS ≈ −49…−50 dBFS) усиливается до примерно −20 dBFS
-///       (допуск ±3 дБ) — «целевой уровень речи»;
-///   (б) громкий вход (RMS −15 dBFS) НЕ усиливается — gain 0, буфер без изменений;
-///   (в) тишина (RMS ≤ −50 dBFS, порог nearSilenceThreshold) не усиливается —
-///       шум микрофона не тянется вверх;
-///   (г) клип: пик после усиления клампится в [−1.0, 1.0] — Int16-конверсия
-///       ниже не клиппит;
-///   (д) сглаживание: два вызова подряд — gain меняется плавно (one-pole,
-///       attack 25 мс / release 300 мс), а не скачком;
-///   (е) env-конфиг: NANODICTATE_GAIN_DISABLED=1 отключает (gain 0),
-///       NANODICTATE_GAIN_TARGET_DB / NANODICTATE_GAIN_MAX_DB парсятся и
-///       доезжают до применения.
+///   (а) quiet input (RMS ≈ −49…−50 dBFS) amplified to ≈ −20 dBFS (±3 dB);
+///   (б) loud input (RMS −15 dBFS) NOT amplified — gain 0, buffer untouched;
+///   (в) silence (RMS ≤ −50 dBFS, nearSilenceThreshold) not amplified —
+///       mic noise not pulled up;
+///   (г) clip: post-gain peak clamps to [−1.0, 1.0] — Int16 conversion below
+///       does not clip;
+///   (д) smoothing: two calls in row — gain changes smoothly (one-pole,
+///       attack 25 ms / release 300 ms), not in a jump;
+///   (е) env config: NANODICTATE_GAIN_DISABLED=1 disables (gain 0),
+///       NANODICTATE_GAIN_TARGET_DB / NANODICTATE_GAIN_MAX_DB parse and
+///       reach apply.
 ///
-/// Единица времени в тестах: 1 сэмпл при sampleRate 16000 = 1/16000 c.
-/// Константа сглаживания: α = 1 − e^(−1/τ), τ = τ_сек × 16000.
+/// Time unit: 1 sample @ sampleRate 16000 = 1/16000 s.
+/// Smoothing constant: α = 1 − e^(−1/τ), τ = τ_sec × 16000.
 final class InputGainTests: XCTestCase {
 
     private let sampleRate = 16000
 
-    /// Амплитуда, дающая RMS ровно `rmsDb` dBFS на константном буфере.
+    /// Amplitude giving exactly `rmsDb` dBFS RMS on constant buffer.
     private func amplitude(forRmsDb rmsDb: Float) -> Float {
         return powf(10, rmsDb / 20)
     }
@@ -37,14 +35,13 @@ final class InputGainTests: XCTestCase {
         return AudioMetrics.dbfs(linear)
     }
 
-    /// Константный буфер заданной амплитуды (синуса нет — нужен ровный RMS,
-    /// чтобы отслеживать усиление по «чистому» уровню).
+    /// Constant-amplitude buffer; no sine — flat RMS tracks gain cleanly.
     private func constantBuffer(_ amplitude: Float, frames: Int) -> [Float] {
         return [Float](repeating: amplitude, count: frames)
     }
 
-    /// RMS Float-буфера (локальная копия метрики — AudioMetrics.rms работает
-    /// с [Int16], а здесь буфер ещё не конвертирован).
+    /// RMS of Float buffer — local copy; AudioMetrics.rms takes [Int16],
+    /// buffer not converted yet.
     private func rmsOf(_ samples: [Float]) -> Float {
         guard !samples.isEmpty else { return 0 }
         var sum: Float = 0
@@ -54,8 +51,8 @@ final class InputGainTests: XCTestCase {
 
     // MARK: - (а) тихий вход усиливается до цели
 
-    /// Тихий вход −49 dBFS (штатный уровень речи): после apply RMS ≈ −20 dBFS
-    /// (цель ± 3 дБ), gain добрался до ~+29 дБ — «речь стала слышной».
+    /// Quiet −49 dBFS input (typical speech): after apply RMS ≈ −20 dBFS
+    /// (target ±3 dB), gain reached ~+29 dB — speech audible.
     @objc func testQuietSpeechIsAmplifiedTowardTarget() {
         let gain = InputGain()
         var buffer = constantBuffer(amplitude(forRmsDb: -49), frames: sampleRate)
@@ -69,14 +66,12 @@ final class InputGainTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(dbfs(outRms), -23, "не ниже −23 dBFS")
         XCTAssertLessThanOrEqual(dbfs(outRms), -17, "не выше −17 dBFS")
         XCTAssertEqual(gain.currentGainDb, 29, accuracy: 0.5, "к концу буфера gain ≈ полный целевой +29 дБ")
-        // После усиления уровень выше исходного более чем в 10 раз (≈ +20 дБ) —
-        // сигнал реально стал громче, а не «как был».
+        // Post-gain level > 10× input (≈ +20 dB) — signal really louder.
         XCTAssertGreaterThanOrEqual(dbfs(outRms), dbfs(inRms) + 20)
     }
 
-    /// Граничный тихий вход ровно на пороге тишины (−50 dBFS): РОВНО на пороге
-    /// усиление ещё 0 (порог строго ниже — «уже не тишина» начинается выше),
-    /// но на один шаг выше (−49) — уже работает (покрыто тестом выше).
+    /// Input at exactly silence threshold (−50 dBFS): gain still 0 (threshold
+    /// strictly below — "not silence" starts above); one step up (−49) works.
     @objc func testQuietAtSilenceThresholdGainZero() {
         let gain = InputGain()
         var buffer = constantBuffer(AudioMetrics.nearSilenceThreshold, frames: sampleRate)
@@ -90,7 +85,7 @@ final class InputGainTests: XCTestCase {
 
     // MARK: - (б) громкий вход не усиливается
 
-    /// Вход −15 dBFS: уже громче цели, усиление 0, буфер проходит без изменений.
+    /// −15 dBFS input: louder than target, gain 0, buffer untouched.
     @objc func testLoudInputIsNotAmplified() {
         let gain = InputGain()
         var buffer = constantBuffer(amplitude(forRmsDb: -15), frames: sampleRate)
@@ -106,8 +101,8 @@ final class InputGainTests: XCTestCase {
 
     // MARK: - (в) тишина не усиливается
 
-    /// Тишина −60 dBFS (RMS 0.001 — ниже порога −50): gain 0, буфер проходит
-    /// как есть — фоновый шум микрофона не тянется к речевому уровню.
+    /// Silence −60 dBFS (RMS 0.001, below threshold −50): gain 0, buffer
+    /// passes as-is — mic noise not pulled to speech level.
     @objc func testSilenceIsNotAmplified() {
         let gain = InputGain()
         var buffer = constantBuffer(0.001, frames: sampleRate)
@@ -122,13 +117,12 @@ final class InputGainTests: XCTestCase {
 
     // MARK: - (г) клип клампится в [−1.0, 1.0]
 
-    /// Один громкий пик 0.9 в тихом буфере: RMS буфера ~ −41 dBFS → целевое
-    /// усиление ~ +21 дБ; пик после усиления ≈ 0.9 × 11.5 ≈ 10.4 → клампится
-    /// в 1.0. Ни один сэмпл после apply не превышает 1.0 по модулю.
+    /// One 0.9 peak in quiet buffer: RMS ~ −41 dBFS → target gain ~ +21 dB;
+    /// post-gain peak ≈ 0.9 × 11.5 ≈ 10.4 → clamps to 1.0; no sample exceeds 1.0.
     @objc func testPeakIsClampedAfterGain() {
         let gain = InputGain()
         var buffer = constantBuffer(0.005, frames: sampleRate)
-        buffer[sampleRate - 1] = 0.9 // пик в самом конце, когда gain уже сошёлся
+        buffer[sampleRate - 1] = 0.9 // peak at very end, gain already converged
         let inRms = rmsOf(buffer)
         XCTAssertEqual(dbfs(inRms), -41, accuracy: 1.0, "предусловие: RMS ниже цели, усиление нужно")
 
@@ -138,25 +132,23 @@ final class InputGainTests: XCTestCase {
         XCTAssertEqual(maxAbs, 1.0, "пик после усиления клампится ровно в 1.0")
         XCTAssertLessThanOrEqual(maxAbs, 1.0, "ни один сэмпл не выходит из [−1, 1]")
         XCTAssertEqual(gain.currentGainDb, 21.2, accuracy: 0.5, "gain ~ +21 дБ — до клампа пик был ~10.4")
-        // Кламп коснулся только пика: уровень «хвоста» буфера всё ещё усилен,
-        // но не клиппит — тихая часть осталась < 1.0.
+        // Clamp hit peak only: buffer tail still amplified, not clipping — < 1.0.
         XCTAssertLessThanOrEqual(buffer[sampleRate / 2], 0.2, "середина буфера не на клампе")
         XCTAssertGreaterThanOrEqual(buffer[sampleRate / 2], 0.03, "середина буфера усилена")
     }
 
     // MARK: - (д) плавное сглаживание
 
-    /// Два вызова подряд (по 160 сэмплов = 10 мс при 16 кГц) на тихом входе:
-    /// gain после первого ∝ (1 − e^(−160/400)) ≈ 33% пути к цели, после второго —
-    /// ещё ≈ 33% остатка. Требование: НЕ скачок сразу к полной цели за один
-    /// буфер (иначе «дыхание»/щёлчки на каждом буфере).
+    /// Two calls in row (160 samples = 10 ms @16 kHz) on quiet input: gain
+    /// after first ≈ 33% of way to target, after second ≈ 33% of rest.
+    /// No jump to full target in one buffer (else breathing/clicks per buffer).
     @objc func testGainSmoothsAcrossBuffers() {
         let gain = InputGain()
-        // α = 1 − e^(−1/400); закрытая форма one-pole после N шагов:
-        // target·(1 − (1−α)^N), (1−α)^N = e^(−N/400) — совпадает с рекурсией.
-        let tauAttack = 0.025 * Double(sampleRate) // 400 сэмплов = 25 мс
+        // α = 1 − e^(−1/400); one-pole closed form after N steps:
+        // target·(1 − (1−α)^N), (1−α)^N = e^(−N/400) — matches recursion.
+        let tauAttack = 0.025 * Double(sampleRate) // 400 samples = 25 ms
         let target: Float = 29 // −49 → −20 дБ
-        let framesPerCall = sampleRate / 100 // 160 сэмплов = 10 мс
+        let framesPerCall = sampleRate / 100 // 160 samples = 10 ms
         let p1 = 1 - exp(-Double(framesPerCall) / tauAttack)
         let expectedAfter1 = Float(Double(target) * p1) // 29·(1−e^(−0.4)) ≈ 9.56
         let p2 = 1 - exp(-2 * Double(framesPerCall) / tauAttack)
@@ -178,19 +170,19 @@ final class InputGainTests: XCTestCase {
         XCTAssertEqual(gain2, expectedAfter2, accuracy: 0.1, "второй шаг ≈ ещё 33% остатка")
     }
 
-    /// Спад (release, 300 мс) тоже плавный: подняли gain на тихом буфере,
-    /// затем дали громкий буфер (цель 0) — gain уходит вниз постепенно,
-    /// не обнуляется мгновенно (иначе щёлкает на стыке «тихо→громко»).
+    /// Release (300 ms) smooth too: gain raised on quiet buffer, then loud
+    /// buffer (target 0) — gain decays gradually, not zeroed instantly
+    /// (else click at quiet→loud edge).
     @objc func testGainReleasesSmoothly() {
         let gain = InputGain()
-        // Разогнали gain на полную цель тихим буфером.
+        // Ran gain up to full target with quiet buffer.
         var quiet = constantBuffer(amplitude(forRmsDb: -49), frames: sampleRate)
         let quietRms = rmsOf(quiet)
         gain.apply(to: &quiet, rms: quietRms, sampleRate: sampleRate)
         XCTAssertEqual(gain.currentGainDb, 29, accuracy: 0.5, "предусловие: gain на цели")
 
-        // Громкий буфер: цель 0, но release 300 мс — за 1600 сэмплов (100 мс)
-        // gain уменьшается лишь до ~72% (это НЕ мгновенный скачок вниз).
+        // Loud buffer: target 0, release 300 ms — 1600 samples (100 ms) bring
+        // gain only to ~72% (no instant drop).
         let decayPerStep = Float(exp(-Double(sampleRate / 10) / (0.300 * Double(sampleRate))))
         let gainBefore = gain.currentGainDb
         var loud = constantBuffer(amplitude(forRmsDb: -15), frames: sampleRate / 10)
@@ -201,8 +193,8 @@ final class InputGainTests: XCTestCase {
         XCTAssertLessThanOrEqual(gainAfter100ms, gainBefore - 0.01, "gain пошёл вниз")
         XCTAssertEqual(gainAfter100ms, gainBefore * decayPerStep, accuracy: 1.0, "за 100 мс ушло ~28%, а не всё")
 
-        // И продолжает спускаться к 0: ещё 3 буфера по 1600 сэмплов
-        // (суммарно 6400 ≈ 0.4 c → e^(−6400/4800) ≈ 0.26 от остатка).
+        // Keeps decaying to 0: 3 more 1600-sample buffers (6400 ≈ 0.4 s,
+        // e^(−6400/4800) ≈ 0.26 of rest).
         for _ in 0..<3 {
             gain.apply(to: &loud, rms: loudRms, sampleRate: sampleRate)
         }
@@ -210,9 +202,9 @@ final class InputGainTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(gain.currentGainDb, 0.1, "и пока не добил до нуля (ещё остаток)")
     }
 
-    /// Тот же буфер (в том числе с уже накопленным gain): повторный apply на
-    /// тихом входе не «взрывает» усиление — асимптота к цели, не рост вверх
-    /// без ограничения (стабильность при непрерывной тихой речи).
+    /// Same buffer (gain already accumulated): repeated apply on quiet input
+    /// does not blow up — asymptote to target, not unbounded growth
+    /// (stability under steady quiet speech).
     @objc func testRepeatedQuietApplysNeverExceedTarget() {
         let gain = InputGain()
         var buffer = constantBuffer(amplitude(forRmsDb: -49), frames: sampleRate / 10)
@@ -230,8 +222,8 @@ final class InputGainTests: XCTestCase {
 
     // MARK: - (е) конфиг по умолчанию и пломбинг из окружения
 
-    /// Дефолт ровно по задаче: включено, −20 dBFS, max +30 дБ, attack 25 мс,
-    /// release 300 мс. Рубильник не меняет поведение по умолчанию.
+    /// Defaults per task: enabled, −20 dBFS, max +30 dB, attack 25 ms,
+    /// release 300 ms.
     @objc func testDefaultsMatchTask() {
         let config = InputGainConfig.defaults
         XCTAssertTrue(config.enabled, "дефолт — фича включена")
@@ -242,14 +234,14 @@ final class InputGainTests: XCTestCase {
         XCTAssertEqual(InputGainConfig(), config, "init по умолчанию == .defaults")
     }
 
-    /// Пустое окружение → ровно `.defaults` (как у AutoStopConfig).
+    /// Empty environment gives exactly `.defaults` (as AutoStopConfig).
     @objc func testFromEnvironmentDefaultsWhenEmpty() {
         let config = InputGainConfig.fromEnvironment([:])
         XCTAssertEqual(config, .defaults)
     }
 
-    /// Рубильник: NANODICTATE_GAIN_DISABLED=1/true/TRUE выключает фичу,
-    /// нераспознанное значение не трогает (fail-closed).
+    /// Switch: NANODICTATE_GAIN_DISABLED=1/true/TRUE disables feature;
+    /// unrecognized value ignored (fail-closed).
     @objc func testFromEnvironmentDisabledSwitch() {
         for value in ["1", "true", "TRUE"] {
             let config = InputGainConfig.fromEnvironment(["NANODICTATE_GAIN_DISABLED": value])
@@ -259,7 +251,7 @@ final class InputGainTests: XCTestCase {
         XCTAssertTrue(config.enabled, "некорректное значение рубильника игнорируется")
     }
 
-    /// Цель и потолок из окружения доезжают до применения.
+    /// Target and cap from environment reach apply().
     @objc func testFromEnvironmentTargetAndMaxParse() {
         let config = InputGainConfig.fromEnvironment([
             "NANODICTATE_GAIN_TARGET_DB": "-25",
@@ -270,7 +262,7 @@ final class InputGainTests: XCTestCase {
         XCTAssertTrue(config.enabled, "параметры не трогают рубильник")
         XCTAssertEqual(config.attackTime, InputGainConfig.defaults.attackTime, "постоянные времени — дефолтные")
 
-        // Применение: с кастомной целью ±25 дБ работает та же математика.
+        // Apply: custom target −25 dB — same math works.
         let gain = InputGain(config: config)
         var buffer = constantBuffer(amplitude(forRmsDb: -49), frames: sampleRate)
         let inRms = rmsOf(buffer)
@@ -278,23 +270,22 @@ final class InputGainTests: XCTestCase {
         XCTAssertEqual(dbfs(outRms), -25, accuracy: 3.0, "кастомная цель ±25 dBFS")
     }
 
-    /// Некорректные значения игнорируются — остаётся дефолт (опечатка не ломает
-    /// ни включённость, ни границы).
+    /// Invalid values ignored — defaults stay (typo breaks neither enabled
+    /// nor bounds).
     @objc func testFromEnvironmentInvalidValuesIgnored() {
         let config = InputGainConfig.fromEnvironment([
-            "NANODICTATE_GAIN_TARGET_DB": "abc",   // не число
-            "NANODICTATE_GAIN_TARGET_DBX": "-25",  // другое имя не читается
-            "NANODICTATE_GAIN_TARGET_DB2": "10",   // цель должна быть ниже 0 dBFS
-            "NANODICTATE_GAIN_MAX_DB": "-5",       // потолок должен быть > 0
-            "NANODICTATE_GAIN_MAX_DBX": "70",      // потолок ≤ 60
+            "NANODICTATE_GAIN_TARGET_DB": "abc",   // not a number
+            "NANODICTATE_GAIN_TARGET_DBX": "-25",  // different name not read
+            "NANODICTATE_GAIN_TARGET_DB2": "10",   // target must be below 0 dBFS
+            "NANODICTATE_GAIN_MAX_DB": "-5",       // cap must be > 0
+            "NANODICTATE_GAIN_MAX_DBX": "70",      // cap ≤ 60
         ])
         XCTAssertEqual(config, .defaults, "некорректные значения — конфигурация по умолчанию")
     }
 
-    /// Значения из env, формально прошедшие валидацию, всё равно проходят
-    /// init-кламп (−120…−1 и 1…60): env не нарушает инварианты конфига
-    /// (`MAX_DB=0.5` — потолок ниже init-минимума, `TARGET_DB=-0.5` — цель
-    /// почти у полной шкалы, постоянный клип).
+    /// Env values that passed validation still go through init clamp
+    /// (−120…−1 and 1…60): env cannot break config invariants
+    /// (`MAX_DB=0.5` below init min, `TARGET_DB=-0.5` near full scale).
     @objc func testFromEnvironmentValuesAreClampedByInit() {
         let config = InputGainConfig.fromEnvironment([
             "NANODICTATE_GAIN_TARGET_DB": "-0.5",
@@ -306,8 +297,8 @@ final class InputGainTests: XCTestCase {
 
     // MARK: - Отключённая фича: буфер проходит без изменений
 
-    /// NANODICTATE_GAIN_DISABLED → InputGain с enabled=false: apply не трогает
-    /// буфер (хоть громкий, хоть тихий) и возвращает исходный RMS.
+    /// NANODICTATE_GAIN_DISABLED → InputGain with enabled=false: apply
+    /// leaves buffer untouched (loud or quiet), returns original RMS.
     @objc func testDisabledGainPassesBufferThrough() {
         let config = InputGainConfig.fromEnvironment(["NANODICTATE_GAIN_DISABLED": "1"])
         XCTAssertFalse(config.enabled)
@@ -322,12 +313,11 @@ final class InputGainTests: XCTestCase {
         XCTAssertEqual(outRms, inRms, accuracy: 0.000001)
         XCTAssertEqual(buffer, original, "выключенная фича — буфер без изменений")
         XCTAssertEqual(gain.currentGainDb, 0)
-        // targetGainDb тоже честно отдаёт 0 при выключенном рубильнике.
+        // targetGainDb also returns 0 when disabled.
         XCTAssertEqual(gain.targetGainDb(forRms: 0.000001), 0)
     }
 
-    /// reset() обнуляет накопленный gain — новый сеанс записи не стартует
-    /// с усиления прошлого.
+    /// reset() zeroes accumulated gain — new recording session starts clean.
     @objc func testResetClearsAccumulatedGain() {
         let gain = InputGain()
         var buffer = constantBuffer(amplitude(forRmsDb: -49), frames: sampleRate)
@@ -338,7 +328,7 @@ final class InputGainTests: XCTestCase {
         XCTAssertEqual(gain.currentGainDb, 0)
     }
 
-    /// Пустой буфер: apply возвращает rms как есть, ничего не трогает.
+    /// Empty buffer: apply returns rms as-is, touches nothing.
     @objc func testEmptyBufferPassesThrough() {
         let gain = InputGain()
         var buffer: [Float] = []
@@ -348,10 +338,9 @@ final class InputGainTests: XCTestCase {
         XCTAssertEqual(gain.currentGainDb, 0)
     }
 
-    /// Тишина после усиленной речи проходит БЕЗ изменений и сбрасывает
-    /// накопленный gain: без этого гарда хвост release (~0.3 c) утекал бы
-    /// в тишину, тянул её вверх и сбивал VAD/автостоп («тишина не усиливается
-    /// вовсе» — регресс чанк-тестов AudioServiceVADTests).
+    /// Silence after amplified speech passes UNCHANGED and resets gain:
+    /// without guard, release tail (~0.3 s) would leak into silence, pull
+    /// it up, break VAD/auto-stop (regression of AudioServiceVADTests chunks).
     @objc func testSilenceAfterAmplifiedSpeechPassesThroughAndResetsGain() {
         let gain = InputGain()
         var speech = constantBuffer(amplitude(forRmsDb: -49), frames: sampleRate)
@@ -371,13 +360,13 @@ final class InputGainTests: XCTestCase {
 
     // MARK: - Интеграция через AudioService
 
-    /// Сквозная проверка проводки: AudioService.process применяет gain к
-    /// буферу, levelDelegate получает УСИЛЕННЫЙ RMS, а stop() возвращает
-    /// усиленные Int16-сэмплы (вход −46 dBFS, на записи пики ~ +26 дБ).
+    /// End-to-end wiring: AudioService.process applies gain to buffer,
+    /// levelDelegate gets AMPLIFIED RMS, stop() returns amplified Int16
+    /// samples (input −46 dBFS, recorded peaks ~ +26 dB).
     @objc func testAudioServiceAmplifiesLevelAndSamples() {
         let engine = GainFakeEngine()
-        // Явная конфигурация (не fromEnvironment): тест не должен зависеть от
-        // NANODICTATE_GAIN_DISABLED в окружении прогона.
+        // Explicit config (not fromEnvironment): test must not depend on
+        // NANODICTATE_GAIN_DISABLED in run environment.
         let service = AudioService(logLevel: "info", engine: engine, gainConfig: InputGainConfig.defaults)
         let delegate = LevelBox()
         service.levelDelegate = delegate
@@ -388,7 +377,7 @@ final class InputGainTests: XCTestCase {
             return
         }
 
-        // Один буфер тихой константной речи: −46 dBFS → нужна компенсация.
+        // One quiet constant-speech buffer: −46 dBFS → compensation needed.
         engine.node.emit(constantBuffer(amplitude(forRmsDb: -46), frames: 8192, sampleRate: 44100))
 
         let samples = service.stop()
@@ -406,8 +395,8 @@ final class InputGainTests: XCTestCase {
 
 // MARK: - Фейковый движок для InputGain-интеграции (стиль AudioServiceLifecycleTests)
 
-/// Фейк движка: тап хранит колбэк, emit() дёргает его синхронно (как в
-/// существующих lifecycle-тестах), конвертация идёт настоящим AVAudioConverter.
+/// Engine fake: tap stores callback, emit() invokes it synchronously (as in
+/// lifecycle tests); conversion via real AVAudioConverter.
 private final class GainFakeNode: AudioInputNodeLike {
     let format: AVAudioFormat
     var tapBlock: AVAudioNodeTapBlock?
@@ -429,7 +418,7 @@ private final class GainFakeNode: AudioInputNodeLike {
 
     func removeTap(onBus bus: AVAudioNodeBus) {}
 
-    /// Эмитирует один PCM-буфер в обработку (в проде это делает аудио-поток).
+    /// Emits one PCM buffer into processing (prod audio thread does this).
     func emit(_ buffer: AVAudioPCMBuffer) {
         tapBlock?(buffer, AVAudioTime())
     }
@@ -445,7 +434,7 @@ private final class GainFakeEngine: AudioEngineLike {
     func stop() {}
 }
 
-/// Контейнер для уровня, который получает live-делегат (слабый по контракту).
+/// Level container received by live delegate (weak by contract).
 private final class LevelBox: AudioLevelDelegate {
     var lastRms: Float?
     func audioLevelChanged(rms: Float) {
@@ -458,8 +447,8 @@ private final class LevelBox: AudioLevelDelegate {
 private extension InputGainTests {
     typealias StartResult = Result<Void, Error>
 
-    /// Ждёт completion асинхронного старта (RunLoop крутится — как в проде
-    /// главный поток). Возвращает результат старта.
+    /// Waits async start completion (RunLoop spins — main thread in prod).
+    /// Returns start result.
     func runStart(_ service: AudioService) -> StartResult {
         let done = expectation(description: "audio start completion")
         var result: StartResult = .failure(AudioServiceError.engineGone)
@@ -471,7 +460,7 @@ private extension InputGainTests {
         return done.isFulfilled ? result : .failure(AudioServiceError.engineGone)
     }
 
-    /// PCM-буфер константной амплитуды для эмиссии в tap.
+    /// Constant-amplitude PCM buffer for tap emission.
     func constantBuffer(_ amplitude: Float, frames: Int, sampleRate: Double) -> AVAudioPCMBuffer {
         let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
         let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames))!

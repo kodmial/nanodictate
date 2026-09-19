@@ -3,8 +3,8 @@ import Network
 
 // MARK: - TimedWord
 
-/// Слово с таймстампами из ответа STT (verbose_json).
-/// Относительное время внутри распознанного аудио, секунды.
+/// Word with timestamps from STT response (verbose_json).
+/// Relative time within the recognized audio, seconds.
 public struct TimedWord: Equatable {
   public let word: String
   public let start: Double
@@ -22,8 +22,8 @@ public struct TimedWord: Equatable {
 public struct TranscriptionResult {
   public let text: String
   public let rawData: Data  // raw API response (JSON as-is)
-  /// Word-таймстампы из ответа; пусто — провайдер их не вернул
-  /// (не ошибка: сшивка сегментов деградирует к по-словному diff).
+  /// Word timestamps from response; empty — provider returned none
+  /// (not an error: segment stitching degrades to word diff).
   public let words: [TimedWord]
 
   public init(text: String, rawData: Data, words: [TimedWord] = []) {
@@ -41,31 +41,31 @@ public enum TranscribeError: Error, Equatable {
   case invalidResponse(String)  // not JSON or missing "text" field
 }
 
-// MARK: - Сетевая доступность (preflight)
+// MARK: - Network availability (preflight)
 
-/// Быстрая проверка наличия сети перед STT-запросом через Network framework.
+/// Quick network check before an STT request via Network framework.
 ///
-/// NWPathMonitor создаётся на ОДИН асинхронный замер текущего состояния и сразу
-/// отменяется — постоянного слушателя держать не нужно. Проверяется ОБЩАЯ
-/// связность, а не наличие локального интерфейса: STT уходит на внешний API
-/// (провайдер через Render-форвардер или GigaAM). Случай «роутер есть, интернета
-/// нет» этот замер не видит — его добивает жёсткий сетевой таймаут запроса
+/// NWPathMonitor made for ONE async snapshot of the current state and
+/// cancelled right away — no permanent listener needed. Checks GENERAL
+/// connectivity, not a local interface: STT goes to an external API
+/// (provider via Render forwarder or GigaAM). "Router up, internet down"
+/// invisible here — hard network request timeout catches it
 /// (`Transcriber.networkRequestTimeout`).
 public enum NetworkReachability {
-  /// Упрощённый статус пути для чистой логики (из NWPath.status).
+  /// Simplified path status for pure logic (from NWPath.status).
   public enum PathStatus {
     case satisfied
     case requiresConnection
     case unsatisfied
   }
 
-  /// Чистое решение «есть ли общий доступ в сеть» — тестируется без реальной сети.
-  /// - `unsatisfied` — маршрута нет вовсе → интернета нет.
-  /// - `requiresConnection` — маршрут есть, но по требованию (VPN/PPP) →
-  ///   пробуем запрос, жёсткий таймаут подстрахует.
-  /// - `satisfied` — маршрут есть; интернет достижим, только если в маршруте
-  ///   есть не-loopback интерфейс (иначе это лишь локальная петля, до внешнего
-  ///   API не достучаться).
+  /// Pure "is internet reachable" decision — tested without a real network.
+  /// - `unsatisfied` — no route at all → no internet.
+  /// - `requiresConnection` — route exists, on demand (VPN/PPP) → try the
+  ///   request, hard timeout backs us up.
+  /// - `satisfied` — route exists; internet reachable only when the route
+  ///   has a non-loopback interface (else it's a local loop only, external
+  ///   API unreachable).
   public static func isReachable(status: PathStatus, possibleExternalRoute: Bool) -> Bool {
     switch status {
     case .unsatisfied:
@@ -77,12 +77,12 @@ public enum NetworkReachability {
     }
   }
 
-  /// Асинхронный замер текущего состояния сети: один NWPathMonitor, первое
-  /// обновление пути, немедленная отмена.
+  /// Async check of the current network state: one NWPathMonitor, first
+  /// path update, immediate cancel.
   public static func isInternetReachable() async -> Bool {
     guard let snapshot = await currentPathSnapshot() else {
-      // Monitor не ответил за отведённое время — не блокируем диктовку:
-      // оптимистично считаем сеть доступной, жёсткий таймаут подстрахует.
+      // Monitor silent — don't block dictation: optimistically assume
+      // network up, hard timeout backs us up.
       return true
     }
     return isReachable(
@@ -96,8 +96,8 @@ public enum NetworkReachability {
     let possibleExternalRoute: Bool
   }
 
-  /// Ждёт первый (текущий) путь от NWPathMonitor; максимум 2 секунды — после
-  /// этого возвращает nil, чтобы диктовка не зависла на самом preflight.
+  /// Waits for the first (current) path from NWPathMonitor; max 2 seconds —
+  /// then returns nil so dictation never hangs on the preflight itself.
   private static func currentPathSnapshot() async -> PathSnapshot? {
     let monitor = NWPathMonitor()
     return await withCheckedContinuation { continuation in
@@ -111,10 +111,10 @@ public enum NetworkReachability {
         }
         finished = true
         lock.unlock()
-        // Обнуляем handler ДО cancel: иначе монитор держится замыканием
-        // (а то — continuation-ом и lock-ом) и не освобождается. Оба пути
-        // (первый путь и 2-секундный фоллбэк) приходят только сюда,
-        // а finished гарантирует ровно один вызов — nil+cancel один раз.
+        // Clear handler BEFORE cancel: else the monitor holds the closure
+        // (and the continuation/lock) and never frees. Both paths
+        // (first path and 2-second fallback) arrive here only, and
+        // finished guarantees exactly one call — nil+cancel once.
         monitor.pathUpdateHandler = nil
         monitor.cancel()
         continuation.resume(returning: value)
@@ -123,8 +123,9 @@ public enum NetworkReachability {
         resume(snapshot(path: path))
       }
       monitor.start(queue: DispatchQueue(label: "nanodictate.network-monitor", qos: .utility))
-      // Фоллбэк: первый путь обязан прийти быстро; если NWPathMonitor молчит —
-      // не держим диктовку, возвращаем nil (оптимистично, таймаут подстрахует).
+      // Fallback: first path must arrive fast; if NWPathMonitor stays
+      // silent — don't hold dictation, return nil (optimistic, timeout
+      // backs us up).
       DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.0) {
         resume(nil)
       }
@@ -142,8 +143,8 @@ public enum NetworkReachability {
       status = .unsatisfied
     }
     let interfaces = path.availableInterfaces
-    // Пустой список интерфейсов — «неизвестно»: оптимистично считаем внешний
-    // маршрут возможным (пусть запрос попробует, таймаут решит).
+    // Empty interface list — "unknown": optimistically assume the external
+    // route possible (let the request try, timeout decides).
     let possibleExternalRoute = interfaces.isEmpty || interfaces.contains { $0.type != .loopback }
     return PathSnapshot(status: status, possibleExternalRoute: possibleExternalRoute)
   }
@@ -160,18 +161,18 @@ public protocol HTTPTransport: AnyObject {
   )
 }
 
-// MARK: - Внутренние типы запроса/ответа
+// MARK: - Internal request/response types
 
-/// HTTP-ответ STT-запроса (статус + тело + заголовки) — внутренний тип
-/// транскрайбера; публичный контракт (HTTPTransport.send) остаётся кортежем.
+/// HTTP response of an STT request (status + body + headers) — internal
+/// transcriber type; the public contract (HTTPTransport.send) stays a tuple.
 private struct STTHTTPResponse {
   let status: Int
   let body: Data
   let headers: [String: String]
 }
 
-/// Контекст адаптерного запроса STT: объединяет параметры отправки, которые
-/// раньше передавались по одному (sendWithRetry/debugDump).
+/// Context of an adapter STT request: bundles the send params previously
+/// passed one by one (sendWithRetry/debugDump).
 private struct SendContext {
   var request: URLRequest
   let transcriptPath: [String]?
@@ -184,32 +185,31 @@ private struct SendContext {
 // MARK: - Transcriber
 
 public final class Transcriber {
-  // MARK: - Константы
+  // MARK: - Constants
 
-  /// Жёсткий сетевой таймаут HTTP-запроса STT (сек), ~15–20 с. Отдельная
-  /// константа от конфигурационного `timeout_seconds` (Transcriber.timeout):
-  /// конфиг может только ОГРАНИЧИТЬ его меньшим значением, но не увеличить —
-  /// иначе диктовка снова будет висеть до 120 с. Таймаут терминальный (без
-  /// ретрая), поэтому фаза «обработка» в оверлее живёт не дольше таймаута
-  /// + небольшой запас.
+  /// Hard network timeout of the STT HTTP request (s), ~15–20 s. Separate
+  /// from config `timeout_seconds` (Transcriber.timeout): config may only
+  /// LIMIT it with a smaller value, never raise — else dictation hangs up
+  /// to 120 s again. Terminal (no retry), so the overlay "processing" phase
+  /// lives no longer than the timeout + a small margin.
   public static let networkRequestTimeout: TimeInterval = 20
 
-  /// Всего попыток STT-запроса (первичная + до 3 ретраев с backoff). Сетевые
-  /// ошибки почти всегда падают быстро (connection refused/reset), поэтому
-  /// 4 быстрые попытки + backoff ≈ 5 с — внутри бюджета ворчдога оверлея;
-  /// таймаут (20 с) терминальный и ретраев не порождает.
+  /// Total STT attempts (initial + up to 3 retries with backoff). Network
+  /// errors almost always fail fast (connection refused/reset), so 4 quick
+  /// attempts + backoff ≈ 5 s — within the overlay watchdog budget;
+  /// timeout (20 s) is terminal and spawns no retries.
   public static let maxAttempts = 4
 
-  /// Каноническое сообщение «нет интернета» — на него опирается маппинг
-  /// оверлея `OverlayErrorText` и тесты. Вычисляемое свойство: резолвится
-  /// при каждом обращении, чтобы тумблер языка в меню применялся на лету.
+  /// Canonical "no internet" message — overlay `OverlayErrorText` mapping
+  /// and tests rely on it. Computed property: resolved on each access so
+  /// the language toggle in the menu applies live.
   public static var noInternetMessage: String {
     L10n.tr("error.noInternet")
   }
 
-  /// Каноническое сообщение «таймаут STT» — на него опирается маппинг
-  /// оверлея `OverlayErrorText` и тесты. Вычисляемое свойство: резолвится
-  /// при каждом обращении, чтобы тумблер языка в меню применялся на лету.
+  /// Canonical "STT timeout" message — overlay `OverlayErrorText` mapping
+  /// and tests rely on it. Computed property: resolved on each access so
+  /// the language toggle in the menu applies live.
   public static var sttTimeoutMessage: String {
     L10n.tr("error.sttTimeout")
   }
@@ -218,34 +218,34 @@ public final class Transcriber {
   private let model: String
   private let apiKey: String
   private let proxyKey: String
-  /// Имя заголовка для proxy-ключа (по умолчанию `X-Proxy-Key`); из конфига
-  /// (`proxy_key_header`) менять можно, чтобы прокси-слой не конфликтовал.
+  /// Header name for the proxy key (default `X-Proxy-Key`); changeable from
+  /// config (`proxy_key_header`) so the proxy layer never conflicts.
   private let proxyKeyHeader: String
   private let language: String
-  /// Таймаут из конфига (`timeout_seconds`); фактический таймаут запроса —
+  /// Timeout from config (`timeout_seconds`); the actual request timeout —
   /// `min(timeout, networkRequestTimeout)`.
   private let timeout: TimeInterval
   private let logLevel: String
   private let transport: HTTPTransport?
-  /// Preflight сети перед отправкой: true — сеть доступна. По умолчанию
-  /// реальный замер через NetworkReachability; тесты инъецируют мок.
+  /// Network preflight before send: true — network up. Default: real check
+  /// via NetworkReachability; tests inject a mock.
   private let networkChecker: () async -> Bool
-  /// Cookie-relay-слой (transport == "cookie-relay"): вычисляемая
-  /// `__test`-кука в памяти + единый Chrome UA. nil — cookie-логики нет,
-  /// поведение как раньше.
+  /// Cookie relay layer (transport == "cookie-relay"): computed in-memory
+  /// `__test` cookie + unified Chrome UA. nil — no cookie logic, behavior
+  /// as before.
   private let cookieRelayProvider: CookieRelayProvider?
-  /// HTTP-прокси (forwarding): URL-rewrite на `http://<httpProxy>/<originURL>`.
-  /// Пусто — без HTTP-прокси, поведение как раньше.
+  /// HTTP proxy (forwarding): URL-rewrite to `http://<httpProxy>/<originURL>`.
+  /// Empty — no HTTP proxy, behavior as before.
   private let httpProxy: String
   private let proxyUser: String
   private let proxyPassword: String
-  /// ID адаптера запроса («openai», «groq», …, известный из секции
-  /// `[providers.<id>]`). Пустой — провайдер не сконфигурирован (ошибка);
-  /// неизвестный — OpenAI-совместимый запрос с собственными baseURL/model.
+  /// Request adapter id ("openai", "groq", ..., from the `[providers.<id>]`
+  /// section). Empty — provider not configured (error); unknown —
+  /// OpenAI-compatible request with own baseURL/model.
   private let adapterID: String?
 
-  /// Кандидат в ретрай (см. `shouldRetry`): HTTP 429/5xx и транспортные
-  /// (не-таймаутные) сетевые ошибки. Всё остальное терминально.
+  /// Retry candidate (see `shouldRetry`): HTTP 429/5xx and transport
+  /// (non-timeout) network errors. Everything else terminal.
   static func isRetryable(_ error: TranscribeError) -> Bool {
     switch error {
     case .http(let code, _):
@@ -257,19 +257,19 @@ public final class Transcriber {
     }
   }
 
-  /// Попытка №`retryIndex` (1-я, 2-я, …) спит до повтора: экспоненциальный
-  /// базовый интервал `0.5 * 2^n` сек + джиттер `jitter` сек (случайный
-  /// 0…0.25 по умолчанию — растаскивает совпавшие по времени клиенты).
+  /// Attempt #`retryIndex` (1st, 2nd, ...) sleeps before the retry:
+  /// exponential base interval `0.5 * 2^n` s + jitter `jitter` s (random
+  /// 0…0.25 by default — spreads coincident clients).
   static func backoffDelay(
     beforeRetry retryIndex: Int, jitter: Double = Double.random(in: 0...0.25)
   ) -> TimeInterval {
     0.5 * pow(2.0, Double(retryIndex)) + jitter
   }
 
-  /// `Retry-After` из заголовков ответа (секунды), если задан и читается.
-  /// Заголовок ищем без учёта регистра; RFC 7231 допускает и секунды, и
-  /// HTTP-date (задержка = дата − сейчас, потолок неотрицательности).
-  /// Кривое значение → nil (тогда — дефолтный backoff).
+  /// `Retry-After` from response headers (seconds), when set and parseable.
+  /// Header searched case-insensitively; RFC 7231 allows both seconds and
+  /// HTTP-date (delay = date − now, non-negativity floor).
+  /// Bad value → nil (default backoff then).
   static func retryAfterSeconds(from headers: [String: String]) -> TimeInterval? {
     guard
       let raw = headers.first(where: {
@@ -282,15 +282,15 @@ public final class Transcriber {
     if let seconds = Double(trimmed), seconds.isFinite, seconds >= 0 {
       return seconds
     }
-    // Retry-After в формате HTTP-date (RFC 7231 §7.1.1.1).
+    // Retry-After as HTTP-date (RFC 7231 §7.1.1.1).
     guard let date = httpDate(from: trimmed) else { return nil }
     return max(0, date.timeIntervalSince(Date()))
   }
 
-  /// Парсинг HTTP-date (RFC 7231 §7.1.1.1): IMF-fixdate
-  /// («EEE, dd MMM yyyy HH:mm:ss GMT»), obsolete RFC 850
-  /// («EEEE, dd-MMM-yy HH:mm:ss GMT») и asctime («EEE MMM d HH:mm:ss yyyy»).
-  /// Не распознано — nil.
+  /// HTTP-date parsing (RFC 7231 §7.1.1.1): IMF-fixdate
+  /// ("EEE, dd MMM yyyy HH:mm:ss GMT"), obsolete RFC 850
+  /// ("EEEE, dd-MMM-yy HH:mm:ss GMT") and asctime ("EEE MMM d HH:mm:ss yyyy").
+  /// Unrecognized — nil.
   static func httpDate(from raw: String) -> Date? {
     let value = raw.trimmingCharacters(in: .whitespaces)
     let formats = [
@@ -329,9 +329,8 @@ public final class Transcriber {
     adapterID: String? = nil,
     retrySleep: ((TimeInterval) async -> Void)? = nil
   ) {
-    // Пустые baseURL/model из конфига (шаблон `config init`) разрешаются
-    // в дефолты адаптера (ProviderRequestBuilder.resolve*); повторный
-    // вызов resolve для уже непустых значений — no-op.
+    // Empty config baseURL/model resolve to adapter defaults
+    // (ProviderRequestBuilder.resolve*); re-resolve of non-empty — no-op.
     self.baseURL = ProviderRequestBuilder.resolveBaseURL(baseURL, for: adapterID ?? "")
     self.model = ProviderRequestBuilder.resolveModel(model, for: adapterID ?? "")
     self.apiKey = apiKey
@@ -347,8 +346,8 @@ public final class Transcriber {
     self.proxyUser = proxyUser
     self.proxyPassword = proxyPassword
     self.adapterID = adapterID
-    // Инъектируемый сон между ретраями: тесты прогоняют backoff без реальных
-    // пауз. Дефолт — настоящий Task.sleep (секунды > 0).
+    // Injected sleep between retries: tests run backoff without real
+    // pauses. Default — real Task.sleep (seconds > 0).
     self.retrySleep =
       retrySleep ?? { seconds in
         guard seconds > 0 else { return }
@@ -360,14 +359,14 @@ public final class Transcriber {
   /// On retryable failures (network, HTTP 429/5xx) retries with exponential
   /// backoff and jitter, up to `maxAttempts` total. Timeouts, cancellation
   /// and invalid responses are terminal.
-  /// - Parameter prompt: необязательный контекст для Whisper-совместимых API
-  ///   (поле `prompt` form-data): текст уже распознанных сегментов при пошаговой
-  ///   диктовке. По умолчанию nil — старый путь (одного запроса) не меняется.
+  /// - Parameter prompt: optional context for Whisper-compatible APIs
+  ///   (`prompt` form-data field): text of already-recognized segments in
+  ///   stepwise dictation. Default nil — old single-request path unchanged.
   public func transcribe(wav: Data, filename: String = "audio.wav", prompt: String? = nil)
     async throws -> TranscriptionResult
   {  // swiftlint:disable:this opening_brace
     if logLevel.lowercased() == "debug" {
-      // URL/модель/размер — без api_key/proxy_key и заголовков.
+      // URL/model/size — no api_key/proxy_key or headers.
       let details = String(
         format: "STT send: url=%@ model=%@ language=%@ wavBytes=%d",
         baseURL,
@@ -378,8 +377,8 @@ public final class Transcriber {
       Logger.log(details, level: "debug")
     }
 
-    // Адаптерный путь: спецификацию запроса строит ProviderRequestBuilder
-    // (известный провайдер — свой формат, неизвестный — OpenAI-совместимый).
+    // Adapter path: ProviderRequestBuilder builds the request spec
+    // (known provider — own format, unknown — OpenAI-compatible).
     guard let adapterID, !adapterID.isEmpty else {
       Logger.log("STT error: empty adapterID — transcribe требует провайдер", level: "error")
       throw TranscribeError.network("No STT provider configured")
@@ -388,12 +387,13 @@ public final class Transcriber {
       adapterID: adapterID, wav: wav, filename: filename, prompt: prompt)
   }
 
-  // MARK: - Адаптерный путь
+  // MARK: - Adapter path
 
   private func transcribeViaAdapter(adapterID: String, wav: Data, filename: String, prompt: String?)
     async throws -> TranscriptionResult
   {  // swiftlint:disable:this opening_brace
-    // Preflight ДО запроса: без сети не тратим запрос на заведомо мёртвый STT.
+    // Preflight BEFORE the request: no network — don't waste a request on
+    // a surely dead STT.
     if await !networkChecker() {
       Logger.log("STT not sent: no internet (preflight)", level: "error")
       throw TranscribeError.network(Self.noInternetMessage)
@@ -440,17 +440,17 @@ public final class Transcriber {
 
   // MARK: - Send
 
-  /// Единая точка отправки всех путей (адаптерный, cloudflare).
+  /// Single send point for all paths (adapter, cloudflare).
   ///
-  /// HTTP-прокси (transport == "http", `http_proxy` в конфиге): URL запроса
-  /// переписывается по схеме «URL-как-путь» — исходный URL целиком
-  /// подставляется ПУТЁМ проксирующего URL:
-  ///   http://<httpProxy>/<полный-исходный-URL>
-  /// Например, для http_proxy "127.0.0.1:8080" и запроса
+  /// HTTP proxy (transport == "http", `http_proxy` in config): the request
+  /// URL is rewritten "URL-as-path" — the original URL fully becomes the
+  /// PATH of the proxying URL:
+  ///   http://<httpProxy>/<full-original-URL>
+  /// E.g. for http_proxy "127.0.0.1:8080" and request
   /// https://api.openai.com/v1/audio/transcriptions:
   ///   http://127.0.0.1:8080/https://api.openai.com/v1/audio/transcriptions
-  /// Прокси разворачивает его и ходит на исходный хост. При заданных
-  /// proxy_user/proxy_password добавляется заголовок
+  /// The proxy unwraps it and hits the original host. When proxy_user/
+  /// proxy_password are set, adds the header
   /// `Proxy-Authorization: Basic base64("user:pass")`.
   private func send(request: URLRequest) async throws -> STTHTTPResponse {
     var request = request
@@ -473,8 +473,8 @@ public final class Transcriber {
     guard let httpResponse = response as? HTTPURLResponse else {
       throw URLError(.badServerResponse)
     }
-    // Заголовки ответа — для Retry-After (HTTP 429). HTTPURLResponse хранит
-    // их с любым регистром ключа; поиск у нас без учёта регистра.
+    // Response headers — for Retry-After (HTTP 429). HTTPURLResponse keeps
+    // them with any key casing; our lookup is case-insensitive.
     var headers: [String: String] = [:]
     for (name, value) in httpResponse.allHeaderFields {
       if let stringValue = value as? String {
@@ -486,12 +486,12 @@ public final class Transcriber {
 
   // MARK: - Response parsing
 
-  /// Разбор HTTP-ответа в результат распознавания.
-  /// - `transcriptPath == nil` — OpenAI-совместимый плоский `{"text": "…"}`;
-  /// - иначе текст извлекается по JSON-пути адаптера (cloudflare).
-  /// Word-таймстампы (если вернул провайдер) кладутся в `result.words`;
-  /// битый/пустой массив — не ошибка (пусто).
-  /// Ошибки и их строки — ровно те же, что были в адаптерном пути (см. тесты).
+  /// Parse an HTTP response into a transcription result.
+  /// - `transcriptPath == nil` — OpenAI-compatible flat `{"text": "…"}`;
+  /// - else text extracted via the adapter JSON path (cloudflare).
+  /// Word timestamps (if the provider returned them) go to `result.words`;
+  /// broken/empty array — not an error (empty).
+  /// Errors and their strings — exactly as in the adapter path (see tests).
   private static func parseResponse(_ response: STTHTTPResponse, transcriptPath: [String]? = nil)
     throws -> TranscriptionResult
   {  // swiftlint:disable:this opening_brace
@@ -513,9 +513,9 @@ public final class Transcriber {
 extension Transcriber {
   // MARK: - Debug dump (log_level == "debug")
 
-  /// При `log_level == "debug"` сохраняет WAV в `recordingsDirectory` и
-  /// возвращает информацию о файле (путь + размер) для дампа; иначе `nil`.
-  /// Пустые данные не сохраняются. Ошибки записи не бросаются наружу.
+  /// With `log_level == "debug"`, saves the WAV to `recordingsDirectory` and
+  /// returns the file info (path + size) for the dump; else `nil`.
+  /// Empty data not saved. Write errors never thrown outward.
   private func saveRecordingIfDebug(wav: Data) -> DebugDump.RecordingInfo? {
     guard logLevel.lowercased() == "debug", !wav.isEmpty else { return nil }
     let path = DebugDump.recordingPath(for: Date())
@@ -523,13 +523,13 @@ extension Transcriber {
     return DebugDump.RecordingInfo(path: path, byteCount: wav.count)
   }
 
-  /// При `log_level == "debug"` дописывает в `~/Library/Logs/NanoDictate/
-  /// transcriber-debug.log` точный исходящий запрос (метод, URL, заголовки с
-  /// маскировкой, form-поля, метаданные file-парта), путь и размер сохранённой
-  /// аудиозаписи — и ответ (HTTP-статус + тело целиком). Если `response` — nil
-  /// (все попытки упали на транспортном уровне до HTTP), в секции ответа
-  /// пишется `(no response — transport error)`. Поведение запроса/ответа не
-  /// меняет; ошибок не бросает.
+  /// With `log_level == "debug"`, appends to `~/Library/Logs/NanoDictate/
+  /// transcriber-debug.log` the exact outgoing request (method, URL, masked
+  /// headers, form fields, file-part metadata), the saved recording's path
+  /// and size — and the response (HTTP status + full body). When `response`
+  /// is nil (all attempts died at the transport level before HTTP), the
+  /// response section gets `(no response — transport error)`. Changes no
+  /// behavior; throws no errors.
   private func debugDump(
     context: SendContext, recording: DebugDump.RecordingInfo?, response: STTHTTPResponse?
   ) {
@@ -571,13 +571,14 @@ extension Transcriber {
 }
 
 extension Transcriber {
-  // MARK: - Общий цикл отправки (адаптерный путь)
+  // MARK: - Shared send loop (adapter path)
 
-  /// Cookie-relay-слой (transport == "cookie-relay"): единый
-  /// браузерный UA + cookie-заголовок. `ensureFresh()` неблокирующий: свежий
-  /// токен (< 120 с) возвращается мгновенно, без сети; протухший обновляется
-  /// ФОНОМ, запрос уходит с текущим токеном. На челлендж отвечает ретрай
-  /// в `sendWithRetry` (refreshBlocking до результата).
+  /// Cookie relay layer (transport == "cookie-relay"): unified browser UA +
+  /// cookie header. `ensureFresh()` is non-blocking: a fresh token
+  /// (< 120 s) returns instantly, offline; a stale one refreshes IN
+  /// BACKGROUND, the request goes with the current token. A challenge is
+  /// answered by the retry in `sendWithRetry` (refreshBlocking until
+  /// result).
   private func applyCookieRelayHeaders(to request: inout URLRequest) async {
     guard let relay = cookieRelayProvider else { return }
     request.setValue(CookieRelayProvider.chromeUA, forHTTPHeaderField: "User-Agent")
@@ -586,45 +587,45 @@ extension Transcriber {
     }
   }
 
-  /// Общий цикл «отправить + (по необходимости) повторить» для обоих путей.
-  /// - до `maxAttempts` попыток: первичная + ретраи с экспоненциальным
-  ///   backoff и джиттером (только retryable ошибки: HTTP 429/5xx,
-  ///   транспортные не-таймаутные); HTTP 429 ждёт Retry-After (потолок 10 с);
-  /// - cookie-челлендж ретраится один раз со свежей кукой (attempt не сжигается);
-  /// - `transcriptPath == nil` — плоский ключ "text"; иначе извлекается по
-  ///   JSON-пути адаптера (cloudflare).
-  /// - `skipPreflight: true` — адаптерный путь уже сделал preflight до запроса.
+  /// Shared "send + retry as needed" loop for both paths.
+  /// - up to `maxAttempts` attempts: initial + retries with exponential
+  ///   backoff and jitter (retryable only: HTTP 429/5xx, transport errors
+  ///   including timeout); HTTP 429 waits Retry-After (cap 10 s);
+  /// - cookie challenge retried once with a fresh cookie (attempt not burned);
+  /// - `transcriptPath == nil` — flat "text" key; else extracted via the
+  ///   adapter JSON path (cloudflare).
+  /// - `skipPreflight: true` — adapter path already did preflight before.
   // swiftlint:disable:next cyclomatic_complexity function_body_length
   private func sendWithRetry(context: SendContext) async throws -> TranscriptionResult {
     var context = context
 
-    // При log_level == "debug" сохраняем саму аудиозапись (WAV) на диск
-    // один раз, до отправки; информация о файле уходит в debug-дамп.
+    // With log_level == "debug", save the WAV itself to disk once, before
+    // sending; the file info goes to the debug dump.
     let recording = saveRecordingIfDebug(wav: context.wav)
 
-    // Preflight сети: сети нет — HTTP-запрос не отправляем вовсе, ошибка
-    // мгновенная («Нет интернета»), вместо зависшего оверлея на 120 с.
+    // Network preflight: no network — no HTTP request at all, instant
+    // error ("No internet") instead of an overlay hanging for 120 s.
     if !context.skipPreflight, await !networkChecker() {
       Logger.log("STT not sent: no internet (preflight)", level: "error")
       debugDump(context: context, recording: nil, response: nil)
       throw TranscribeError.network(Self.noInternetMessage)
     }
 
-    // maxAttempts попыток (первичная + до maxAttempts-1 ретраев) с
-    // экспоненциальным backoff и джиттером. Ретраятся только retryable
-    // ошибки (HTTP 429/5xx, транспортные не-таймаутные); таймаут, cancel
-    // и invalidResponse — терминальные, повтор не жжёт бюджет оверлея.
+    // maxAttempts tries (initial + up to maxAttempts-1 retries) with
+    // exponential backoff and jitter. Retried only retryable errors
+    // (HTTP 429/5xx, transport errors including timeout); cancel and
+    // invalidResponse — terminal, a retry never burns the overlay budget.
     var lastError: TranscribeError?
     var attempt = 0
-    // Retry-After из заголовка HTTP 429 — ждём указанное сервером время.
+    // Retry-After from the HTTP 429 header — wait what the server says.
     var retryAfterHeader: TimeInterval?
-    // cookie-челлендж ретраится не больше одного раза (свежей кукой).
+    // Cookie challenge retried at most once (with a fresh cookie).
     var challengeRetried = false
     while attempt < Self.maxAttempts {
-      // Отмена родителя (например, первый успех параллельного failover
-      // отменил сиблингов — cancelAll): повторный POST не отправляем.
-      // Дефолтный retrySleep глотает отмену через try?, поэтому проверка
-      // именно здесь — гарантия отсутствия «лишних» запросов после победы.
+      // Parent cancellation (e.g. the first success of parallel failover
+      // cancelled siblings — cancelAll): no repeated POST sent. The
+      // default retrySleep swallows cancellation via try?, so the check
+      // lives here — guarantees no "extra" requests after a win.
       if Task.isCancelled {
         throw CancellationError()
       }
@@ -644,15 +645,15 @@ extension Transcriber {
           )
           Logger.log(logLine, level: "debug")
         }
-        // HTTP 429: при Retry-After в заголовках отступаем на указанное
-        // сервером время (потолок ~10 с — бюджет ворчдога оверлея).
+        // HTTP 429: with a Retry-After header, back off what the server
+        // says (cap ~10 s — overlay watchdog budget).
         if response.status == 429 {
           retryAfterHeader = Self.retryAfterSeconds(from: response.headers)
         }
-        // Cookie-челлендж (transport == "cookie-relay"): сервер вместо
-        // контента прислал JS-заглушку. Единственный ретрай — со свежей
-        // кукой (refreshBlocking до результата); attempt не сжигается.
-        // Повторный челлендж после свежего токена — серьёзная ошибка.
+        // Cookie challenge (transport == "cookie-relay"): the server sent a
+        // JS stub instead of content. The single retry — with a fresh
+        // cookie (refreshBlocking until result); attempt not burned.
+        // A challenge after a fresh token — a serious error.
         let responseIsChallenge = CookieRelayProvider.looksLikeChallenge(response.body)
         if let relay = cookieRelayProvider, !challengeRetried, responseIsChallenge {
           if let freshCookie = await relay.refreshBlocking() {
@@ -675,7 +676,7 @@ extension Transcriber {
         }
         return result
       } catch let error as TranscribeError {
-        // HTTP 4xx (кроме 429)/invalidResponse — не ретраим.
+        // HTTP 4xx (except 429)/invalidResponse — no retry.
         guard Self.isRetryable(error) else {
           Logger.log("STT error (attempt \(attempt)): \(Self.describe(error))", level: "error")
           throw error
@@ -688,7 +689,7 @@ extension Transcriber {
         if attempt >= Self.maxAttempts {
           break
         }
-        // Пауза: Retry-After при 429 (потолок 10 с), иначе backoff.
+        // Pause: Retry-After on 429 (cap 10 s), else backoff.
         var delay = Self.backoffDelay(beforeRetry: attempt)
         if case .http(429, _) = error, let retryAfter = retryAfterHeader {
           delay = min(retryAfter, 10)
@@ -702,11 +703,11 @@ extension Transcriber {
         Logger.log("STT cancelled (URLError.cancelled, attempt \(attempt))", level: "error")
         throw TranscribeError.network("Request cancelled")
       } catch let error as URLError where error.code == .timedOut {
-        // Жёсткий сетевой таймаут запроса (networkRequestTimeout).
-        // Терминальный, БЕЗ ретрая: повторный запрос почти наверняка
-        // упрётся в тот же таймаут и снова заставит оверлей крутить
-        // точки — поэтому фаза «обработка» не живёт дольше таймаута
-        // + небольшой запас (см. OverlayController.processingMaxDuration).
+        // Hard network request timeout (networkRequestTimeout) — terminal,
+        // NO retry: a retried request would almost surely hit the same
+        // timeout again and keep the overlay spinning dots, so the
+        // "processing" phase never outlives the timeout + a small margin
+        // (see OverlayController.processingMaxDuration).
         Logger.log(
           "STT timeout (attempt \(attempt)): \(error.localizedDescription)", level: "error")
         throw TranscribeError.network(Self.sttTimeoutMessage)
@@ -722,9 +723,9 @@ extension Transcriber {
         await retrySleep(Self.backoffDelay(beforeRetry: attempt))
       }
     }
-    // Все попытки упали на транспортном уровне — ответа так и нет.
-    // В debug-дампе фиксируем и сам факт запроса (метод/URL/заголовки/поля),
-    // чтобы было видно, что до HTTP дело не дошло; ошибки дампа не роняют.
+    // All attempts died at the transport level — no response at all.
+    // The debug dump records the request itself (method/URL/headers/fields)
+    // so it's visible HTTP was never reached; dump errors never crash.
     debugDump(context: context, recording: recording, response: nil)
     if let lastError {
       Logger.log(
@@ -735,17 +736,17 @@ extension Transcriber {
     throw TranscribeError.network("Unknown transport error")
   }
 
-  /// Человекочитаемое описание ошибки для лога. Тело HTTP-ответа маскируется
-  /// через `DebugDump.maskedResponseBody` (секреты затираются по ПОЛНОМУ телу),
-  /// затем отсекается до ~120 символов, чтобы api_key/proxy_key провайдера
-  /// не попали в лог.
+  /// Human-readable error description for logs. The HTTP body is masked via
+  /// `DebugDump.maskedResponseBody` (secrets wiped over the FULL body),
+  /// then truncated to ~120 characters so provider api_key/proxy_key never
+  /// land in the log.
   static func describe(_ error: TranscribeError) -> String {
     switch error {
     case .network(let message):
       return "network: \(message)"
     case let .http(code, body):
-      // Маскируем ПОЛНОЕ тело (секрет может пересечь границу обрезки),
-      // потом отсекаем до ~120 символов.
+      // Mask the FULL body (a secret may cross the truncation boundary),
+      // then cut to ~120 characters.
       return "HTTP \(code): \(String(DebugDump.maskedResponseBody(Data(body.utf8)).prefix(120)))"
     case .invalidResponse(let message):
       return "invalid response: \(message)"
@@ -755,8 +756,8 @@ extension Transcriber {
 
 // MARK: - Multipart body
 
-// Единый источник правды о multipart-формате — ProviderRequestBuilder
-// (STTAdapter.swift): все OpenAI-совместимые адаптеры дают
-// байт-в-байт одинаковое тело (см. ProviderRequestBuilder.multipartBody).
+// Single source of truth for the multipart format — ProviderRequestBuilder
+// (STTAdapter.swift): all OpenAI-compatible adapters produce byte-identical
+// bodies (see ProviderRequestBuilder.multipartBody).
 
 // swiftlint:disable:this file_length

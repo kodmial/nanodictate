@@ -1,473 +1,135 @@
 # NanoDictate
 
-On-screen dictation for macOS, triggered by a double-tap of the **Alt** key.
-Press **Alt** twice, speak, press **Alt** twice again — the recognized text is
-typed into whatever app is currently focused.
-
-Built as a Swift Package Manager package (`swift-tools-version:5.7`, macOS 12+).
-
-## Components
-
-- **NanoDictateCore** — shared library with the core dictation logic (recording,
-  STT, overlay, text insertion, provider adapters, silence auto-stop, batch
-  transcription).
-- **NanoDictateAgent** — background LaunchAgent daemon that listens for the
-  trigger, shows the overlay, and performs the dictation work.
-- **nanodictate** — command-line control utility and interactive TUI status
-  menu (start/stop the agent, inspect config, pick providers, transcribe
-  files, show logs).
-
-## Features
-
-- Double-**Alt** start/stop dictation; **Esc** cancels.
-- Interactive TUI status menu (`nanodictate`) with agent state, provider list,
-  log viewer, and language toggle as the first menu item.
-- Bilingual UI (English and Russian); set `ui_language = "en"` or `"ru"` in
-  config (default: `"en"`).
-- Overlay panel with live input level, recording/progress/status phases.
-- Text insertion via CGEvent keyboard events (default) or clipboard + Cmd+V
-  (`insert_method = "clipboard"`, restores previous clipboard).
-- Undo window: a double-**Alt** shortly after an insertion removes it.
-- Silence auto-stop (~3 s of quiet) with configurable duration and RMS
-  threshold; environment variables
-  `NANODICTATE_AUTOSTOP_DISABLED`, `NANODICTATE_AUTOSTOP_DURATION`,
-  `NANODICTATE_AUTOSTOP_RMS`.
-- Batch file transcription with chunked segments, parallel workers, pause
-  cutting, checkpoint/resume, and a progress bar.
-- Multi-provider STT via adapters implementing the OpenAI-compatible
-  `/audio/transcriptions` protocol — see [Providers](#providers): `openai`,
-  `groq`, `airubiz` (default), `cloudflare`, or any custom
-  OpenAI-compatible endpoint.
-- Proxy transports (see [Transports](#transports)).
-- Optional review gate (`review_before_insert`) — confirm the text in the
-  terminal before it is typed.
-- Auto-failover between providers (`auto_failover`) and manual retry
-  (`nanodictate retry <provider>`).
-- TOML configuration at `~/.config/nanodictate/config.toml`.
-
-## Providers
-
-| id | What it is | Key |
-|---|---|---|
-| `openai` | Whisper API | api_key |
-| `groq` | Whisper (fast) | api_key |
-| `airubiz` | GigaAM, anonymous (**default**) | none |
-| `cloudflare` | Workers AI, raw WAV; `base_url` = full URL with `account_id`/model in path | api_key |
-| `*` | any OpenAI-compatible endpoint (generic) | per server |
-
-Default `active_provider = "airubiz"`; an unknown id falls back to the
-generic `openai-compatible` adapter. All adapters are covered by unit tests;
-live e2e is verified manually — there are no live-server tests in the repo
-(CI runs no network).
+Live voice dictation into any macOS app (12+). Double-tap **Alt** to start and
+stop — speak, and the recognized text is typed into the currently focused app.
+STT runs on OpenAI, Groq, Cloudflare Workers AI, or any OpenAI-compatible
+endpoint. Binaries are signed with a stable identity, so
+**Microphone/Accessibility grants survive rebuilds**.
 
 ## Installation
 
-Choose one of the three distribution paths. Homebrew and MacPorts packaging is
-included in this repository (`packaging/`: formula/Portfile templates plus a
-release generator in `scripts/release-prep.rb`), but the tap and port are not
-published yet — ready-to-run binaries for the latest release are always
-available from **GitHub Releases**.
-
-> **No Developer ID / no notarization (deliberate).** There is no paid Apple
-> Developer account behind this project, so release binaries are unsigned
-> (ad-hoc) and macOS may block *browser* downloads via Gatekeeper. See
-> [docs/packaging/homebrew.md](docs/packaging/homebrew.md) and
-> [docs/packaging/macports.md](docs/packaging/macports.md) for the details
-> and the `xattr` workaround below.
-
 ### Homebrew
 
-The formula is a **binary formula**: `brew` downloads the prebuilt tarball
-from GitHub Releases and installs it as-is — no Xcode / Swift toolchain
-needed. The formula template (`packaging/homebrew/nanodictate.rb.tpl`) and
-the generator (`scripts/release-prep.rb`) ship in the repo; the tap itself is
-not published yet, so **GitHub Releases** below is the working path today.
-
 ```sh
-brew install kodmial/nanodictate-homebrew/nanodictate    # once the tap is published
+brew install kodmial/nanodictate-homebrew/nanodictate
 ```
 
-Requires **macOS 12+** only. Until the tap exists you can install the
-generated formula directly:
-`brew install /path/to/nanodictate/packaging/homebrew/nanodictate.rb`
-(also a binary download — nothing is compiled).
+Binary formula — downloads a prebuilt tarball, nothing is compiled. The tap is
+not published yet (see GitHub Releases below).
 
 ### MacPorts
-
-The Portfile is pending a PR to `macports-ports` (not accepted yet); the
-template (`packaging/macports/Portfile.tpl`) and generator
-(`scripts/release-prep.rb`) ship in the repo. It builds from source:
 
 ```sh
 sudo port install nanodictate
 ```
 
-Requires **Xcode 14.3+** — the port sets `use_xcode yes` (there is no Swift
-port in MacPorts). Expect a long first build: SwiftPM compiles the whole
-package from source.
+Builds from source (Xcode 14.3+, use_xcode yes; first build is long). The port
+is pending upstream acceptance — use GitHub Releases below.
 
 ### GitHub Releases (current)
 
-Prebuilt tarballs for both architectures are attached to every release —
-`nanodictate-0.1.0-macos-$(uname -m).tar.gz` resolves to
-`nanodictate-0.1.0-macos-arm64.tar.gz` on Apple Silicon and to
-`nanodictate-0.1.0-macos-x86_64.tar.gz` on Intel:
-
 ```sh
 curl -L -O https://github.com/kodmial/nanodictate/releases/download/v0.1.0/nanodictate-0.1.0-macos-$(uname -m).tar.gz
-curl -L -O https://github.com/kodmial/nanodictate/releases/download/v0.1.0/SHA256SUMS.txt
-shasum -a 256 -c SHA256SUMS.txt        # optional: verifies the downloaded tarball
-```
-
-Extract into a directory of your choice — only the two binaries are needed,
-the running binary registers the launch service itself:
-
-```sh
-mkdir -p ~/.local/bin
 tar xzf nanodictate-0.1.0-macos-$(uname -m).tar.gz
-cp NanoDictateAgent nanodictate ~/.local/bin/          # or /usr/local/bin with sudo
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-Then grant permissions and start the agent. The config needs no manual
-setup: on first launch the app copies `config.example.toml` (next to the
-binaries) to `~/.config/nanodictate/config.toml` automatically.
-
-```sh
-nanodictate start                                           # registers ~/Library/LaunchAgents/com.nanodictate.agent.plist (realpath of the agent) and loads the service
-# nanodictate config init                                  # optional: write the config explicitly (same canon)
-# cp config.example.toml ~/.config/nanodictate/config.toml # optional: manual copy
-```
-
-**Permissions (manual, required).** In **System Settings > Privacy &
-Security** add the `NanoDictateAgent` binary to **Microphone** and
-**Accessibility** (and **Input Monitoring** if the hotkey does not fire).
-macOS prompts on first use; grants are per-binary.
-
-**Browser downloads** (unlike `curl` and `brew`) get a `com.apple.quarantine`
-attribute, and Gatekeeper then refuses to run the unsigned ad-hoc binaries.
-Clear it once:
-
-```sh
-xattr -dr com.apple.quarantine ~/.local/bin/NanoDictateAgent ~/.local/bin/nanodictate
-```
-
-Requires **macOS 12+**. Xcode Command Line Tools are needed only for the
-MacPorts build-from-source path; the Homebrew formula and the GitHub Releases
-binaries run as-is. Once installed, see [Install & Run](#install--run) for the
-LaunchAgent, CLI and configuration details.
-
-## Build & Test
-
-Requirements: macOS 12+ and a Swift **5.7+** toolchain (below); Node.js ≥ 22
-is needed only for the deploy MCP server.
-
-### Build requirements
-
-The package uses `swift-tools-version:5.7`, so it builds with any **Swift 5.7+**
-toolchain — Xcode 14+ or the Command Line Tools with SwiftPM. Use the standard
-SwiftPM commands:
-
-```sh
-swift build -c debug      # or -c release
-swift run nanodictate --help
-```
-
-`mcp/nanodictate-deploy-mcp-server/start.sh` (deploy MCP server) runs the same
-`swift build` internally; it auto-detects the toolchain via `xcrun --find
-swift` unless the `SWIFT_TOOLCHAIN` environment variable points at a specific
-toolchain.
-
-### Tests
-
-The tests are packaged as a standalone executable target
-(`NanoDictateCoreTests`) rather than XCTest test targets, so they are run with
-`swift run` instead of `swift test` (the package declares no test targets for
-`swift test` to discover). The runner executes every `test*` method, prints a
-summary, and exits non-zero if any test fails. The current suite runs
-**795 tests** (working tree; final number confirmed by local run). The same
-commands are used by the CI workflow
-(`.github/workflows/ci.yml`).
-
-```sh
-swift run NanoDictateCoreTests
-```
-
-### Code signing — `NanoDictate Code Signing`
-
-macOS TCC grants (Microphone, Accessibility) are keyed to the binary's cdhash.
-Ad-hoc signing on every rebuild produces a new cdhash and resets all grants —
-the agent stops reacting to Alt+Alt until permissions are re-granted. Builds
-must use the fixed identity **NanoDictate Code Signing** (see
-[Code Signing](#code-signing) below). The only supported path is the MCP
-deploy server (`dictation_sign` / `dictation_deploy`) — it runs
-`codesign --force --sign "NanoDictate Code Signing" --entitlements
-Resources/*.entitlements --options runtime --identifier <bundle-id>` and then
-`codesign --verify --strict`. It has no ad-hoc fallback: if the identity is
-missing, it fails with instructions. Raw `swift build` + `codesign` / manual
-`security` calls from scripts or subagents break TCC — do not use them.
-
-Create the identity once in **Keychain Access > Certificate Assistant >
-Create a Certificate...** — Name `NanoDictate Code Signing`, Identity Type
-Self-Signed Root, Certificate Type Code Signing — then verify with
-`security find-identity -p codesigning -v`.
-
-### Permissions — Microphone + Accessibility
-
-After the first signed build, grant two permissions in **System Settings >
-Privacy & Security**:
-
-- **Microphone** — audio capture (`com.apple.security.device.audio-input`).
-- **Accessibility** — global Alt+Alt hotkey and text
-  insertion via `CGEvent` (TCC grant, not an entitlement).
-
-Add the *signed* binary (`.build/debug/NanoDictateAgent`) to each list. The
-path is bound to the cdhash of that exact signed binary — after an ad-hoc
-rebuild the checkbox resets and the hotkey goes dead; re-sign with the stable
-identity and re-grant once. **Input Monitoring** may also be required on some
-macOS versions if the hotkey does not fire — add the same binary there if
-needed. See [Code Signing](#code-signing) and
-[Permissions](#permissions) for details.
-
-### MCP server — Node.js ≥ 22
-
-The deploy MCP server (`mcp/nanodictate-deploy-mcp-server/`, symlink
-`mcp/dictation-deploy-mcp-server` → same directory) automates build + sign +
-restart with a stable signature. Requires **Node.js ≥ 22** (`engines` in
-`package.json`) and the Swift toolchain above (its tools shell out to
-`swift build` / `codesign`).
-
-```sh
-cd mcp/nanodictate-deploy-mcp-server
-npm install            # or: npm ci (package-lock.json is committed)
-npm run build          # tsc → dist/
-npm test               # npm run build && node --test
-npm start              # node dist/index.js (stdio MCP transport)
-```
-
-`dist/` and `node_modules/` are gitignored and **absent on a fresh clone**
-— running `dist/index.js` directly would fail with `ENOENT`. `start.sh`
-is the entry point for MCP clients: when `dist/index.js` is missing it
-installs dependencies (`npm ci` → fallback `npm install`) and builds (`tsc`),
-then `exec`s the compiled server (build log → `.start-build.log`, errors →
-stderr, never stdout — that would corrupt MCP JSON-RPC). Register it in
-`~/.claude.json` as `bash $PROJECT_ROOT/mcp/nanodictate-deploy-mcp-server/start.sh`
-(not in project `settings.json`).
-
-Other scripts: `npm run typecheck` (`tsc --noEmit`), `npm run test:coverage`
-(`npm run build && node --test --experimental-test-coverage`), `npm run clean`
-(`rm -rf dist`). See [Deploy (MCP Server)](#deploy-mcp-server) for the
-exposed tools.
-
-## Install & Run
-
-### LaunchAgent (NanoDictateAgent)
-
-```sh
-# Install and start the LaunchAgent
+cp NanoDictateAgent nanodictate ~/.local/bin/
 nanodictate start
-
-# Check status
-nanodictate status
-
-# Stop the agent
-nanodictate stop
 ```
 
-The running binary registers the service itself: `nanodictate start` writes
-the canonical `~/Library/LaunchAgents/com.nanodictate.agent.plist` (Label
-`com.nanodictate.agent`, ProgramArguments = symlink-resolved real path of
-the agent) and bootstraps it into `launchd`. `start` takes over an existing
-service (rewrite → bootout → bootstrap — the file is written first so a
-write error never stops a working agent), so the path never goes stale after
-updates; on a binary path change it prints a hint that macOS may ask again
-for Microphone/Accessibility permission.
+The archive contains the two binaries plus `config.example.toml` (the first
+launch copies it to the config path automatically). Browser downloads get a
+`com.apple.quarantine` attribute — clear it once with
+`xattr -dr com.apple.quarantine ~/.local/bin/NanoDictateAgent ~/.local/bin/nanodictate`.
 
-With `brew install` / `sudo port install` the launch service is registered
-**at install time**: the formula's `post_install` and the port's
-`post-destroot` write the same canonical plist (same single label, no second
-daemon) and activate it once — after a clean install the agent is registered
-without a manual first run and starts at login (RunAtLoad + KeepAlive).
-`nanodictate start` remains for re-registration and management.
+## Configuration
 
-### CLI & TUI (nanodictate)
+Config lives at `~/.config/nanodictate/config.toml` (chmod 600, atomic
+writes). `nanodictate config init` — auto-run on first launch — copies the
+bundled `config.example.toml`, the single source of defaults. Edit the user
+config, not that file.
 
-```sh
-nanodictate start | stop | status
-nanodictate config init [--force]         # create default config.toml
-nanodictate config path                   # show config path
-nanodictate config set-key <provider>     # set API key interactively
-nanodictate provider list                 # list configured providers
-nanodictate provider use <name>           # set active provider
-nanodictate routing show                  # show routing roles
-nanodictate routing set segment <name>    # set segment provider
-nanodictate routing set final <name>      # set final provider
-nanodictate transcribe FILE [--json]      # one-shot file transcription
-nanodictate retry <provider>              # retry last recording
-nanodictate last                          # show last transcription
-nanodictate logs                          # last 50 log lines
-```
-
-The TUI status menu launches automatically when stdout is a TTY. It shows
-agent state, provider info, log tail, and supports keyboard navigation
-(arrows, Enter, number keys, Esc/q to exit).
-
-### Configuration
-
-Config path: `~/.config/nanodictate/config.toml` (chmod 600, atomic writes).
-
-**Canonical config.** The repo ships `config.example.toml` — the single source
-of defaults (canon). If `~/.config/nanodictate/config.toml` does not exist,
-the first launch (agent or CLI) copies the canon there automatically
-(`nanodictate config init` writes the same canon explicitly; a manual `cp` is
-optional). The current canon is the `config.example.toml` file in the
-repository — treat it as authoritative over any sample shown in docs.
+Top-level options (defaults):
 
 ```toml
-# NanoDictate — канонический конфиг
-# При первом запуске приложение автоматически копирует его в
-# ~/.config/nanodictate/config.toml, если того файла ещё нет. Правки вноси
-# в юзер-конфиг (~/.config/nanodictate/config.toml), а не в этот файл.
-# Секреты — только плейсхолдеры: api_key / api_key_file в секциях провайдеров
-# либо env-переменная NANODICTATE_API_KEY (приоритет над файлом — только у
-# активного провайдера; failover-кандидаты и роли сохраняют свои api_key/
-# api_key_file; в файл не пишется).
-# Пустые base_url/model — агент подставит дефолты адаптера.
-# This file is the canonical default config. On first launch the app copies it
-# to ~/.config/nanodictate/config.toml if that file does not exist.
-
-# Язык STT-подсказки (пусто = авто-детект Whisper, параметр не шлётся).
-# Явное значение (language = "ru") форвардится в запрос.
-language = ""
+language = ""          # STT hint; empty = Whisper auto-detect
 ui_language = "en"
 sounds_enabled = true
 timeout_seconds = 120
 log_level = "info"
-active_provider = "airubiz"
+active_provider = "airubiz"    # openai / groq / cloudflare / airubiz / any custom id
+```
 
+Provider sections: key via `api_key` or `api_key_file`:
+
+```toml
 [providers.openai]
 name = "OpenAI"
-base_url = ""
+base_url = ""          # empty = adapter defaults
 model = ""
-api_key = ""
+api_key = ""           # e.g. "gsk_..." (Groq)
 # api_key_file = "~/.config/nanodictate/keys/openai.txt"
+```
 
-[providers.groq]
-name = "Groq"
-base_url = ""
-model = ""
-api_key = ""
-# api_key_file = "~/.config/nanodictate/keys/groq.txt"
+`airubiz` is the only section with non-empty `base_url`/`model` — anonymous
+keyless STT, the default (transport `direct`):
 
-[providers.cookie-relay]
-name = "Cookie Relay"
-base_url = ""
-model = ""
-api_key = ""
-transport = "cookie-relay"
-# proxy_key = ""
-# proxy_key_header = "X-Proxy-Key"
-
-[providers.cloudflare]
-name = "Cloudflare Workers AI"
-# base_url для Cloudflare — полный URL с account_id и моделью в пути, например:
-# base_url = "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run/@cf/openai/whisper-large-v3-turbo"
-model = ""
-api_key = ""
-# transport у cloudflare не указывается: "cloudflare" — это id секции
-# (адаптер STT), а не HTTPTransport. Транспорт задают только для
-# http/gateway/cookie-relay.
-
+```toml
 [providers.airubiz]
-name = "Airubiz GigaAM (sherpa)"
+name = "Airubiz"
 base_url = "https://api.airubiz.site/v1/audio/transcriptions"
 model = "gigaam-v3-ctc-sherpa"
 api_key = ""
-# Анонимный STT-сервер: ключ не нужен, транспорт по умолчанию direct.
-
-# Примеры транспортов для секций (раскомментируй нужный):
-#
-# [providers.http-proxy]
-# name = "HTTP Proxy example"
-# base_url = ""
-# model = ""
-# api_key = ""
-# transport = "http"
-# http_proxy = "proxy.example.com:8080"
-# proxy_user = ""
-# proxy_password = ""
-#
-# [providers.gateway-provider]
-# name = "Gateway example"
-# base_url = ""
-# model = ""
-# api_key = ""
-# transport = "gateway"
-# proxy_key = ""
-# proxy_key_header = "X-Custom-Auth"
-
-# Маршрутизация STT по ролям (см. [routing] в Config.swift):
-# final_provider — финальный проход (чанковый и не-чанковый путь),
-# segment_provider — только сегменты чанковой диктовки.
-# Не задано — роль играет active_provider. auto_failover на ролях не действует.
-# Чтобы включить — раскомментируй секцию:
-#
-# [routing]
-# segment_provider = "cloudflare"
-# final_provider = "groq"
-
-# Дополнительные top-level опции (значения по умолчанию):
-# double_alt_max_interval = 0.4
-# undo_max_interval = 2.0
-# undo_sound_enabled = true
-# chunked = false
-# providers = ["groq", "cloudflare"]
-# auto_failover = false
-# insert_method = "cgevent"
-# review_before_insert = false
 ```
-Top-level options:
 
-| Key                        | Default       | Meaning                                                                |
-|----------------------------|---------------|------------------------------------------------------------------------|
-| `active_provider`          | *(first)*     | Which `[providers.<id>]` section is active.                            |
-| `providers`                | `[]`          | Explicit failover order, e.g. `["groq", "airubiz"]`.                  |
-| `auto_failover`            | `false`       | Retry with the next provider on network/server errors.                 |
-| `timeout_seconds`          | `120`         | Timeout for the STT request.                                           |
-| `double_alt_max_interval`  | `0.4`         | Max gap between the two Alt presses (seconds).                         |
-| `sounds_enabled`           | `true`        | Play system sounds on events.                                          |
-| `log_level`                | `"info"`      | `"debug"` enables verbose logging and STT request/response dumps.      |
-| `language`                 | `""`          | Spoken language hint sent to the STT API (`""` = auto-detect, not sent). |
-| `ui_language`              | `"en"`        | UI language: `"en"` or `"ru"`. Switchable from the TUI menu.           |
-| `insert_method`            | `"cgevent"`   | `"cgevent"` or `"clipboard"` (clipboard + Cmd+V).                      |
-| `review_before_insert`     | `false`       | Confirm text in terminal before inserting.                             |
-| `chunked`                  | `false`       | Chunked/live dictation: segments inserted as you speak.                |
-| `undo_max_interval`        | `2.0`         | Window (seconds) for double-Alt undo.                                  |
+`transport` in a provider's section picks how the request reaches the server
+(see [Transports](#transports)):
 
-**Secrets.** API keys go in `api_key` (inline) or `api_key_file` (file
-path; first non-empty line is used; `chmod 600`). The environment variable
-`NANODICTATE_API_KEY` overrides the file key for the **active provider only**;
-failover candidates and routing roles keep their own `api_key`/`api_key_file`.
-It is never written to the config file.
+```toml
+transport = "http"
+http_proxy = "proxy.example.com:8080"
+```
 
-### Permissions
+- Any OpenAI-compatible endpoint: custom section id, set `base_url` + `model`
+  explicitly (`openai`/`groq` get adapter defaults).
+- Secrets live in `api_key`/`api_key_file`; `NANODICTATE_API_KEY` overrides
+  the file for the active provider only and is never written to disk.
 
-On first run, macOS requests permissions. Grant them in **System Settings >
-Privacy & Security**:
+Full list of sections and options — see [config.example.toml](config.example.toml).
 
-- **Microphone** — required for audio capture.
-- **Accessibility** — required for the global hotkey and text insertion.
-- **Input Monitoring** — keyboard-event monitoring (add `NanoDictateAgent` if
-  the hotkey does not fire).
+## Usage
 
-Add the *signed* binary (`.build/debug/NanoDictateAgent`) to each list. The
-path changes after a rebuild with a different signature — see
-[Code Signing](#code-signing).
+```sh
+nanodictate start | stop | status
+nanodictate config init           # create config.toml from the bundled example
+nanodictate config set-key <id>   # set an API key interactively
+nanodictate provider use <id>     # switch active provider
+nanodictate transcribe FILE       # one-shot file transcription
+nanodictate logs                  # last 50 log lines
+```
+
+Run `nanodictate` with no arguments for the interactive TUI (status, provider
+list, log viewer, EN/RU language toggle). Dictation: double-**Alt** start,
+speak, double-**Alt** stop (**Esc** cancels); a double-**Alt** shortly after an
+insertion undoes it. `nanodictate start` registers the LaunchAgent
+(`com.nanodictate.agent`). Grant **Microphone** and **Accessibility** to
+`NanoDictateAgent` in System Settings once (add **Input Monitoring** if the
+hotkey does not fire).
+
+## Providers
+
+| id | Provider | Key |
+|---|---|---|
+| `openai` | Whisper API | api_key |
+| `groq` | Whisper (fast) | api_key |
+| `cloudflare` | Workers AI, raw WAV; `base_url` = full URL incl. `account_id`/model | api_key |
+| `airubiz` | GigaAM, anonymous (**default**) | none |
+| any other id | generic OpenAI-compatible endpoint | per server |
+
+Default `active_provider = "airubiz"` (zero-config; no key needed). Unknown
+ids fall back to the generic OpenAI-compatible adapter.
 
 ## Transports
 
-How a provider's requests reach the STT server. Set `transport` in the
-provider's `[providers.<id>]` section (or at the top level).
+`transport` in a provider's section decides how requests reach the STT server:
 
 | transport | Fields | When |
 |---|---|---|
@@ -476,146 +138,64 @@ provider's `[providers.<id>]` section (or at the top level).
 | `gateway` | `proxy_key`, optional `proxy_key_header` (default `X-Proxy-Key`) | secret header; active when `proxy_key` non-empty |
 | `cookie-relay` | `base_url`, optional `proxy_key` | JS-challenge relay (`__test` cookie, AES-128-CBC, TTL 120s) |
 
-Notes:
+Notes: `cloudflare` is a provider id, **not** a transport; `cookie-relay` is a
+**transport value, not a provider** — set `transport = "cookie-relay"` inside
+any STT provider's section.
 
-- `cloudflare` is a provider id, **not** a transport — transport is only set
-  for `http`/`gateway`/`cookie-relay` (see `config.example.toml`).
-- Legacy aliases `relay` / `infinityfree` are converted to `cookie-relay`
-  with a deprecation warning (`Config.canonicalTransport`).
-- `base_url` is required for all non-`direct` transports.
-- Secrets are never written to the config file; use the environment variable
-  `NANODICTATE_API_KEY` for the active provider only.
+## Code Signing & TCC
 
-## UI Language
+macOS TCC grants are keyed to the binary's signature (cdhash). The fixed
+identity **NanoDictate Code Signing** keeps the cdhash stable across rebuilds,
+so grants survive. Sign only via the MCP server tools (`dictation_sign` /
+`dictation_deploy`); raw `swift build` + ad-hoc `codesign` changes the
+signature and drops Microphone/Accessibility grants.
 
-The TUI and agent UI strings support English and Russian. Set
-`ui_language = "en"` or `ui_language = "ru"` in `config.toml` (default:
-`"en"`). The first item in the TUI status menu toggles the language at
-runtime.
-
-## Development
-
-### Target structure
-
-```
-Package.swift                        # swift-tools-version:5.7, macOS 12+
-Sources/
-  AudioEngineGuard/                  # ObjC clang target (NSException + AVFAudio bridge)
-  NanoDictateCore/                     # Core library (Config, STT, AudioService, BatchTranscriber, L10n, …)
-  NanoDictateAgent/                     # LaunchAgent executable
-  nanodictate/                       # CLI + TUI executable
-Tests/
-  NanoDictateCoreTests/                # Standalone test runner (no XCTest required)
-Resources/
-  *.entitlements                     # Code signing entitlements
-  *.plist.template                   # LaunchAgent plist template
-```
-
-### Running tests
+## Build & Test
 
 ```sh
-swift run NanoDictateCoreTests
+swift build -c debug                          # or -c release
+swift run nanodictate --help
+swift run NanoDictateCoreTests                # standalone runner, 795 tests
 ```
 
-The executable runner enumerates the suite classes in
-`Tests/NanoDictateCoreTests/`, runs every `test*` method, prints a summary,
-and exits non-zero if any test fails.
+## MCP Server
 
-## Deploy (MCP Server)
-
-The `mcp/nanodictate-deploy-mcp-server/` directory contains an MCP server
-(Model Context Protocol, stdio transport) that automates build, code signing,
-and agent restart. It preserves TCC (Microphone/Accessibility) grants by
-using a fixed signing identity and fixed entitlements across rebuilds.
-
-Tools provided:
-
-| Tool                | Description                                                          |
-|---------------------|----------------------------------------------------------------------|
-| `dictation_build`   | `swift build` for the chosen configuration.                          |
-| `dictation_sign`    | Re-sign both binaries with the stable identity + entitlements.       |
-| `dictation_deploy`  | Build, sign, restart — each step gated on the previous.              |
-| `dictation_restart` | Restart the LaunchAgent (`launchctl kickstart -k`).                  |
-| `dictation_status`  | Process state, launchd state, code signature details.                |
-
-See [`mcp/nanodictate-deploy-mcp-server/README.md`](mcp/nanodictate-deploy-mcp-server/README.md)
-for setup and usage details.
-
-### Code Signing
-
-macOS TCC grants (Microphone, Accessibility, Input Monitoring) are keyed to
-the binary's code signature (cdhash). Ad-hoc signing on every rebuild
-produces a new signature and resets all grants.
-
-The MCP server uses a fixed identity **"NanoDictate Code Signing"** (a
-self-signed certificate created once via Keychain Access > Certificate
-Assistant) with fixed entitlements files (`Resources/*.entitlements`) and
-`codesign --force --options runtime`. Same identity + same entitlements +
-same code = same cdhash = grants survive rebuilds.
-
-To create the signing certificate:
-
-1. Open **Keychain Access** > **Certificate Assistant** > **Create a
-   Certificate...**
-2. Name: `NanoDictate Code Signing`
-3. Identity Type: **Self-Signed Root**
-4. Certificate Type: **Code Signing**
-5. Create, then sign/redeploy via the MCP server.
-
-`dictation_sign` has **no ad-hoc fallback** — if the identity is missing
-from the keychain, it fails with a clear error and points to the steps
-above.
+`mcp/nanodictate-deploy-mcp-server/` automates build + sign + restart of the
+agent with a stable signature (Node.js ≥ 22). See its
+[README](mcp/nanodictate-deploy-mcp-server/README.md).
 
 ## Troubleshooting
 
-- **Agent not running / hotkey dead** — check with `nanodictate status`;
-  restart with `nanodictate stop && nanodictate start`. Or use launchctl
-  directly:
-  ```sh
-  launchctl print gui/$(id -u)/com.nanodictate.agent
-  launchctl kickstart -k gui/$(id -u)/com.nanodictate.agent
-  ```
-- **Logs** — `~/Library/Logs/NanoDictate/agent.log`
-  (`nanodictate logs` prints the last 50 lines; `tail -f` for live).
-  Set `log_level = "debug"` for verbose output; STT request/response
-  dumps go to `~/Library/Logs/NanoDictate/transcriber-debug.log`.
-- **Permissions re-requested after every rebuild** — binary was re-signed
-  with a different identity; use a stable signing certificate (see
-  [Code Signing](#code-signing)) and re-grant once.
-- **STT timeout / no internet** — check `base_url`, `model`, network
-  connection, and proxy transport settings.
-- **Config errors** — the agent logs the offending file and line;
-  `nanodictate config --show-file` prints parsed config with secrets
-  masked.
+- Agent dead / hotkey gone: `nanodictate stop && nanodictate start`.
+- Permissions re-requested after a rebuild: re-sign with the stable identity
+  (`dictation_deploy`) and re-grant once.
+- Logs: `~/Library/Logs/NanoDictate/agent.log`; set `log_level = "debug"` for
+  verbose output (`nanodictate logs` prints the last 50 lines).
 
 ## Uninstall
 
+**Homebrew**
+
 ```sh
 nanodictate stop
+brew uninstall kodmial/nanodictate-homebrew/nanodictate
+```
+
+**MacPorts**
+
+```sh
+nanodictate stop
+sudo port uninstall nanodictate
+```
+
+User files (config, logs, LaunchAgent) survive the package uninstall — remove
+manually:
+
+```sh
 rm ~/Library/LaunchAgents/com.nanodictate.agent.plist
-rm -rf ~/.config/nanodictate           # config and key files
-rm -rf ~/Library/Logs/NanoDictate
-rm -f /usr/local/bin/nanodictate     # symlink (if created by the MCP server)
+rm -rf ~/.config/nanodictate ~/Library/Logs/NanoDictate
 ```
 
 ## License
 
 [MIT](LICENSE) — Copyright (c) 2026 NanoDictate contributors.
-
-## Local linting
-
-Two linters enforce code style: `swift-format` (0.50700.1) and `swiftlint`
-(0.55.1) — installed with `brew install swift-format swiftlint` (or
-`port install swift-format swiftlint`). Manual run:
-`swift-format lint --recursive Sources` and
-`swiftlint lint Sources`. The pre-commit hook
-(`.githooks/pre-commit`, enabled with `git config core.hooksPath .githooks`)
-checks only staged `.swift` files and blocks a commit only on linter
-`error`-level findings; warnings are printed but do not stop the commit.
-Ограничение: хук линтует содержимое РАБОЧЕГО ДЕРЕВА файлов, а не
-staged-индекс (`git diff --cached --name-only` отбирает файлы, но
-линтерам передаётся путь с диска). Если застейджить часть правок и
-продолжить править те же файлы — гейт смотрит не на то содержимое:
-возможен ложный блок или пропуск ошибки. Чтобы избегать: перед коммитом
-делай `git add` всех правок файла (или commit через `git commit` сразу
-после добавления).

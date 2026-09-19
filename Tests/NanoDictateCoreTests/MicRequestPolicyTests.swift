@@ -1,25 +1,21 @@
 import Foundation
 @testable import NanoDictateCore
 
-/// Анти-штормовый сторож TCC-запросов микрофона (MicRequestPolicy).
-/// Порог: 3 таймаута в окне 6 ч → запрос блокируется; recordGranted сбрасывает
-/// счётчик; окно протухает по времени; повреждённый/отсутствующий файл
-/// состояния = свежее состояние; состояние персистентно между инстансами.
-/// Все тесты пишут во ВРЕМЕННЫЙ файл (никогда не трогают реальный
-/// Application Support пользователя).
+/// Anti-storm TCC mic-prompt guard (MicRequestPolicy): 3 timeouts in a 6h window
+/// block requests; recordGranted resets; corrupt/missing state file = fresh;
+/// state persists across instances. Tests write temp files only, never the real
+/// user Application Support.
 final class MicRequestPolicyTests: XCTestCase {
 
-    /// Временный URL файла состояния, уникальный на тест (между записями
-    /// разных тестов нет конфликтов, тестовое состояние не липнет к агенту).
+    /// Unique per-test temp URL: no conflicts, no state leaks to the agent.
     private func tempStateURL() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("mic-request-policy-\(UUID().uuidString).json")
     }
 
-    /// Стабильное «сейчас» для детерминизма (окно 6 ч = 21 600 с).
+    /// Fixed "now" for determinism (6h window = 21 600 s).
     private let t0 = Date(timeIntervalSince1970: 1_000_000)
 
-    /// До порога новые запросы разрешены: 0, 1 и 2 таймаута в окне.
     @objc func testAllowBelowThreshold() {
         var policy = MicRequestPolicy(fileURL: tempStateURL())
         XCTAssertTrue(policy.allowRequest(now: t0))
@@ -29,21 +25,19 @@ final class MicRequestPolicyTests: XCTestCase {
         XCTAssertTrue(policy.allowRequest(now: t0.addingTimeInterval(2)))
     }
 
-    /// На пороге и выше (3+ таймаутов в окне) запрос блокируется,
-    /// пока горит окно.
+    /// 3+ timeouts in window block requests while the window is live.
     @objc func testBlockAtAndAfterThreeTimeouts() {
         var policy = MicRequestPolicy(fileURL: tempStateURL())
         for i in 0..<3 {
             policy.recordTimeout(now: t0.addingTimeInterval(Double(i)))
         }
         XCTAssertFalse(policy.allowRequest(now: t0.addingTimeInterval(5)))
-        // 4-й таймаут не «починит» ситуацию — все ещё в окне.
+        // 4th timeout does not unlock — still within window.
         policy.recordTimeout(now: t0.addingTimeInterval(5))
         XCTAssertFalse(policy.allowRequest(now: t0.addingTimeInterval(6)))
     }
 
-    /// recordGranted сбрасывает счётчик: блокировавший шторм снимается
-    /// полностью, следующий запрос разрешён.
+    /// recordGranted fully clears the storm; next request allowed.
     @objc func testRecordGrantedResets() {
         var policy = MicRequestPolicy(fileURL: tempStateURL())
         for i in 0..<3 {
@@ -54,8 +48,7 @@ final class MicRequestPolicyTests: XCTestCase {
         XCTAssertTrue(policy.allowRequest(now: t0.addingTimeInterval(6)))
     }
 
-    /// Окно протухает по времени: ровно на границе 6 ч старый таймаут выпадает
-    /// из подсчёта (сброс «по времени»); за секунду до границы — ещё блокирует.
+    /// Window expires exactly at 6h; one second before still blocks.
     @objc func testWindowExpiryReallows() {
         var policy = MicRequestPolicy(fileURL: tempStateURL())
         for i in 0..<3 {
@@ -67,8 +60,7 @@ final class MicRequestPolicyTests: XCTestCase {
         XCTAssertTrue(policy.allowRequest(now: onBoundary))
     }
 
-    /// Повреждённый JSON в файле состояния трактуется как свежее состояние:
-    /// сторож не ломается мусором и снова разрешает запросы.
+    /// Corrupt state file treated as fresh; guard survives garbage.
     @objc func testCorruptStateFileIsFresh() throws {
         let url = tempStateURL()
         try "не json {{{".data(using: .utf8)!.write(to: url)
@@ -76,14 +68,13 @@ final class MicRequestPolicyTests: XCTestCase {
         XCTAssertTrue(policy.allowRequest(now: t0))
     }
 
-    /// Отсутствующий файл состояния — тоже свежее состояние.
+    /// Missing state file also treated as fresh.
     @objc func testMissingStateFileIsFresh() {
         let policy = MicRequestPolicy(fileURL: tempStateURL())
         XCTAssertTrue(policy.allowRequest(now: t0))
     }
 
-    /// Состояние персистентно между инстансами: второй инстанс, открывший тот
-    /// же файл, видит те же таймауты (перезапуск агента не снимает шторм).
+    /// State persists across instances: agent restart does not clear storm.
     @objc func testPersistenceAcrossInstances() {
         let url = tempStateURL()
         var first = MicRequestPolicy(fileURL: url)
@@ -92,8 +83,7 @@ final class MicRequestPolicyTests: XCTestCase {
         }
         let second = MicRequestPolicy(fileURL: url)
         XCTAssertFalse(second.allowRequest(now: t0.addingTimeInterval(10)))
-        // И recordGranted тоже персистится: грант в одном инстансе снимает
-        // шторм и в новом (проблема решена — счётчик больше не блокирует).
+        // recordGranted also persists: grant in one instance clears storm in new.
         var third = MicRequestPolicy(fileURL: url)
         third.recordGranted(now: t0.addingTimeInterval(10))
         let fourth = MicRequestPolicy(fileURL: url)

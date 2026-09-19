@@ -19,7 +19,7 @@ final class SysSoundsTests: XCTestCase {
     @objc func testDisabledSoundsAreNoOp() {
         let sounds = SysSounds(enabled: false)
         XCTAssertFalse(sounds.enabled)
-        // При enabled == false вызовы — no-op и не должны бросать.
+        // No-op calls must not throw when disabled.
         sounds.playStart()
         sounds.playEnd()
         sounds.playCancel()
@@ -35,7 +35,7 @@ final class SysSoundsTests: XCTestCase {
 
     @objc func testReenableAfterDisable() {
         let sounds = SysSounds(enabled: false)
-        sounds.playStart() // no-op
+        sounds.playStart()
         sounds.enabled = true
         XCTAssertTrue(sounds.enabled)
         sounds.playStart()
@@ -45,51 +45,43 @@ final class SysSoundsTests: XCTestCase {
 
     // MARK: - Новое поведение (NSSound + защита от дублей)
 
-    /// Системные звуки macOS (Tink/Pop/Ping) обязаны существовать
-    /// в /System/Library/Sounds — иначе NSSound(named:) вернёт nil.
+    /// System sounds must exist in /System/Library/Sounds, else NSSound(named:) is nil.
     @objc func testSystemSoundsExist() {
         XCTAssertNotNil(NSSound(named: "Tink"))
         XCTAssertNotNil(NSSound(named: "Pop"))
         XCTAssertNotNil(NSSound(named: "Ping"))
     }
 
-    /// После playStart звук помечается играющим — это состояние,
-    /// на котором строится защита от повторного переигрывания.
+    /// playStart marks sound playing — basis of duplicate-replay guard.
     @objc func testPlayStartMarksCurrentlyPlaying() {
         let sounds = SysSounds(enabled: true)
         sounds.playStart()
         XCTAssertEqual(sounds.playingName, "Tink")
     }
 
-    /// Защита от дублей: тот же звук, помеченный играющим, — повтор пропускаем;
-    /// другой звук или завершившийся тот же самый — пропускать не нужно.
+    /// Same playing sound skipped; different or finished sound plays.
     @objc func testDuplicateReplayIsSkippedForSamePlayingSound() {
         let sounds = SysSounds(enabled: true)
-        sounds.playStart() // играем "Tink" — первый вызов никогда не скипается
-        // Тот же звук и помечен играющим — повторно не запускаем.
+        sounds.playStart() // First play is never skipped.
         XCTAssertTrue(sounds.shouldSkipReplay(of: "Tink", currentlyPlaying: true))
-        // Другой звук — играем (предыдущий при этом останавливается).
+        // Different sound plays; previous stops.
         XCTAssertFalse(sounds.shouldSkipReplay(of: "Pop", currentlyPlaying: true))
-        // Тот же звук, но уже завершился — можно играть снова.
         XCTAssertFalse(sounds.shouldSkipReplay(of: "Tink", currentlyPlaying: false))
     }
 
     // MARK: - Звук ошибки сети (Basso)
 
-    /// Basso — системный «звук ошибки» macOS, должен существовать в
-    /// /System/Library/Sounds, иначе playError молча пропустит сбой.
+    /// Basso must exist in /System/Library/Sounds, else playError silently skips.
     @objc func testErrorSoundExists() {
         XCTAssertNotNil(NSSound(named: "Basso"))
     }
 
-    /// playError() играет Basso и помечает его играющим (как остальные звуки).
     @objc func testPlayErrorUsesBasso() {
         let sounds = SysSounds(enabled: true)
         sounds.playError()
         XCTAssertEqual(sounds.playingName, "Basso")
     }
 
-    /// Отключённые звуки: playError — no-op без падения.
     @objc func testPlayErrorDisabledIsNoOp() {
         let sounds = SysSounds(enabled: false)
         sounds.playError()

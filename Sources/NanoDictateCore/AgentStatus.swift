@@ -2,8 +2,7 @@ import Foundation
 
 // MARK: - Статус агента: чистая логика меню (без ввода-вывода и AppKit)
 
-/// Срез данных о состоянии агента для построения экрана «Статус».
-/// Собирается в menu.swift (процессы/файлы), здесь — только отображение.
+/// Agent state snapshot for Status screen; gathered in menu.swift, rendered here.
 public struct AgentStatusData: Equatable {
   public var agentRunning: Bool
   public var agentPID: String?
@@ -41,7 +40,7 @@ public struct AgentStatusData: Equatable {
   }
 }
 
-/// Один пункт меню: клавиша («1», «q»…) и подпись.
+/// Menu row: shortcut key ("1", "q") + label.
 public struct MenuItem: Equatable {
   public let key: String
   public let label: String
@@ -51,8 +50,7 @@ public struct MenuItem: Equatable {
   }
 }
 
-/// Действие пункта экрана «Статус» по ключу (чистая логика, без I/O).
-/// I/O-слой (menu.swift) только исполняет возвращённый экшен.
+/// Status-screen action by key; pure — menu.swift only executes it.
 public enum StatusMenuAction: Equatable {
   case toggleLanguage
   case showProviders
@@ -64,27 +62,23 @@ public enum StatusMenuAction: Equatable {
   case quit
 }
 
-/// Жест подтверждения в диалоге смены провайдера (уже отделён от терминала):
-/// `.yes` — клавиша y, `.enter` — Enter, `.other` — любая иная клавиша.
+/// Provider-switch confirm gesture: .yes = y, .enter = Enter, .other = rest.
 public enum ConfirmationGesture: Equatable {
   case yes
   case enter
   case other
 }
 
-/// Гейт запуска меню: показывается ТОЛЬКО без команды И в интерактивном
-/// терминале (tty). В пайпах/скриптах — прежнее поведение: usage + exit 0.
+/// Menu only when no command AND tty; in pipes — usage + exit 0.
 public enum MenuGate {
   public static func shouldRunMenu(hasCommand: Bool, tty: Bool) -> Bool {
     !hasCommand && tty
   }
 }
 
-/// Построение экранов и текстов меню. Никакого ввода/вывода — только строки.
+/// Menu screens/text builders; pure strings, no I/O.
 public enum AgentScreen {
-  /// Маппинг ключа экрана «Статус» в действие меню. Единый источник правды:
-  /// именно он не даёт ключу "0" попасть в default (.quit) — пункт языка
-  /// обязан переключать язык, а не выходить из меню.
+  /// Key→action map; keeps "0" out of default .quit — language must switch, not quit.
   public static func statusMenuAction(forKey key: String) -> StatusMenuAction {
     switch key {
     case "0": return .toggleLanguage
@@ -98,7 +92,7 @@ public enum AgentScreen {
     }
   }
 
-  /// Заголовки и подсказки (владеет текстом меню; ANSI добавляет menu.swift).
+  /// Titles/hints; owns menu text, ANSI added by menu.swift.
   public static func statusTitle() -> String {
     L10n.tr("status.title")
   }
@@ -119,8 +113,7 @@ public enum AgentScreen {
     L10n.tr("status.hintProviders")
   }
 
-  /// Принимает ли жест подтверждение смены провайдера: y и Enter — да,
-  /// любая другая клавиша — нет (чистая логика, без чтения терминала).
+  /// y/Enter confirm; other keys reject (pure, no terminal read).
   public static func confirmationAccepts(key: ConfirmationGesture) -> Bool {
     switch key {
     case .yes, .enter: return true
@@ -132,18 +125,17 @@ public enum AgentScreen {
     L10n.tr("status.hintLogs")
   }
 
-  /// События лога, после которых запись завершена (запись НЕ активна).
+  /// Log events marking recording end (recording NOT active).
   private static let recordingEndMarkers = [
-    "transcribe submit",  // запись остановлена и отправлена на распознавание
+    "transcribe submit",  // recording stopped, sent to STT
     "record cancelled",
-    "record limit reached",  // жёсткий лимит — запись финализирована
+    "record limit reached",  // hard limit — recording finalized
     "transcription inserted",
     // swiftlint:disable:next trailing_comma
     "transcription failed",
   ]
 
-  /// Эвристика по логу агента: запись активна, если после последнего
-  /// «record start» не было ни одного терминального события.
+  /// Recording active if after last "record start" no terminal event followed.
   public static func isRecordingActive(logLines: [String]) -> Bool {
     var lastStart = -1
     var lastEnd = -1
@@ -169,7 +161,7 @@ public enum AgentScreen {
     return formatter.string(fromByteCount: bytes)
   }
 
-  /// Строка провайдера как в `nanodictate status`.
+  /// Provider line matching `nanodictate status`.
   public static func providerLine(providerName: String?, providerID: String?, providersEmpty: Bool)
     -> String
   {  // swiftlint:disable:this opening_brace
@@ -184,13 +176,12 @@ public enum AgentScreen {
       : L10n.tr("menu.notSelected")
   }
 
-  /// Выравнивание колонки значений: label + отступ = ровно 12 символов
-  /// (значения начинаются с 13-й колонки независимо от длины метки EN/RU).
+  /// Pad label to 12 chars; values start at col 13 regardless of EN/RU label length.
   private static func padCol12(_ label: String) -> String {
     label + String(repeating: " ", count: max(0, 12 - label.count))
   }
 
-  /// Экран «Статус»: агент, запись, провайдер, лог (размер/ошибки/хвост).
+  /// Status screen: agent, recording, provider, log (size/errors/tail).
   public static func statusScreen(_ status: AgentStatusData) -> String {
     let agent =
       status.agentRunning
@@ -219,7 +210,7 @@ public enum AgentScreen {
     return lines.joined(separator: "\n")
   }
 
-  /// Пункты экрана «Статус»: ключ + подпись (действия назначает menu.swift).
+  /// Status menu rows: key + label; actions wired by menu.swift.
   public static func statusMenuItems(agentRunning: Bool) -> [MenuItem] {
     [
       MenuItem(key: "0", label: L10n.tr("menu.language")),
@@ -235,7 +226,7 @@ public enum AgentScreen {
     ]
   }
 
-  /// Строка провайдера для экрана «Провайдеры»: `* Groq [groq] — model`.
+  /// Providers screen row: `* Groq [groq] — model`.
   public static func providerItemLine(_ provider: STTProvider) -> String {
     let marker = provider.isActive ? "*" : " "
     let name = provider.name.isEmpty ? provider.id : provider.name
@@ -246,14 +237,14 @@ public enum AgentScreen {
     providers.map { providerItemLine($0) }.joined(separator: "\n")
   }
 
-  /// Результат валидации выбора провайдера (без IO).
+  /// Provider-switch validation result (no IO).
   public enum ProviderSwitchResult: Equatable {
     case isValid(targetID: String)
     case unknownProvider(id: String, available: [String])
     case empty
   }
 
-  /// Чистая проверка: существует ли провайдер с таким id (до реальной правки конфига).
+  /// Pure check: provider id exists, before writing config.
   public static func validateProviderSwitch(targetID: String, providers: [STTProvider])
     -> ProviderSwitchResult
   {  // swiftlint:disable:this opening_brace

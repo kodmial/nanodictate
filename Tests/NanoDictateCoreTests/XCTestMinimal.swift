@@ -3,19 +3,12 @@ import ObjectiveC
 
 // MARK: - Минимальная замена XCTest (нет Xcode на этой машине)
 //
-// `swift test` не работает: в CommandLineTools нет XCTest.framework
-// ("XCTest not available"). Чтобы тесты реально выполнялись, предоставляем
-// компактный XCTest-совместимый API: тот же `XCTestCase`, те же
-// `XCTAssert*`-функции. Раннер (см. main.swift) находит все подклассы
-// `XCTestCase` через ObjC-runtime, вызывает каждый `test*`-метод по
-// селектору и завершает процесс с ненулевым кодом при первом провале.
+// CommandLineTools lacks XCTest.framework, so `swift test` fails; this shim
+// mirrors the XCTest API. Runner (main.swift) finds XCTestCase subclasses via
+// ObjC runtime, calls each test* selector, exits nonzero on first failure.
 
-/// Примитив асинхронного ожидания: тест создаёт expectation, async-задача
-/// вызывает fulfill(), а `wait(for:timeout:)` блокирует до сброса флага.
-///
-/// Флаг (а не DispatchSemaphore) выбран намеренно: семафорные ожидания здесь
-/// показали гонки (fulfill() вызывается, но wait всё равно уходит в таймаут),
-/// а флаг с NSLock не «поедается» при чтении, как се‥мафорный wait(.now()).
+/// Bool flag over DispatchSemaphore: semaphore waits raced here — fulfill()
+/// fired yet wait still timed out.
 public class XCTestExpectation: NSObject {
     private let lock = NSLock()
     private var _fulfilled = false
@@ -33,26 +26,22 @@ public class XCTestExpectation: NSObject {
 }
 
 public class XCTestCase: NSObject {
-    /// Неудачи текущего теста; раннер сбрасывает перед каждым тестом.
+    /// Failures of current test; runner resets before each test.
     public static var currentFailures: [String] = []
 
     public required override init() {
         super.init()
     }
 
-    // @objc — раннер вызывает setUp/tearDown по селектору (см. main.swift),
-    // а override в подклассах наследует objc-доступность.
+    // @objc: runner calls by selector; subclass overrides inherit objc visibility.
     @objc public func setUp() {}
     @objc public func tearDown() {}
 
-    /// Создаёт ожидание (API-совместимо с XCTest).
     public func expectation(description: String) -> XCTestExpectation {
         return XCTestExpectation()
     }
 
-    /// Блокирует поток до выполнения всех ожиданий либо до `timeout`.
-    /// Крутит RunLoop (а не usleep), чтобы `Task` на главном акторе —
-    /// как в TranscriberTests.runAsync — мог выполниться и позвать fulfill().
+    /// Spins RunLoop, not usleep: main-actor Task (runAsync) must run to fulfill().
     public func wait(for expectations: [XCTestExpectation], timeout: TimeInterval) {
         let deadline = Date().addingTimeInterval(timeout)
         while !expectations.allSatisfy({ $0.isFulfilled }) {
@@ -67,7 +56,6 @@ public class XCTestCase: NSObject {
         }
     }
 
-    /// Регистрирует неудачу (вызывается из XCTAssert*-функций).
     public static func recordFailure(_ message: String, file: StaticString, line: UInt) {
         currentFailures.append("\(file):\(line): \(message)")
     }
@@ -203,8 +191,6 @@ public func XCTAssertNotNil(
     }
 }
 
-/// Проверяет, что выражение бросает ошибку. `errorHandler` вызывается,
-/// если ошибка действительно была.
 public func XCTAssertThrowsError<T>(
     _ expression: @autoclosure () throws -> T,
     _ message: String = "",

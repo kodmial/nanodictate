@@ -1,25 +1,17 @@
 import CoreGraphics
 
-/// Маркер СВОЕГО синтетического Return.
-///
-/// Проблема: синтетический Enter постится через `.cghidEventTap`, но наш
-/// session-тап видит его повторно только на СЛЕДУЮЩЕЙ итерации run loop —
-/// синхронный флаг «сейчас постится» к моменту обработки уже снят. Маркер
-/// ставится в поле `.eventSourceUserData` САМОГО события ДО постинга и
-/// переживает асинхронную доставку: по нему тап исключает событие из
-/// роутинга (не зовёт enterKeyPressed, не гасит cancelPendingTap) и из
-/// глотания — синтетика доходит до приложения.
+/// Marks own synthetic Return via event field: session tap sees it only next run-loop pass,
+/// when sync flag is already cleared. Field survives async delivery; tap skips routing/swallowing.
 public enum SyntheticReturnMarker {
-  /// Постоянный токен между постами ("NDTK"). Менять не нужно: исключение
-  /// действует на ЛЮБОЙ наш синтетический Return, а не на конкретный пост.
+  /// Constant token ("NDTK"): applies to any synthetic Return, not one post.
   public static let token: Int64 = 0x4E44_544B
 
-  /// Пометить событие как собственный синтетический Return (до постинга).
+  /// Tag event as own synthetic Return (before posting).
   public static func mark(_ event: CGEvent) {
     event.setIntegerValueField(.eventSourceUserData, value: token)
   }
 
-  /// Является ли событие нашим синтетическим Return (по полю события).
+  /// Is event our synthetic Return (by event field)?
   public static func isOwnSyntheticReturn(_ event: CGEvent) -> Bool {
     event.getIntegerValueField(.eventSourceUserData) == token
   }

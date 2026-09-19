@@ -3,55 +3,43 @@ import Foundation
 
 // MARK: - Чистая логика VU-отображения уровня звука (оверлей «Halo»)
 
-/// Чистый расчёт VU-фидбека оверлея: dB-ремап линейного RMS в метр 0…1,
-/// баллистика (быстрый attack / медленный release), зона «горячего» уровня
-/// и толщина штриха кольца-дуги. Без SwiftUI и без I/O — полностью покрывается
-/// юнит-тестами.
+/// Pure VU meter math: RMS remap, ballistics, hot zone, stroke width. No I/O — unit-tested.
 public enum OverlayLevel {
-  /// Нижняя граница отображаемой шкалы в dBFS: −50 dBFS → метр 0.
-  /// Верхняя граница шкалы — 0 dBFS → метр 1.
+  /// Meter scale floor: −50 dBFS → 0; ceiling 0 dBFS → 1.
   public static let floordB: Float = -50
 
-  /// Время attack в секундах: метр догоняет цель за ~70 мс.
+  /// Attack time: meter reaches target in ~70 ms.
   public static let attackTime: TimeInterval = 0.07
 
-  /// Постоянная времени release: экспоненциальный спад с τ ≈ 0.5 с —
-  /// при тике ~11 Гц (интервал ≈ 0.09 с) это ~×0.83 за тик, «плавно, но
-  /// заметно» и соответствует ×~0.9/тик из спеки.
+  /// Release τ ≈ 0.5 s: at ~11 Hz tick ≈ ×0.83 — smooth but visible, per spec ~×0.9/tick.
   public static let releaseTime: TimeInterval = 0.5
 
-  /// Порог «горячей» зоны в dBFS: выше него фидбек теплеет (см. isHot).
+  /// Hot zone threshold (dBFS): above it feedback warms.
   public static let hotThresholddB: Float = -6
 
-  /// Порог «горячей» зоны в метрах — выведен из dBFS-порога (0.88 при −6 dBFS).
+  /// Hot threshold in meters, derived from dBFS (−6 dBFS → 0.88).
   public static var hotMeterThreshold: Float {
     (hotThresholddB - floordB) / -floordB  // (−6 − (−50))/50 = 0.88
   }
 
-  /// Перевод линейного RMS (0…1) в метр 0…1 по шкале −50…0 dBFS:
-  /// `rms <= 0 ? 0 : clamp((20·log10(rms) + 50)/50, 0…1)`.
-  /// Та же шкала, что у `AudioMetrics.nearSilenceThreshold` (−50 dBFS ≈ 0.00316).
+  /// Linear RMS → meter on −50…0 dBFS scale; same scale as AudioMetrics.nearSilenceThreshold.
   public static func meter(fromRMS rms: Float) -> Float {
     guard rms > 0 else { return 0 }
     let decibels = 20 * log10(rms)
     return min(max((decibels - floordB) / -floordB, 0), 1)
   }
 
-  /// Обратная функция шкалы: dBFS, которому соответствует метр 0…1.
-  /// Необходимо для проверки порогов в тестах и для логов.
+  /// Inverse scale: dBFS for given meter; used by tests and logs.
   public static func dbfs(forMeter meter: Float) -> Float {
     floordB + min(max(meter, 0), 1) * -floordB
   }
 
-  /// «Горячая» зона: уровень выше −6 dBFS (метр > 0.88) — кольцо теплеет.
+  /// Hot zone: above −6 dBFS (meter > 0.88) — ring warms.
   public static func isHot(meter: Float) -> Bool {
     meter > hotMeterThreshold
   }
 
-  /// Envelope-баллистика VU за шаг `dt` (секунды). Входы — текущий и целевой
-  /// метр (0…1), оба клампятся. Если цель выше — быстрый attack (линейное
-  /// сближение за `attackTime`); иначе — экспоненциальный release к цели
-  /// (не ниже её). Результат 0…1.
+  /// VU ballistics for dt: higher target → linear attack; else exp release. Clamped 0…1.
   public static func enveloped(current: Float, target: Float, dt delta: TimeInterval) -> Float {
     let current = min(max(current, 0), 1)
     let target = min(max(target, 0), 1)
@@ -63,32 +51,27 @@ public enum OverlayLevel {
     return max(target, decayed)
   }
 
-  /// Толщина штриха кольца-дуги: растёт с уровнем 3…9 пт.
+  /// Ring stroke width: grows 3…9 pt with level.
   public static func strokeWidth(forMeter meter: Float) -> CGFloat {
     CGFloat(3 + min(max(meter, 0), 1) * 6)
   }
 }
 
-/// Следящий пик VU-метра: держит максимальный уровень ~`holdTime`, затем плавно
-/// опадает. Используется пик-точкой кольца («маленький кружок»), чтобы короткие
-/// всплески уровня были видны, а не пропадали мгновенно.
+/// Peak follower: holds max ~holdTime, decays after. Ring dot keeps brief spikes visible.
 public struct OverlayPeak: Equatable {
-  /// Сколько секунд пик держит максимум до начала спада.
+  /// Seconds peak holds max before decay.
   public static let holdTime: TimeInterval = 0.8
 
-  /// Скорость плавного спада после окончания удержания (единиц в секунду,
-  /// линейно): с 1.0 до 0 — ~1.4 с.
+  /// Linear decay rate (units/s): 1.0 → 0 in ~1.4 s.
   public static let fallRate: Float = 0.7
 
-  /// Текущее значение пика (0…1).
+  /// Peak value, 0…1.
   public private(set) var value: Float = 0
   private var holdRemaining: TimeInterval = 0
 
   public init() {}
 
-  /// Обновляет пик за шаг `dt`: новый максимум фиксируется и держится
-  /// `holdTime`; пока уровень ниже — идёт оставшееся удержание, затем плавный
-  /// спад. Возвращает текущее значение пика.
+  /// Step dt: new max held holdTime; below — hold then decay. Returns peak.
   public mutating func update(level: Float, dt delta: TimeInterval) -> Float {
     let level = min(max(level, 0), 1)
     if level > value {
@@ -102,7 +85,7 @@ public struct OverlayPeak: Equatable {
     return value
   }
 
-  /// Сброс пика в ноль (начало новой сессии / скрытие оверлея).
+  /// Reset to zero (new session / overlay hide).
   public mutating func reset() {
     value = 0
     holdRemaining = 0

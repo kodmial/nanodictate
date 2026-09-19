@@ -18,8 +18,7 @@ public enum L10n {
     table(language)[key] ?? key
   }
 
-  /// Следующий язык при тумблере в меню (чистая логика, без I/O).
-  /// Пункт «0» экрана «Статус» вызывает переключение .en ↔ .ru.
+  /// Next language for menu toggle (Status key "0"): .en ↔ .ru.
   public static func toggled() -> AppLanguage {
     language == .en ? .ru : .en
   }

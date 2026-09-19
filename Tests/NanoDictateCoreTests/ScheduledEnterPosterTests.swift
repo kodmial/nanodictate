@@ -1,14 +1,11 @@
 import Foundation
 @testable import NanoDictateCore
 
-/// Отмена УЖЕ запланированного синтетического Enter (замечание #2 ревью):
-/// Esc после вставки текста (латч уже снят, пост висит в очереди на ~250 мс)
-/// должен отменять срабатывание. Планирование инкапсулировано в
-/// ScheduledEnterPoster — здесь latency-тесты отмены и срабатывания.
+/// Cancels an already-scheduled synthetic Enter (замечание #2 ревью): Esc after insert
+/// must not let the ~250 ms pending post fire. Latency tests live here.
 final class ScheduledEnterPosterTests: XCTestCase {
 
-    /// Ждёт до `timeout` секунд, пока `condition` не станет true (крутит main
-    /// run loop — как прод: asyncAfter/тап живут на нём).
+    /// Spins main run loop until `condition` is true or `timeout` (asyncAfter/tap live there).
     private func waitFor(timeout: TimeInterval, _ condition: () -> Bool) {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline && !condition() {
@@ -16,8 +13,7 @@ final class ScheduledEnterPosterTests: XCTestCase {
         }
     }
 
-    /// Отмена: после cancelScheduled() действие НЕ выполняется даже по
-    /// истечении паузы (Esc после Enter-останова не даёт постикнуть Enter).
+    /// Canceled action never fires, even after the delay (Esc after Enter-stop must not post).
     @objc func testCancelPreventsScheduledAction() {
         let poster = ScheduledEnterPoster()
         poster.delay = 0.05
@@ -31,7 +27,6 @@ final class ScheduledEnterPosterTests: XCTestCase {
         XCTAssertEqual(fired, 0, "отменённый пост не должен сработать через паузу")
     }
 
-    /// Без отмены действие срабатывает ровно один раз после паузы.
     @objc func testActionFiresOnceAfterDelay() {
         let poster = ScheduledEnterPoster()
         poster.delay = 0.05
@@ -44,8 +39,7 @@ final class ScheduledEnterPosterTests: XCTestCase {
         XCTAssertEqual(fired, 1)
     }
 
-    /// Перепланирование отменяет предыдущее: сработать может только последний
-    /// schedule (в латче Enter всегда ровно один, повторы не инкрементируют).
+    /// Reschedule replaces the previous one: only the last schedule fires (latch holds one Enter).
     @objc func testRescheduleReplacesPrevious() {
         let poster = ScheduledEnterPoster()
         poster.delay = 0.05
@@ -59,7 +53,6 @@ final class ScheduledEnterPosterTests: XCTestCase {
         XCTAssertEqual(fired, 1)
     }
 
-    /// Отмена без планирования и повторная отмена — идемпотентный no-op.
     @objc func testCancelWithoutScheduleIsNoop() {
         let poster = ScheduledEnterPoster()
         poster.cancelScheduled()
@@ -72,7 +65,7 @@ final class ScheduledEnterPosterTests: XCTestCase {
         XCTAssertEqual(fired, 1)
     }
 
-    /// После отмены можно планировать заново (новый цикл записи → новый Enter).
+    /// Can reschedule after cancel (new recording cycle needs a new Enter).
     @objc func testScheduleWorksAgainAfterCancel() {
         let poster = ScheduledEnterPoster()
         poster.delay = 0.05

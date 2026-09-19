@@ -4,63 +4,58 @@ import Foundation
 // MARK: - CookieRelayProvider
 
 //
-// Унифицированный транспорт STT-провайдера (ключ `transport` в конфиге),
-// режим "cookie-relay": ретрансляция через прокси, встречающий «небраузерные»
-// запросы JS-челленджем. Сервер вместо контента присылает HTML со скриптом
-// и константами a/b/c (hex по 32 символа); браузер вычисляет cookie
-// `__test = toHex(slowAES.decrypt(c, 2, a, b))` и редиректит с ним.
+// Unified STT provider transport (`transport` key), "cookie-relay" mode:
+// proxy meets non-browser requests with JS challenge. Server returns HTML
+// with script + constants a/b/c (hex 32 chars); browser computes cookie
+// `__test = toHex(slowAES.decrypt(c, 2, a, b))` and redirects with it.
 //
-// Требования пользователя, зашитые здесь:
-//   1. Никакого node/JavaScript — slowAES.decrypt(c,2,a,b) воспроизводится
-//      байт-в-байт на CommonCrypto (AES-128-CBC, БЕЗ снятия padding), ~15 строк.
-//   2. Cookie НЕ в конфиге — живёт в памяти: {value, createdAt}, TTL 120 с.
-//   3. Обновление неблокирующее: пока токен моложе 120 с — ensureFresh()
-//      возвращает текущий токен мгновенно, без единого сетевого запроса;
-//      протухший/отсутствующий токен обновляется ФОНОМ, вызывающий получает
-//      текущий токен сразу. Блокирующий refresh нужен в одном месте — когда
-//      STT-запрос уже получил челлендж (ретраить есть смысл только со свежей
-//      кукой).
-//   4. Один фиксированный браузерный UA (Chrome) — и за челленджем, и на
-//      STT-запросы через прокси.
+// Hard user requirements:
+//   1. No node/JavaScript — slowAES.decrypt(c,2,a,b) reproduced byte-for-byte
+//      on CommonCrypto (AES-128-CBC, WITHOUT padding removal), ~15 lines.
+//   2. Cookie NOT in config — lives in memory: {value, createdAt}, TTL 120 s.
+//   3. Refresh non-blocking: token younger 120 s — ensureFresh() returns it
+//      instantly, zero network requests; stale/absent token refreshed in
+//      BACKGROUND, caller gets current token at once. Blocking refresh in one
+//      place only — STT request already got challenge (retry makes sense only
+//      with fresh cookie).
+//   4. One fixed browser UA (Chrome) — challenge and STT requests via proxy.
 
 public final class CookieRelayProvider {
-  /// TTL токена в памяти (сек). Cookie прокси выдаёт на ≥ 120 секунд —
-  /// до этого срока свежий токен не пересчитывается вообще.
+  /// Token TTL in memory (sec). Proxy issues cookie ≥ 120 s — below that
+  /// fresh token never recalculated.
   public static let tokenTTL: TimeInterval = 120
 
-  /// Единственный User-Agent, которым агент «ходит»: и за челленджем, и на
-  /// STT-запросы через cookie-relay прокси (браузерный UA обязателен —
-  /// curl/8.0 получает «Empty reply from server»).
+  /// Sole agent UA: challenge + STT via cookie-relay proxy. Browser UA
+  /// mandatory — curl/8.0 gets "Empty reply from server".
   public static let chromeUA =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     + "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-  /// Имя cookie в заголовке (без "=").
+  /// Cookie header name (without "=").
   private static let cookieName = "__test"
 
-  /// Таймаут refresh-запросов (челлендж-GET и probe-GET), сек. Страницы
-  /// маленькие, ответ приходит быстро, а refreshBlocking() может выполняться
-  /// ВНУТРИ STT-цикла (челлендж-ретрай) — дефолтные 60 с URLSession повисли
-  /// бы на диктовке сверх документированного networkRequestTimeout (20 с).
+  /// Refresh timeout (challenge-GET, probe-GET), sec. Pages small, responses
+  /// fast; refreshBlocking() may run INSIDE STT loop (challenge retry) —
+  /// URLSession default 60 s would hang dictation past documented
+  /// networkRequestTimeout (20 s).
   private static let refreshTimeout: TimeInterval = 8
 
-  /// Значение токена в памяти.
   private struct Token {
-    let value: String  // lowerHex значения cookie, БЕЗ "__test="
+    let value: String  // lowerHex cookie value, WITHOUT "__test="
     let createdAt: Date
   }
 
   private let lock = NSLock()
   private var token: Token?
-  /// Одновременно идёт НЕ более одного фонового пересчёта (дедупликация):
-  /// параллельные ensureFresh/refreshBlocking дожидаются одного и того же Task.
-  /// Результат Task — значение из performRefresh(): свежий токен или nil.
+  /// At most ONE background refresh in flight (dedup): parallel
+  /// ensureFresh/refreshBlocking await the same Task. Task result —
+  /// performRefresh() value: fresh token or nil.
   private var refreshInFlight: Task<String?, Never>?
 
-  private let origin: String  // схема+хост прокси, где живёт челлендж
+  private let origin: String  // proxy scheme+host serving challenge
   private let userAgent: String
   private let transport: HTTPTransport?
-  /// Инъекцируемые часы — тесты «старят» токен без реальных задержек.
+  /// Injectable clock — tests age token without real delays.
   private let now: () -> Date
 
   public init(
@@ -75,8 +70,8 @@ public final class CookieRelayProvider {
     self.now = now
   }
 
-  /// Фабрика для `transport == "cookie-relay"`: origin выводится из baseURL
-  /// STT-эндпоинта (прокси). nil — URL непарсится, cookie-слой не поднять.
+  /// Factory for `transport == "cookie-relay"`: origin derived from STT
+  /// endpoint baseURL (proxy). nil — URL unparsable, cookie layer impossible.
   public static func makeForCookieRelay(
     baseURL: String,
     transport: HTTPTransport? = nil
@@ -85,8 +80,7 @@ public final class CookieRelayProvider {
     return CookieRelayProvider(origin: origin, transport: transport)
   }
 
-  /// Схема+хост из URL STT-эндпоинта — origin, где прокси раздаёт челлендж.
-  /// Например "https://proxy.example.com/go/…" → "https://proxy.example.com".
+  /// Scheme+host from STT endpoint URL — origin serving challenge.
   public static func origin(from baseURL: String) -> String? {
     guard
       let url = URL(string: baseURL),
@@ -104,19 +98,18 @@ public final class CookieRelayProvider {
 
   // MARK: - API для Transcriber
 
-  /// Полностью готовое значение заголовка Cookie («__test=<hex>») или nil.
-  /// Синхронно, без сети.
+  /// Full Cookie header value ("__test=<hex>") or nil. Sync, no network.
   public func currentCookie() -> String? {
     lock.lock()
     defer { lock.unlock() }
     return token.map { "\(Self.cookieName)=\($0.value)" }
   }
 
-  /// Неблокирующее поддержание токена:
-  /// - токен МОЛОЖЕ 120 с и обновление не идёт → ничего не запускает,
-  ///   возвращает текущий токен мгновенно, сетевых запросов нет;
-  /// - токен протух/отсутствует ИЛИ обновление уже идёт → запускает фоновый
-  ///   пересчёт (дедуплицированный) и возвращает ТЕКУЩИЙ токен сразу.
+  /// Non-blocking token upkeep:
+  /// - fresh (younger 120 s) and no refresh running → nothing launches,
+  ///   current token returned instantly, zero network requests;
+  /// - stale/absent OR refresh running → background recalc (deduped) starts,
+  ///   CURRENT token returned immediately.
   public func ensureFresh() async -> String? {
     let header = currentCookie()
     let decision = refreshDecision()
@@ -127,13 +120,12 @@ public final class CookieRelayProvider {
     return header
   }
 
-  /// Блокирующий пересчёт «до результата»: дожидается завершения (своего или
-  /// уже идущего) пересчёта и возвращает результат пересчёта: НОВЫЙ токен,
-  /// либо nil, если пересчёт не удался. Старый токен при неудаче остаётся
-  /// в памяти (currentCookie() его вернёт), но ретраить ИМ бессмысленно —
-  /// челлендж уже показал, что сервер его отверг; челлендж-ретрай обязан
-  /// уходить с nil-семантикой → Transcriber прерывает попытку, а не тратит
-  /// POST на заведомо мёртвую куку.
+  /// Blocking recalc "to result": awaits completion (own or in-flight) and
+  /// returns NEW token, or nil on failure. Old token stays in memory
+  /// (currentCookie() returns it), but retrying with it is pointless —
+  /// challenge already showed server rejected it; challenge retry must use
+  /// nil-semantics, so Transcriber aborts the attempt instead of wasting a
+  /// POST on a dead cookie.
   public func refreshBlocking() async -> String? {
     let task = startRefresh()
     guard let value = await task.value else { return nil }
@@ -142,8 +134,8 @@ public final class CookieRelayProvider {
 
   // MARK: - Статика: разбор челленджа и AES-128-CBC
 
-  /// Признак cookie-челленджа: страница содержит aes.js, toNumbers и
-  /// document.cookie — то есть вместо контента сервер прислал JS-заглушку.
+  /// Cookie-challenge mark: page has aes.js, toNumbers, document.cookie —
+  /// JS stub instead of content.
   public static func looksLikeChallenge(_ body: String) -> Bool {
     body.contains("aes.js") && body.contains("toNumbers") && body.contains("document.cookie")
   }
@@ -153,7 +145,7 @@ public final class CookieRelayProvider {
     return looksLikeChallenge(text)
   }
 
-  /// Аналог JS `toNumbers(d)`: hex-строка → массив байт.
+  /// JS `toNumbers(d)` analog: hex string to byte array.
   public static func toNumbers(_ hex: String) -> [UInt8] {
     var result: [UInt8] = []
     var index = hex.startIndex
@@ -167,36 +159,35 @@ public final class CookieRelayProvider {
     return result
   }
 
-  /// Аналог JS `toHex(arr)`: массив байт → lowerHex.
+  /// JS `toHex(arr)` analog: byte array to lowerHex.
   public static func toHex(_ bytes: [UInt8]) -> String {
     bytes.map { String(format: "%02x", $0) }.joined()
   }
 
-  /// Строгий UTF-8-декодер: `String(decoding:as:)` чинит битые байты
-  /// заменителем, а здесь nil-семантика `String(data:encoding:)` сохранена
-  /// явно — недействительная последовательность возвращает nil.
+  /// Strict UTF-8 decoder: `String(decoding:as:)` replaces broken bytes;
+  /// here nil-semantics kept explicitly — invalid sequence returns nil.
   private static func strictUTF8(_ data: Data) -> String? {
     let text = String(decoding: data, as: UTF8.self)
     guard text.utf8.elementsEqual(data) else { return nil }
     return text
   }
 
-  /// Константы челленджа, извлечённые из страницы (hex-строки по 32 символа).
-  /// Вместо 3-элементного кортежа — именованная структура (large_tuple).
+  /// Challenge constants extracted from page (32-char hex). Named struct
+  /// over 3-element tuple (large_tuple rule).
   public struct ChallengeConstants {
-    /// a: ключ AES-128.
+    /// a: AES-128 key.
     public let keyHex: String
-    /// b: вектор инициализации.
+    /// b: initialization vector.
     public let ivHex: String
-    /// c: шифротекст (один 16-байтный блок).
+    /// c: ciphertext (single 16-byte block).
     public let cipherHex: String
   }
 
-  /// Константы a/b/c из тела челленджа. Разные страницы форматируются по-разному
-  /// (пробелы вокруг «=» и скобок, переносы строк, UPPERCASE-HEX), поэтому
-  /// каждая константа ищется отдельно — порядок a,b,c не важен:
+  /// Constants a/b/c from challenge body. Pages format differently (spaces
+  /// around "=" and parens, line breaks, UPPERCASE-HEX) — each constant
+  /// searched separately, order a,b,c irrelevant:
   ///   `\ba\s*=\s*toNumbers\s*\(\s*"([0-9A-Fa-f]{32})"\s*\)`
-  /// Все три найдены → набор, иначе nil (такая страница — не наш челлендж).
+  /// All three found → set, else nil (page not our challenge).
   public static func extractConstants(from page: String) -> ChallengeConstants? {
     var found: [String: String] = [:]
     for name in ["a", "b", "c"] {
@@ -217,10 +208,10 @@ public final class CookieRelayProvider {
     return ChallengeConstants(keyHex: keyHex, ivHex: ivHex, cipherHex: cipherHex)
   }
 
-  /// slowAES.decrypt(c, 2, a, b) байт-в-байт = стандартный AES-128-CBC:
-  /// единственный 16-байтный блок из hex(c) расшифровать ключом hex(a),
-  /// IV hex(b), БЕЗ снятия padding (kCCOptionPKCS7Padding не передаём).
-  /// Результат — lowerHex расшифрованного блока → значение cookie.
+  /// slowAES.decrypt(c, 2, a, b) byte-for-byte = standard AES-128-CBC:
+  /// single 16-byte block from hex(c) decrypted with key hex(a), IV hex(b),
+  /// WITHOUT padding removal (no kCCOptionPKCS7Padding). Result — lowerHex
+  /// of decrypted block, the cookie value.
   public static func decrypt(a keyHex: String, b ivHex: String, c cipherHex: String) -> String? {
     let key = toNumbers(keyHex)
     let ivBytes = toNumbers(ivHex)
@@ -236,7 +227,7 @@ public final class CookieRelayProvider {
             CCCrypt(
               CCOperation(kCCDecrypt),
               CCAlgorithm(kCCAlgorithmAES),
-              CCOptions(0),  // БЕЗ kCCOptionPKCS7Padding
+              CCOptions(0),  // no kCCOptionPKCS7Padding
               keyPtr.baseAddress,
               kCCKeySizeAES128,
               ivPtr.baseAddress,
@@ -256,7 +247,7 @@ public final class CookieRelayProvider {
 
   // MARK: - Внутреннее
 
-  /// Свежесть токена и факт идущего пересчёта — под одним замком (синхронно).
+  /// Token freshness + refresh-in-flight under one lock (sync).
   private func refreshDecision() -> (fresh: Bool, inFlight: Bool) {
     lock.lock()
     defer { lock.unlock() }
@@ -268,8 +259,8 @@ public final class CookieRelayProvider {
     return now().timeIntervalSince(token.createdAt) < Self.tokenTTL
   }
 
-  /// Запускает пересчёт, если его ещё нет; возвращает (в т.ч. уже идущий) Task.
-  /// Результат Task — значение из performRefresh(): новый токен или nil.
+  /// Starts recalc if absent; returns (possibly in-flight) Task. Task
+  /// result — performRefresh() value: new token or nil.
   private func startRefresh() -> Task<String?, Never> {
     lock.lock()
     if let existing = refreshInFlight {
@@ -292,12 +283,12 @@ public final class CookieRelayProvider {
     refreshInFlight = nil
   }
 
-  /// Полный цикл вычисления и проверки токена:
-  /// 1) GET origin (UA браузера) → страница-челлендж;
-  /// 2) извлечь a/b/c, расшифровать AES-128-CBC → значение cookie;
-  /// 3) probe: GET origin с новой кукой → сервер отвечает НЕ челленджем —
-  ///    кука принята, кладём в память.
-  /// Любой сбой → nil, старый токен (если был) сохраняется.
+  /// Full token compute+verify cycle:
+  /// 1) GET origin (browser UA) — challenge page;
+  /// 2) extract a/b/c, AES-128-CBC decrypt — cookie value;
+  /// 3) probe: GET origin with new cookie — server replies NOT a challenge,
+  ///    cookie accepted, stored.
+  /// Any failure → nil, old token (if any) kept.
   private func performRefresh() async -> String? {
     guard
       let page = await fetchText(origin),
@@ -316,15 +307,15 @@ public final class CookieRelayProvider {
     return value
   }
 
-  /// Кладёт принятый кукой токен в память (синхронно — ключ в безопасности).
+  /// Stores cookie-accepted token in memory (sync — key safe).
   private func storeToken(_ value: String) {
     lock.lock()
     defer { lock.unlock() }
     token = Token(value: value, createdAt: now())
   }
 
-  /// GET origin (и опционально с cookie) → тело текстом; nil при любой ошибке.
-  /// Таймаут refreshTimeout (8 с) — жёстко: вызовы идут и из STT-цикла.
+  /// GET origin (optionally with cookie) — text body; nil on any error.
+  /// Timeout refreshTimeout (8 s) hard: calls run from STT loop too.
   private func fetchText(_ urlString: String, cookie: String? = nil) async -> String? {
     guard let url = URL(string: urlString) else { return nil }
     var request = URLRequest(url: url)

@@ -2,11 +2,10 @@ import Foundation
 
 // MARK: - Контракт для меню (несколько STT-провайдеров)
 
-/// Публичный срез провайдера для UI-меню. Секретов не содержит — только
-/// выбор и метаданные.
+/// Provider view for UI menu; no secrets, just selection + metadata.
 public struct STTProvider: Equatable {
-  public let id: String  // = имя секции, например "groq"
-  public let name: String  // отображаемое имя (name из секции; fallback — id)
+  public let id: String  // = config section name, e.g. "groq"
+  public let name: String  // display name from section; fallback — id
   public let baseURL: String
   public let model: String
   public let isActive: Bool
@@ -32,18 +31,16 @@ public enum ProviderStoreError: Error, CustomStringConvertible {
   }
 }
 
-/// Доступ к списку STT-провайдеров и переключению активного.
-/// Читает тот же config.toml, что и `AppConfig.load(from:)`. Резолва
-/// `active_provider` не делает: меню должно работать даже при сломанном выборе.
+/// Provider list + active switch; reads same config.toml as AppConfig.
+/// Doesn't resolve active_provider — menu works even with broken selection.
 public enum ProviderStore {
-  /// Тестовый хук: переопределяет путь к конфигу (nil = defaultPath()).
-  /// В проде не используется; нужен, чтобы тесты не трогали реальный конфиг.
+  /// Test hook: override config path (nil = defaultPath()); keeps tests off real config.
   static var configPathOverride: String?
 
-  /// Активный провайдер после последнего вызова `loadProviders()`.
+  /// Active provider from last `loadProviders()`.
   public static var activeProvider: STTProvider?
 
-  /// Загружает все провайдеры из config.toml, выставляет `activeProvider`.
+  /// Load all providers from config.toml; set `activeProvider`.
   public static func loadProviders() throws -> [STTProvider] {
     let (activeID, providers) = try AppConfig.loadProvidersOnly(from: configPathOverride)
     let list = providers.map { provider -> STTProvider in
@@ -59,9 +56,8 @@ public enum ProviderStore {
     return list
   }
 
-  /// Делает провайдера активным: валидация имени → точечная правка
-  /// `active_provider` в config.toml (chmod 600) → обновление `activeProvider`.
-  /// Несуществующее имя → `ProviderStoreError.unknownProvider` со списком.
+  /// Validate name → patch active_provider (chmod 600) → refresh activeProvider.
+  /// Unknown name → ProviderStoreError.unknownProvider with available list.
   public static func setActive(providerID: String) throws {
     let (_, providers) = try AppConfig.loadProvidersOnly(from: configPathOverride)
     guard providers.contains(where: { $0.id == providerID }) else {

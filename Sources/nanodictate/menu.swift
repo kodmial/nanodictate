@@ -4,13 +4,13 @@ import NanoDictateCore
 
 // MARK: - TTY-гейт
 
-/// Терминал ли stdout: меню рисуется только при интерактивном выводе.
-/// В пайпах/скриптах main.swift показывает usage, как раньше.
+/// Is stdout a terminal: the menu renders only on interactive output.
+/// In pipes/scripts main.swift shows usage, as before.
 func isTTY() -> Bool {
   isatty(STDOUT_FILENO) == 1
 }
 
-// MARK: - Вывод: ANSI + raw-режим ввода
+// MARK: - Output: ANSI + raw input mode
 
 private let ansiHome = "\u{1B}[H"
 private let ansiClear = "\u{1B}[2J"
@@ -19,13 +19,13 @@ let ansiReset = "\u{1B}[0m"
 private let ansiHideCursor = "\u{1B}[?25l"
 private let ansiShowCursor = "\u{1B}[?25h"
 
-/// Печатает кадр меню, стирая предыдущий.
+/// Prints a menu frame, erasing the previous one.
 func render(_ text: String) {
   fputs(ansiHome + ansiClear + text + "\n", stdout)
   fflush(stdout)
 }
 
-/// Raw-режим stdin: клавиша читается без Enter и без эха.
+/// Raw stdin mode: a key is read without Enter and without echo.
 private func setRawMode(_ enabled: Bool) {
   guard isatty(STDIN_FILENO) == 1 else { return }
   var term = termios()
@@ -40,18 +40,20 @@ private func setRawMode(_ enabled: Bool) {
   tcsetattr(STDIN_FILENO, TCSANOW, &term)
 }
 
-// MARK: - Восстановление терминала по сигналу (SIGINT/SIGTERM)
+// MARK: - Terminal restore on signal (SIGINT/SIGTERM)
 
-/// Снимок исходного termios до raw-режима — чтобы Ctrl+C / kill не оставили
-/// терминал без эха (raw-режим ISIG: сигнал убивает процесс, defer не успевает).
+/// Snapshot of the original termios before raw mode — so Ctrl+C / kill do not
+/// leave the terminal without echo (raw-mode ISIG: the signal kills the
+/// process, defer does not get a chance).
 private var originalTermios: termios?
 
-/// Статический буфер «показать курсор + перевод строки»: безопасен даже в
-/// async-signal контексте (без аллокаций).
+/// Static "show cursor + newline" buffer: safe even in an async-signal
+/// context (no allocations).
 private let showCursorPlusNewline: [UInt8] = Array("\u{1B}[?25h\n".utf8)
 
-/// Восстанавливает termios и курсор, затем завершает процесс.
-/// Нормальный путь выхода чистит defer в runMenu; этот хендлер — сигнальный.
+/// Restores termios and the cursor, then exits the process.
+/// The normal exit path cleans up via defer in runMenu; this handler is
+/// for signals.
 private func restoreTerminalAndExit(_ sig: Int32) {
   if var term = originalTermios {
     _ = tcsetattr(STDIN_FILENO, TCSANOW, &term)
@@ -62,7 +64,8 @@ private func restoreTerminalAndExit(_ sig: Int32) {
   _exit(sig)
 }
 
-/// Ставит обработчики SIGINT/SIGTERM. Делает снимок termios ДО raw-режима.
+/// Installs SIGINT/SIGTERM handlers. Takes the termios snapshot BEFORE
+/// raw mode.
 private func installSignalHandlers() {
   if isatty(STDIN_FILENO) == 1 {
     var term = termios()
@@ -75,26 +78,26 @@ private func installSignalHandlers() {
   }
   var action = sigaction()
   sigemptyset(&action.sa_mask)
-  action.sa_flags = 0  // без SA_RESTART: блокирующее чтение входа прерывается сигналом
+  action.sa_flags = 0  // no SA_RESTART: blocking input read is interrupted by a signal
   action.__sigaction_u.__sa_handler = handler
   _ = sigaction(SIGINT, &action, nil)
   _ = sigaction(SIGTERM, &action, nil)
 }
 
-/// Есть ли данные в stdin в течение ms (нужно отличить одиночный Esc от стрелки).
+/// Is there data in stdin within ms (needed to tell a lone Esc from an arrow).
 private func inputReady(_ milliseconds: Int) -> Bool {
   var pfd = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
   return poll(&pfd, 1, Int32(milliseconds)) > 0
 }
 
-// MARK: - Клавиши
+// MARK: - Keys
 
 enum MenuKey: Equatable {
   case quit, unknown, enter, upArrow, down, refresh, yes
   case number(Int)
 }
 
-/// Доп. чтение после ESC: стрелка "ESC [ A/B" или неизвестная последовательность.
+/// Extra read after ESC: an arrow "ESC [ A/B" or an unknown sequence.
 private func readEscapeKey() -> MenuKey {
   var byte2: UInt8 = 0
   guard read(STDIN_FILENO, &byte2, 1) > 0, byte2 == 0x5B, inputReady(20) else { return .quit }
@@ -109,13 +112,13 @@ private func readEscapeKey() -> MenuKey {
 
 func readMenuKey() -> MenuKey {
   var byte: UInt8 = 0
-  guard read(STDIN_FILENO, &byte, 1) > 0 else { return .quit }  // EOF — pipe закрыт
+  guard read(STDIN_FILENO, &byte, 1) > 0 else { return .quit }  // EOF — pipe closed
   switch byte {
-  case 0x1B:  // Esc или префикс стрелок "ESC [ A/B"
+  case 0x1B:  // Esc or the arrow prefix "ESC [ A/B"
     if inputReady(50) {
       return readEscapeKey()
     }
-    return .quit  // одиночный Esc
+    return .quit  // lone Esc
   case 0x0A, 0x0D: return .enter
   case 0x71, 0x51: return .quit  // q / Q
   case 0x79, 0x59: return .yes  // y / Y
@@ -125,7 +128,7 @@ func readMenuKey() -> MenuKey {
   }
 }
 
-// MARK: - Экраны и действия
+// MARK: - Screens and actions
 
 enum MenuAction {
   case quit, back, refresh, showProviders, showLogs, toggleAgent, toggleLanguage
@@ -149,9 +152,10 @@ struct MenuView {
   var providers: [STTProvider] = []
   var logLines: [String] = []
   var notice: String?
-  /// Закэшированный статус агента: стрелки/Enter в цикле не должны делать
-  /// 5 I/O-операций (pgrep, ProviderStore, лог, launchctl, stat) на КАЖДОЕ
-  /// нажатие — см. lastStatusRefresh (обновление не чаще 1 раза в 2 секунды).
+  /// Cached agent status: arrows/Enter in the loop must not run
+  /// 5 I/O ops (pgrep, ProviderStore, log, launchctl, stat) on EACH
+  /// keypress — see lastStatusRefresh (refresh not more often than
+  /// once per 2 seconds).
   var cachedStatus: AgentStatusData?
   var lastStatusRefresh = Date.distantPast
 }
@@ -224,18 +228,19 @@ private func logsPageText(lines: [String], window: Int, top: Int) -> String {
   return out.joined(separator: "\n")
 }
 
-// MARK: - Пункты
+// MARK: - Entries
 
 private func statusEntries(agentRunning: Bool) -> [MenuEntry] {
-  // Пункт языка добавляем ровно ОДИН раз: statusMenuItems() тоже возвращает
-  // ключ "0" — дублировать его нельзя (раньше маппинг без case "0" уводил
-  // дубль в default → .quit, и меню рисовало лишнюю строку "q — Language",
-  // Enter по которой ВЫХОДИЛ из меню вместо переключения языка).
+  // The language entry is added exactly ONCE: statusMenuItems() also
+  // returns the key "0" — it cannot be duplicated (previously the mapping
+  // without a "0" case sent the duplicate to default → .quit, and the menu
+  // drew an extra "q — Language" line which EXITED the menu on Enter
+  // instead of toggling the language).
   var entries = [
     MenuEntry(key: .number(0), label: L10n.tr("menu.language"), action: .toggleLanguage)
   ]
   entries += AgentScreen.statusMenuItems(agentRunning: agentRunning).compactMap { item in
-    // "0" уже добавлен первым пунктом — не рисуем дубль.
+    // "0" is already the first entry — do not draw the duplicate.
     guard item.key != "0" else { return nil }
     let key: MenuKey = Int(item.key).map(MenuKey.number) ?? .quit
     let action: MenuAction
@@ -260,7 +265,7 @@ private func providerEntries(_ providers: [STTProvider]) -> [MenuEntry] {
   }
 }
 
-// MARK: - Сбор данных статуса
+// MARK: - Status data collection
 
 func agentIsRunning() -> Bool {
   runProcess("/bin/launchctl", ["print", "\(guiDomain)/com.nanodictate.agent"]).status == 0
@@ -271,24 +276,24 @@ private func logFileURL() -> URL {
   return URL(fileURLWithPath: dir).appendingPathComponent("agent.log")
 }
 
-/// Читает хвост лог-файла: последний 1 МБ через FileHandle-seek,
-/// возвращает не более `maxLines` непустых строк.  Вместо полного
-/// чтения (~23 МБ → 1.7 с) — ≈80 мс (×20 ускорение).
-/// `isRecordingActive` и `hasErrors` сканируют хвост — для TUI-статуса
-/// этого достаточно: последние start/end markers всегда в хвосте лога.
+/// Reads the log-file tail: the last 1 MB via FileHandle-seek,
+/// returns at most `maxLines` non-empty lines. Instead of a full
+/// read (~23 MB → 1.7 s) — ≈80 ms (×20 speedup).
+/// `isRecordingActive` and `hasErrors` scan the tail — for the TUI status
+/// that is enough: the latest start/end markers are always in the tail.
 func readLogFile(maxLines: Int = 500) -> [String] {
   let url = logFileURL()
   guard let handle = try? FileHandle(forReadingFrom: url) else { return [] }
   defer { handle.closeFile() }
   let fileSize = handle.seekToEndOfFile()
   guard fileSize > 0 else { return [] }
-  let maxRead: UInt64 = 1024 * 1024  // 1 МБ — ≈12 000 строк @ ~80 байт
+  let maxRead: UInt64 = 1024 * 1024  // 1 MB ≈ 12 000 lines @ ~80 bytes
   let readSize = min(fileSize, maxRead)
   handle.seek(toFileOffset: fileSize - readSize)
   let data = handle.readData(ofLength: Int(readSize))
   let text = String(decoding: data, as: UTF8.self)
   var lines = text.components(separatedBy: .newlines)
-  // Первая строка может быть обрезана (начинались с середины строки) — пропускаем.
+  // The first line may be cut (started mid-line) — skip it.
   if readSize < fileSize, !lines.isEmpty {
     lines.removeFirst()
   }
@@ -314,7 +319,7 @@ private func collectStatus() -> AgentStatusData {
     } else if list.isEmpty {
       providersEmpty = true
     }
-  } catch {  // сломанный/legacy-конфиг — строка «не выбран»
+  } catch {  // broken/legacy config — "not selected" line
   }
   let logLines = readLogFile()
   let logURL = logFileURL()
@@ -335,14 +340,15 @@ private func collectStatus() -> AgentStatusData {
   )
 }
 
-// MARK: - Главный цикл
+// MARK: - Main loop
 
 func runMenu() -> Int32 {
-  // Меню требует TTY и на вывод, и на ввод; иначе — тихий выход к usage в main.swift.
+  // The menu needs a TTY for both output and input; otherwise — a quiet
+  // exit to usage in main.swift.
   guard isTTY(), isatty(STDIN_FILENO) == 1 else { return 0 }
   let uiLanguage = (try? AppConfig.load(from: nil))?.uiLanguage
   L10n.language = uiLanguage == "ru" ? .ru : .en
-  installSignalHandlers()  // снимок termios до raw-режима + SIGINT/SIGTERM
+  installSignalHandlers()  // termios snapshot before raw mode + SIGINT/SIGTERM
   setRawMode(true)
   defer {
     setRawMode(false)
@@ -361,16 +367,16 @@ func runMenu() -> Int32 {
     var text = ""
     switch view.page {
     case .status:
-      // collectStatus() = 5 I/O-операций (pgrep, ProviderStore.loadProviders,
-      // readLogFile, launchctl print, attributesOfItem). Кэш с TTL 2 с:
-      // обработка клавиш (стрелки/Enter) НЕ блокируется на I/O — статус
-      // обновляется не чаще раза в 2 секунды, перерисовка мгновенная.
+      // collectStatus() = 5 I/O ops (pgrep, ProviderStore.loadProviders,
+      // readLogFile, launchctl print, attributesOfItem). Cache with a 2 s TTL:
+      // key handling (arrows/Enter) is NOT blocked on I/O — the status
+      // refreshes at most once per 2 seconds, redraw is instant.
       if view.cachedStatus == nil || Date().timeIntervalSince(view.lastStatusRefresh) >= 2.0 {
         view.cachedStatus = collectStatus()
         view.lastStatusRefresh = Date()
       }
       guard let status = view.cachedStatus else {
-        // Недостижимо: ветка выше только что заполнила cachedStatus.
+        // Unreachable: the branch above just filled cachedStatus.
         preconditionFailure("cachedStatus должен быть заполнен после refresh")
       }
       entries = statusEntries(agentRunning: status.agentRunning)

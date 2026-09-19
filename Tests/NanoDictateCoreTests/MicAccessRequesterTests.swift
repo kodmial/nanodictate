@@ -2,22 +2,21 @@ import Foundation
 import AVFoundation
 @testable import NanoDictateCore
 
-/// Тесты MicAccessRequester — проверяемый в мини-XCTest (без аудио-железа и TCC,
-/// именно для этого координатор вынесен из Agent в Core).
-/// Покрывают целиком «цикл запроса с защитами»:
-///   • authorized/denied/restricted — синхронный исход без системного запроса;
-///   • granted/denied в ответ на системный диалог — исход на главной очереди;
-///   • сторож: колбэк не пришёл за timeout → .timedOut (не вечное ожидание),
-///     таймаут учтён в штормовой политике;
-///   • ПОЗДНИЙ granted после таймаута отбрасывается по сессионному токену:
-///     ни второго исхода, ни сброса штормового счётчика (регрессия фикса);
-///   • повторный запрос, пока диалог висит, не открывает второй диалог;
-///   • анти-шторм: после 3 таймаутов в окне 6 ч запрос не открывается вовсе.
+/// Tests of MicAccessRequester — testable in mini-XCTest (no audio hardware,
+/// no TCC; coordinator extracted from Agent into Core for this reason).
+/// Cover whole "protected request cycle":
+///   • authorized/denied/restricted — sync outcome, no system prompt;
+///   • granted/denied from system dialog — outcome on main queue;
+///   • watchdog: callback not arrived by timeout → .timedOut (no eternal wait),
+///     timeout counted in storm policy;
+///   • LATE granted after timeout dropped by session token: no second outcome,
+///     no storm-counter reset (fix regression);
+///   • re-request while dialog pending — no second dialog;
+///   • anti-storm: after 3 timeouts in a 6h window request not opened at all.
 final class MicAccessRequesterTests: XCTestCase {
 
-    /// Управляемый «системный запрос»: диалог не открывает, колбэк держит до
-    /// команды теста (respond/промолчать). callCount — сколько раз запрос
-    /// реально стартовал.
+    /// Controlled "system request": opens no dialog, holds callback until
+    /// test command (respond/stay silent). callCount — real request starts.
     private final class RequestStub {
         private(set) var callCount = 0
         private(set) var lastCompletion: ((Bool) -> Void)?
@@ -44,7 +43,7 @@ final class MicAccessRequesterTests: XCTestCase {
         )
     }
 
-    /// Ждёт ровно один исход (completion координатора — РОВНО один раз).
+    /// Waits exactly one outcome (coordinator completion — EXACTLY once).
     private func waitForOutcome(
         _ requester: MicAccessRequester,
         timeout: TimeInterval = 2
@@ -71,7 +70,7 @@ final class MicAccessRequesterTests: XCTestCase {
         var outcomes: [MicAccessRequester.Outcome] = []
         requester.requestIfNeeded { outcomes.append($0) }
 
-        // Синхронно, без wait: статус уже известен — системного запроса нет.
+        // Sync, no wait: status already known — no system prompt.
         XCTAssertEqual(outcomes, [.granted])
         XCTAssertEqual(stub.callCount, 0, "системный диалог не открывается при выданном доступе")
         XCTAssertFalse(requester.isInFlight)
@@ -99,15 +98,14 @@ final class MicAccessRequesterTests: XCTestCase {
             .appendingPathComponent("requester-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: file) }
 
-        // Два таймаута в прошлом (штормовой счётчик на 2 из 3 — запрос
-        // доступа ещё разрешён)…
+        // Two past timeouts (storm counter at 2 of 3 — request still allowed)…
         var policy = MicRequestPolicy(fileURL: file)
         for _ in 0..<(MicRequestPolicy.maxTimeoutsInWindow - 1) {
             policy.recordTimeout(now: Date())
         }
         XCTAssertTrue(MicRequestPolicy(fileURL: file).allowRequest(now: Date()), "2 таймаута — ещё до порога")
 
-        // …и НОРМАЛЬНЫЙ granted в ответ на запрос: шторм снимается.
+        // …and NORMAL granted on request: storm cleared.
         let stub = RequestStub()
         let requester = makeRequester(status: { .notDetermined }, stub: stub, policyFile: file)
 
@@ -118,7 +116,7 @@ final class MicAccessRequesterTests: XCTestCase {
             if outcomes.count == 1 { done.fulfill() }
         }
         XCTAssertEqual(stub.callCount, 1, "системный запрос открыт ровно один раз")
-        // Диалог отвечает granted в срок (сторож 0.2 с не успевает)…
+        // Dialog answers granted in time (0.2s watchdog does not fire)…
         stub.lastCompletion?(true)
         wait(for: [done], timeout: 2)
         XCTAssertEqual(outcomes, [.granted])
@@ -126,7 +124,7 @@ final class MicAccessRequesterTests: XCTestCase {
             eventually { requester.isInFlight == false },
             "после granted флаг «в полёте» снят"
         )
-        // Грант получен — счётчик таймаутов сброшен.
+        // Grant received — timeout counter reset.
         XCTAssertTrue(
             MicRequestPolicy(fileURL: file).allowRequest(now: Date()),
             "granted в срок обязан сбросить штормовой счётчик"
@@ -142,9 +140,9 @@ final class MicAccessRequesterTests: XCTestCase {
 
         requester.requestIfNeeded { _ in }
         stub.lastCompletion?(false)
-        // Ответ переводится на main (async): дождаться, пока первый запрос
-        // завершится и снимет флаг — иначе повторный вызов уйдёт в
-        // guard isInFlight (диалог №2 не откроется, исхода не будет).
+        // Completion hops to main (async): wait until first request finishes and
+        // clears the flag — else retry hits guard isInFlight (no second
+        // dialog, no outcome).
         XCTAssertTrue(
             eventually { requester.isInFlight == false },
             "первый запрос обязан завершиться до повторного"
@@ -156,7 +154,7 @@ final class MicAccessRequesterTests: XCTestCase {
             outcomes.append(outcome)
             done.fulfill()
         }
-        // Следующий Alt+Alt открывает НОВЫЙ диалог; ответ deny → .denied.
+        // Next Alt+Alt opens NEW dialog; deny answer → .denied.
         stub.lastCompletion?(false)
         wait(for: [done], timeout: 2)
         XCTAssertEqual(outcomes, [.denied])
@@ -169,78 +167,77 @@ final class MicAccessRequesterTests: XCTestCase {
             .appendingPathComponent("requester-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: file) }
 
-        // Два таймаута уже в окне (штормовой счётчик на 2 из 3): третий,
-        // который запишет сторож, обязан перевалить лимит. Так assert
-        // allowRequest(file) внизу доказывает, что таймаут РЕАЛЬНО записан.
+        // Seed 2 timeouts in window (counter 2 of 3): third (watchdog) must
+        // cross the limit — assert below proves timeout REALLY recorded.
         var seed = MicRequestPolicy(fileURL: file)
         seed.recordTimeout(now: Date())
         seed.recordTimeout(now: Date())
         XCTAssertTrue(MicRequestPolicy(fileURL: file).allowRequest(now: Date()), "2 таймаута — ещё до порога")
 
         let stub = RequestStub()
-        // Сторож короткий (0.2 c) — тест не ждёт 10 c прода.
+        // Short watchdog (0.2s) — test does not wait prod's 10s.
         let requester = makeRequester(status: { .notDetermined }, stub: stub, policyFile: file, timeout: 0.2)
 
         let (outcome, _) = waitForOutcome(requester)
         XCTAssertEqual(outcome, .timedOut, "молчащий диалог обязан дать .timedOut")
         XCTAssertEqual(stub.callCount, 1, "запрос стартовал один раз")
         XCTAssertFalse(requester.isInFlight, "после таймаута флаг «в полёте» снят")
-        // Третий таймаут сторожа (на фоне двух посеянных) перевалил порог:
-        // свежий инстанс политики из того же файла запрос больше не разрешает.
+        // Watchdog's 3rd timeout (plus 2 seeded) crossed the threshold:
+        // fresh policy from same file rejects request now.
         XCTAssertFalse(
             MicRequestPolicy(fileURL: file).allowRequest(now: Date()),
             "таймаут записан в штормовой счётчик (2+1 на пределе)"
         )
     }
 
-    /// Поздний granted после таймаута — ровно та регрессия, ради которой в
-    /// стороже СМЕНА токена, а не только снятие флага: ответ, пришедший после
-    /// показанной ошибки, не даёт второго исхода (запись не начнётся) и не
-    /// сбрасывает штормовой счётчик (запрос считался таймаутом).
+    /// Late grant after timeout — the exact regression that made watchdog
+    /// CHANGE TOKEN, not just clear flag: answer after shown error gives no
+    /// second outcome (recording won't start) and does not reset storm
+    /// counter (request counted as timeout).
     @objc func testLateGrantAfterTimeoutIsDropped() {
         let file = FileManager.default.temporaryDirectory
             .appendingPathComponent("requester-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: file) }
         let stub = RequestStub()
-        // Стартовая политика пустая: три молчащих диалога САМИ доведут счётчик
-        // до предела (после 3-го таймаута четвёртый запрос блокируется).
+        // Empty start policy: three silent dialogs themselves drive counter
+        // to limit (after 3rd timeout 4th request blocked).
         let requester = makeRequester(status: { .notDetermined }, stub: stub, policyFile: file, timeout: 0.15)
 
-        // Три таймаута подряд: каждый цикл — новый запрос, ответа нет.
+        // Three timeouts in a row: each cycle a new request, no answer.
         var lastCycleOutcomes: [MicAccessRequester.Outcome] = []
         for _ in 0..<3 {
             let (outcome, outcomes) = waitForOutcome(requester)
             XCTAssertEqual(outcome, .timedOut)
             lastCycleOutcomes = outcomes
         }
-        // Четвёртый запрос — анти-шторм (счётчик на пределе): системный
-        // диалог не открывается вовсе, исход единственный.
+        // 4th request — anti-storm (counter at limit): system dialog not
+        // opened at all, single outcome.
         let (suppressedOutcome, suppressedOutcomes) = waitForOutcome(requester)
         XCTAssertEqual(suppressedOutcome, .suppressedByPolicy)
         XCTAssertEqual(suppressedOutcomes, [.suppressedByPolicy], "анти-шторм: один исход, диалог не открывался")
 
-        // Последний РЕАЛЬНЫЙ диалог (третьего цикла) отвечает granted — НО
-        // уже после того, как сторож сработал и сменил сессию.
+        // Last REAL dialog (3rd cycle) answers granted — BUT after watchdog
+        // fired and changed session.
         stub.lastCompletion?(true)
-        // Ответа, который начал бы запись, нет: у последнего реального цикла
-        // по-прежнему ровно один исход (.timedOut). drainEngineQueue прогоняет
-        // run loop — неотброшенный granted уже успел бы долететь.
+        // Answer that would start recording is absent: last real cycle still
+        // has exactly ONE outcome (.timedOut). drainEngineQueue spins
+        // run loop — undropped grant would have arrived by now.
         drainEngineQueue()
         XCTAssertEqual(
             lastCycleOutcomes,
             [.timedOut],
             "поздний granted не даёт второго исхода (запись не начнётся)"
         )
-        // Штормовой счётчик НЕ сброшен поздним granted: запрос остаётся
-        // заблокированным (fresh policy читает состояние из файла).
+        // Storm counter NOT reset by late grant: request stays blocked
+        // (fresh policy reads state from file).
         XCTAssertFalse(
             MicRequestPolicy(fileURL: file).allowRequest(now: Date()),
             "поздний granted не должен сбрасывать штормовой счётчик"
         )
     }
 
-    /// Повторный запрос, пока системный диалог висит, не открывает второй
-    /// диалог и не даёт второго исхода.
+    /// Repeat request while system dialog hangs opens no second dialog
+    /// and gives no second outcome.
     @objc func testDuplicateWhileInFlightIsIgnored() {
         let file = FileManager.default.temporaryDirectory
             .appendingPathComponent("requester-\(UUID().uuidString).json")
@@ -252,12 +249,12 @@ final class MicAccessRequesterTests: XCTestCase {
         requester.requestIfNeeded { outcomes.append($0) }
         XCTAssertEqual(stub.callCount, 1, "первый запрос стартует")
 
-        // Второй Alt+Alt в полёте: ни исхода, ни второго системного запроса.
+        // Second Alt+Alt in flight: neither outcome nor second system request.
         requester.requestIfNeeded { outcomes.append($0) }
         XCTAssertEqual(stub.callCount, 1, "второй запрос не открывает второй диалог")
         XCTAssertEqual(outcomes, [], "повторный вызов в полёте не даёт исхода")
 
-        // Ответ на ПЕРВЫЙ запрос — ровно один исход.
+        // Answer to FIRST request — exactly one outcome.
         stub.lastCompletion?(true)
         XCTAssertTrue(
             eventually(timeout: 1.0, { outcomes == [.granted] }),

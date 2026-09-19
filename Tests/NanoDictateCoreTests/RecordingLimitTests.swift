@@ -1,9 +1,8 @@
 import Foundation
 @testable import NanoDictateCore
 
-/// Тесты жёсткого лимита записи (60 с / 960 000 сэмплов).
-/// Чистая логика `RecordingLimit` — без реального аудио-устройства,
-/// AVAudioEngine/AVAudioConverter в мини-XCTest не запускается.
+/// Hard recording limit (60 s / 960 000 samples): pure logic —
+/// AVAudioEngine/AVAudioConverter don't run in mini-XCTest.
 final class RecordingLimitTests: XCTestCase {
 
     // MARK: - Максимальная длительность 60.0 с
@@ -19,7 +18,6 @@ final class RecordingLimitTests: XCTestCase {
 
     @objc func testStoppedExactlyAt60Seconds() {
         var limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
-        // 59.999 с — ещё работает; ровно 60.0 с — обязательная остановка.
         XCTAssertFalse(limit.shouldStop(elapsed: 59.999, totalSamples: 0))
         XCTAssertTrue(limit.shouldStop(elapsed: 60.0, totalSamples: 0))
         XCTAssertTrue(limit.isExhausted)
@@ -34,7 +32,7 @@ final class RecordingLimitTests: XCTestCase {
     // MARK: - Вычисление лимита по сэмплам (память)
 
     @objc func testMaxSamplesIs960000() {
-        // 16 кГц × 60 с = 960 000 сэмплов — ровно по требованию, без запаса.
+        // 16 kHz × 60 s = 960 000 samples — exactly, no headroom.
         let limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
         XCTAssertEqual(limit.maxSamples, 960_000)
     }
@@ -68,14 +66,14 @@ final class RecordingLimitTests: XCTestCase {
 
     @objc func testTimeLimitTriggersWithTinyBuffer() {
         var limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
-        // Тишина (почти пустой буфер) не отменяет лимит по времени.
+        // Near-empty buffer does not lift the time limit.
         XCTAssertFalse(limit.shouldStop(elapsed: 59.999, totalSamples: 10))
         XCTAssertTrue(limit.shouldStop(elapsed: 60.0, totalSamples: 10))
     }
 
     @objc func testSampleCapTriggersWithLittleElapsedTime() {
         var limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
-        // Мгновенный переполняющий ввод останавливает запись и до 60 с.
+        // Sample cap triggers even with zero elapsed time.
         XCTAssertTrue(limit.shouldStop(elapsed: 0.0, totalSamples: 960_000))
     }
 
@@ -97,8 +95,7 @@ final class RecordingLimitTests: XCTestCase {
         var limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
         XCTAssertTrue(limit.shouldStop(elapsed: 60.0, totalSamples: 800_000))
         XCTAssertTrue(limit.isExhausted)
-        // Даже «сброшенные» время/объём не отменяют остановку: защёлка держит,
-        // пока не начат новый сеанс (новый экземпляр лимита).
+        // Latch holds until a new session; reset time/samples won't reopen.
         XCTAssertTrue(limit.shouldStop(elapsed: 0, totalSamples: 0))
         XCTAssertTrue(limit.shouldStop(elapsed: 1.0, totalSamples: 1))
         XCTAssertTrue(limit.isExhausted)
@@ -113,7 +110,6 @@ final class RecordingLimitTests: XCTestCase {
 
     @objc func testAppendPastCapAddsNothingThroughBudget() {
         var limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
-        // 960 000 занято — свободных сэмплов нет, буфер дальше не растёт.
         XCTAssertFalse(limit.shouldStop(elapsed: 0, totalSamples: 959_000))
         XCTAssertGreaterThanOrEqual(limit.remainingSamples(after: 959_000), 1_000)
         _ = limit.shouldStop(elapsed: 0, totalSamples: 960_000)
@@ -127,8 +123,7 @@ final class RecordingLimitTests: XCTestCase {
         _ = finished.shouldStop(elapsed: 60.0, totalSamples: 960_000)
         XCTAssertTrue(finished.isExhausted)
 
-        // В AudioService.start() создаётся НОВЫЙ RecordingLimit — как здесь:
-        // предыдущая защёлка не переносится в новый сеанс.
+        // AudioService.start() makes a fresh limit — latch not carried over.
         var next = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
         XCTAssertFalse(next.isExhausted)
         XCTAssertFalse(next.shouldStop(elapsed: 0, totalSamples: 0))
@@ -141,8 +136,8 @@ final class RecordingLimitTests: XCTestCase {
         var limit = RecordingLimit(maxDuration: 0.5, sampleRate: 16000)
         XCTAssertEqual(limit.maxSamples, 8_000)
         XCTAssertFalse(limit.shouldStop(elapsed: 0.499, totalSamples: 7_999))
-        XCTAssertTrue(limit.shouldStop(elapsed: 0.5, totalSamples: 7_999))   // время
-        XCTAssertTrue(limit.shouldStop(elapsed: 0.1, totalSamples: 8_000))   // объём
+        XCTAssertTrue(limit.shouldStop(elapsed: 0.5, totalSamples: 7_999))   // time
+        XCTAssertTrue(limit.shouldStop(elapsed: 0.1, totalSamples: 8_000))   // samples
         XCTAssertEqual(limit.remainingSamples(after: 8_000), 0)
         XCTAssertTrue(limit.isExhausted)
     }

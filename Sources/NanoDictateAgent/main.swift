@@ -2,9 +2,9 @@
 //  main.swift
 //  NanoDictateAgent
 //
-//  Оркестратор фонового агента диктовки NanoDictate.
-//  Статическая машина состояний: idle → recording → transcribing → idle.
-//  Swift 5.7, macOS 12, Intel. Только AppKit/Foundation/AVFoundation через NanoDictateCore.
+//  NanoDictate background dictation agent orchestrator.
+//  State machine: idle → recording → transcribing → idle.
+//  Swift 5.7, macOS 12, Intel. AppKit/Foundation/AVFoundation via NanoDictateCore.
 //
 
 import AVFoundation
@@ -16,103 +16,86 @@ import NanoDictateCore
 
 // swiftlint:disable:next type_body_length
 final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
-  // Strong references на все сервисы — предотвращают их деаллокацию.
+  // Strong refs keep services alive.
   private let sounds: SysSounds
   private let overlay: OverlayController
   private let audio: AudioService
   private let hotkeys: HotkeyService
   private let transcriber: Transcriber
 
-  /// Последний WAV в памяти + повторное распознавание другим провайдером.
-  /// Serves и автоfailover (см. `transcribeAutomatically`), и ручной retry
-  /// из `nanodictate retry <provider>` (через DistributedNotificationCenter).
+  /// Stored last WAV, re-transcribable by another provider; serves auto-failover and CLI retry.
   private let retryProvider: RetryProvider
 
-  /// UX-настройки из конфига (прод-дефолты: метод cgevent, failover/review выкл).
+  /// UX config copies: cgevent insert, failover/review off by default.
   private let insertMethod: InsertMethod
   private let autoFailover: Bool
   private let reviewBeforeInsert: Bool
 
-  /// Провайдеры в порядке failover (без активного): кандидаты на автоповтор.
+  /// Failover order (active excluded): candidates for auto-retry.
   private let failoverCandidates: [AppConfig.Provider]
-  /// Все провайдеры по id — для ручного retry через IPC.
+  /// All providers by id: for manual retry via IPC.
   private let providersByID: [String: AppConfig.Provider]
-  /// Имя активного провайдера (nil — legacy-конфиг без секций).
+  /// Active provider id (nil — legacy config without sections).
   private let activeProviderID: String?
 
   // MARK: Маршрутизация STT по ролям ([routing])
 
-  /// id провайдера сегментов пошаговой диктовки (роль `segment` из
-  /// `[routing]`); nil — роль не задана/фолбэк на активного. Решается в init
-  /// ТОЛЬКО из конфига (резолверы не бросают), активное участие роли —
-  /// в `roleTranscriber(_:)`.
+  /// Segment-role provider id ([routing]); nil — unset, fallback active; resolved in init from config.
   private let segmentRoleProviderID: String?
-  /// id провайдера финального прохода по всей записи (роль `final` из
-  /// `[routing]`); nil — роль не задана/фолбэк на активного.
+  /// Final-pass provider id ([routing]); nil — unset, fallback active.
   private let finalRoleProviderID: String?
-  /// Единый построитель Transcriber из секции провайдера И ОБЩИХ настроек
-  /// конфига (language/timeout/log_level/корневой proxyKeyHeader): через него
-  /// идут активный путь, failover/retry и роли маршрутизации — повторы ведут
-  /// себя как основной путь (тот же язык, таймаут и уровень лога).
+  /// Single Transcriber builder (provider section + shared config); retries/roles behave like main path.
   private let makeTranscriber: (AppConfig.Provider) -> Transcriber
 
-  /// РАЗРЕШЁННЫЙ конфиг сессии — единый источник истины для реального
-  /// запросного пути: из него в init собран Transcriber и cookie-relay-слой
-  /// (baseURL/model/apiKey/transport), из него же на старте сессии
-  /// вычисляется метка оверлея «через что идёт распознавание»
-  /// (RecognitionLabel.forSession). Конфиг в момент показа оверлея не
-  /// перечитывается — ярлык жёстко связан с провайдером распознавателя.
+  /// Resolved session config — source of truth for request path and overlay STT label; never re-read.
   private let resolvedConfig: AppConfig
 
-  /// Наблюдатель DistributedNotificationCenter для ручного retry из CLI.
+  /// DistributedNotificationCenter observer for manual retry from CLI.
   private var retryObserver: NSObjectProtocol?
 
-  /// Уровень логирования из конфига: при "debug" в лог дополнительно пишется
-  /// метрология (уровень RMS записи перед отправкой в STT).
+  /// Log level from config: at "debug" the log also gets metrology
+/// (recording RMS level before STT send).
   private let logLevel: String
 
-  /// Пошаговая диктовка (флаг `chunked = true` в конфиге): сегменты →
-  /// инкрементальная вставка → финальный проход по всему WAV. OFF — ровно
-  /// текущее поведение (один запрос).
+  /// Step dictation (`chunked = true` in config): segments → incremental insert →
+  /// final pass over the whole WAV. OFF — current behavior (single request).
   private let chunked: Bool
 
-  // MARK: Live-диктовка (chunked = true)
+  // MARK: Live dictation (chunked = true)
 
-  /// Серийный исполнитель живого цикла: уттеренсы распознаются СТРОГО по
-  /// очереди — «хвост» останова встаёт перед финальным проходом, а каждый
-  /// следующий сегмент получает prompt с текстом всех предыдущих. submit не
-  /// блокирует вызывающего (main), каждый блок серийной очереди дожидается
-  /// своего Task (паттерн ChunkedPipelineTests.testInsertAndPhaseAreSynchronous).
+  /// Serial executor of the live loop: utterances recognized STRICTLY in queue
+  /// order — the stop tail lands before the final pass, and each next segment's
+  /// prompt carries all previous text. submit never blocks main; each serial
+  /// block waits its own Task (pattern from ChunkedPipelineTests.testInsertAndPhaseAreSynchronous).
   private let liveExecutor = SerialAsyncExecutor()
-  /// Токен живого цикла: новый старт записи / Esc аннулируют обработку
-  /// сегментов старого цикла (страж вставки раньше времени). Читается и
-  /// пишется на main; каждый цикл создаёт колбэк с захватом своего токена.
+  /// Live-loop token: new recording start / Esc invalidate prior loop segment
+  /// processing (early insert guard). Read/written on main; every loop callback
+  /// captures its own token.
   private var liveSession = 0
-  /// Накопление живого цикла (сегменты, prompt, флаги). Пишется ТОЛЬКО на
-  /// liveExecutor (серийно); создаётся на main при каждом старте записи.
+  /// Live-loop accumulation (segments, prompt, flags). Written ONLY on
+  /// liveExecutor (serially); created on main at each recording start.
   private var liveRunState: LiveRunState?
 
-  /// Накопление одного живого цикла диктовки. Поля инкрементально растут на
-  /// liveExecutor; main читает их только для стражей (сессионные токены).
+  /// Accumulated state of one live dictation loop. Fields grow incrementally on
+  /// liveExecutor; main reads them only for guards (session tokens).
   private final class LiveRunState {
     let session: Int
-    /// Сколько сегментов распознано и поставлено в очередь на вставку.
+    /// How many segments recognized and queued for insertion.
     var segmentCount = 0
-    /// Текст, уже заявленный на вставку (с разделительными пробелами) —
-    /// база для финального word-diff и prompt-аккумуляции.
+    /// Text already committed to insertion (with separating spaces) —
+    /// base for final word-diff and prompt accumulation.
     var insertedText = ""
-    /// Части предыдущих сегментов для prompt следующего (чистый текст,
-    /// без ведущих пробелов).
+    /// Earlier segment parts for the next prompt (clean text, no leading spaces).
     var promptParts: [String] = []
-    /// «Хвост» (незакрытый уттеренс при останове) доставлен: при одном
-    /// сегменте он покрывает запись до конца — финальный проход не нужен.
+    /// Stop tail (unclosed utterance) delivered: with one segment it covers the
+    /// whole recording — no final pass needed.
     var tailDelivered = false
-    /// Хотя бы один сегмент не распознался — финальный проход обязателен
-    /// (он «докрутит» пропущенную фразу по всему WAV).
+    /// At least one segment failed — final pass is mandatory
+    /// (it recovers the missed phrase from the whole WAV).
     var anySegmentFailed = false
-    /// Текст последнего сбоя сегмента: при ПОЛНОМ сбое всех сегментов
-    /// (segmentCount == 0) финал показывает явное сообщение об ошибке STT,
-    /// а не сбивающий с толку «Пустой результат» (ревью #112).
+    /// Text of the last segment failure: on a FULL failure of all segments
+    /// (segmentCount == 0) the final pass shows an explicit STT error message
+    /// instead of the confusing "Empty result" (review #112).
     var lastErrorText: String?
 
     init(session: Int) {
@@ -120,11 +103,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     }
   }
 
-  /// Серийный исполнитель async-задач: каждая задача выполняется строго после
-  /// предыдущей (пока та не завершилась), submit не блокирует вызывающего.
-  /// Глубинная причина серийности: порядок вставок и доставка «хвоста» перед
-  /// финальным проходом — DIFF финализации считает текст уже-вставленных
-  /// сегментов, значит они обязаны быть обработаны раньше.
+  /// Serial async executor: each task runs strictly after the previous one
+  /// (until it finishes); submit never blocks the caller. Why serial matters:
+  /// insertion order and tail delivery before the final pass — the finalization
+  /// DIFF counts already-inserted segment text, so it must be processed earlier.
   private final class SerialAsyncExecutor {
     private let queue = DispatchQueue(label: "nanodictate.live.serial", qos: .userInitiated)
 
@@ -142,94 +124,91 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
 
   private var state: NanoDictateState = .idle
 
-  /// Сессионный токен фазы «обработка»: каждая новая отправка в STT
-  /// инкрементирует его, и страж (watchdog) старого цикла видит расхождение
-  /// токенов и не мешает новому циклу.
+  /// Session token of the "processing" phase: each new STT send increments it;
+  /// the old loop's watchdog sees the mismatch and does not disturb the new loop.
   private var processingSession = 0
 
-  /// Старт записи «в полёте» (движок поднимается асинхронно на фоновой
-  /// очереди AudioService): повторный Alt+Alt в это окно игнорируется, а не
-  /// дублирует подъём движка.
+  /// Recording start "in flight" (engine boots asynchronously on AudioService's
+  /// background queue): repeated Alt+Alt in this window is ignored, not duplicated.
   private var isStarting = false
-  /// Сессионный токен старта: инкрементируется при каждом новом старте и при
-  /// срабатывании сторожа подъёма — аннулирует устаревшие completion-колбэки.
+  /// Start session token: incremented on each new start and on boot watchdog
+  /// firing — invalidates stale completion callbacks.
   private var startSession = 0
-  /// Сессионный токен запроса доступа к микрофону (TCC-диалог).
-  /// Координатор запроса доступа к микрофону: сессионный токен + сторож +
-  /// анти-шторм MicRequestPolicy (см. MicRequestPolicy: после 3 таймаутов
-  /// запроса в окне 6 ч новый системный диалог НЕ открывается — повторные
-  /// диалоги у фонового агента без бандла клинят tccd и замораживают
-  /// систему). Состояние политики персистентно между рестартами агента
-  /// (файл в Application Support). Вынесен в Core, чтобы поведение сторожа
-  /// при позднем granted покрывалось мини-XCTest (NanoDictateCoreTests).
+  /// Microphone access coordinator: session token + watchdog + MicRequestPolicy
+  /// anti-storm (after 3 request timeouts in a 6 h window no new system dialog —
+  /// repeated dialogs from a bundle-less background agent wedge tccd and freeze
+  /// the system). Policy state persists across agent restarts (file in
+  /// Application Support). Lives in Core so late-grant watchdog behavior is
+  /// covered by mini-XCTest (NanoDictateCoreTests).
   private let micAccessRequester: MicAccessRequester
-  /// Cooldown терминальных микрофонных ошибок (showMicrophoneError): пока
-  /// доступ к микрофону не выдан / движок не поднялся, каждый Alt+Alt не
-  /// должен снова играть Basso и мигать оверлеем — сообщение один раз в 3 с.
+  /// Cooldown for terminal mic errors (showMicrophoneError): while mic access
+  /// is not granted / engine not up, each Alt+Alt must not replay Basso and
+  /// flash the overlay — message once per 3 s.
   private var micErrorCooldown = MicErrorCooldown(interval: 3.0)
 
   // MARK: UX quick wins
 
-  /// Токен отмены фазы «Распознаю…»: Esc во время STT ставит его, и результат
-  /// вернувшегося запроса игнорируется (текст не вставляется). Сбрасывается
-  /// при каждом новом цикле (processSamples).
+  /// Cancel token for the "Recognizing…" phase: Esc during STT sets it, and the
+  /// returning request's result is ignored (text not inserted). Reset at each
+  /// new loop (processSamples).
   private var cancelRecognition = false
 
-  /// Латч синтетического Enter после Enter-останова записи: Enter во время
-  /// .recording останавливает запись, запускает распознавание и ставит латч;
-  /// после успешной вставки текста постится РОВНО ОДИН синтетический Enter.
-  /// Читается в точках вставки (postSyntheticReturnIfPending), гасится в
-  /// handleEmptyResult / failTranscription / handleCancel / после постинга.
+  /// Synthetic-Enter latch after Enter-stop of recording: Enter during
+  /// .recording stops recording, starts recognition, sets the latch; after a
+  /// successful insert EXACTLY ONE synthetic Enter is posted. Read at insert
+  /// points (postSyntheticReturnIfPending), cleared in handleEmptyResult /
+  /// failTranscription / handleCancel / after posting.
   private let enterSendLatch = EnterSendLatch()
-  /// Отменяемое планирование синтетического Enter: postSyntheticReturnIfPending
-  /// планирует пост через паузу ~250 мс, handleCancel (в ЛЮБОЙ ветке, включая
-  /// .idle) отменяет уже запланированный пост — Esc гасит не только латч,
-  /// но и запланированное срабатывание.
+  /// Cancellable scheduling of the synthetic Enter:
+  /// postSyntheticReturnIfPending schedules the post after a ~250 ms pause,
+  /// handleCancel (in ANY branch, including .idle) cancels the already
+  /// scheduled post — Esc extinguishes not only the latch but also the
+  /// scheduled firing.
   private let scheduledEnterPoster = ScheduledEnterPoster()
 
-  /// Состояние undo: последняя УСПЕШНАЯ вставка (текст + момент времени).
-  /// Двойной Alt в пределах undoMaxInterval после вставки стирает её.
+  /// Undo state: the last SUCCESSFUL insertion (text + timestamp). A double
+  /// Alt within undoMaxInterval after the insertion erases it.
   private var lastInsertedText: String?
   private var lastInsertedAt: TimeInterval?
 
-  /// Окно undo и звук отката — из конфига (undo_max_interval /
-  /// undo_sound_enabled). Значения копируются в init, чтобы не менять
-  /// дата-класс конфига в процессе работы.
+  /// Undo window and rollback sound — from config (undo_max_interval /
+  /// undo_sound_enabled). Copies made in init so the live config data class
+  /// stays untouched.
   private let undoMaxInterval: TimeInterval
   private let undoSoundEnabled: Bool
 
-  /// Cooldown звука «пустой результат»: повторный Alt+Alt в тишине (<2 слов
-  /// распознавания) не спамит Funk каждое нажатие. Отдельный от
-  /// micErrorCooldown: «пустая диктовка» ≠ «ошибка микрофона».
+  /// Cooldown for the "empty result" sound: repeated Alt+Alt in silence (<2 words
+  /// recognized) does not spam Funk on every press. Separate from
+  /// micErrorCooldown: "empty dictation" ≠ "mic error".
   private var emptyResultCooldown = MicErrorCooldown(interval: 3.0)
 
-  /// Жёсткий сторож подъёма аудиодвижка: `engine.start()` умеет блокироваться
-  /// (смена устройства, инициализация после TCC-гранта). Старт идёт на фоновой
-  /// очереди AudioService — главный поток не замирает, но без сторожа зависшая
-  /// очередь оставила бы оверлей «Записываю…» навсегда. По таймауту — терминальная
-  /// ошибка (оверлей гаснет, следующий Alt+Alt работает).
+  /// Hard watchdog for audio engine boot: `engine.start()` can block (device
+  /// switch, init after TCC grant). Start runs on AudioService's background
+  /// queue — main thread never freezes, but without the watchdog a hung queue
+  /// would leave the "Recording…" overlay forever. On timeout — terminal error
+  /// (overlay goes out, next Alt+Alt works).
   private static let recordStartTimeout: TimeInterval = 10
-  /// Сторож системного запроса доступа к микрофону: у фонового агента без
-  /// бандла окно TCC может не отобразиться, и колбэк `requestAccess` не придёт —
-  /// сторож даёт терминальную ошибку вместо вечного ожидания.
+  /// Watchdog for the system mic-access request: a bundle-less background agent
+  /// may never show the TCC window, and the `requestAccess` callback never
+  /// fires — the watchdog yields a terminal error instead of an endless wait.
   private static let micRequestTimeout: TimeInterval = 10
 
-  /// Retain-свойство для таймера автоподхвата права Accessibility
-  /// (Timer.scheduledTimer с repeats:true не должен попадать под ARC/GC).
+  /// Retain property for the Accessibility auto-grant poll timer
+  /// (Timer.scheduledTimer with repeats:true must not fall to ARC/GC).
   private var accessibilityPollTimer: Timer?
-  /// Rate-limit открытия панели «Доступность»: серия нажатий/стартов без
-  /// гранта не должна плодить окна настроек (не чаще раза в 10 минут).
-  /// Метка последнего открытия хранится в UserDefaults, а не в памяти
-  /// процесса: фоновый респавн агента (KeepAlive) память обнуляет, и без
-  /// персистентности панель открывалась бы при КАЖДОМ респавне.
+  /// Rate limit for opening the Accessibility panel: a series of presses/starts
+  /// without the grant must not spawn settings windows (at most once per 10 min).
+  /// Last-open stamp lives in UserDefaults, not process memory: a background
+  /// agent respawn (KeepAlive) resets memory, and without persistence the panel
+  /// would open on EVERY respawn.
   private static let accessibilityPanelCooldown: TimeInterval = 10 * 60
   private static let lastAccessibilityPanelOpenAtKey = "NanoDictate.lastAccessibilityPanelOpenAt"
 
   // swiftlint:disable:next function_body_length
   init(config: AppConfig) {
     logLevel = config.logLevel
-    // Тот же resolved-конфиг, из которого ниже собран Transcriber, —
-    // источник истины метки оверлея (RecognitionLabel.forSession).
+    // Same resolved config the Transcriber below was built from —
+    // source of truth for the overlay label (RecognitionLabel.forSession).
     resolvedConfig = config
     undoMaxInterval = config.undoMaxInterval
     undoSoundEnabled = config.undoSoundEnabled
@@ -238,16 +217,16 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     overlay = OverlayController(logLevel: config.logLevel)
     audio = AudioService(
       logLevel: config.logLevel,
-      // Пломбинг автоостановки по тишине из окружения (сама фича — в
-      // NanoDictateCore/AudioService): пустое окружение → `.defaults`,
-      // ровно по задаче (включено, ~3 c, −50 dBFS). Спасательный люк —
-      // NANODICTATE_AUTOSTOP_DISABLED / _DURATION / _RMS, см. AutoStopConfig.
+      // Silence auto-stop sealing from environment (the feature itself lives
+      // in NanoDictateCore/AudioService): empty env → `.defaults`, exactly per
+      // task (on, ~3 s, −50 dBFS). Escape hatch: NANODICTATE_AUTOSTOP_DISABLED
+      // / _DURATION / _RMS, see AutoStopConfig.
       autoStopConfig: AutoStopConfig.fromEnvironment()
     )
-    // Координатор TCC-запроса микрофона: сторож таймаута + анти-шторм
-    // (MicRequestPolicy). Токены и флаги запроса живут внутри него —
-    // устаревшие колбэки (поздний granted после таймаута) отбрасываются
-    // по сессионному токену, запись из-под показанной ошибки не начнётся.
+    // Mic TCC-request coordinator: timeout watchdog + anti-storm
+    // (MicRequestPolicy). Tokens and request flags live inside it —
+    // stale callbacks (late grant after timeout) are dropped by session token,
+    // recording under a shown error never starts.
     micAccessRequester = MicAccessRequester(
       status: { AVCaptureDevice.authorizationStatus(for: .audio) },
       requestAccess: { completion in
@@ -260,21 +239,20 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       doubleTapMaxInterval: config.doubleAltMaxInterval,
       logLevel: config.logLevel
     )
-    // Cookie-relay-слой включается только при transport = "cookie-relay"
-    // (legacy-алиасы старого конфига канонизируются при парсинге;
-    // корневой key или секция активного провайдера: resolveActiveProvider
-    // уже скопировал его в effective-конфиг). nil — поведение как раньше.
+    // Cookie-relay layer only for transport = "cookie-relay" (legacy aliases
+    // of the old config are canonicalized at parse; root key or active
+    // provider section: resolveActiveProvider already copied it into the
+    // effective config). nil — previous behavior.
     let cookieRelayProvider =
       config.transport == "cookie-relay"
       ? CookieRelayProvider.makeForCookieRelay(baseURL: config.baseURL)
       : nil
-    // Единый реестр cookie-relay-провайдеров по baseURL (кука выпускается
-    // на origin прокси; одинаковый baseURL → тот же origin → тот же
-    // инстанс). Важно: реестр строится ОДИН раз в init и в замыкании
-    // только читается — гонок нет, а failover/retry переиспользуют
-    // ТОТ ЖЕ инстанс, что основной путь, вместе с его разогретым
-    // токеном (иначе первый retry-запрос ушёл бы без куки на лишний
-    // челлендж-раундтрип).
+    // Single registry of cookie-relay providers by baseURL (the cookie is
+    // issued for the proxy origin; the same baseURL → same origin → same
+    // instance). Key: the registry is built ONCE in init and only read in the
+    // closure — no races; failover/retry reuse THE SAME instance as the main
+    // path, with its warmed token (otherwise the first retry request would go
+    // without a cookie on an extra challenge roundtrip).
     var cookieRelayByURL: [String: CookieRelayProvider] = [:]
     if let cookieRelayProvider {
       cookieRelayByURL[config.baseURL] = cookieRelayProvider
@@ -292,11 +270,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       guard transport == "cookie-relay" else { return nil }
       return cookieRelayByURL[provider.baseURL]
     }
-    // Активный провайдер: явный active_provider, либо (по документированному
-    // сценарию «только секции [providers.X], без active_provider») — первый
-    // провайдер по порядку. От него зависит, КОГО исключать из failover-
-    // очереди и какой адаптер запроса использует основной путь: повторять
-    // падение основного провайдера при автоfailover нельзя.
+    // Active provider: explicit active_provider, or (documented "sections only,
+    // no active_provider" scenario) the first provider in order. It decides
+    // WHO is excluded from the failover queue and which adapter the main
+    // request path uses: re-picking a main-provider failure on auto-failover
+    // is not allowed.
     activeProviderID =
       config.activeProvider.isEmpty
       ? config.providers.first?.id
@@ -307,23 +285,22 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       byID[provider.id] = provider
     }
     providersByID = byID
-    // Единый построитель Transcriber из полей секции провайдера + ОБЩИХ
-    // настроек конфига (language/timeout/log_level/корневой proxyKeyHeader):
-    // активный путь, failover/retry и роли маршрутизации ходят через него —
-    // повторы и роли ведут себя как основной путь (тот же язык, таймаут и
-    // уровень лога).
-    // id провайдера уходит в adapterID — известный провайдер
-    // получает свой формат запроса (groq/cloudflare), неизвестный —
-    // OpenAI-совместимый с собственными base_url/model из секции.
-    // Env-ключ NANODICTATE_API_KEY скоуплен на АКТИВНОГО провайдера
-    // (resolveAPIKey + activeProviderID): failover-кандидаты и роли
-    // маршрутизации ходят через этот же построитель и получают СВОЙ ключ
-    // (api_key/api_key_file); ролевый/кандидатный провайдер без своего ключа
-    // получает пусто — запрос падает штатно, а не уходит с env-ключом.
-    // Локальная копия активного id для замыкания: ссылаться на
-    // self.activeProviderID внутри замыкания нельзя — self до super.init ещё
-    // не полностью инициализирован (retryProvider/роли присваиваются ниже),
-    // а замыкание захватывается свойством makeTranscriber.
+    // Single Transcriber builder from provider-section fields + SHARED config
+    // settings (language/timeout/log_level/root proxyKeyHeader): the active
+    // path, failover/retry and routing roles all go through it — retries and
+    // roles behave like the main path (same language, timeout, log level).
+    // Provider id goes to adapterID — a known provider gets its request format
+    // (groq/cloudflare), unknown — OpenAI-compatible with its own
+    // base_url/model from the section.
+    // Env key NANODICTATE_API_KEY is scoped to the ACTIVE provider
+    // (resolveAPIKey + activeProviderID): failover candidates and routing
+    // roles go through this same builder and get THEIR OWN key
+    // (api_key/api_key_file); a role/candidate provider without its own key
+    // gets empty — the request fails normally, not sneaking an env key.
+    // Local copy of the active id for the closure: referencing
+    // self.activeProviderID inside the closure is impossible — self is not
+    // fully initialized before super.init (retryProvider/roles assigned
+    // below), and the closure is captured by the makeTranscriber property.
     let builderActiveID = activeProviderID
     let makeTranscriber = { (provider: AppConfig.Provider) -> Transcriber in
       Transcriber(
@@ -345,9 +322,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       )
     }
     self.makeTranscriber = makeTranscriber
-    // Активный транскрайбер — секцией активного провайдера через тот же
-    // построитель (единая логика с failover/retry/ролями). Legacy-конфиг
-    // (без секций) — ровно прежнее построение из effective-полей.
+    // The active transcriber — by the active provider's section through the
+    // same builder (unified logic with failover/retry/roles). A legacy
+    // config (without sections) — exactly the previous construction from the
+    // effective fields.
     if let activeID = activeProviderID, let activeProvider = byID[activeID] {
       transcriber = makeTranscriber(activeProvider)
     } else {
@@ -367,9 +345,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         adapterID: activeProviderID
       )
     }
-    // Роли маршрутизации из [routing]: резолверы фолбэчат на активного;
-    // пустой id (legacy-конфиг) → nil — роль не участвует, ровно текущее
-    // поведение.
+    // Routing roles from [routing]: resolvers fall back to the active provider;
+    // empty id (legacy config) → nil — role unused, exactly current behavior.
     let segmentRoleID = config.segmentProviderID()
     segmentRoleProviderID = segmentRoleID.isEmpty ? nil : segmentRoleID
     let finalRoleID = config.finalProviderID()
@@ -377,17 +354,16 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     insertMethod = config.insertMethod
     autoFailover = config.autoFailover
     reviewBeforeInsert = config.reviewBeforeInsert
-    // Failover/retry распознаёт СЕКЦИЕЙ провайдера через тот же построитель
-    // (см. выше): повторы ведут себя как основной путь.
+    // Failover/retry recognizes BY PROVIDER SECTION through the same builder
+    // (see above): retries behave like the main path.
     retryProvider = RetryProvider { wav, provider in
       let transcriber = makeTranscriber(provider)
       return try await transcriber.transcribe(wav: wav)
     }
     super.init()
 
-    // Прогрев cookie-relay-токена: первый Alt+Alt не должен уходить с
-    // протухшей/пустой кукой — фоновая заготовка токена стартует сразу
-    // (неблокирующе для ввода).
+    // Cookie-relay token warm-up: first Alt+Alt must not go out with a stale or
+    // empty cookie — background token prep starts right away (non-blocking).
     if let cookieRelayProvider {
       Task { _ = await cookieRelayProvider.refreshBlocking() }
     }
@@ -395,26 +371,26 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     audio.levelDelegate = self
     hotkeys.delegate = self
 
-    // Принудительная остановка по жёсткому лимиту (60 с) идёт тем же путём,
-    // что и обычный стоп: сэмплы → WAV → транскрибация.
+    // Forced stop on the hard limit (60 s) goes the same way as a normal stop:
+    // samples → WAV → transcription.
     audio.onRecordingLimitReached = { [weak self] samples in
       DispatchQueue.main.async {
         self?.handleRecordingLimitReached(samples: samples)
       }
     }
 
-    // Автоостановка по непрерывной тишине (~3 с): эквивалент повторного
-    // Alt+Alt без нажатия — запись остановлена внутри AudioService, здесь
-    // только финализация сэмплов тем же стандартным путём.
+    // Auto-stop on continuous silence (~3 s): equivalent to a repeated Alt+Alt
+    // without a press — recording stops inside AudioService, here only sample
+    // finalization through the same standard path.
     audio.onAutoStop = { [weak self] samples in
       DispatchQueue.main.async {
         self?.handleAutoStop(samples: samples)
       }
     }
 
-    // Ручной retry из nanodictate: «Повторить распознавание другим провайдером».
-    // CLI ставит distributed-нотификацию — агент распознаёт свой lastWAV из
-    // памяти (доступность и вставка — как в обычном цикле).
+    // Manual retry from nanodictate: "Re-transcribe with another provider".
+    // CLI posts a distributed notification — the agent picks up its in-memory
+    // lastWAV (availability and insertion — as in the normal loop).
     retryObserver = DistributedNotificationCenter.default().addObserver(
       forName: Notification.Name("com.nanodictate.agent.retryRequest"),
       object: nil,
@@ -437,14 +413,14 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     try hotkeys.start()
   }
 
-  // MARK: - Accessibility (право «Доступность»)
+  // MARK: - Accessibility grant
 
-  /// Запускает hotkey, если право Accessibility уже выдано; иначе каждые 2
-  /// секунды опрашивает AXIsProcessTrusted(), пока пользователь не включит
-  /// право — затем стартует hotkey и останавливает опрос. Без гранта —
-  /// тихий статус и открытие системной панели с rate-limit'ом
-  /// (openAccessibilitySettingsIfDue, не чаще раза в 10 минут; метка
-  /// персистентна в UserDefaults — фоновый респавн панель не открывает).
+  /// Starts the hotkey if the Accessibility grant is already given; otherwise
+  /// polls AXIsProcessTrusted() every 2 seconds until the user enables it —
+  /// then starts the hotkey and stops polling. Without the grant — quiet status
+  /// and opening the system panel with rate limit
+  /// (openAccessibilitySettingsIfDue, at most once per 10 min; stamp persists
+  /// in UserDefaults — a background respawn does not reopen the panel).
   func startWithAccessibilityRequest() throws {
     if AXIsProcessTrusted() {
       try start()
@@ -452,17 +428,17 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       return
     }
 
-    // Без звука ошибки: отсутствие гранта на старте/респавне — не поломка
-    // микрофона, а ожидание действия пользователя (KeepAlive-респавны не
-    // должны играть Basso). Статус оверлея подсказывает, что нужно
-    // включить «Доступность»; панель открывается сама (не чаще раза в 10
-    // минут), и явное Alt+Alt нужно только при отзыве гранта на ходу.
+    // No error sound: a missing grant at start/respawn is not a mic failure
+    // but a wait for the user (KeepAlive respawns must not play Basso). The
+    // overlay status hints what to enable; the panel opens itself (at most
+    // once per 10 min), and an explicit Alt+Alt is needed only when the grant
+    // is revoked mid-flight.
     Logger.log(L10n.tr("error.accessibilityRequired"), level: "info")
     overlay.setStatus(L10n.tr("error.accessibilityRequired"))
     hideAfter(2.0, reason: "accessibility required")
     openAccessibilitySettingsIfDue()
 
-    // Автоподхват права: опрос каждые 2 секунды на главном потоке.
+    // Auto-pickup of the grant: poll every 2 seconds on the main thread.
     accessibilityPollTimer?.invalidate()
     accessibilityPollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) {
       [weak self] timer in  // swiftlint:disable:this closure_parameter_position
@@ -486,17 +462,17 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     RunLoop.main.add(pollTimer, forMode: .common)
   }
 
-  /// Открытие системной панели «Приватность и безопасность → Доступность» —
-  /// при старте/респавне без гранта (см. startWithAccessibilityRequest) и по
-  /// явному Alt+Alt, не чаще раза в accessibilityPanelCooldown. Метка
-  /// последнего открытия хранится в UserDefaults: респавн агента (KeepAlive)
-  /// память обнуляет, и без персистентности панель открывалась бы при
-  /// КАЖДОМ респавне — спам окнами при отсутствующем гранте.
+  /// Opens the system panel "Privacy & Security → Accessibility" — at
+  /// start/respawn without the grant (see startWithAccessibilityRequest) and
+  /// on explicit Alt+Alt, at most once per accessibilityPanelCooldown. Last
+  /// open stamp lives in UserDefaults: an agent respawn (KeepAlive) resets
+  /// memory, and without persistence the panel would open on EVERY respawn —
+  /// window spam with a missing grant.
   private func openAccessibilitySettingsIfDue() {
     let now = CFAbsoluteTimeGetCurrent()
     let defaults = UserDefaults.standard
-    // Отсутствующая метка (double == 0) трактуется как «не открывали»:
-    // now - 0 заведомо больше cooldown.
+    // Missing stamp (double == 0) means "never opened":
+    // now - 0 is certainly above the cooldown.
     let lastOpen = defaults.double(forKey: Self.lastAccessibilityPanelOpenAtKey)
     guard now - lastOpen >= Self.accessibilityPanelCooldown else {
       if isDebug {
@@ -505,9 +481,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       return
     }
     defaults.set(now, forKey: Self.lastAccessibilityPanelOpenAtKey)
-    // Панель открывается так же, как это делают Karabiner и подобные
-    // приложения. Статическая строка-литерал гарантированно валидна на
-    // macOS 12+.
+    // Panel opens the way Karabiner and similar apps do. Static string literal
+    // is guaranteed valid on macOS 12+.
     guard
       let url = URL(
         string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
@@ -535,13 +510,13 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     }
   }
 
-  /// Синхронный предикат глотания физического Return: вне .idle (запись
-  /// или распознавание) — глотать. Собственный синтетический Return
-  /// исключается НЕ здесь: постинг помечает событие маркером
-  /// SyntheticReturnMarker, и HotkeyService не глотает его по полю события —
-  /// синхронный флаг снялся бы к моменту повторного визита тапа (событие
-  /// доходит до .cgSessionEventTap на следующей итерации run loop).
-  /// Вызывается из event-тапа на main run loop — гонок с состоянием нет.
+  /// Synchronous swallowing predicate for a physical Return: outside .idle
+  /// (recording or recognizing) — swallow. Our own synthetic Return is NOT
+  /// excluded here: posting marks the event with SyntheticReturnMarker, and
+  /// HotkeyService does not swallow it by the event field — a synchronous flag
+  /// would be gone by the tap's next visit (event reaches .cgSessionEventTap
+  /// on the next run-loop iteration). Called from the event tap on the main
+  /// run loop — no state races.
   func shouldSwallowReturnKeyEvent() -> Bool {
     state != .idle
   }
@@ -549,8 +524,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   // MARK: - AudioLevelDelegate
 
   func audioLevelChanged(rms: Float) {
-    // Колбэк installTap выполняется на аудио-потоке — переходим на main,
-    // т.к. overlay.updateLevel трогает SwiftUI @Published.
+    // installTap callback runs on the audio thread — hop to main,
+    // since overlay.updateLevel touches SwiftUI @Published.
     DispatchQueue.main.async {
       self.overlay.updateLevel(rms)
     }
@@ -563,12 +538,12 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   }
 
   private func handleAltDoubleTap() {
-    // Без права «Доступность» агент не может ни слушать Alt+Alt, ни постить
-    // клавиши — запись бесполезна. Явное действие пользователя (нажатие
-    // хоткея при отсутствующем гранте) открывает панель настроек — с
-    // rate-limit'ом (openAccessibilitySettingsIfDue, не чаще раза в 10 мин)
-    // и понятным сообщением; при старте/респавне панель открывается тем же
-    // путём (см. startWithAccessibilityRequest).
+    // Without the Accessibility grant the agent can neither hear Alt+Alt nor
+    // post keys — recording is useless. An explicit user action (hotkey press
+    // with a missing grant) opens the settings panel — rate-limited
+    // (openAccessibilitySettingsIfDue, at most once per 10 min) plus a clear
+    // message; at start/respawn the panel opens the same way
+    // (see startWithAccessibilityRequest).
     guard AXIsProcessTrusted() else {
       openAccessibilitySettingsIfDue()
       showMicrophoneError(L10n.tr("error.accessibilityRequired"))
@@ -579,9 +554,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     }
     switch state {
     case .idle:
-      // Undo-окно: двойной Alt в пределах undoMaxInterval после успешной
-      // вставки (state = .idle) стирает вставленный текст. Во всех
-      // остальных состояниях Alt ведёт себя как раньше (см. .recording).
+      // Undo window: a second Alt within undoMaxInterval after a successful
+      // insert (state = .idle) erases the inserted text. In every other state
+      // Alt behaves as before (see .recording).
       if NanoDictateFlow.shouldUndoInsteadOfStart(
         state: state,
         lastInsertedAt: lastInsertedAt,
@@ -594,25 +569,25 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       }
     case .recording:
       if chunked {
-        // Живая диктовка: останов (отдаст «хвост» в liveExecutor) +
-        // финальный проход по всему WAV (тот же путь, что processChunked).
+        // Live dictation: stop (hands the tail to liveExecutor) +
+        // final pass over the whole WAV (same path as processChunked).
         liveFinalize()
       } else {
         sendRecording()
       }
     case .transcribing:
-      // Заняты отправкой — игнорируем.
+      // Busy sending — ignore.
       break
     }
   }
 
-  /// Enter/Keypad Enter: во время .recording — останов записи и запуск
-  /// распознавания (как второй Alt в .recording: chunked → liveFinalize,
-  /// иначе sendRecording) + латч РОВНО одного синтетического Enter после
-  /// вставки текста. Во время .transcribing — no-op (спека: повторный Enter
-  /// не инкрементирует латч, второй Enter не постится). В .idle сюда не
-  /// попадает: тап пропускает физический Enter насквозь (предикат
-  /// глотания = false), ветка .idle — страховка.
+  /// Enter/Keypad Enter: during .recording — stop recording and start
+  /// recognition (like the second Alt in .recording: chunked → liveFinalize,
+  /// else sendRecording) + latch of EXACTLY ONE synthetic Enter after text
+  /// insertion. During .transcribing — no-op (spec: repeated Enter does not
+  /// increment the latch, no second Enter posted). Never lands in .idle: the
+  /// tap passes a physical Enter through (swallow predicate = false), the
+  /// .idle branch is a safety net.
   private func handleEnterKeyPressed() {
     if isDebug {
       Logger.log("Enter handled: state=\(String(describing: state))", level: "debug")
@@ -626,65 +601,67 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         sendRecording()
       }
     case .transcribing:
-      // Спека п.3: Enter во время распознавания не реагирует.
+      // Spec item 3: Enter during recognition does not react.
       break
     case .idle:
       break
     }
   }
 
-  /// Точка синтетического Enter: вызывается ПОСЛЕ успешной вставки текста
-  /// (completeInsertion / completeChunkedInsertion / retryInsertion). Если
-  /// латч стоит — снять его (одноразово) и через паузу ~250 мс (целевое
-  /// приложение успевает обработать вставленный текст) постить
-  /// синтетический Return (keyDown + keyUp) в приложение в фокусе. После
-  /// постинга латч снят. Автостоп по тишине и лимит длительности латч НЕ
-  /// ставят — сюда они не приходят с pending-латчем. Планирование держится
-  /// в ScheduledEnterPoster: Esc отменяет УЖЕ запланированный пост.
+  /// Synthetic-Enter point: called AFTER a successful text insertion
+  /// (completeInsertion / completeChunkedInsertion / retryInsertion). If the
+  /// latch is armed — consume it (one-shot) and after ~250 ms pause (target
+  /// app has time to process the inserted text) post a synthetic Return
+  /// (keyDown + keyUp) to the focused app. After posting the latch is clear.
+  /// Silence auto-stop and the duration limit never arm the latch — they do
+  /// not arrive here with a pending latch. Scheduling lives in
+  /// ScheduledEnterPoster: Esc cancels an ALREADY scheduled post.
   private func postSyntheticReturnIfPending() {
     guard enterSendLatch.consume() else { return }
-    // self в замыкании не нужен: постинг и лог — статики. Агент живёт
-    // весь процесс, Poster свой — цикла удержания нет.
+    // No self in the closure: posting and log are static. Agent lives the
+    // whole process, Poster is its own — no retain cycle.
     scheduledEnterPoster.action = {
-      // Событие помечается маркером SyntheticReturnMarker ДО постинга:
-      // наш session-тап видит синтетический Return повторно на следующей
-      // итерации run loop и по полю события не глотает его (доходит до
-      // приложения) и не дублирует enterKeyPressed (не остановит новую
-      // запись, начатую в окне паузы).
+      // Event is stamped with SyntheticReturnMarker BEFORE posting: our
+      // session tap sees the synthetic Return again on the next run-loop
+      // iteration and by the event field neither swallows it (reaches the
+      // app) nor duplicates enterKeyPressed (will not stop a new recording
+      // started in the pause window).
       Inserter.postReturnKeyDownUp()
       Logger.log("synthetic Enter posted after Enter-stop insert", level: "info")
     }
     scheduledEnterPoster.schedule()
   }
 
-  // MARK: - Запись
+  // MARK: - Recording
 
-  /// Pre-flight: проверка доступа к микрофону до запуска движка.
-  /// Не запрашиваем доступ принудительно из-под launchd (окно запроса может
-  /// не отобразиться): только проверяем статус, а для .notDetermined пробуем
-  /// запросить — и при granted начинаем запись.
-  /// Вся механика «просит разрешение → вылетает сообщение → зависает» —
-  /// в Core (MicAccessRequester), здесь только логирование и реакция на исход:
-  /// 1) повторный Alt+Alt, пока системный диалог TCC уже висит, не открывает
-  ///    второй запрос (isInFlight в координаторе);
-  /// 2) сторож micRequestTimeout: если колбэк requestAccess не пришёл (окно
-  ///    у фонового агента без бандла могло не отобразиться) — терминальная
-  ///    ошибка в оверлее вместо вечного ожидания; поздний granted после
-  ///    таймаута отбрасывается по сессионному токену (запись не начнётся
-  ///    из-под уже показанной ошибки, штормовой счётчик не сбросится);
-  /// 3) ветки .denied/.restricted дают понятное сообщение и НЕ трогают движок;
-  /// 4) анти-шторм MicRequestPolicy: после 3 таймаутов в окне 6 ч запрос
-  ///    доступа не открывается вовсе (серия повторов не плодит диалоги,
-  ///    клинящие tccd) — вместо запроса понятная инструкция, следующий
-  ///    Alt+Alt снова пробует, пока грант не появится вручную.
+  /// Pre-flight: mic access check before the engine starts. We do not request
+  /// access forcibly from under launchd (the request window may not appear):
+  /// only check status, and for .notDetermined try to request — on granted,
+  /// start recording.
+  /// The whole "request permission → message pops out → hang" mechanics is
+  /// in Core (MicAccessRequester); here only logging and reacting to the
+  /// outcome:
+  /// 1) repeated Alt+Alt while the TCC dialog hangs does not open a second
+  ///    request (isInFlight in the coordinator);
+  /// 2) micRequestTimeout watchdog: if the requestAccess callback never fires
+  ///    (a bundle-less background agent may not show the window) — terminal
+  ///    error in the overlay instead of endless waiting; a late granted after
+  ///    timeout is dropped by session token (recording does not start under an
+  ///    already-shown error, the storm counter does not reset);
+  /// 3) .denied/.restricted branches give a clear message and do NOT touch the
+  ///    engine;
+  /// 4) MicRequestPolicy anti-storm: after 3 timeouts in a 6 h window the
+  ///    access request does not open at all (repeat presses do not spawn
+  ///    tccd-wedging dialogs) — instead a clear instruction; the next Alt+Alt
+  ///    tries again until the grant appears manually.
   private func requestMicrophoneAndStart() {
     let status = AVCaptureDevice.authorizationStatus(for: .audio)
-    // Каждый запрос доступа к микрофону фиксируется в логе: сам факт проверки,
-    // текущий статус TCC и результат системного диалога (granted/denied).
+    // Every mic access request is logged: the check itself, the current TCC
+    // status, and the system dialog result (granted/denied).
     Logger.log("mic permission check: \(MicrophoneAuth.statusText(status))", level: "info")
-    // Повторный Alt+Alt, пока диалог висит, — только лог, без второго
-    // запроса (внутренний guard координатора делает то же самое; здесь —
-    // ради читаемого сообщения).
+    // Repeated Alt+Alt while the dialog hangs — only a log, no second request
+    // (the coordinator's internal guard does the same; here it is for a
+    // readable message).
     guard !micAccessRequester.isInFlight else {
       Logger.log("mic permission request already in flight — ignoring Alt+Alt", level: "info")
       return
@@ -713,12 +690,12 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     }
   }
 
-  /// Логика старта записи: двигает агента в состояние .recording.
-  /// Панель показывается здесь и держится ВЕСЬ цикл записи/распознавания;
-  /// hide() вызывается только из терминальных точек (стоп/ошибка/вставка).
-  /// Подъём движка асинхронный (AudioService.start(completion:) на фоновой
-  /// очереди, completion на главном) + сторож recordStartTimeout: зависший
-  /// движок даёт терминальную ошибку, а не вечно висящий оверлей.
+  /// Recording start logic: moves the agent to .recording.
+  /// Panel shows here and stays the WHOLE record/recognize loop; hide() is
+  /// called only from terminal points (stop/error/insert). Engine boot is
+  /// async (AudioService.start(completion:) on a background queue, completion
+  /// on main) + recordStartTimeout watchdog: a hung engine gives a terminal
+  /// error, not an endless overlay.
   private func startRecording() {
     guard !isStarting else {
       Logger.log("record start ignored: already starting", level: "info")
@@ -726,11 +703,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     }
     sounds.playStart()
     overlay.show()
-    // Метка «через что идёт распознавание» («<провайдер> · <модель>») — из ТОГО
-    // ЖЕ resolved-провайдера, которым в init собран распознаватель сессии
-    // (resolvedConfig): единый источник истины, конфиг здесь не перечитывается.
+    // Label "what recognition goes through" ("<provider> · <model>") — from
+    // THE SAME resolved provider the session transcriber was built with in
+    // init (resolvedConfig): single source of truth, config not re-read here.
     overlay.setSTTLabel(RecognitionLabel.forSession(resolvedConfig))
-    // Фаза «запись»: микрофон + таймер, время старта фиксируется здесь.
+    // "Recording" phase: mic + timer, start time fixed here.
     overlay.setRecordingPhase()
     overlay.setStatus(L10n.tr("overlay.recording"))
     Logger.log("record start")
@@ -739,26 +716,26 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     startSession += 1
     let session = startSession
 
-    // Сторож подъёма движка: если за recordStartTimeout движок не стартовал
-    // — терминальная ошибка (оверлей гаснет, следующий Alt+Alt работает).
-    // startSession инкрементируется здесь же: отложенный completion старта
-    // (если движок всё же поднялся позже) увидит расхождение токенов.
-    // audio.cancel() здесь НЕ вызывается намеренно: его teardown ушёл бы на
-    // очередь зависшего движка (заблокирована навсегда), и разблокировавшийся
-    // ПОСЛЕ подмены старт дотянул бы его БЕЗ гарда поколения — setRecording(
-    // false)/сброс буферов/tapInstalled=false убили бы живую новую сессию на
-    // свежем движке. Старый движок разбирают wedge (stop на глобальной
-    // очереди) и сам устаревший старт (терминальная ветка teardownEngineOnly,
-    // .failure(.engineSuperseded)); state новой сессии (isRecording/буферы)
-    // переинициализирует старт нового сеанса.
+    // Engine boot watchdog: if the engine does not start within
+    // recordStartTimeout — terminal error (overlay goes out, next Alt+Alt
+    // works). startSession increments here too: a delayed start completion
+    // (engine did boot later) sees the token mismatch.
+    // audio.cancel() is intentionally NOT called here: its teardown would go
+    // to the hung engine's queue (blocked forever), and a start that unlocked
+    // AFTER the swap would run it WITHOUT a generation guard — setRecording(
+    // false)/buffer reset/tapInstalled=false would kill a live new session on
+    // the fresh engine. The old engine is dismantled by the wedge (stop on the
+    // global queue) and by the stale start itself (terminal branch
+    // teardownEngineOnly, .failure(.engineSuperseded)); the new session state
+    // (isRecording/buffers) is reinitialized by the new session's start.
     DispatchQueue.main.asyncAfter(deadline: .now() + Self.recordStartTimeout) { [weak self] in
       guard let self, self.startSession == session, self.isStarting else { return }
       Logger.log("record start timed out after \(Int(Self.recordStartTimeout)) s", level: "error")
       self.startSession += 1
       self.isStarting = false
-      // Зависший движок подменяется свежим: engine.start() мог вообще не
-      // вернуться (HAL заблокирован сменой устройства) — старый экземпляр
-      // непригоден, следующий Alt+Alt стартует с чистого движка.
+      // The wedged engine is replaced with a fresh one: engine.start() may
+      // never have returned (HAL blocked by a device switch) — the old
+      // instance is unusable, the next Alt+Alt starts from a clean engine.
       self.audio.replaceEngineAfterWedge()
       Logger.log("record start recovery: wedged engine replaced", level: "info")
       self.showMicrophoneError(L10n.tr("error.micNoResponse"))
@@ -767,14 +744,13 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     audio.start { [weak self] result in
       guard let self else { return }
       guard self.startSession == session else {
-        // Старт завершился позже сторожа (или начался новый цикл).
-        // Если движок успели поднять — не оставляем запись висеть.
-        // cancel() здесь выполняется ТОЛЬКО когда движок, начавший
-        // запись, всё ещё текущий: старты, разблокировавшиеся ПОСЛЕ
-        // wedge-подмены, AudioService помечает сам (.failure(
-        // .engineSuperseded), см. AudioService.startOnEngineQueue) и до
-        // .success они не доходят — иначе cancel() убил бы живую новую
-        // сессию на свежем движке.
+        // Start finished after the watchdog (or a new loop began).
+        // If the engine did boot — do not leave recording hanging.
+        // cancel() here runs ONLY when the engine that started recording is
+        // still current: starts that unlocked AFTER the wedge swap are
+        // flagged by AudioService itself (.failure(.engineSuperseded), see
+        // AudioService.startOnEngineQueue) and never reach .success —
+        // otherwise cancel() would kill a live new session on the fresh engine.
         if case .success = result {
           self.audio.cancel()
         }
@@ -785,9 +761,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       case .success:
         self.state = .recording
         if self.chunked {
-          // Живая диктовка: каждый уттеренс (пауза ≥ pauseDuration)
-          // распознаётся и вставляется на лету, к моменту Alt+Alt текст
-          // уже частично в поле ввода.
+          // Live dictation: each utterance (pause ≥ pauseDuration) is
+          // recognized and inserted on the fly; by the time of Alt+Alt the
+          // text is already partly in the input field.
           self.subscribeLiveNanoDictate()
         }
         if self.isDebug {
@@ -800,16 +776,16 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     }
   }
 
-  /// Терминальная ошибка микрофона: понятное сообщение в оверлее + звук
-  /// ошибки (Basso). Одна точка hide — оверлей гаснет, state уже .idle,
-  /// следующий Alt+Alt начинает новый цикл.
+  /// Terminal mic error: clear message in the overlay + error sound (Basso).
+  /// One hide point — overlay goes out, state already .idle, the next Alt+Alt
+  /// starts a new loop.
   private func showMicrophoneError(_ message: String) {
-    // Cooldown: повторный Alt+Alt в сломанном состоянии (denied / движок
-    // молчит) не должен заново играть звук ошибки и перерисовывать оверлей
-    // — иначе при каждом нажатии слышен Basso и мигает панель. Cooldown
-    // подавляет ТОЛЬКО звук и сообщение; hide ниже — всегда: панель,
-    // показанная неудавшимся startRecording, не зависает со статусом
-    // «Записываю…» до следующего Alt+Alt.
+    // Cooldown: repeated Alt+Alt in a broken state (denied / silent engine)
+    // must not replay the error sound and redraw the overlay — otherwise every
+    // press plays Basso and flashes the panel. The cooldown suppresses ONLY
+    // the sound and message; hide below is always: a panel shown by a failed
+    // startRecording does not hang with the "Recording…" status until the next
+    // Alt+Alt.
     let showFeedback = micErrorCooldown.allow(at: CFAbsoluteTimeGetCurrent())
     if showFeedback {
       overlay.setStatus(message)
@@ -828,9 +804,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     processSamples(samples)
   }
 
-  /// Обычный путь финализации записи: сэмплы → WAV → транскрибация.
-  /// Вызывается и по стопу пользователем, и после принудительной остановки
-  /// по лимиту длительности (см. `onRecordingLimitReached`).
+  /// Standard recording finalization path: samples → WAV → transcription.
+  /// Called both on user stop and after the forced duration limit
+  /// (see `onRecordingLimitReached`).
   private func processSamples(_ samples: [Int16]) {
     if chunked {
       processChunked(samples)
@@ -839,26 +815,26 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     processSingleRequest(samples)
   }
 
-  /// Обычный путь финализации записи: сэмплы → WAV → ОДНА транскрибация.
-  /// Ровно текущее поведение (регрессионный путь при chunked = false).
+  /// Standard recording finalization path: samples → WAV → ONE transcription.
+  /// Exactly current behavior (regression path at chunked = false).
   // swiftlint:disable:next function_body_length
   private func processSingleRequest(_ samples: [Int16]) {
     state = .transcribing
-    // Новый цикл — токен отмены прошлого распознавания не действует.
+    // New loop — previous recognition's cancel token does not apply.
     cancelRecognition = false
-    // Фаза «обработка»: вместо иконки — анимация точек, пока идёт STT.
+    // "Processing" phase: dots animation instead of the icon while STT runs.
     overlay.setProcessingPhase()
     overlay.setStatus(L10n.tr("overlay.recognizing"))
-    // Длительность по фактически собранным сэмплам (16 кГц моно) —
-    // видно, в каких единицах уходит аудио в STT. Звук завершения играем
-    // НЕ здесь, а в completeInsertion ПОСЛЕ вставки текста.
+    // Duration from actually collected samples (16 kHz mono) — shows in which
+    // units audio goes to STT. The finish sound plays NOT here but in
+    // completeInsertion AFTER text insertion.
     let duration = Double(samples.count) / 16000.0
     Logger.log(
       String(format: "transcribe submit (\(samples.count) samples, %.2f s)", duration),
       level: "info")
 
-    // Что именно уходит в LLM: длительность + уровень RMS + флаг «около-тишины».
-    // Метрология — только при log_level == "debug" (не спамить).
+    // What exactly goes to the LLM: duration + RMS level + "near-silence" flag.
+    // Metrology only at log_level == "debug" (no spam).
     if logLevel.lowercased() == "debug" {
       let rms = AudioMetrics.rms(samples: samples)
       let nearSilence = AudioMetrics.isNearSilence(avgRMS: rms)
@@ -872,13 +848,13 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       Logger.log(inputMetrics, level: "debug")
     }
 
-    // Страж фазы «обработка»: анимация точек не может жить дольше жёсткого
-    // таймаута запроса + небольшого запаса (processingMaxDuration). Если STT
-    // за это время не завершился (сеть зависла, транспорт молчит) — цикл
-    // завершаем сами, с сообщением «Таймаут STT». Сессионный токен не даёт
-    // стражу старого цикла оборвать новый (пользователь уже начал новую
-    // диктовку); проверка state == .transcribing делает страж no-op после
-    // любого терминального события.
+    // Watchdog of the "processing" phase: the dots animation cannot outlive
+    // the hard request timeout plus a small margin (processingMaxDuration).
+    // If STT has not finished by then (network hung, transport silent) — end
+    // the loop ourselves, with the "STT timeout" message. The session token
+    // keeps an old loop's watchdog from cutting a new one (the user already
+    // started a new dictation); the state == .transcribing check makes the
+    // watchdog a no-op after any terminal event.
     processingSession += 1
     let session = processingSession
     DispatchQueue.main.asyncAfter(deadline: .now() + OverlayController.processingMaxDuration) {
@@ -894,15 +870,14 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     Task { [weak self] in
       guard let self else { return }
 
-      // Тот же страж, что у watchdog-а выше: сессия «обработки»,
-      // зафиксированная в момент отправки. Если к моменту завершения
-      // Task сессия сменилась (новая диктовка) или цикл уже завершён
-      // терминальным событием (watchdog «Таймаут STT» поставил state в
-      // .idle) — терминальные вызовы становятся no-op, повторный
-      // failTranscription/completeInsertion невозможен.
+      // Same guard as the watchdog above: the "processing" session fixed at
+      // send time. If by the end of the Task the session changed (new
+      // dictation) or the loop already ended with a terminal event (the
+      // "STT timeout" watchdog set state to .idle) — terminal calls become
+      // no-ops; a repeated failTranscription/completeInsertion is impossible.
       let wav = WAVEncoder.encode(samples: samples)
-      // Последний WAV держим в памяти (RetryProvider): ручной retry другим
-      // провайдером (`nanodictate retry`) и автоfailover используют его же.
+      // Last WAV kept in memory (RetryProvider): manual retry with another
+      // provider (`nanodictate retry`) and auto-failover reuse it.
       self.retryProvider.store(wav: wav)
 
       do {
@@ -913,10 +888,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         let text = TextRefinement.finalize(result.text)
 
         DispatchQueue.main.async {
-          // Страж доставки: сессия «обработка» активна (токен совпал,
-          // state все ещё .transcribing) И распознавание не отменено
-          // по Esc. Отмена по Esc ставит cancelRecognition и уводит
-          // state в .idle — текст вставлен не будет.
+          // Delivery guard: the "processing" session is active (token
+          // matched, state still .transcribing) AND recognition not cancelled
+          // by Esc. Esc cancel sets cancelRecognition and moves state to
+          // .idle — text will not be inserted.
           guard
             NanoDictateFlow.shouldDeliverResult(
               isCancelled: self.cancelRecognition,
@@ -939,15 +914,15 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     }
   }
 
-  /// Пошаговая диктовка (chunked = true): VAD-сегментация записи → каждый
-  /// сегмент отдельным запросом (prompt = уже распознанный текст) → инкре-
-  /// ментальная вставка → финальный проход по всему WAV одним запросом →
-  /// по-словный diff → замена изменившегося диапазона одним действием.
+  /// Step dictation (chunked = true): VAD segmentation of the recording → each
+  /// segment as a request (prompt = already-recognized text) → incremental
+  /// insert → final pass over the whole WAV in one request → word diff →
+  /// replacement of the changed range in a single action.
   // swiftlint:disable:next cyclomatic_complexity function_body_length
   private func processChunked(_ samples: [Int16]) {
     state = .transcribing
-    // Новый цикл — токен отмены прошлого распознавания не действует
-    // (тот же сброс, что и в processSingleRequest).
+    // New loop — previous recognition's cancel token does not apply
+    // (same reset as in processSingleRequest).
     cancelRecognition = false
     overlay.setProcessingPhase()
     overlay.setStatus(L10n.tr("overlay.recognizing"))
@@ -957,10 +932,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       String(format: "chunked transcribe submit (\(samples.count) samples, %.2f s)", duration),
       level: "info")
 
-    // Страж фазы «обработка»: несколько сегментов + финальный проход —
-    // каждый запрос до networkRequestTimeout; сторож считает по числу
-    // запросов (N сегментов, count > 1 ⇒ ещё +1 финальный). Тот же
-    // механизм сессионного токена, что и в processSingleRequest.
+    // "Processing" phase watchdog: several segments + final pass — each
+    // request up to networkRequestTimeout; the guard counts by request number
+    // (N segments, count > 1 ⇒ one more final). Same session-token mechanism
+    // as processSingleRequest.
     let segments = AudioSegmenter.segments(samples: samples)
     let requestCount = segments.count <= 1 ? 1 : segments.count + 1
     let chunkedMaxDuration = Double(requestCount) * Transcriber.networkRequestTimeout + 5
@@ -982,14 +957,13 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         let outcome = try await ChunkedPipeline().run(
           samples: samples,
           stt: { wav, filename, prompt in
-            // Роли из [routing]: сегменты (filename "segment-N.wav")
-            // идут segment_provider, финальный проход по всему WAV
-            // ("final.wav") — final_provider. Роль не задана
-            // (= фолбэк на активного) — активный transcriber, ровно
-            // текущее поведение. Failover на ролях нет — провайдер
-            // роли используется напрямую. Сбой сегмента абортит весь
-            // прогон (ChunkedPipeline.run не ловит ошибки сегментов),
-            // финальный проход при этом не выполняется.
+            // Roles from [routing]: segments (filename "segment-N.wav") go to
+            // segment_provider, the final pass over the whole WAV
+            // ("final.wav") — final_provider. Role unset (= fallback to the
+            // active one) — active transcriber, exactly current behavior.
+            // No failover on roles — the role provider is used directly.
+            // A segment failure aborts the whole run (ChunkedPipeline.run
+            // does not catch segment errors); no final pass then.
             let selected: Transcriber
             if filename == "final.wav" {
               selected = self.roleTranscriber(self.finalRoleProviderID) ?? self.transcriber
@@ -1001,9 +975,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
           },
           insert: { operation in
             DispatchQueue.main.async {
-              // Тот же сессионный страж, что в single-пути: если
-              // сессия «обработки» сменилась или цикл завершён
-              // терминальным событием — вставка/статус no-op.
+              // Same session guard as in the single path: if the
+              // "processing" session changed or the loop ended with a
+              // terminal event — insert/status is a no-op.
               guard
                 self.processingSession == session,
                 self.state == .transcribing
@@ -1024,8 +998,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
           },
           onPhase: { phase in
             DispatchQueue.main.async {
-              // Страж от старого цикла, перезаписывающего статус
-              // новой диктовки или терминальное сообщение.
+              // Guard against an old loop overwriting the new dictation's
+              // status or a terminal message.
               guard
                 self.processingSession == session,
                 self.state == .transcribing
@@ -1063,33 +1037,34 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     }
   }
 
-  /// Терминальная точка чанкового цикла: вставка уже сделана конвейером
-  /// (append-операциями и финальной replace), здесь — финальные UX-решения
-  /// (синтез с main-веткой): undo-бухгалтерия получает финальный текст сессии,
-  /// review-гейт подтверждает/отменяет уже-напечатанный результат, пустой
-  /// результат идёт тем же путём, что в single-пути (handleEmptyResult).
+  /// Terminal point of the chunked loop: insertion was already done by the
+  /// pipeline (append operations and the final replace), here — final UX
+  /// decisions (synthesized with the main branch): undo bookkeeping gets the
+  /// session's final text, the review gate confirms/cancels the already-typed
+  /// result, an empty result goes the same way as in the single path
+  /// (handleEmptyResult).
   private func completeChunkedInsertion(outcome: ChunkedPipeline.Outcome) {
     let text = outcome.insertedText
 
-    // Пустой результат: конвейер ничего не напечатал (0 сегментов или
-    // пустые транскрибации) — отдельный звук «пусто», undo-окно не
-    // открывается, ровно как в single-пути (completeInsertion).
+    // Empty result: the pipeline typed nothing (0 segments or empty
+    // transcriptions) — separate "empty" sound, no undo window, exactly as in
+    // the single path (completeInsertion).
     if NanoDictateFlow.outcome(for: text) == .empty {
       handleEmptyResult()
       return
     }
 
-    // Ревью перед вставкой (review_before_insert = true): сегменты чанковой
-    // сессии напечатаны конвейером инкрементально, поэтому гейт работает
-    // финальным подтверждением — при отмене напечатанный текст стирается
-    // целиком (одно действие delete), undo-окно при этом не открывается.
+    // Review before insert (review_before_insert = true): a chunked session's
+    // segments were already typed incrementally by the pipeline, so the gate
+    // works as a final confirmation — on cancel the typed text is deleted
+    // entirely (one delete action), no undo window then.
     if reviewBeforeInsert, hasInteractiveStdin {
       switch ReviewGate.confirm(text: text) {
       case .insert:
         break
       case .cancel:
-        // Напечатанное стёрто, вставки нет — латч синтетического Enter
-        // гасим (см. completeInsertion review-cancel).
+        // Typed text erased, no insert — clear the synthetic-Enter latch
+        // (see completeInsertion review-cancel).
         enterSendLatch.cancel()
         Inserter.delete(characters: text)
         overlay.resetPhase()
@@ -1104,8 +1079,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         "review_before_insert включён, но stdin не терминал — ревью чанка пропущено", level: "info")
     }
 
-    // Бухгалтерия undo: двойной Alt в пределах undoMaxInterval стирает
-    // финальный текст чанковой сессии одним действием.
+    // Undo bookkeeping: a second Alt within undoMaxInterval erases the
+    // chunked session's final text in one action.
     lastInsertedText = text
     lastInsertedAt = CFAbsoluteTimeGetCurrent()
 
@@ -1119,63 +1094,63 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         + "finalChanged=\(outcome.finalChanged) (\(text.count) chars)",
       level: "info"
     )
-    // Маркер для `nanodictate last` — финальный текст чанковой сессии.
+    // Marker for `nanodictate last` — the chunked session's final text.
     Logger.log("LAST_TEXT: \(text.replacingOccurrences(of: "\n", with: " "))")
-    // Финальный кусок вставлен и финализирован — только теперь синтетический
-    // Enter (не посреди потока кусков).
+    // Final piece inserted and finalized — only now the synthetic
+    // Enter (not mid-stream of pieces).
     postSyntheticReturnIfPending()
   }
 
-  /// Запись остановлена по жёсткому лимиту (60 с / 960 000 сэмплов) —
-  /// финализируем собранные сэмплы стандартным путём.
+  /// Recording stopped by the hard limit (60 s / 960 000 samples) —
+  /// finalize the collected samples the standard way.
   private func handleRecordingLimitReached(samples: [Int16]) {
     guard state == .recording else { return }
     Logger.log("record limit reached (\(samples.count) samples)", level: "info")
     if chunked {
-      // Живая диктовка: «хвост» уже отдан колбэком onSpeechSegment ДО
-      // этого вызова (performForcedStop: tail → onRecordingLimitReached) и
-      // стоит в liveExecutor первым; здесь — только страж и финальный
-      // проход по переданным сэмплам (без audio.stop()).
+      // Live dictation: the tail was already handed by onSpeechSegment BEFORE
+      // this call (performForcedStop: tail → onRecordingLimitReached) and
+      // stands first in liveExecutor; here — only the guard and the final
+      // pass over the passed samples (no audio.stop()).
       liveFinalizeFromSamples(samples)
     } else {
       processSamples(samples)
     }
   }
 
-  /// Запись автоматически остановлена по непрерывной тишине (~3 с) — тот же
-  /// путь, что и ручное повторное Alt+Alt: финализируем собранные сэмплы.
-  /// Детектор жил в AudioService (там известна реальная длительность буферов),
-  /// колбэк приходит на главной очереди; «хвост» live-диктовки уже отдан
-  /// onSpeechSegment ДО этого вызова.
+  /// Recording auto-stopped on continuous silence (~3 s) — same path as a
+  /// manual repeated Alt+Alt: finalize the collected samples.
+  /// The detector lived in AudioService (the real buffer duration is known
+  /// there), the callback arrives on the main queue; the live-dictation tail
+  /// was already handed by onSpeechSegment before this call.
   private func handleAutoStop(samples: [Int16]) {
     guard state == .recording else { return }
     Logger.log("auto-stop by silence (\(samples.count) samples)", level: "info")
     if chunked {
-      // Живая диктовка: «хвост» стоит в liveExecutor первым (tail был
-      // доставлен onSpeechSegment раньше onAutoStop), здесь — финальный
-      // проход по снимку. audio.stop() не вызываем: AudioService уже
-      // разбирает движок своим путём (teardown на engineQueue).
+      // Live dictation: the tail stands first in liveExecutor (tail was
+      // delivered by onSpeechSegment before onAutoStop), here — the final
+      // pass over the snapshot. No audio.stop(): AudioService already tears
+      // the engine down its own way (teardown on engineQueue).
       liveFinalizeFromSamples(samples)
     } else {
       processSamples(samples)
     }
   }
 
-  // MARK: - Живая диктовка (chunked = true)
+  // MARK: - Live dictation (chunked = true)
 
-  /// Ставит live-подписку на речевые сегменты. Логика «кто сегодня отвечает
-  /// за сегменты» фиксируется В МОМЕНТ ДОСТАВКИ: колбэк заменяется на новый
-  /// при каждом старте, каждый захватывает свой токен сессии, и устаревший
-  /// цикл не может обслужить сегменты нового (liveSession сменился, страж в
-  /// handleLiveSegment отбрасывает).
+  /// Subscribes to live speech segments. The "who answers for segments today"
+  /// logic is fixed AT DELIVERY TIME: the callback is replaced on every start,
+  /// each captures its own session token, and a stale loop cannot service the
+  /// new loop's segments (liveSession changed, the guard in
+  /// handleLiveSegment drops them).
   private func subscribeLiveNanoDictate() {
     liveSession += 1
     let runState = LiveRunState(session: liveSession)
     liveRunState = runState
     audio.onSpeechSegment = { [weak self] segment, isTail in
       guard let self else { return }
-      // Страж сессии: цикл отменён Esc / начат заново (liveSession
-      // сменился) — сегмент старого цикла не обрабатываем.
+      // Session guard: loop cancelled by Esc / restarted (liveSession
+      // changed) — old-loop segment not processed.
       guard self.liveSession == runState.session else { return }
       self.liveExecutor.submit {
         await self.handleLiveSegment(segment, isTail: isTail, runState: runState)
@@ -1183,10 +1158,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     }
   }
 
-  /// Обработка одного доставленного сегмента (live-VAD или «хвост»). Всегда
-  /// на liveExecutor — сегменты распознаются строго по очереди, накопленный
-  /// prompt каждого следующего включает все предыдущие, «хвост» останова
-  /// гарантированно обработан ДО финального прохода.
+  /// Handles one delivered segment (live VAD or the tail). Always on
+  /// liveExecutor — segments are recognized strictly in order, each next one's
+  /// accumulated prompt includes all previous; the stop tail is guaranteed
+  /// processed BEFORE the final pass.
   private func handleLiveSegment(
     _ segmentSamples: [Int16],
     isTail: Bool,
@@ -1194,8 +1169,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   ) async {
     let index = runState.segmentCount
 
-    // Оверлей: «Распознаю… (часть N)» на время STT сегмента; фаза записи
-    // остаётся (пользователь ещё говорит) — меняем только статус.
+    // Overlay: "Recognizing… (part N)" while the segment's STT runs; the
+    // recording phase stays (user still talks) — only status changes.
     DispatchQueue.main.async { [weak self] in
       guard
         let self,
@@ -1207,10 +1182,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     }
 
     do {
-      // Тот же per-segment путь, что и в offline-чанкинге (ChunkedPipeline.
-      // recognizeSegment): WAV → STT с prompt-контекстом → финализация.
-      // Failover здесь не нужен — финальный проход по всему WAV «докрутит»
-      // ошибку (в offline-чанкинге сбой сегмента, напротив, абортит прогон).
+      // Same per-segment path as in offline chunking (ChunkedPipeline.
+      // recognizeSegment): WAV → STT with prompt context → finalization.
+      // No failover here — the final pass over the whole WAV recovers the
+      // error (in offline chunking a segment failure, by contrast, aborts
+      // the run).
       let result = try await ChunkedPipeline.recognizeSegment(
         samples: segmentSamples,
         index: index,
@@ -1218,9 +1194,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         prompt: runState.promptParts.isEmpty
           ? nil : ChunkedPipeline.truncatedPrompt(runState.promptParts),
         stt: { wav, filename, prompt in
-          // Роль segment из [routing] — как в processChunked: провайдер
-          // сегментов; не задан — активный transcriber (failover здесь
-          // не нужен — финальный проход «докрутит»).
+          // The segment role from [routing] — as in processChunked: the
+          // segment provider; unset — active transcriber (no failover here
+          // either — the final pass recovers).
           let transcriber = self.roleTranscriber(self.segmentRoleProviderID) ?? self.transcriber
           let segmentResult = try await transcriber.transcribe(
             wav: wav, filename: filename, prompt: prompt)
@@ -1229,9 +1205,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         filename: "live-segment-\(index + 1).wav"
       )
 
-      // Накопление — на liveExecutor ПОСЛЕ успешного STT: только
-      // распознанный текст попадает в prompt следующего сегмента и в
-      // базу финального diff.
+      // Accumulation — on liveExecutor AFTER successful STT: only recognized
+      // text enters the next segment's prompt and the final diff base.
       runState.insertedText += result.insertText
       runState.promptParts.append(result.promptText)
       runState.segmentCount += 1
@@ -1245,12 +1220,12 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
           self.liveSession == runState.session,
           self.state == .recording || self.state == .transcribing
         else { return }
-        // Инкрементальная вставка в поле ввода: «появляется постепенно».
+        // Incremental insert into the input field: "appears gradually".
         Inserter.append(result.insertText)
         Logger.log(
           "live append segment \(index + 1) (\(result.insertText.count) chars)", level: "info")
-        // Статус возвращается к фазе записи — кроме «хвоста» (идёт
-        // фиксация: «Распознаю…» покажет страж/финальный проход).
+        // Status returns to the recording phase — except for the tail
+        // (finalization runs: "Recognizing…" shows the guard/final pass).
         if self.state == .recording {
           self.overlay.setStatus(L10n.tr("overlay.recording"))
         }
@@ -1262,46 +1237,47 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         "live segment \(index + 1) failed: \(message) — фраза «докрутится» финальным проходом",
         level: "error"
       )
-      // Сбой сегмента не прерывает диктовку: фраза целиком (или её часть)
-      // будет распознана финальным проходом по ВСЕМУ WAV при фиксации.
+      // A segment failure never interrupts dictation: the whole phrase (or
+      // part of it) is recognized by the final pass over the WHOLE WAV at
+      // commit.
       runState.anySegmentFailed = true
-      // Запоминаем текст последней ошибки: если упадут ВСЕ сегменты
-      // (segmentCount == 0, STT недоступен), финальный проход завершится
-      // явной failTranscription с этим текстом, а не «Пустым результатом».
+      // Remember the last failure text: if ALL segments fail (segmentCount
+      // == 0, STT unavailable), the final pass ends with an explicit
+      // failTranscription carrying this text, not an "Empty result".
       runState.lastErrorText = message
     }
   }
 
-  /// Фиксация живой диктовки (2-й Alt): останов → «хвост» незакрытого
-  /// уттеренса уходит в liveExecutor (встаёт после незавершённых сегментов)
-  /// → финальный проход по всему WAV → общий терминальный путь
-  /// completeChunkedInsertion.
+  /// Live dictation commit (2nd Alt): stop → the unclosed utterance's tail
+  /// goes to liveExecutor (stands after unfinished segments) → final pass
+  /// over the whole WAV → the common terminal path completeChunkedInsertion.
   private func liveFinalize() {
     guard state == .recording else { return }
     guard let runState = liveRunState else {
-      // Логически недостижимо (подписка ставится при успешном старте
-      // вместе с state = .recording) — страховочный путь в offline-чанкинг.
+      // Logically unreachable (the subscription is set on successful start
+      // together with state = .recording) — safety path into offline chunking.
       sendRecording()
       return
     }
 
-    // Фаза «обработка» — как в processChunked: страж на весь цикл, звук
-    // завершения, статус распознавания.
+    // "Processing" phase — as in processChunked: watchdog for the whole
+    // loop, finish sound, recognizing status.
     state = .transcribing
     cancelRecognition = false
     overlay.setProcessingPhase()
     overlay.setStatus(L10n.tr("overlay.recognizing"))
     sounds.playEnd()
 
-    // Синхронный останов: незакрытый уттеренс отдаётся колбэком ДО возврата
-    // stop() и уже стоит в liveExecutor первым в очереди финализации.
+    // Synchronous stop: the unclosed utterance is handed by the callback
+    // BEFORE stop() returns and stands first in liveExecutor's finalization
+    // queue.
     let samples = audio.stop()
     let duration = Double(samples.count) / 16000.0
     Logger.log(
       String(format: "live finalize (\(samples.count) samples, %.2f s)", duration), level: "info")
 
-    // Страж фазы «обработка»: незавершённые сегменты + «хвост» + финальный
-    // проход — каждый запрос до networkRequestTimeout (запас на все).
+    // "Processing" phase watchdog: unfinished segments + tail + final pass —
+    // each request up to networkRequestTimeout (margin for all).
     let requestCount = max(2, runState.segmentCount + 2)
     let liveMaxDuration = Double(requestCount) * Transcriber.networkRequestTimeout + 5
     processingSession += 1
@@ -1318,11 +1294,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     }
   }
 
-  /// Финализация живого цикла по принудительному стопу (лимит длительности
-  /// или автоостановке по тишине ~3 c). «Хвост» уже доставлен onSpeechSegment
-  /// ДО этого вызова (порядок в performForcedStop: tail → колбэк) и стоит
-  /// в liveExecutor первым; здесь — только страж и финальный проход по
-  /// переданным сэмплам (без audio.stop()).
+  /// Finalization of a live loop on a forced stop (duration limit or
+  /// auto-stop by silence ~3 s). The tail was already delivered by
+  /// onSpeechSegment BEFORE this call (order in performForcedStop: tail →
+  /// callback) and stands first in liveExecutor; here — only the guard and
+  /// the final pass over the passed samples (no audio.stop()).
   private func liveFinalizeFromSamples(_ samples: [Int16]) {
     guard let runState = liveRunState else {
       processChunked(samples)
@@ -1354,26 +1330,27 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     }
   }
 
-  /// Финальный проход живого цикла (всегда на liveExecutor, ПОСЛЕ «хвоста»
-  /// и всех сегментов — серийная очередь гарантирует порядок). «Один сегмент
-  /// без пауз» — единственный сегмент это «хвост» (покрывает запись до
-  /// конца) и ни один сегмент не сбоил: двойной STT-запрос не нужен (нечем
-  /// «полировать»). Иначе — статический helper ChunkedPipeline.finalize (тот
-  /// же путь, что и в offline-чанкинге): word-diff → замена одного диапазона.
+  /// Final pass of a live loop (always on liveExecutor, AFTER the tail and
+  /// all segments — the serial queue guarantees the order). "One segment
+  /// without pauses" — the only segment is the tail (covers the recording to
+  /// its end) and no segment failed: a double STT request is not needed
+  /// (nothing to "polish"). Otherwise — the static helper
+  /// ChunkedPipeline.finalize (the same path as in offline chunking):
+  /// word-diff → replace one range.
   // swiftlint:disable:next cyclomatic_complexity function_body_length
   private func finishLiveRun(samples: [Int16], session: Int, runState: LiveRunState) async {
-    // Пустая запись — без лишнего STT-запроса (недостижимо иначе, чем
-    // процесс, но симметрично offline-чанкингу).
+    // Empty recording — no extra STT request (reachable only in a contrived
+    // process, but symmetric to offline chunking).
     if runState.segmentCount == 0 {
-      // Полный сбой всех сегментов (STT недоступен: отключённая сеть /
-      // провайдер): пользователь реально говорил, но ни один сегмент не
-      // распознан. Это ошибка STT, а НЕ «пустая диктовка» — явная
-      // failTranscription с текстом последней ошибки (как согласовано
-      // с offline-чанкингом, ревью #112), а не маскирующий сбой «Пустой
-      // результат» (звук Funk).
+      // Full failure of all segments (STT unavailable: disconnected network /
+      // provider): the user actually spoke, but no segment was recognized.
+      // This is an STT error, NOT an "empty dictation" — an explicit
+      // failTranscription with the last error text (as agreed with offline
+      // chunking, review #112), not a masking "Empty result" failure
+      // (Funk sound).
       if runState.anySegmentFailed {
-        // Текст запоминается в catch handleLiveSegment; страховка на
-        // недостижимый случай — стандартное сообщение таймаута.
+        // Text is remembered in the catch of handleLiveSegment; fallback
+        // for the unreachable case — the standard timeout message.
         let message = runState.lastErrorText ?? Transcriber.sttTimeoutMessage
         DispatchQueue.main.async {
           guard self.processingSession == session, self.state == .transcribing else { return }
@@ -1391,8 +1368,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       return
     }
 
-    // Единственный сегмент + «хвост» покрывает запись до конца + не было
-    // сбоев — пропускаем финальный проход.
+    // Single segment + the tail covers the recording to its end + no
+    // failures — skip the final pass.
     // swiftformat:disable:next andOperator
     if runState.segmentCount == 1 && runState.tailDelivered && !runState.anySegmentFailed {
       let outcome = ChunkedPipeline.Outcome(
@@ -1410,9 +1387,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         samples: samples,
         insertedText: runState.insertedText,
         stt: { wav, filename, prompt in
-          // Роль final из [routing]: финальный проход по всей записи
-          // идёт провайдером роли; не задан — активный transcriber
-          // (ровно текущее поведение: без failover — роль выбрана явно).
+          // The final role from [routing]: the final pass over the whole
+          // recording goes to the role's provider; unset — the active
+          // transcriber (exactly the current behavior: no failover — the
+          // role is chosen explicitly).
           let transcriber = self.roleTranscriber(self.finalRoleProviderID) ?? self.transcriber
           let finalResult = try await transcriber.transcribe(
             wav: wav, filename: filename, prompt: prompt)
@@ -1456,28 +1434,30 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     }
   }
 
-  /// Вставка результата STT в активное приложение.
-  /// Пустой результат (нет ни одной буквы/цифры) вставлять нельзя: мусор не
-  /// появляется в тексте, вместо звука успеха — звук «пусто» (Funk), не чаще
-  /// раза в 3 с. Одиночное слово — валидный результат, вставляется.
-  /// Звук завершения играется ПОСЛЕ вставки (CGEvent), а не до неё.
+  /// Inserts the STT result into the active application.
+  /// An empty result (no letter/digit at all) must not be inserted: garbage
+  /// does not appear in the text; instead of the success sound — the
+  /// "empty" sound (Funk), not more often than once per 3 s. A single word
+  /// is a valid result and is inserted.
+  /// The completion sound plays AFTER the insertion (CGEvent), not before.
   private func completeInsertion(_ text: String) {
     if NanoDictateFlow.outcome(for: text) == .empty {
       handleEmptyResult()
       return
     }
 
-    // Ревью перед вставкой (review_before_insert = true): текст печатается
-    // в stdout, вставка только по Enter; Esc/другое — отмена. Под launchd
-    // (агент без терминала) ReviewGate.confirm вернула бы nil → молчаливая
-    // отмена ВСЕХ вставок — гейт пропускаем (текст вставляется как обычно).
+    // Review before insert (review_before_insert = true): the text is
+    // printed to stdout, insertion only on Enter; Esc/other — cancel. Under
+    // launchd (agent without a terminal) ReviewGate.confirm would return
+    // nil → silent cancel of ALL insertions — the gate is skipped (the text
+    // inserts as usual).
     if reviewBeforeInsert, hasInteractiveStdin {
       switch ReviewGate.confirm(text: text) {
       case .insert:
         break
       case .cancel:
-        // Вставки не было — латч синтетического Enter (Enter-останов)
-        // гасим: свежий Enter-останов ждать не должен зависнуть.
+        // No insertion happened — extinguish the synthetic-Enter latch
+        // (Enter-stop): a fresh Enter-stop must not hang waiting.
         enterSendLatch.cancel()
         overlay.resetPhase()
         overlay.setStatus(L10n.tr("overlay.cancelled"))
@@ -1492,33 +1472,34 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         level: "info")
     }
 
-    // Вставка текста выбранным способом (cgevent / clipboard) — единственная
-    // операция, которую можно откатить undo-ом ниже (lastInserted*).
+    // Text insertion by the chosen method (cgevent / clipboard) — the only
+    // operation that undo below can roll back (lastInserted*).
     Inserter.insert(text: text, method: insertMethod)
     lastInsertedText = text
     lastInsertedAt = CFAbsoluteTimeGetCurrent()
 
-    // UI+звук — только после гарантированной вставки.
+    // UI+sound — only after the guaranteed insertion.
     overlay.resetPhase()
     overlay.setStatus(L10n.tr("overlay.finishing"))
     sounds.playCompletionAfterInsert()
     hideAfter(0.8, reason: "insert done")
     state = .idle
     Logger.log("transcription inserted (\(text.count) chars)")
-    // Маркер для `nanodictate last` (последний распознанный текст); переводы
-    // строк заменяем, чтобы маркер остался одной строкой лога.
+    // Marker for `nanodictate last` (last recognized text); newlines are
+    // replaced so the marker stays a single log line.
     Logger.log("LAST_TEXT: \(text.replacingOccurrences(of: "\n", with: " "))")
-    // Латч Enter-останова: ровно один синтетический Enter после вставки.
-    // state уже .idle — к моменту постинга (~250 мс) предикат глотания
-    // вернёт false, синтетический Return дойдёт до приложения.
+    // Enter-stop latch: exactly one synthetic Enter after the insertion.
+    // state is already .idle — by posting time (~250 ms) the swallow
+    // predicate returns false, the synthetic Return reaches the app.
     postSyntheticReturnIfPending()
   }
 
-  /// Транскрайбер роли маршрутизации (segment/final). Возвращает nil, когда роль
-  /// не задана или указывает на активного провайдера — тогда вызывающий
-  /// использует активный transcriber (строго текущее поведение). Иначе —
-  /// прямой Transcriber провайдера роли из секции, БЕЗ failover-цепочки
-  /// (роли выбраны явно; автоfailover остаётся только для основного пути).
+  /// Transcriber of a routing role (segment/final). Returns nil when the role
+  /// is unset or points to the active provider — then the caller uses the
+  /// active transcriber (strictly the current behavior). Otherwise — a direct
+  /// Transcriber of the role's provider from its section, WITHOUT a failover
+  /// chain (roles are chosen explicitly; auto-failover stays only for the
+  /// main path).
   private func roleTranscriber(_ roleProviderID: String?) -> Transcriber? {
     guard
       let roleProviderID,
@@ -1530,15 +1511,16 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     return makeTranscriber(provider)
   }
 
-  /// Распознавание с автоматическим failover (auto_failover = true):
-  /// основной провайдер — self.transcriber (активный из конфига); при
-  /// TranscribeError пробуем кандидатов из failover-порядка. Ошибка, НЕ
-  /// относящаяся к провайдеру (микрофон и т.п.), failover не запускает.
-  /// Возвращает (результат, id failover-провайдера; nil — основной).
+  /// Recognition with automatic failover (auto_failover = true): the primary
+  /// provider is self.transcriber (the active one from the config); on a
+  /// TranscribeError the candidates from the failover order are tried. An
+  /// error NOT related to the provider (microphone etc.) does not start a
+  /// failover. Returns (result, id of the failover provider; nil — primary).
   private func transcribeAutomatically(wav: Data) async throws -> (TranscriptionResult, String?) {
-    // Роль final из [routing] (целая запись не-chunked): задана и отлична
-    // от активного — прямой провайдер роли БЕЗ failover-цепочки. Роль не
-    // задана/совпадает с активным — ровно текущее поведение ниже.
+    // The final role from [routing] (whole recording non-chunked): set and
+    // different from the active — the direct role provider WITHOUT a
+    // failover chain. Role unset/equal to active — exactly the current
+    // behavior below.
     if let transcriber = roleTranscriber(finalRoleProviderID) {
       let result = try await transcriber.transcribe(wav: wav)
       return (result, nil)
@@ -1559,14 +1541,14 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         level: "info"
       )
       retryProvider.lastFailedProviderID = activeProviderID
-      // Параллельный failover вынесен в NanoDictateCore (тестируемая
-      // функция): RetryProvider.parallelFailover — все кандидаты
-      // запускаются одним withTaskGroup (независимые STT-запросы),
-      // первый успех выигрывает и отменяет остальных (cancelAll);
-      // TranscribeError-ы накапливаются — побеждает последний
-      // завершившийся; не-TranscribeError прерывает цепочку, как в
-      // последовательном цикле (микрофон и т.п.). lastFailedProviderID
-      // стоит ДО группы и сбрасывается в retranscribe на успехе.
+      // The parallel failover is moved to NanoDictateCore (a testable
+      // function): RetryProvider.parallelFailover — all candidates run in
+      // one withTaskGroup (independent STT requests), the first success
+      // wins and cancels the rest (cancelAll); TranscribeErrors accumulate —
+      // the last one that finished wins; a non-TranscribeError breaks the
+      // chain like the sequential loop (microphone etc.).
+      // lastFailedProviderID is set BEFORE the group and reset on a success
+      // in retranscribe.
       return try await RetryProvider.parallelFailover(
         candidates: failoverCandidates
       ) { provider in
@@ -1578,9 +1560,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     }
   }
 
-  /// Обработка ручного retry из CLI (`nanodictate retry <provider>`).
-  /// Распознаёт последний WAV из памяти (если он есть) выбранным провайдером
-  /// и вставляет результат стандартным путём (ревью/метод вставки учитываются).
+  /// Handles a manual retry from the CLI (`nanodictate retry <provider>`).
+  /// Recognizes the last WAV from memory (if any) with the chosen provider
+  /// and inserts the result by the standard path (review/insertion method
+  /// are respected).
   private func handleRetryRequest(provider: AppConfig.Provider) {
     guard retryProvider.hasLastRecording else {
       Logger.log("retry request ignored: no recording in this session", level: "info")
@@ -1603,8 +1586,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         let networkText = OverlayErrorText.text(for: error)
         Logger.log("retry with provider '\(display)' failed: \(error)", level: "error")
         DispatchQueue.main.async {
-          // Показываем ошибку ТОЛЬКО если цикл диктовки не активен:
-          // иначе оверлей живого цикла («Записываю…»/«Распознаю…») затирается.
+          // Show the error ONLY if the dictation loop is not active:
+          // otherwise the live loop's overlay ("Recording…"/"Recognizing…")
+          // would be wiped.
           guard self.state == .idle else {
             Logger.log("retry error ignored: nanodictate cycle active", level: "info")
             return
@@ -1620,13 +1604,14 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     }
   }
 
-  /// Вставка результата ручного retry: общий путь completeInsertion
-  /// (ревью-гейт, способ вставки, маркер LAST_TEXT), но вне state-машины
-  /// записи — retry не трогает state и сессию обработки.
+  /// Insertion of a manual retry result: the common completeInsertion path
+  /// (review gate, insertion method, LAST_TEXT marker), but outside the
+  /// recording state machine — retry does not touch state and the
+  /// processing session.
   private func retryInsertion(_ text: String) {
-    // Ретрай вне state-машины цикла: если пользователь уже начал новый цикл
-    // (запись/распознавание), устаревший текст ретрая не вставляем и оверлей
-    // живого цикла не трогаем.
+    // Retry outside the loop's state machine: if the user already started a
+    // new loop (recording/recognition), the stale retry text is not inserted
+    // and the live loop's overlay is not touched.
     guard state == .idle else {
       Logger.log(
         "retry result dropped: nanodictate cycle active (state=\(String(describing: state)))",
@@ -1659,19 +1644,20 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     postSyntheticReturnIfPending()
   }
 
-  /// «Пустая» диктовка: STT вернул <2 слов (или тишину). Текст не вставляем,
-  /// звук успеха не играем. Отдельный звук Funk вместо Basso — пустая
-  /// диктовка это НЕ ошибка микрофона; cooldown пустых результатов отдельный.
+  /// "Empty" dictation: STT returned <2 words (or silence). The text is not
+  /// inserted, the success sound is not played. A separate Funk sound
+  /// instead of Basso — empty dictation is NOT a microphone error; a
+  /// separate cooldown for empty results.
   private func handleEmptyResult() {
-    // Вставки не было — латч синтетического Enter (Enter-останов) гасим:
-    // пустой результат не постит Enter.
+    // No insertion happened — extinguish the synthetic-Enter latch
+    // (Enter-stop): an empty result does not post Enter.
     enterSendLatch.cancel()
     if emptyResultCooldown.allow(at: CFAbsoluteTimeGetCurrent()) {
       sounds.playEmptyResult()
     } else if isDebug {
       Logger.log("empty-result sound suppressed (cooldown active)", level: "debug")
     }
-    // Свежая «вставка» не состоялась — undo-окно не открывается.
+    // A fresh "insertion" did not happen — the undo window does not open.
     lastInsertedText = nil
     lastInsertedAt = nil
     overlay.resetPhase()
@@ -1681,15 +1667,15 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     Logger.log("empty transcription result — not inserted", level: "info")
   }
 
-  /// Откат последней вставки двойным Alt в пределах undoMaxInterval.
-  /// Стираем ровно столько символов, сколько вставили (backspace — зеркало
-  /// к Inserter.insert), статус оверлея — «Отмена вставки», звук отката —
-  /// по конфигу (undo_sound_enabled). Может перезапустить оверлей, если панель
-  /// успела скрыться после «Завершаю…».
+  /// Rollback of the last insertion by double Alt within undoMaxInterval.
+  /// Deletes exactly as many characters as were inserted (backspace is a
+  /// mirror of Inserter.insert), overlay status — "Insertion undone", undo
+  /// sound — per config (undo_sound_enabled). May restart the overlay if the
+  /// panel managed to hide after "Finishing…".
   private func undoLastInsertion() {
     guard let text = lastInsertedText else {
-      // Вставки нет (например, окно истекло при отложенном прерывании) —
-      // закрываем undo-окно и уходим.
+      // No insertion (e.g. the window expired during a deferred interrupt) —
+      // close the undo window and leave.
       lastInsertedAt = nil
       lastInsertedText = nil
       return
@@ -1703,18 +1689,18 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     }
     lastInsertedText = nil
     lastInsertedAt = nil
-    // state уже .idle — следующий Alt+Alt начнёт новую запись.
+    // state is already .idle — the next Alt+Alt starts a new recording.
     hideAfter(0.8, reason: "insertion undone")
     Logger.log("insertion undone (\(text.count) chars)")
   }
 
-  /// Терминальная точка цикла при ошибке STT (сеть, HTTP, таймаут).
-  /// `isNetworkFailure == true` (нет интернета / таймаут STT) — дополнительно
-  /// играем системный звук ошибки (Basso), чтобы пользователь понял сбой
-  /// даже не глядя на оверлей.
+  /// Terminal point of the loop on an STT error (network, HTTP, timeout).
+  /// `isNetworkFailure == true` (no internet / STT timeout) — additionally
+  /// plays the system error sound (Basso) so the user understands the
+  /// failure even without looking at the overlay.
   private func failTranscription(_ message: String, isNetworkFailure: Bool) {
-    // Распознавание не удалось — синтетический Enter не постится,
-    // латч Enter-останова гасим.
+    // Recognition failed — the synthetic Enter is not posted, the
+    // Enter-stop latch is extinguished.
     enterSendLatch.cancel()
     if isNetworkFailure {
       sounds.playError()
@@ -1726,23 +1712,24 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     Logger.log("transcription failed: \(message)", level: "error")
   }
 
-  /// Esc: отмена текущей фазы. Ветки состояния специфичны только в первом шаге
-  /// (recording — остановить движок; transcribing — поставить токен отмены,
-  /// чтобы результат вернувшегося STT-запроса не вставлялся), далее общий
-  /// терминальный хвост: статус «Отменено», звук отмены (Ping, НЕ Basso — это
-  /// не ошибка), ровно один hide. Каждая терминальная точка планирует hide
-  /// ровно один раз.
+  /// Esc: cancels the current phase. The state branches differ only in the
+  /// first step (recording — stop the engine; transcribing — set the cancel
+  /// token so the result of a returning STT request is not inserted), then a
+  /// common terminal tail: "Cancelled" status, cancel sound (Ping, NOT Basso —
+  /// this is not an error), exactly one hide. Every terminal point schedules
+  /// hide exactly once.
   private func handleCancel() {
-    // Esc отменяет УЖЕ ЗАПЛАНИРОВАННЫЙ синтетический Enter: латч снят ещё
-    // в момент вставки (consume), пост висит в операционной очереди —
-    // отменяем его до любой ветки (включая .idle, где ранний return
-    // произошёл бы раньше терминального хвоста).
+    // Esc cancels an ALREADY SCHEDULED synthetic Enter: the latch was
+    // consumed at insertion time, the post hangs in the OS queue — cancel
+    // it before any branch (including .idle, where an early return would
+    // have happened before the terminal tail).
     scheduledEnterPoster.cancelScheduled()
     switch state {
     case .recording:
       audio.cancel()
-      // Аннулируем живой цикл: сегмент, распознаваемый в моменте на
-      // liveExecutor, не вставится (страж liveSession в handleLiveSegment).
+      // Invalidate the live loop: a segment being recognized on
+      // liveExecutor right now will not insert (the liveSession guard in
+      // handleLiveSegment).
       liveSession += 1
       liveRunState = nil
       Logger.log("record cancelled")
@@ -1752,9 +1739,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     case .idle:
       return
     }
-    // Спека: Esc гасит латч синтетического Enter — отменённая запись/
-    // распознавание не постит Enter. В .idle возвращаемся выше (латч в
-    // .idle не стоит — arm() только в .recording).
+    // Spec: Esc extinguishes the synthetic-Enter latch — a cancelled
+    // recording/recognition does not post Enter. In .idle we return above
+    // (the latch does not arm in .idle — arm() only in .recording).
     enterSendLatch.cancel()
     overlay.resetPhase()
     overlay.setStatus(L10n.tr("overlay.cancelled"))
@@ -1765,20 +1752,20 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
 
   // MARK: - Helpers
 
-  /// Стандартный ввод — терминал? ReviewGate читает stdin; под launchd (GUI-
-  /// агент без терминала) гейт не блокирует и не отменяет вставки (см.
-  /// completeInsertion/retryInsertion).
+  /// Is the standard input a terminal? ReviewGate reads stdin; under
+  /// launchd (a GUI agent without a terminal) the gate neither blocks nor
+  /// cancels insertions (see completeInsertion/retryInsertion).
   private var hasInteractiveStdin: Bool {
     isatty(STDIN_FILENO) == 1
   }
 
-  /// Единственная точка вызова hide() — терминальные события цикла
-  /// (mic denied, insert done, transcription failed, cancelled; лимит идёт
-  /// тем же путём через processSamples). Задержка оставляет на экране
-  /// финальный статус («Завершаю…»/«Отменено»). Решение о скрытии — чистая
-  /// логика OverlayLifecycle в NanoDictateCore: панель НЕ прячется, если
-  /// к моменту срабатывания запись уже начата заново (state != .idle) —
-  /// оверлей остаётся виден весь новый цикл.
+  /// The single call site of hide() — the loop's terminal events
+  /// (mic denied, insert done, transcription failed, cancelled; the limit
+  /// goes the same way through processSamples). The delay keeps the final
+  /// status ("Finishing…"/"Cancelled") on screen. The hiding decision is the
+  /// pure OverlayLifecycle logic in NanoDictateCore: the panel does NOT hide
+  /// if by the time the timer fires a recording has already started again
+  /// (state != .idle) — the overlay stays visible for the whole new loop.
   private func hideAfter(_ seconds: TimeInterval, reason: String) {
     if isDebug {
       Logger.log("overlay hide scheduled after \(seconds) s, reason=\(reason)", level: "debug")
@@ -1809,16 +1796,17 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
 
 // MARK: - Main
 
-/// Исключительный flock-лок синглтона: <tmp>/nanodictate-agent-<uid>.lock.
-/// fd живёт в глобальной переменной весь процесс — лок снимается только при
-/// завершении процесса. Второй инстанс (дубль launchd-старта) НЕ выходит из
-/// процесса: оба LaunchAgent держат KeepAlive=true, и чистый exit ушёл бы в
-/// бесконечный респавн. Вместо выхода — пассивное ожидание на главном run loop.
+/// Exclusive flock singleton lock: <tmp>/nanodictate-agent-<uid>.lock.
+/// The fd lives in a global variable for the whole process — the lock is
+/// released only when the process exits. A second instance (a duplicate
+/// launchd start) does NOT exit the process: both LaunchAgents hold
+/// KeepAlive=true, and a clean exit would go into an infinite respawn.
+/// Instead of exiting — passive waiting on the main run loop.
 var instanceLockFD: Int32 = -1
 
-/// Пытается занять singleton-лок. true — лок взят, сервисы можно стартовать;
-/// false — уже работает другой инстанс (залогировано), процесс должен
-/// простаивать, ничего не запуская.
+/// Tries to take the singleton lock. true — the lock is taken, services
+/// may start; false — another instance is already running (logged), the
+/// process must idle, starting nothing.
 @discardableResult
 func ensureSingleInstance() -> Bool {
   let lockPath = FileManager.default.temporaryDirectory
@@ -1849,11 +1837,13 @@ func ensureSingleInstance() -> Bool {
   return true
 }
 
-// Singleton-гейт — первый исполняемый код, ДО загрузки конфига и ДО любых
-// сервисов (HotkeyService, микрофон, STT, CGEvent-тап, observer'ы).
+// Singleton gate — the first executable code, BEFORE the config load and
+// before any services (HotkeyService, microphone, STT, CGEvent tap,
+// observers).
 guard ensureSingleInstance() else {
-  // Второй инстанс уже работает — пассивно ждём на главной dispatch queue.
-  // dispatchMain() не требует run loop source и никогда не возвращается.
+  // A second instance is already running — passively wait on the main
+  // dispatch queue. dispatchMain() needs no run loop source and never
+  // returns.
   dispatchMain()
 }
 
@@ -1865,19 +1855,19 @@ do {
   config = AppConfig.defaults
 }
 
-// UI-язык из конфига — ДО первого использования L10n.tr (статические
-// сообщения Transcriber.noInternetMessage/… резолвятся при первом доступе).
+// UI language from the config — BEFORE the first L10n.tr use (static
+// Transcriber.noInternetMessage/… messages resolve on first access).
 L10n.language = AppLanguage(rawValue: config.uiLanguage) ?? .en
 
 let app = NSApplication.shared
 let agent = Agent(config: config)
 
 do {
-  // Проверяет AXIsProcessTrusted(); если права нет — показывает понятное
-  // сообщение и опрашивает раз в 2 сек до выдачи права (автоподхват).
-  // Панель «Доступность» при отсутствии гранта открывается САМА при старте
-  // (rate-limit 10 минут, см. openAccessibilitySettingsIfDue); явное Alt+Alt
-  // нужно для повторного открытия при отзыве гранта на ходу.
+  // Checks AXIsProcessTrusted(); if the right is missing — shows a clear
+  // message and polls every 2 s until granted (auto-grab). The
+  // "Accessibility" panel opens ITSELF at start when the grant is missing
+  // (rate-limit 10 min, see openAccessibilitySettingsIfDue); an explicit
+  // Alt+Alt is needed to reopen it when the grant is revoked on the fly.
   try agent.startWithAccessibilityRequest()
 } catch {
   Logger.log("hotkey service failed to start: \(error.localizedDescription)", level: "error")
@@ -1888,7 +1878,7 @@ do {
   exit(1)
 }
 
-// Фоновый агент: без иконки в Dock и без меню-бара приложения.
+// Background agent: no Dock icon and no menu-bar app.
 NSApp.setActivationPolicy(.accessory)
 
 app.run()

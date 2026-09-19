@@ -3,57 +3,48 @@ import Foundation
 
 // MARK: - Координатор запроса доступа к микрофону (TCC)
 
-/// Запрос системного доступа к микрофону с тремя защитами от «просит разрешение
-/// → вылетает сообщение → зависает»:
-/// 1) повторный запрос, пока системный диалог уже висит, не открывается
-///    (`isInFlight`) — второй диалог не плодится;
-/// 2) сторож `timeout`: если колбэк `requestAccess` не пришёл (у фонового агента
-///    без бандла окно TCC может не отобразиться) — терминальный исход вместо
-///    вечного ожидания;
-/// 3) анти-шторм `MicRequestPolicy`: после N таймаутов в окне 6 ч новый запрос
-///    не открывается вовсе (серия диалогов клинит tccd и морозит систему) —
-///    вместо запроса клиент показывает инструкцию.
-///
-/// Сессионный токен (`session`) аннулирует устаревшие колбэки: сторож
-/// инкрементирует его СРАЗУ при срабатывании, поэтому поздний `granted`
-/// (диалог ответил уже после таймаута) не начинает запись из-под показанной
-/// ошибки и не сбрасывает штормовой счётчик. Смена токена делает то же самое
-/// для колбэка предыдущего запроса, когда пользователь нажал хоткей повторно.
-///
-/// Логики UI/логов здесь нет намеренно: модуль возвращает исход, клиент решает,
-/// что показать. Вынесен из Agent в Core, чтобы поведение сторожа при позднем
-/// granted покрывалось мини-XCTest (без аудио-железа и TCC).
+/// Microphone access request, guarded against ask → dialog → hang loop:
+/// 1) no second request while a dialog is up (isInFlight) — no duplicated dialog;
+/// 2) timeout watchdog: bundle-less background agent's TCC window may never
+///    show and callback may never come — terminal outcome instead of infinite wait;
+/// 3) MicRequestPolicy anti-storm: N timeouts in 6h stop new requests (dialog
+///    storm jams tccd, freezes system); client shows instructions instead.
+/// Session token (session) invalidates stale callbacks: watchdog bumps it
+/// immediately, so a late "granted" can't start recording under a shown error
+/// or reset the storm counter. Token change does same for previous request's
+/// callback when user pressed hotkey again.
+/// No UI/logging here deliberately: module returns outcome, client decides what
+/// to show. Moved from Agent to Core so late-granted watchdog behavior is
+/// XCTest-coverable (no audio hardware, no TCC).
 public final class MicAccessRequester {
-  /// Исход запроса — что клиент должен сделать.
+  /// Request outcome — what the client must do.
   public enum Outcome: Equatable {
-    /// Доступ есть (был выдан ранее или выдан сейчас) — можно начинать запись.
+    /// Access granted (now or earlier) — recording may start.
     case granted
-    /// Доступ запрещён/ограничен — запись невозможна, нужен «System Settings».
+    /// Denied/restricted — recording impossible, needs "System Settings".
     case denied
-    /// Колбэк запроса не пришёл за `timeout`; таймаут учтён в политике.
+    /// No callback within `timeout`; timeout counted in policy.
     case timedOut
-    /// Анти-шторм: запрос не открывался вовсе (исчерпан лимит таймаутов).
+    /// Anti-storm: no request opened (timeout limit exhausted).
     case suppressedByPolicy
   }
 
-  /// Текущий статус доступа (в проде — AVCaptureDevice.authorizationStatus).
+  /// Current access status (prod: AVCaptureDevice.authorizationStatus).
   public typealias StatusProvider = () -> AVAuthorizationStatus
-  /// Системный запрос доступа (в проде — AVCaptureDevice.requestAccess).
-  /// Колбэк вызывается на произвольной очереди и здесь же переводится на
-  /// главную.
+  /// System access request (prod: AVCaptureDevice.requestAccess).
+  /// Callback on arbitrary queue; forwarded to main here.
   public typealias RequestAccess = (@escaping (Bool) -> Void) -> Void
 
   private let status: StatusProvider
   private let requestAccess: RequestAccess
-  /// `var`, а не `let`: recordTimeout/recordGranted — мутирующие методы политики.
+  /// `var` not `let`: policy methods are mutating.
   private var policy: MicRequestPolicy
   private let timeout: TimeInterval
 
-  /// Сессионный токен запроса: инкрементируется при каждом запросе, при
-  /// срабатывании сторожа и при получении ответа — устаревшие колбэки
-  /// отбрасываются по расхождению токенов.
+  /// Session token: bumped on each request, watchdog fire, answer — stale
+  /// callbacks dropped by token mismatch.
   private var session = 0
-  /// Системный диалог уже висит: повторный вызов не открывает второй.
+  /// System dialog already up: repeat call opens no second.
   private var inFlight = false
 
   public init(
@@ -68,17 +59,16 @@ public final class MicAccessRequester {
     self.timeout = timeout
   }
 
-  /// Системный запрос доступа сейчас в полёте (диалог показан, ответа нет).
-  /// Вызывающий поток может отличить «запрос уже идёт» от «начали новый».
+  /// System access request currently in flight (dialog shown, no answer).
+  /// Caller distinguishes "already requesting" from "started new".
   public var isInFlight: Bool {
     inFlight
   }
 
-  /// Полный цикл «проверить статус → при необходимости запросить доступ →
-  /// дождаться ответа со сторожем». `completion` вызывается РОВНО ОДИН раз:
-  /// либо синхронно (статус уже известен — `granted`/`denied`), либо на главной
-  /// очереди (ответ системы / таймаут / сработавший анти-шторм).
-  /// Повторный вызов, пока ответа ещё нет, не даёт ни исхода, ни запроса.
+  /// Full cycle: check status → request if needed → wait for answer with
+  /// watchdog. `completion` called EXACTLY once: synchronously (status known —
+  /// granted/denied) or on main queue (answer / timeout / anti-storm).
+  /// Re-call while unanswered yields neither outcome nor request.
   public func requestIfNeeded(completion: @escaping (Outcome) -> Void) {
     switch status() {
     case .authorized:
@@ -96,23 +86,22 @@ public final class MicAccessRequester {
       let requestSession = session
 
       DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
-        // Сторож срабатывает, только пока запрос РЕАЛЬНО в полёте:
-        // ответ уже снял флаг и сменил токен — иначе сторож выстреливал
-        // бы посреди записи, со звуком ошибки и гашением оверлея.
+        // Watchdog fires only while request still in flight — an answer
+        // already cleared the flag, else it would fire mid-recording
+        // with error sound and overlay dismissal.
         // swiftformat:disable indent
-        // (индент guard-условий: swiftformat выравнивает продолжения на +6,
-        // SwiftLint Kodeco разрешает максимум +2 — выравниваем под SwiftLint)
+        // (guard-cond indent: swiftformat aligns +6, SwiftLint Kodeco caps +2 — follow SwiftLint)
         guard let self,
           self.session == requestSession,
           self.inFlight
         else { return }
         // swiftformat:enable indent
         self.inFlight = false
-        // Токен меняется ЗДЕСЬ: поздний granted (диалог ответил после
-        // таймаута) увидит расхождение и будет отброшен — запись не
-        // начнётся из-под уже показанной ошибки.
+        // Bump token here: late granted (dialog answered after timeout)
+        // sees mismatch and is dropped — recording won't start under a
+        // shown error.
         self.session += 1
-        // Таймаут — штормовой счётчик (окно 6 ч), см. MicRequestPolicy.
+        // Timeout → storm counter (6h window), see MicRequestPolicy.
         self.policy.recordTimeout(now: Date())
         completion(.timedOut)
       }
@@ -121,10 +110,10 @@ public final class MicAccessRequester {
         DispatchQueue.main.async {
           guard let self, self.session == requestSession else { return }
           self.inFlight = false
-          // Смена токена аннулирует запланированный сторож (no-op).
+          // Token change cancels scheduled watchdog (no-op).
           self.session += 1
           if granted {
-            // Ответ получен — штормовой счётчик сбрасывается.
+            // Answer received — reset storm counter.
             self.policy.recordGranted(now: Date())
             completion(.granted)
           } else {

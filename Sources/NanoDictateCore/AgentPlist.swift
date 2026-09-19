@@ -4,20 +4,20 @@ import Foundation
 
 // MARK: - Каноническая спецификация службы агента
 
-/// Один демон при любом способе установки (brew/port/dev-сборка): службу
-/// регистрирует САМ запущенный бинарь. Канонический plist один навсегда —
-/// ~/Library/LaunchAgents/com.nanodictate.agent.plist, Label com.nanodictate.agent.
-/// Упаковка (Homebrew/MacPorts) службу НЕ регистрирует.
+/// One daemon regardless of install method (brew/port/dev-build): the
+/// running binary itself registers the service. Canonical plist single
+/// forever — ~/Library/LaunchAgents/com.nanodictate.agent.plist, Label
+/// com.nanodictate.agent. Packaging (Homebrew/MacPorts) does NOT register.
 public enum AgentService {
-  /// Label службы (уникален в gui-домене launchd).
+  /// Service label (unique in launchd gui-domain).
   public static let name = "com.nanodictate.agent"
 
-  /// GUI-домен launchctl: "gui/<uid>".
+  /// launchctl GUI domain: "gui/<uid>".
   public static func guiDomain(uid: uid_t = getuid()) -> String {
     return "gui/\(uid)"
   }
 
-  /// Канонический путь plist (~/Library/LaunchAgents/com.nanodictate.agent.plist).
+  /// Canonical plist path (~/Library/LaunchAgents/com.nanodictate.agent.plist).
   public static func canonicalURL(
     homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
   ) -> URL {
@@ -30,20 +30,20 @@ public enum AgentService {
 
 // MARK: - Реальный путь бинаря
 
-/// realpath: путь со всеми симлинками resolved (URL.resolvingSymlinksInPath).
-/// Если файла нет (симлинк битый) — возвращает normalised абсолютный путь
-/// (resolvingSymlinksInPath идемпотентен на несуществующих путях).
+/// realpath: path with all symlinks resolved (URL.resolvingSymlinksInPath).
+/// Missing file (broken symlink) — normalized absolute path returned
+/// (resolvingSymlinksInPath idempotent on non-existent paths).
 public func agentRealPath(_ path: String) -> String {
   return URL(fileURLWithPath: path).resolvingSymlinksInPath().path
 }
 
-/// Путь к бинарю агента, под которым служба будет зарегистрирована:
-/// 1) env NANODICTATE_AGENT_BIN (явный оверрайд, например установленный
-///    в /opt/local/bin вариант; realpath завершает разрешение симлинков);
-/// 2) NanoDictateAgent рядом с РЕАЛЬНЫМ (после разрешения симлинков) путём
-///    вызванного CLI — переживает вызов через /opt/homebrew/bin или симлинк;
-/// 3) фолбэк — sibling-путь рядом с вызванным бинарём (брат в .build/debug).
-/// Возврат пустым невозможен: последняя ветка всегда даёт путь.
+/// Path agent binary the service registers under:
+/// 1) env NANODICTATE_AGENT_BIN (explicit override, e.g. installed
+///    /opt/local/bin variant; realpath finishes symlink resolution);
+/// 2) NanoDictateAgent next to REAL (post-symlink-resolution) path of the
+///    invoked CLI — survives invocation via /opt/homebrew/bin or symlink;
+/// 3) fallback — sibling next to invoked binary (brother in .build/debug).
+/// Empty return impossible: last branch always yields a path.
 public func resolveAgentBinaryPath(
   invokedBinary: String,
   environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -59,8 +59,8 @@ public func resolveAgentBinaryPath(
   if fileManager.fileExists(atPath: sibling.path) {
     return agentRealPath(sibling.path)
   }
-  // Фолбэк: брат рядом с исходным (не resolved) вызовом — покрывает dev-сборку,
-  // где argv[0] уже реальный путь.
+  // Fallback: sibling next to raw (unresolved) invocation — covers
+  // dev-build, argv[0] already a real path.
   let rawSibling = URL(fileURLWithPath: invokedBinary).deletingLastPathComponent()
     .appendingPathComponent(name)
   return agentRealPath(rawSibling.path)
@@ -69,7 +69,7 @@ public func resolveAgentBinaryPath(
 // MARK: - Генерация канонического plist
 
 public enum AgentPlist {
-  /// Экранирование XML-спецсимволов (пути могут содержать &, ", <, >).
+  /// XML-escaping (paths may contain &, ", <, >).
   public static func xmlEscape(_ value: String) -> String {
     return
       value
@@ -79,8 +79,8 @@ public enum AgentPlist {
       .replacingOccurrences(of: "\"", with: "&quot;")
   }
 
-  /// Инлайн-XML канонического plist: Label, ProgramArguments (бинарь + флаги),
-  /// RunAtLoad + KeepAlive (как в прежнем шаблоне), лог-пути в ~/Library/Logs.
+  /// Inline XML of canonical plist: Label, ProgramArguments (binary + flags),
+  /// RunAtLoad + KeepAlive (as prior template), log paths in ~/Library/Logs.
   public static func plistContent(
     agentBinary: String, flags: [String] = [], logPath: String
   ) -> String {
@@ -112,8 +112,8 @@ public enum AgentPlist {
       """
   }
 
-  /// ProgramArguments прежнего plist с диска (для сравнения путей при takeover).
-  /// nil — plist отсутствует, не читается или не содержит массива.
+  /// ProgramArguments of previous plist from disk (path compare at takeover).
+  /// nil — plist missing/unreadable/no array.
   public static func programArguments(
     fromPlistAt path: String,
     fileManager: FileManager = .default
@@ -132,7 +132,7 @@ public enum AgentPlist {
     return args
   }
 
-  /// Атомарная запись plist с правами 0600 (пишет makeLaunchAgentsDir).
+  /// Atomic plist write with 0600 perms (creates LaunchAgents dir).
   public static func writePlist(
     agentBinary: String,
     flags: [String] = [],
@@ -150,8 +150,8 @@ public enum AgentPlist {
 
 // MARK: - launchctl-обёртка (инъектируемая для тестов)
 
-/// Инъектируемый исполнитель launchctl: прод — runProcess, тесты — мок
-/// (launchd в тестах не вызывается).
+/// Injectable launchctl runner: prod — runProcess, tests — mock
+/// (launchd not called in tests).
 public final class Launchctl {
   // swiftlint:disable large_tuple
   public typealias Run = (String, [String]) -> (status: Int32, stdout: String, stderr: String)
@@ -167,12 +167,13 @@ public final class Launchctl {
     return "\(AgentService.guiDomain())/\(AgentService.name)"
   }
 
-  /// launchctl print — служба загружена (status == 0)?
+  /// launchctl print — service loaded (status == 0)?
   public func isLoaded(target: String) -> Bool {
     return run("/bin/launchctl", ["print", target]).status == 0
   }
 
-  /// launchctl bootout — выгрузка под target; обрыв допустим (службы нет).
+  /// launchctl bootout — unload under target; failure tolerable (service
+  /// absent).
   // swiftlint:disable large_tuple
   @discardableResult
   public func bootout(target: String) -> (status: Int32, stdout: String, stderr: String) {
@@ -180,7 +181,7 @@ public final class Launchctl {
   }
   // swiftlint:enable large_tuple
 
-  /// launchctl bootstrap gui/uid path — загрузка плана из plist.
+  /// launchctl bootstrap gui/uid path — load plan from plist.
   // swiftlint:disable large_tuple
   @discardableResult
   public func bootstrap(plistPath: String, domain: String) -> (
@@ -191,7 +192,7 @@ public final class Launchctl {
   }
   // swiftlint:enable large_tuple
 
-  /// launchctl load path — legacy-фолбэк (старые macOS / без gui-домена).
+  /// launchctl load path — legacy fallback (old macOS / no gui-domain).
   // swiftlint:disable large_tuple
   @discardableResult
   public func load(plistPath: String) -> (status: Int32, stdout: String, stderr: String) {
@@ -199,7 +200,7 @@ public final class Launchctl {
   }
   // swiftlint:enable large_tuple
 
-  /// launchctl kickstart -k target — рестарт загруженной службы.
+  /// launchctl kickstart -k target — restart loaded service.
   // swiftlint:disable large_tuple
   @discardableResult
   public func kickstart(target: String) -> (status: Int32, stdout: String, stderr: String) {
@@ -210,21 +211,21 @@ public final class Launchctl {
 
 // MARK: - Установщик службы
 
-/// Результат операции install/restart — поля для сообщений CLI и TCC-подсказки.
+/// install/restart result — fields for CLI messages and TCC hint.
 public struct AgentInstallResult: Equatable {
-  /// Служба активна после операции (bootstrap/load/kickstart).
+  /// Service active after op (bootstrap/load/kickstart).
   public var registered: Bool
-  /// Прежний процесс остановлен bootout (терпимо к «службы нет»).
+  /// Old process stopped by bootout (tolerates "no service").
   public var bootoutSucceeded: Bool
-  /// ProgramArguments изменился относительно прежнего plist → TCC-подсказка.
+  /// ProgramArguments changed vs previous plist → TCC hint.
   public var binaryPathChanged: Bool
-  /// stderr bootstrap (неуспех продолжал fallback-цепочку).
+  /// bootstrap stderr (failure continued fallback chain).
   public var bootstrapError: String
-  /// stderr load (fallback после bootstrap).
+  /// load stderr (fallback after bootstrap).
   public var loadError: String
-  /// stderr kickstart (restart без полной установки).
+  /// kickstart stderr (restart without full install).
   public var kickError: String
-  /// Ошибка записи plist (nil — plist записан).
+  /// plist write error (nil — plist written).
   public var writeError: String?
 
   public init(
@@ -246,11 +247,11 @@ public struct AgentInstallResult: Equatable {
   }
 }
 
-/// Регистрация/рестарт канонического plist. Manager-смена (другой бинарь,
-/// другой способ установки) = takeover: запись нового plist → bootout старого →
-/// bootstrap. Идемпотентно: повторный start уже загруженной службы меняет
-/// владельца и путь корректно (launchd держит в памяти план из plist НА
-/// МОМЕНТ bootstrap — перезапись файла сама по себе живой службы не трогает).
+/// Register/restart canonical plist. Manager change (different binary,
+/// different install method) = takeover: write new plist → bootout old →
+/// bootstrap. Idempotent: re-start of already-loaded service changes owner
+/// and path correctly (launchd keeps in-memory plan from plist AT
+/// bootstrap — rewriting the file alone does not touch the live service).
 public struct AgentInstaller {
   public var launchctl: Launchctl
   public var fileManager: FileManager
@@ -274,12 +275,12 @@ public struct AgentInstaller {
     return "\(AgentService.guiDomain())/\(AgentService.name)"
   }
 
-  /// Полная установка (start): запись канонического plist (realpath агента)
-  /// СНАЧАЛА → bootout (терпимо к отсутствию службы) → bootstrap, фолбэк load.
-  /// Порядок важен: при ошибке записи работающий агент НЕ останавливается —
-  /// bootout идёт только после успешной записи нового плана.
-  /// binaryPathChanged = true, если старый plist указывал на другой бинарь
-  /// (смена менеджера/обновление) — CLI печатает TCC-подсказку.
+  /// Full install (start): write canonical plist (agent realpath) FIRST →
+  /// bootout (tolerates absent service) → bootstrap, load fallback.
+  /// Order matters: write error — working agent NOT stopped, bootout runs
+  /// only after successful new-plan write.
+  /// binaryPathChanged = true — old plist pointed at different binary
+  /// (manager change/update) — CLI prints TCC hint.
   @discardableResult
   public func install(
     agentBinary: String, flags: [String] = [], logPath: String
@@ -315,12 +316,12 @@ public struct AgentInstaller {
     return result
   }
 
-  /// Рестарт (Provider-смена, config-опции, меню): канонический plist
-  /// перезаписывается, затем kickstart -k. ВАЖНО: kickstart перезапускает
-  /// службу по СТАРОМУ плану из памяти launchd (ProgramArguments не
-  /// перечитывается) — реальная смена пути бинаря применится через
-  /// фолбэк-установку в этом методе, полный `nanodictate start` или перелогин.
-  /// Если служба не загружена (kickstart упал) — полная установка.
+  /// Restart (provider change, config options, menu): canonical plist
+  /// rewritten, then kickstart -k. IMPORTANT: kickstart restarts service per
+  /// STALE in-memory launchd plan (ProgramArguments NOT re-read) — real
+  /// binary path change applies via fallback-install in this method, full
+  /// `nanodictate start`, or re-login. Service not loaded (kickstart failed)
+  /// — full install.
   @discardableResult
   public func restart(
     agentBinary: String, flags: [String] = [], logPath: String

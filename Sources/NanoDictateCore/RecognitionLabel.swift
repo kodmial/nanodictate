@@ -1,29 +1,18 @@
 import Foundation
 
-/// Маршрут STT-запроса: напрямую на провайдера или через реле (transport).
-///
-/// Расшифровывается из поля `transport` секции провайдера: пустое/отсутствующее
-/// значение — прямой запрос; заданное значение (например `cookie-relay`) —
-/// запрос идёт через этот маршрут. Значение берётся из ТОГО ЖЕ провайдера,
-/// из которого агент собирает Transcriber/RetryProvider, — ярлык обязан
-/// отражать фактический маршрут, а не строку из конфига.
+/// STT route: direct to provider or via relay (`transport` field; empty → direct).
+/// Uses same provider as Transcriber/RetryProvider — label reflects real route, not config string.
 public enum STTRoute: Equatable {
-  /// Прямой запрос к провайдеру.
   case direct
-  /// Запрос через реле с именем `relay` (например transport = "cookie-relay").
+  /// Via relay named `relay` (transport = "cookie-relay").
   case relay(String)
 }
 
-/// Построение ярлыка «через что идёт распознавание» для верхней части оверлея.
-///
-/// Чистая функция: принимает уже РАЗРЕШЁННЫЕ значения (провайдер, модель,
-/// маршрут), которые реально уходят в STT-запрос, и возвращает строку показа.
-/// Сам оверлей конфиг не читает — ярлык приходит от агента в сообщении старта
-/// диктовки (`OverlayController.setSTTLabel`).
+/// Builds "what recognizes" label for overlay top. Pure: takes resolved values
+/// actually sent to STT. Overlay never reads config — label arrives via `OverlayController.setSTTLabel`.
 public enum RecognitionLabel {
-  /// Маршрут запроса из значения `transport` (nil/пусто → прямой).
-  /// Значение канонизируется (legacy-алиасы старого конфига →
-  /// "cookie-relay") — ярлык не зависит от устаревших строк конфига.
+  /// Route from `transport` (nil/empty → direct). Value canonicalized
+  /// (legacy aliases → "cookie-relay") — label independent of stale config strings.
   public static func route(transport: String?) -> STTRoute {
     guard let transport else { return .direct }
     let trimmed = transport.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -31,14 +20,10 @@ public enum RecognitionLabel {
     return .relay(AppConfig.canonicalTransport(trimmed))
   }
 
-  /// id активного провайдера сессии: `active_provider`, если задан (после
-  /// резолва `AppConfig.parse` он гарантированно существует), иначе — первый
-  /// провайдер по порядку секций `[providers.X]`; nil — секций нет вовсе
-  /// (legacy-конфиг, провайдер не разрешился).
-  ///
-  /// Правило повторяет `resolveActiveProvider` в Config.swift: ярлык обязан
-  /// называть ТОТ ЖЕ провайдер, чьи поля (baseURL/model/apiKey/transport)
-  /// агент скопировал в effective-конфиг и из него собрал Transcriber.
+  /// Active session provider: `active_provider` if set (guaranteed after
+  /// `AppConfig.parse`), else first `[providers.X]` section; nil — no sections (legacy).
+  /// Mirrors `resolveActiveProvider` in Config.swift — label must name the
+  /// provider whose fields built the Transcriber.
   public static func activeProviderID(in config: AppConfig) -> String? {
     if !config.activeProvider.isEmpty {
       return config.activeProvider
@@ -46,10 +31,8 @@ public enum RecognitionLabel {
     return config.providers.first?.id
   }
 
-  /// Отображаемое имя провайдера для ярлыка: `name` из его секции
-  /// (`[providers.<id>]`), если задан и непуст; иначе — сам `id` (фоллбэк на
-  /// id не даёт «лживой» метки: имя всегда резолвится во что-то стабильное,
-  /// связанное с конфигом, а не молча пропадает).
+  /// Display name: section `name` if non-empty, else `id` — fallback keeps
+  /// label bound to config, never silently missing.
   public static func displayName(for providerID: String, in config: AppConfig) -> String {
     let configured = config.providers
       .first { $0.id == providerID }?
@@ -59,22 +42,14 @@ public enum RecognitionLabel {
     return configured
   }
 
-  /// Ярлык сессии диктовки из РАЗРЕШЁННОГО конфига — того же самого, из
-  /// которого агент в init собрал Transcriber и cookie-relay-слой (resolvedConfig).
-  /// Конфиг в момент показа оверлея НЕ перечитывается и ярлык не хардкодится:
-  /// единый источник истины — разрешённый провайдер сессии.
+  /// Session label from the resolved config that built Transcriber/relay —
+  /// not re-read at overlay time, not hardcoded; resolved provider is single source of truth.
   ///
-  /// - провайдер разрешён: `"<displayName> · <model>"` (через реле —
-  ///   `"<реле>→<displayName> · <model>"`), где displayName — `name` секции
-  ///   провайдера, либо id, если name пуст/отсутствует;
-  /// - модель пустая: только имя провайдера (с маршрутом, если он есть);
-  /// - провайдер не разрешился вовсе (legacy без секций): `"—"`.
-  ///
-  /// Подробнее про legacy (корневой `base_url`, секций `[providers.X]` нет):
-  /// метка ВСЕГДА `"—"` — это по спеке. Реальный сервер запроса (host из
-  /// корневого base_url) в ярлык НЕ выносится намеренно: legacy-конфиг не
-  /// несёт имени провайдера, а показывать голый host/модель без провайдера
-  /// запутывает. Оверлей остаётся без верхней строки — это ожидаемо.
+  /// - resolved: "<displayName> · <model>", via relay "<relay>→<displayName> · <model>";
+  /// - empty model: provider name only (route prefix if any);
+  /// - unresolved (legacy, no sections): "—".
+  /// - legacy (root base_url, no sections): always "—" per spec; real server host
+  ///   deliberately not shown — no provider name to display, bare host confuses.
   public static func forSession(_ config: AppConfig) -> String {
     guard let providerID = activeProviderID(in: config) else { return "—" }
     return build(
@@ -84,9 +59,7 @@ public enum RecognitionLabel {
     )
   }
 
-  /// Строка ярлыка для оверлея:
-  /// - прямой запрос: `"<провайдер> · <модель>"` (пустая модель — только провайдер);
-  /// - через реле: `"<реле>→<провайдер> · <модель>"` (пустое имя реле — без стрелки).
+  /// Label string: direct — "<provider> · <model>"; relay — "<relay>→<provider> · <model>".
   public static func build(provider: String, model: String, route: STTRoute = .direct) -> String {
     let labelParts = parts(provider: provider, model: model, route: route)
     return labelParts.model.isEmpty
@@ -95,14 +68,12 @@ public enum RecognitionLabel {
 
   // MARK: - Раздельные части ярлыка (шапка оверлея)
 
-  /// Раздельные части ярлыка для шапки оверлея: провайдер (с маршрутом) и модель.
-  /// Шапка рендерится из ДВУХ значений — иерархия «кто распознаёт», а не одной
-  /// склеенной строки: провайдер — крупнее/ярче, модель — приглушённая.
+  /// Overlay header parts; rendered as two values (provider bold, model dimmed),
+  /// not one glued string.
   public struct RecognitionLabelParts: Equatable {
-    /// Часть «через что идёт запрос»: `<реле>→<провайдер>` (relay) или просто
-    /// провайдер (direct); для legacy без секций — "—".
+    /// Route part: "<relay>→<provider>" (relay) or plain provider (direct); legacy — "—".
     public let provider: String
-    /// Модель, обрезанная по краям. Пустая — модель показывать не нужно.
+    /// Model to display; empty — hide.
     public let model: String
 
     public init(provider: String, model: String) {
@@ -111,10 +82,8 @@ public enum RecognitionLabel {
     }
   }
 
-  /// Части ярлыка из РАЗРЕШЁННЫХ значений — те же, что складываются в строку
-  /// `build`/`forSession`: провайдер через `providerPart` (маршрут-префикс),
-  /// модель обрезана. `build` строится отсюда, так что строка и части не могут
-  /// разойтись.
+  /// Parts from resolved values — same inputs as `build`/`forSession`; `build`
+  /// derives from here, so string and parts can't diverge.
   public static func parts(provider: String, model: String, route: STTRoute = .direct)
     -> RecognitionLabelParts
   {  // swiftlint:disable:this opening_brace
@@ -124,10 +93,8 @@ public enum RecognitionLabel {
     )
   }
 
-  /// Части ярлыка сессии из РАЗРЕШЁННОГО конфига — аналог `forSession`, но
-  /// раздельно: провайдер с маршрутом (displayName из конфига, фоллбэк на id)
-  /// и модель. Legacy без секций (провайдер не разрешился) → провайдер "—",
-  /// модель пустая (по спеке `forSession`).
+  /// Session parts like `forSession`, split: provider with route, model.
+  /// Legacy (not resolved) → provider "—", empty model.
   public static func sessionParts(_ config: AppConfig) -> RecognitionLabelParts {
     guard let providerID = activeProviderID(in: config) else {
       return RecognitionLabelParts(provider: "—", model: "")
@@ -139,11 +106,9 @@ public enum RecognitionLabel {
     )
   }
 
-  /// Разбор строки ярлыка сессии обратно на {provider, model} для раздельного
-  /// рендера шапки. Строка всегда построена как `"<provider> · <model>"`
-  /// (`build`/`forSession`); разделитель ищется с конца — поставщики и модели
-  /// не должны содержать " · " сами. Строка без разделителя (например legacy
-  /// "—") целиком уходит в provider, модель пустая.
+  /// Parse session label back into {provider, model}. Separator searched from
+  /// end — providers/models must not contain " · ". No separator (legacy "—") →
+  /// whole string as provider, empty model.
   public static func parts(fromLabel label: String) -> RecognitionLabelParts {
     let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
     guard let separator = trimmed.range(of: " · ", options: .backwards) else {
@@ -154,8 +119,7 @@ public enum RecognitionLabel {
     return RecognitionLabelParts(provider: provider, model: model)
   }
 
-  /// Часть «через что идёт запрос»: имя провайдера с префиксом маршрута
-  /// (`"<реле>→<провайдер>"` для relay, иначе — просто провайдер).
+  /// Provider name with route prefix: "<relay>→<provider>" (relay) or plain provider.
   public static func providerPart(provider: String, route: STTRoute) -> String {
     switch route {
     case .direct:

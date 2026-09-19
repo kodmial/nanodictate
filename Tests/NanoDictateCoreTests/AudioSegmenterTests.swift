@@ -3,12 +3,12 @@ import Foundation
 
 // MARK: - Тесты VAD-сегментации (AudioSegmenter)
 //
-// Синтетические RMS-таймлайны (окно = 1 с) и сэмплы. Никакой сети и I/O.
+// Synthetic RMS timelines and samples; no network or I/O.
 
 final class AudioSegmenterTests: XCTestCase {
 
-    private let speech: Float = 0.05   // выше порога тишины
-    private let silence: Float = 0.001 // ниже порога тишины
+    private let speech: Float = 0.05   // above silence threshold
+    private let silence: Float = 0.001 // below silence threshold
 
     private func cfg(
         pause: TimeInterval = 1.0,
@@ -35,7 +35,7 @@ final class AudioSegmenterTests: XCTestCase {
     }
 
     @objc func testShortSegmentIsMerged() {
-        // Пауза после первого слова есть, но сегмент короче minSegment — не режем.
+        // Pause exists but segment < minSegment — no split.
         let rms: [Float] = [speech, silence, speech, speech, speech]
         let ranges = AudioSegmenter.splitRanges(
             rms: rms, windowDuration: 1.0, config: cfg(min: 3.0)
@@ -44,7 +44,7 @@ final class AudioSegmenterTests: XCTestCase {
     }
 
     @objc func testHardMaxBoundary() {
-        // Непрерывная речь 50 окон; maxSegment = 10 c → пять сегментов по 10.
+        // 50 speech windows, maxSegment 10s → five segments.
         let rms = Array(repeating: speech, count: 50)
         let ranges = AudioSegmenter.splitRanges(
             rms: rms, windowDuration: 1.0, config: cfg(min: 1.0, max: 10.0)
@@ -53,7 +53,7 @@ final class AudioSegmenterTests: XCTestCase {
     }
 
     @objc func testPauseShorterThanRequiredDoesNotSplit() {
-        // pauseDuration = 2 c, пауза всего 1 окно — границы нет.
+        // Pause of 1 window < pauseDuration 2s — no split.
         let rms: [Float] = [speech, speech, silence, speech, speech, speech]
         let ranges = AudioSegmenter.splitRanges(
             rms: rms, windowDuration: 1.0, config: cfg(pause: 2.0, min: 1.0)
@@ -76,7 +76,6 @@ final class AudioSegmenterTests: XCTestCase {
 
     // MARK: - Сэмплы (16 кГц) + оверлэп
 
-    /// Синтез записи: блоки (амплитуда синуса, секунды) подряд.
     private func makeSamples(_ blocks: [(amplitude: Float, seconds: Double)], sampleRate: Int = 16000) -> [Int16] {
         var out: [Int16] = []
         for block in blocks {
@@ -91,8 +90,7 @@ final class AudioSegmenterTests: XCTestCase {
     }
 
     @objc func testSamplesOverlapPrependToNextSegment() {
-        // Речь 2 с, пауза 1.5 с, речь 2 с → два сегмента; к началу второго
-        // приклеена последняя секунда первого (оверлэп).
+        // Speech 2s, pause 1.5s, speech 2s → 2 segments, 1s overlap prepended.
         let samples = makeSamples([
             (amplitude: 0.1, seconds: 2.0),
             (amplitude: 0.0, seconds: 1.5),
@@ -109,18 +107,17 @@ final class AudioSegmenterTests: XCTestCase {
         let first = segments[0]
         XCTAssertEqual(first.start, 0)
         let firstEnd = Int((first.end * 16000).rounded())
-        XCTAssertEqual(first.samples.count, firstEnd) // без оверлэпа у первого
+        XCTAssertEqual(first.samples.count, firstEnd) // no overlap on first segment
 
         let second = segments[1]
         let bodyStart = Int((second.start * 16000).rounded())
         let bodyEnd = Int((second.end * 16000).rounded())
-        XCTAssertEqual(second.samples.count, bodyEnd - bodyStart + 16000) // тело + 1 c оверлэпа
-        // Оверлэп — хвост ТЕЛА предыдущего сегмента (речь), а не тишина паузы:
+        XCTAssertEqual(second.samples.count, bodyEnd - bodyStart + 16000) // body + 1s overlap
+        // Overlap is tail of previous body (speech), not pause silence.
         XCTAssertEqual(
             Array(second.samples[0..<16000]),
             Array(samples[(firstEnd - 16000)..<firstEnd])
         )
-        // Дополнительно: в оверлэпе должна быть речь (ненулевая амплитуда).
         XCTAssertTrue(second.samples[0..<16000].contains { abs($0) > 0 })
     }
 
@@ -133,8 +130,7 @@ final class AudioSegmenterTests: XCTestCase {
     // MARK: - F4: запись обрывается посреди паузы
 
     @objc func testRecordingCutsMidPause() {
-        // Речь 2 с → тишина 0.7 с (< minSegment для паузовой границы, которую
-        // addBreak может установить), запись обрывается. Ожидаем один сегмент.
+        // Speech 2s, silence 0.7s (< minSegment), recording cut → one segment.
         let rms: [Float] = [speech, speech, silence]
         let ranges = AudioSegmenter.splitRanges(
             rms: rms, windowDuration: 1.0, config: cfg(pause: 1.0, min: 1.0)

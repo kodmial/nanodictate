@@ -1,8 +1,8 @@
 import Foundation
 
-/// Кодирование PCM Int16 сэмплов в WAV (RIFF) формат.
+/// Encode PCM Int16 samples to WAV (RIFF) format.
 public enum WAVEncoder {
-  /// Кодирует массив Int16 сэмплов в WAV-файл (mono, 16 бит, указанный sampleRate).
+  /// Encode Int16 samples to WAV (mono, 16-bit, given sampleRate).
   public static func encode(samples: [Int16], sampleRate: Int = 16000) -> Data {
     let numChannels: Int16 = 1
     let bitsPerSample: Int16 = 16
@@ -33,10 +33,8 @@ public enum WAVEncoder {
     // data sub-chunk
     data.append(contentsOf: "data".utf8)
     data.append(contentsOf: withUnsafeBytes(of: dataSize.littleEndian) { Array($0) })
-    // Резервная ёмкость уже выделена (44 + samples.count * 2): bulk-append
-    // сырых байт вместо per-sample append — в разы быстрее на больших чанках
-    // (30 c @16 кГц = 480 000 сэмплов = 960 КБ; per-sample append аллоцировал
-    // временный Array на каждый сэмпл). Малая endian — native на всех Mac.
+    // Pre-reserved capacity (44 + n*2): bulk append, no per-sample temp arrays.
+    // Little-endian native on all Macs.
     if !samples.isEmpty {
       samples.withUnsafeBytes { raw in
         data.append(contentsOf: raw)

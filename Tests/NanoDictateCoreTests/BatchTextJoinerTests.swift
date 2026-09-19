@@ -31,7 +31,7 @@ final class BatchTextJoinerTests: XCTestCase {
     }
 
     @objc func testBoundaryLargerThanShortest() {
-        // Совпадение не может превышать длину меньшей стороны.
+        // Match cannot exceed the shorter side's length.
         XCTAssertEqual(BatchTextJoiner.boundaryDropCount(previous: "a", next: "a b c"), 1)
     }
 
@@ -44,7 +44,6 @@ final class BatchTextJoinerTests: XCTestCase {
     }
 
     @objc func testJoinSingleChainFullOverlap() {
-        // Следующий чанк целиком — хвост предыдущего: ничего нового не добавляется.
         XCTAssertEqual(BatchTextJoiner.join(["apple banana", "banana"]), "apple banana")
     }
 
@@ -66,10 +65,9 @@ final class BatchTextJoinerTests: XCTestCase {
     }
 
     @objc func testJoinPunctuationInsideWord() {
-        // Пунктуация внутри слова сравнивается как есть (как WordDiff.words):
-        // одинаковые слова с одинаковой пунктуацией — совпадение.
+        // Punctuation compared verbatim (like WordDiff.words): same punctuation → match.
         XCTAssertEqual(BatchTextJoiner.boundaryDropCount(previous: "мир, мир,", next: "мир, мир, снова"), 2)
-        // Разная пунктуация у «того же» слова — совпадения нет (без слепой нормализации).
+        // Different punctuation, same word → no match (no blind normalization).
         XCTAssertEqual(BatchTextJoiner.boundaryDropCount(previous: "мир. мир.", next: "мир, мир, снова"), 0)
     }
 

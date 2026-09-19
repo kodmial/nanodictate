@@ -3,9 +3,8 @@ import Foundation
 
 // MARK: - STTAdapterTests
 //
-// Без сети: проверяется только ПОСТРОЕНИЕ запроса (url, заголовки, тело,
-// contentType, transcriptPath) и парсинг текста ответа
-// (extractText + multipartBody байт-в-байт).
+// No network: request building (url/headers/body/contentType/transcriptPath)
+// and response text parsing (extractText, byte-exact multipartBody).
 
 final class STTAdapterTests: XCTestCase {
 
@@ -19,8 +18,7 @@ final class STTAdapterTests: XCTestCase {
         XCTAssertTrue(known.contains("groq"))
         XCTAssertTrue(known.contains("cloudflare"))
         XCTAssertFalse(known.contains("custom"))
-        // Мёртвые адаптеры снесены: deepgram/giga-chat/relay не числятся в
-        // справочнике (защита от регрессии — fallback в openAICompatible).
+        // Removed adapters must stay gone — fallback would hide a regression.
         XCTAssertFalse(known.contains("deepgram"))
         XCTAssertFalse(known.contains("giga-chat"))
         XCTAssertFalse(known.contains("relay"))
@@ -32,7 +30,7 @@ final class STTAdapterTests: XCTestCase {
         XCTAssertEqual(STTAdapterID.from("groq"), .groq)
         XCTAssertEqual(STTAdapterID.from("cloudflare"), .cloudflare)
         XCTAssertEqual(STTAdapterID.from("whatever"), .openAICompatible)
-        // Живые selfhosted-провайдеры (GigaAM и т.п.) — неизвестный id → openAICompatible.
+        // Unknown id — selfhosted providers fall back to openAICompatible.
         XCTAssertEqual(STTAdapterID.from("gigaam"), .openAICompatible)
         XCTAssertEqual(STTAdapterID.from("selfhosted"), .openAICompatible)
     }
@@ -62,10 +60,9 @@ final class STTAdapterTests: XCTestCase {
         XCTAssertEqual(ProviderRequestBuilder.resolveBaseURL("https://my.api/v1", for: "groq"), "https://my.api/v1")
         XCTAssertEqual(ProviderRequestBuilder.resolveModel("", for: "openai"), "whisper-1")
         XCTAssertEqual(ProviderRequestBuilder.resolveModel("my-model", for: "groq"), "my-model")
-        // Cloudflare: дефолта нет — пустая модель остаётся пустой (модель в URL).
+        // Cloudflare has no default — model lives in the URL.
         XCTAssertEqual(ProviderRequestBuilder.resolveModel("", for: "cloudflare"), "")
-        // gigaam/selfhosted (openAICompatible): пустая base_url НЕ резолвится в
-        // локальный дефолт — никакой личный endpoint не подставляется.
+        // openAICompatible: empty base_url never falls back to a local endpoint.
         XCTAssertEqual(ProviderRequestBuilder.resolveBaseURL("", for: "gigaam"), "")
         XCTAssertEqual(ProviderRequestBuilder.resolveBaseURL("", for: "selfhosted"), "")
     }
@@ -104,7 +101,7 @@ final class STTAdapterTests: XCTestCase {
             return
         }
         let text = String(data: data, encoding: .utf8)!
-        // Фикс HTTP 400: Groq просит verbose_json, но БЕЗ timestamp_granularities[].
+        // HTTP 400 fix: Groq wants verbose_json, without timestamp_granularities[].
         XCTAssertTrue(text.contains("name=\"response_format\"\r\n\r\nverbose_json\r\n"),
                       "verbose_json запрашивается (Groq поддерживает)")
         XCTAssertFalse(text.contains("timestamp_granularities"),
@@ -116,8 +113,7 @@ final class STTAdapterTests: XCTestCase {
     // MARK: - Не задан language → языковой параметр в запрос не попадает
 
     @objc func testUnsetLanguageOmitsLanguageParam() {
-        // Путь, которым ходит живой агент: конфиг без language → plan(groq)
-        // с пустым языком → в multipart нет field language (авто-детект).
+        // Live agent path: config without language → Whisper auto-detects.
         let spec = ProviderRequestBuilder.plan(
             adapterID: "groq", baseURL: "", model: "", apiKey: "sk-groq",
             language: "", wav: wav)
@@ -131,7 +127,6 @@ final class STTAdapterTests: XCTestCase {
     }
 
     @objc func testExplicitLanguageIsForwarded() {
-        // Явный language = "ru" в конфиге форвардится в запрос как раньше.
         let spec = ProviderRequestBuilder.plan(
             adapterID: "groq", baseURL: "", model: "", apiKey: "sk-groq",
             language: "ru", wav: wav)
@@ -147,10 +142,8 @@ final class STTAdapterTests: XCTestCase {
     // MARK: - Selfhosted (gigaam / selfhosted → openAICompatible)
 
     @objc func testGigaAMPlanEndToEnd() {
-        // Живой конфиг GigaAM: кастомный base_url + модель gigaam-v3.
-        // Неизвестный id "gigaam" → openAICompatible → multipart + Bearer,
-        // verbose_json + timestamp_granularities[]=word (word-таймстампы),
-        // language форвардится. Дополнительных шагов авторизации не планируется.
+        // Live GigaAM: unknown id → openAICompatible multipart with word
+        // timestamps, language forwarded, no extra auth steps.
         let url = "https://example.com/projects/proj/openai/v1/audio/transcriptions"
         let spec = ProviderRequestBuilder.plan(
             adapterID: "gigaam", baseURL: url, model: "gigaam-v3", apiKey: "gigaam-key",
@@ -175,9 +168,7 @@ final class STTAdapterTests: XCTestCase {
     }
 
     @objc func testSelfhostedPlanWithoutKey() {
-        // Самописный selfhosted-провайдер без api_key: Authorization остаётся
-        // "Bearer " (пустой токен), base_url как есть. Пустая base_url НЕ
-        // резолвится в локальный 8080-дефолт — url nil (нет запроса).
+        // No api_key → "Bearer " (empty token); no base_url default → url nil.
         let spec = ProviderRequestBuilder.plan(
             adapterID: "selfhosted", baseURL: "https://stt.example.net/v1", model: "gigaam-v3",
             apiKey: "", language: "ru", wav: wav)
@@ -224,8 +215,7 @@ final class STTAdapterTests: XCTestCase {
     }
 
     @objc func testCloudflareRequiresExplicitBaseURL() {
-        // Дефолтного base_url нет: пустой → url nil (модель зашита в URL,
-        // провайдер обязан задать личный endpoint).
+        // No default base URL — provider must set its own endpoint.
         let spec = ProviderRequestBuilder.plan(
             adapterID: "cloudflare", baseURL: "", model: "", apiKey: "k",
             language: "ru", wav: wav)
@@ -270,11 +260,7 @@ final class STTAdapterTests: XCTestCase {
     }
 
     @objc func testMultipartBodyAppendsStableFieldsBeforeClosing() {
-        // Полный набор stable-полей (гейтинг уже прошёл — здесь только факт
-        // сборки): порядок строго prompt < temperature < vad_filter <
-        // no_speech_threshold < compression_ratio_threshold < logprob_threshold
-        // < закрывающий boundary. Числа — в локале-независимом виде
-        // (numberString: «0», «true», «0.6», «2.4», «-1»).
+        // Stable fields after prompt in fixed order; numbers locale-independent.
         let boundary = "Boundary-TEST"
         let stable = BatchStableMultipartFields(
             temperature: 0,
@@ -334,7 +320,7 @@ final class STTAdapterTests: XCTestCase {
     }
 
     @objc func testExtractTextCloudflarePath() throws {
-        // Cloudflare Workers AI: {"result":{"text":…}} — ходим по transcriptPath.
+        // Cloudflare wraps text under result.text — walk transcriptPath.
         let body = Data(#"{"result":{"text":"текст из cloudflare"}}"#.utf8)
         let path = ["result", "text"]
         let text = try ProviderRequestBuilder.extractText(from: body, path: path)
@@ -353,7 +339,6 @@ final class STTAdapterTests: XCTestCase {
 
     // MARK: - Word-таймстампы (verbose_json / cloudflare words)
 
-    /// openai план: multipart просит verbose_json + timestamp_granularities[]=word.
     @objc func testOpenAIPlanRequestsVerboseJSON() {
         let spec = ProviderRequestBuilder.plan(
             adapterID: "openai", baseURL: "", model: "", apiKey: "sk-openai",
@@ -366,7 +351,7 @@ final class STTAdapterTests: XCTestCase {
         XCTAssertTrue(text.contains("name=\"response_format\"\r\n\r\nverbose_json\r\n"),
                       "verbose_json даёт word-таймстампы")
         XCTAssertTrue(text.contains("name=\"timestamp_granularities[]\"\r\n\r\nword\r\n"))
-        // Поля идут ПОСЛЕ prompt, перед закрывающим boundary (граница в конце).
+        // Fields sit between prompt and the closing boundary.
         let formatPos = text.range(of: "response_format")!.lowerBound
         let granPos = text.range(of: "timestamp_granularities[]")!.lowerBound
         XCTAssertTrue(formatPos < granPos)
@@ -374,7 +359,6 @@ final class STTAdapterTests: XCTestCase {
         XCTAssertTrue(granPos < closingPos, "закрывающий boundary после полей таймстампов")
     }
 
-    /// multipartBody напрямую: явный emission response_format + granularities[].
     @objc func testMultipartBodyEmitsTimestampFields() {
         let boundary = "Boundary-TEST"
         let body = ProviderRequestBuilder.multipartBody(
@@ -386,7 +370,7 @@ final class STTAdapterTests: XCTestCase {
         XCTAssertTrue(text.hasSuffix("--Boundary-TEST--\r\n"))
     }
 
-    /// OpenAI-ответ: words[] на верхнем уровне, у каждого слова — word/start/end.
+    /// OpenAI response: top-level words[] with word/start/end.
     @objc func testExtractWordsOpenAIFlat() {
         let body = Data(#"{"text":"один два","words":[{"word":"один","start":0.1,"end":0.5},{"word":"два","start":0.5,"end":1.0}]}"#.utf8)
         let words = ProviderRequestBuilder.extractWords(from: body, path: nil)
@@ -398,9 +382,7 @@ final class STTAdapterTests: XCTestCase {
         XCTAssertEqual(words[1].end, 1.0, accuracy: 0.0001)
     }
 
-    /// Cloudflare-ответ: слова под transcriptPath-путем (путь без последнего
-    /// сегмента ["result"] → ключ "words"); слово — word с fallback на
-    /// punctuated_word.
+    /// Cloudflare: words under parent path; word falls back to punctuated_word.
     @objc func testExtractWordsCloudflarePath() {
         let body = Data(#"{"result":{"words":[{"word":"один","start":0.0,"end":0.4},{"punctuated_word":"два.","start":0.5,"end":0.9}]}}"#.utf8)
         let path = ["result", "text"]
@@ -410,9 +392,9 @@ final class STTAdapterTests: XCTestCase {
         XCTAssertEqual(words[1].word, "два.", "fallback на punctuated_word")
     }
 
-    /// Битые/частичные записи пропускаются; битый JSON и отсутствующие слова — [].
+    /// Broken entries skipped; bad JSON and absent words → empty list.
     @objc func testExtractWordsSkippedAndBroken() {
-        // У «б» нет end — запись отбрасывается.
+        // "б" lacks end — entry dropped.
         let partial = Data(#"{"words":[{"word":"а","start":0.1,"end":0.2},{"word":"б","start":0.3}]}"#.utf8)
         XCTAssertEqual(ProviderRequestBuilder.extractWords(from: partial, path: nil).map { $0.word }, ["а"])
 
@@ -420,10 +402,9 @@ final class STTAdapterTests: XCTestCase {
                       "битый JSON → пустой список")
         XCTAssertTrue(ProviderRequestBuilder.extractWords(from: Data(), path: nil).isEmpty,
                       "пустое тело → пустой список")
-        // words нет вовсе.
         let noWords = Data(#"{"text":"просто текст"}"#.utf8)
         XCTAssertTrue(ProviderRequestBuilder.extractWords(from: noWords, path: nil).isEmpty)
-        // Cloudflare без words в result.
+        // Cloudflare: no words in result.
         let cf = Data(#"{"result":{"text":"т"}}"#.utf8)
         let path = ["result", "text"]
         XCTAssertTrue(ProviderRequestBuilder.extractWords(from: cf, path: path).isEmpty)

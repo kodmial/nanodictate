@@ -1,11 +1,10 @@
 import Foundation
 @testable import NanoDictateCore
 
-/// Тесты канонической регистрации службы (AgentPlist + Launchctl +
-/// AgentInstaller): «один демон при любом способе установки» — бинарь сам
-/// пишет ~/Library/LaunchAgents/com.nanodictate.agent.plist с realpath агента,
-/// takeover при смене менеджера, TCC-подсказка при смене пути. launchctl
-/// замокан (моковый run) — launchd в тестах не вызывается.
+/// Canonical service registration (AgentPlist + Launchctl + AgentInstaller):
+/// one daemon regardless of install path. Binary writes the LaunchAgents plist
+/// with agent realpath; takeover on manager change, TCC hint on path change.
+/// launchctl is mocked — launchd never invoked in tests.
 final class AgentPlistTests: XCTestCase {
 
   // MARK: - Helpers
@@ -44,7 +43,7 @@ final class AgentPlistTests: XCTestCase {
     let url = AgentService.canonicalURL(homeDirectory: home)
     XCTAssertEqual(
       url.path, "/Users/test/Library/LaunchAgents/com.nanodictate.agent.plist")
-    // Единственный канон: путь тот же независимо от способа установки.
+    // Single canonical path regardless of install method.
     XCTAssertEqual(
       AgentService.canonicalURL(homeDirectory: URL(fileURLWithPath: "/Users/other")).path
         .hasSuffix("/Library/LaunchAgents/com.nanodictate.agent.plist"),
@@ -66,7 +65,7 @@ final class AgentPlistTests: XCTestCase {
     try makeSymlink(at: link, to: target)
 
     XCTAssertEqual(agentRealPath(link.path), target.path)
-    XCTAssertEqual(agentRealPath(target.path), target.path)  // без симлинка — без изменений
+    XCTAssertEqual(agentRealPath(target.path), target.path)
   }
 
   @objc func testRealPathNoFileStillNormalizes() {
@@ -83,7 +82,7 @@ final class AgentPlistTests: XCTestCase {
     try makeFile(target)
     let link = dir.appendingPathComponent("linkedAgent")
     try makeSymlink(at: link, to: target)
-    // NANODICTATE_AGENT_BIN разрешается до реального пути (share/opt/local).
+    // NANODICTATE_AGENT_BIN resolves to real path (share/opt/local).
     let resolved = resolveAgentBinaryPath(
       invokedBinary: "/usr/local/bin/nanodictate",
       environment: ["NANODICTATE_AGENT_BIN": link.path])
@@ -99,7 +98,7 @@ final class AgentPlistTests: XCTestCase {
     let agent = binDir.appendingPathComponent("NanoDictateAgent")
     try makeFile(cli)
     try makeFile(agent)
-    // Вызов через симлинк (brew/port): sibling ищется у REALPATH вызванного.
+    // Invoked via symlink (brew/port): sibling sought beside realpath of invoked.
     let linkDir = dir.appendingPathComponent("links")
     try FileManager.default.createDirectory(at: linkDir, withIntermediateDirectories: true)
     let link = linkDir.appendingPathComponent("nanodictate")
@@ -110,7 +109,7 @@ final class AgentPlistTests: XCTestCase {
   }
 
   @objc func testResolveWithoutSiblingFallsBackToSiblingPath() {
-    // Dev-сборка: бинаря рядом может не быть — фолбэк не nil, путь рядом с CLI.
+    // Dev build lacks sibling; fallback returns path beside CLI, never nil.
     let resolved = resolveAgentBinaryPath(
       invokedBinary: "/tmp/x/nanodictate", environment: [:])
     XCTAssertEqual(resolved, "/tmp/x/NanoDictateAgent")
@@ -154,14 +153,14 @@ final class AgentPlistTests: XCTestCase {
   @objc func testPlistContentEscapesXmlSpecials() throws {
     let binary = "/tmp/agent & co<Nano>Dictate\"Agent"
     let content = AgentPlist.plistContent(agentBinary: binary, logPath: "/tmp/l.log")
-    XCTAssertFalse(content.contains("& co<"))  // сырые спецсимволы не проходят
+    XCTAssertFalse(content.contains("& co<"))  // raw specials must not pass
     XCTAssertTrue(content.contains("&amp; co&lt;"))
     XCTAssertTrue(content.contains("&gt;"))  // ">" → &gt;
     XCTAssertTrue(content.contains("&quot;"))  // "\"" → &quot;
     XCTAssertFalse(content.contains("Nano>Dictate"))
     XCTAssertFalse(content.contains("Dictate\"Agent"))
     let args = AgentPlist.programArguments(fromPlistData: Data(content.utf8))
-    XCTAssertEqual(args, [binary])  // roundtrip возвращает исходный путь
+    XCTAssertEqual(args, [binary])  // roundtrip returns the original path
   }
 
   @objc func testResolveEmptyEnvBinFallsThroughToSibling() throws {
@@ -173,8 +172,7 @@ final class AgentPlistTests: XCTestCase {
     let agent = binDir.appendingPathComponent("NanoDictateAgent")
     try makeFile(cli)
     try makeFile(agent)
-    // NANODICTATE_AGENT_BIN задан ПУСТЫМ — трактуется как «не задан»,
-    // разрешение идёт через sibling у realpath вызванного CLI.
+    // Empty NANODICTATE_AGENT_BIN = unset; resolve via sibling beside realpath.
     let resolved = resolveAgentBinaryPath(
       invokedBinary: cli.path, environment: ["NANODICTATE_AGENT_BIN": ""])
     XCTAssertEqual(resolved, agent.path)
@@ -239,7 +237,7 @@ final class AgentPlistTests: XCTestCase {
     XCTAssertTrue(result.registered)
     XCTAssertTrue(result.bootoutSucceeded)
     XCTAssertFalse(result.binaryPathChanged)
-    // Порядок launchctl: bootout → bootstrap; plist записан на диск ДО bootout.
+    // Launchctl order: bootout then bootstrap; plist written before bootout.
     XCTAssertEqual(mock.commandNames(), ["bootout", "bootstrap"])
     XCTAssertTrue(FileManager.default.fileExists(atPath: inst.plistURL.path))
     XCTAssertEqual(AgentPlist.programArguments(fromPlistAt: inst.plistURL.path), ["/bin/agent"])
@@ -255,7 +253,7 @@ final class AgentPlistTests: XCTestCase {
     let again = inst.install(agentBinary: "/new", logPath: "/tmp/l.log")
     XCTAssertTrue(again.registered)
     XCTAssertTrue(again.bootoutSucceeded)
-    XCTAssertTrue(again.binaryPathChanged)  // смена менеджера/пути → TCC-подсказка
+    XCTAssertTrue(again.binaryPathChanged)  // manager/path change → TCC hint
     XCTAssertEqual(AgentPlist.programArguments(fromPlistAt: inst.plistURL.path), ["/new"])
   }
 
@@ -266,22 +264,22 @@ final class AgentPlistTests: XCTestCase {
     let inst = installer(home: dir, mock: mock)
 
     let first = inst.install(agentBinary: "/bin/agent", logPath: "/tmp/l.log")
-    XCTAssertFalse(first.binaryPathChanged)  // первый запуск — плана не было
+    XCTAssertFalse(first.binaryPathChanged)  // first run: no prior plan
 
     let same = inst.install(agentBinary: "/bin/agent", logPath: "/tmp/l.log")
-    XCTAssertFalse(same.binaryPathChanged)  // тот же путь — подсказки нет
+    XCTAssertFalse(same.binaryPathChanged)  // same path: no hint
   }
 
   @objc func testInstallBootoutTolerantWhenServiceMissing() throws {
     let dir = try tmpDir()
     defer { try? FileManager.default.removeItem(at: dir) }
     let mock = MockLaunchctl()
-    mock.bootoutStatus = 1  // службы нет — bootout обязан упасть терпимо
+    mock.bootoutStatus = 1  // service missing: bootout must fail tolerantly
     let inst = installer(home: dir, mock: mock)
 
     let result = inst.install(agentBinary: "/bin/agent", logPath: "/tmp/l.log")
 
-    XCTAssertTrue(result.registered)  // bootstrap всё равно прошёл
+    XCTAssertTrue(result.registered)  // bootstrap still succeeded
     XCTAssertFalse(result.bootoutSucceeded)
     XCTAssertTrue(FileManager.default.fileExists(atPath: inst.plistURL.path))
   }
@@ -321,16 +319,16 @@ final class AgentPlistTests: XCTestCase {
     let dir = try tmpDir()
     defer { try? FileManager.default.removeItem(at: dir) }
     let blocker = dir.appendingPathComponent("blocker")
-    try makeFile(blocker)  // файл на месте будущего каталога → запись не пройдёт
+    try makeFile(blocker)  // file blocks future dir path: write must fail
     let mock = MockLaunchctl()
-    let inst = installer(home: blocker, mock: mock)  // plistURL уйдёт ПОД файл
+    let inst = installer(home: blocker, mock: mock)  // plistURL lands under file
 
     let result = inst.install(agentBinary: "/bin/agent", logPath: "/tmp/l.log")
 
     XCTAssertFalse(result.registered)
     XCTAssertNotNil(result.writeError)
-    // Запись идёт ДО bootout: при ошибке записи launchctl не дёргается ВООБЩЕ
-    // (bootout в т.ч.) — работавшая служба не останавливается.
+    // Write precedes bootout; on write error launchctl untouched, so the
+    // running service is never stopped.
     XCTAssertTrue(mock.calls.isEmpty)
     XCTAssertFalse(result.bootoutSucceeded)
   }

@@ -3,18 +3,16 @@ import Foundation
 // MARK: - RetryProvider
 
 //
-// Хранение последнего WAV в ПАМЯТИ (не на диске) + повторное распознавание
-// другим провайдером. Два сценария использования:
-//   1. Автоfailover: при сетевой/серверной ошибке основного провайдера агент
-//      пробует следующих из списка (ключи `providers`/`auto_failover` в конфиге).
-//      Ошибки микрофона/записи (НЕ TranscribeError) failover НЕ запускают.
-//   2. Ручной retry: `nanodictate retry <provider>` просит агента повторить
-//      распознавание последнего WAV выбранным провайдером.
+// Last WAV kept in MEMORY (not on disk) + re-recognition by another provider.
+// Two use scenarios:
+//   1. Auto-failover: primary provider network/server error — agent tries
+//      next from list (`providers`/`auto_failover` config keys). Mic/record
+//      errors (NOT TranscribeError) never trigger failover.
+//   2. Manual retry: `nanodictate retry <provider>` re-recognizes last WAV
+//      by the chosen provider.
 //
-// Сама по себе структура потокобезопасна (NSLock); асинхронные вызовы
-// транскрибации выполняются вызывающим кодом.
+// Struct itself thread-safe (NSLock); async transcribe calls run by caller.
 
-/// Тип функции распознавания одного провайдера.
 public typealias TranscribeFunction = (Data, AppConfig.Provider) async throws -> TranscriptionResult
 
 public final class RetryProvider {
@@ -24,14 +22,14 @@ public final class RetryProvider {
   private var _lastWAV: Data?
   private var _lastWAVCreatedAt: Date?
 
-  /// Функция распознавания; по умолчанию — Transcriber, собранный из полей
-  /// провайдера (base_url/model/api_key/proxy_key/language/timeout).
+  /// Recognition function; default — Transcriber built from provider fields
+  /// (base_url/model/api_key/proxy_key/language/timeout).
   public var transcribeFunction: TranscribeFunction
 
-  /// Провайдер, которым последняя запись уже была распознана (неуспешно) —
-  /// исключается из failover-очереди.
-  /// Lock-backed: при параллельном failover (main.swift transcribeAutomatically)
-  /// писать/читать могут разные Task-и одновременно.
+  /// Provider whose last recording already failed recognition — excluded
+  /// from failover queue.
+  /// Lock-backed: parallel failover (main.swift transcribeAutomatically)
+  /// may read/write from different Tasks concurrently.
   private var _lastFailedProviderID: String?
   public var lastFailedProviderID: String? {
     get {
@@ -50,14 +48,13 @@ public final class RetryProvider {
     self.transcribeFunction = transcribeFunction ?? RetryProvider.defaultTranscribe
   }
 
-  /// Дефолтная реализация: Transcriber из полей провайдера.
-  /// `transport` в секции провайдера равен "cookie-relay" (legacy-алиасы
-  /// канонизируются при парсинге) — включается
-  /// cookie-relay-слой. Кэш cookie-relay-провайдеров по baseURL — ОДИН
-  /// инстанс на origin (cookie-токен живёт в памяти инстанса): иначе каждый
-  /// retry/failover создавал бы новый провайдер без токена и первый же
-  /// запрос уходил бы без куки на лишний челлендж-раундтрип.
-  /// Значения общие для всех экземпляров RetryProvider.
+  /// Default impl: Transcriber from provider fields.
+  /// `transport == "cookie-relay"` (legacy aliases canonicalized at parse)
+  /// enables cookie-relay layer. Cookie-relay cache by baseURL — ONE
+  /// instance per origin (cookie token lives in instance memory): else each
+  /// retry/failover would build a fresh provider without token and the first
+  /// request would go without cookie for an extra challenge round-trip.
+  /// Values shared across all RetryProvider instances.
   private static func defaultTranscribe(
     _ wav: Data,
     _ provider: AppConfig.Provider
@@ -66,9 +63,9 @@ public final class RetryProvider {
     let transcriber = Transcriber(
       baseURL: provider.baseURL,
       model: provider.model,
-      // Дефолт не знает активного провайдера конфига (init вызывается без
-      // конфиг-контекста): env-ключ НЕ выдаётся (fail-closed) — провайдер
-      // работает собственным api_key/api_key_file либо запрос падает штатно.
+      // Default has no config context (init runs without config): env key
+      // NOT issued (fail-closed) — provider uses own api_key/api_key_file,
+      // else request fails normally.
       apiKey: resolveAPIKey(for: provider, activeProviderID: nil),
       proxyKey: provider.proxyKey,
       cookieRelayProvider: relay,
@@ -80,13 +77,12 @@ public final class RetryProvider {
     return try await transcriber.transcribe(wav: wav)
   }
 
-  /// Общий кэш cookie-relay-провайдеров (ключ — baseURL провайдера).
+  /// Shared cookie-relay cache (key — provider baseURL).
   private static let cookieRelayLock = NSLock()
   private static var cookieRelayByURL: [String: CookieRelayProvider] = [:]
 
-  /// Cookie-relay-провайдер провайдера: переиспользует инстанс из кэша, иначе
-  /// создаёт и кладёт в кэш. Синхронный доступ к кэшу — через хелперы
-  /// (NSLock не трогаем из async-контекста).
+  /// Cookie-relay for provider: reuse cached instance, else create and store.
+  /// Sync cache access via helpers (no NSLock from async context).
   private static func sharedCookieRelay(for provider: AppConfig.Provider) async
     -> CookieRelayProvider?
   {  // swiftlint:disable:this opening_brace
@@ -113,23 +109,21 @@ public final class RetryProvider {
     cookieRelayByURL[baseURL] = provider
   }
 
-  /// Ключ провайдера для ЗАПРОСА. Env-переменная NANODICTATE_API_KEY (высший
-  /// приоритет, никогда не пишется в файл) отдаётся ТОЛЬКО активному
-  /// провайдеру — тому, чей `id` совпадает с `activeProviderID` (см.
-  /// applyEnvAPIKey в Config). Неактивным провайдерам (failover-кандидаты,
-  /// retry, роли маршрутизации) env-ключ НЕ утекает: они получают собственный
-  /// ключ (api_key из конфига → api_key_file), а без ключа — пустую строку
-  /// (запрос падает штатно).
-  /// `activeProviderID` — id активной секции из конфига; nil (активный не
-  /// задан / legacy-конфиг / нет конфиг-контекста) — env не выдаётся никому
-  /// (fail-closed). public — агент переиспользует её в конфиг-зависимой
-  /// функции распознавания.
+  /// Provider key FOR REQUEST. Env NANODICTATE_API_KEY (highest priority,
+  /// never written to file) goes ONLY to active provider — id matches
+  /// `activeProviderID` (see applyEnvAPIKey in Config). Inactive providers
+  /// (failover candidates, retry, routing roles) get no env key: own key
+  /// (config api_key → api_key_file), no key → empty string (request fails
+  /// normally).
+  /// `activeProviderID` — active section id; nil (no active / legacy config /
+  /// no config context) — env issued to nobody (fail-closed). public —
+  /// agent reuses it in config-aware recognition function.
   public static func resolveAPIKey(
     for provider: AppConfig.Provider,
     activeProviderID: String?
   ) -> String {
-    // Env-ключ — только активному провайдеру (тот же источник, что
-    // applyEnvAPIKey; здесь — на случай, если конфиг читался без env).
+    // Env key only for active provider (same source as applyEnvAPIKey;
+    // here — config may have been read without env).
     let envKey = ProcessInfo.processInfo.environment["NANODICTATE_API_KEY"]
     if provider.id == activeProviderID, let envKey, !envKey.isEmpty {
       return envKey
@@ -155,7 +149,7 @@ public final class RetryProvider {
 
   // MARK: Последняя запись (в памяти, без диска)
 
-  /// Сохранить последний буфер WAV (вызывается из обработчика сэмплов агента).
+  /// Saves last WAV buffer (called from agent's sample handler).
   public func store(wav: Data) {
     lock.lock()
     defer { lock.unlock() }
@@ -163,21 +157,20 @@ public final class RetryProvider {
     _lastWAVCreatedAt = Date()
   }
 
-  /// Последний буфер WAV (nil — ещё не было записи в этой сессии).
+  /// Last WAV buffer (nil — no recording in this session yet).
   public var lastWAV: Data? {
     lock.lock()
     defer { lock.unlock() }
     return _lastWAV
   }
 
-  /// Время сохранения последней записи (для свежести retry из CLI).
+  /// Last recording save time (retry freshness from CLI).
   public var lastWAVCreatedAt: Date? {
     lock.lock()
     defer { lock.unlock() }
     return _lastWAVCreatedAt
   }
 
-  /// Была ли хоть одна запись в этой сессии.
   public var hasLastRecording: Bool {
     lock.lock()
     defer { lock.unlock() }
@@ -186,8 +179,7 @@ public final class RetryProvider {
 
   // MARK: Retry одним провайдером
 
-  /// Повторить распознавание последнего WAV указанным провайдером.
-  /// Возвращает nil, если последней записи нет.
+  /// Re-recognize last WAV with given provider. nil — no last recording.
   public func retranscribe(
     with provider: AppConfig.Provider
   ) async throws -> TranscriptionResult? {
@@ -199,13 +191,12 @@ public final class RetryProvider {
 
   // MARK: Failover-цепочка
 
-  /// Распознать WAV с автоматическим failover по `order`.
-  /// - `autoFailover == false` → пробуем только первый провайдер из `order`.
-  /// - При TranscribeError (сеть/сервер/ответ) → следующий провайдер из
-  ///   очереди; провайдер, упавший последним, исключается.
-  /// - НЕ-TranscribeError (например, ошибка микрофона) → пробрасывается сразу,
-  ///   failover не запускается.
-  /// - Возвращает (результат, id успешного провайдера).
+  /// Recognize WAV with auto-failover over `order`.
+  /// - `autoFailover == false` — only first provider from `order` tried.
+  /// - TranscribeError (network/server/response) → next provider in queue;
+  ///   last-failed provider excluded.
+  /// - NON-TranscribeError (e.g. mic error) → rethrown at once, no failover.
+  /// - Returns (result, successful provider id).
   public func transcribeWithFailover(
     wav: Data,
     order: [AppConfig.Provider],
@@ -231,7 +222,7 @@ public final class RetryProvider {
         lastError = error
         lastFailedProviderID = provider.id
       } catch {
-        // Не-TranscribeError (микрофон и т.п.) — failover НЕ запускаем.
+        // Non-TranscribeError (mic etc.) — no failover.
         throw error
       }
     }
@@ -240,23 +231,23 @@ public final class RetryProvider {
 
   // MARK: - Параллельный failover (withTaskGroup)
 
-  /// Параллельный failover по кандидатам: все транскрибации запускаются одним
-  /// withTaskGroup (независимые STT-запросы), первый успех выигрывает и
-  /// отменяет остальных (cancelAll). Семантика (перенесена из NanoDictateAgent
+  /// Parallel failover over candidates: all transcriptions in one
+  /// withTaskGroup (independent STT requests), first success wins and
+  /// cancels the rest (cancelAll). Semantics (moved from NanoDictateAgent
   /// transcribeAutomatically 1:1):
-  /// - первый `.success` → `group.cancelAll()` и возврат;
-  /// - TranscribeError → запоминается как `lastFailure`, побеждает ПОСЛЕДНИЙ
-  ///   завершившийся (исход возвращается как Result и разворачивается после
-  ///   withTaskGroup — тело группы не бросает);
-  /// - НЕ-TranscribeError (abortError, например ошибка микрофона) → абортит
-  ///   группу и пробрасывается независимо от накопленного `lastFailure`;
-  /// - пустые кандидаты → `TranscribeError.invalidResponse("failover has no
+  /// - first `.success` → `group.cancelAll()` and return;
+  /// - TranscribeError → remembered as `lastFailure`, LAST finished wins
+  ///   (outcome returned as Result, unwrapped after withTaskGroup — group
+  ///   body does not throw);
+  /// - NON-TranscribeError (abortError, e.g. mic error) → aborts group and
+  ///   rethrown regardless of accumulated `lastFailure`;
+  /// - empty candidates → `TranscribeError.invalidResponse("failover has no
   ///   candidates")`.
   ///
-  /// `lastFailedProviderID` функция НЕ трогает: он ставится вызывающим ДО
-  /// группы и сбрасывается на успехе в `retranscribe`/`transcribeWithFailover`.
-  /// `Candidate` — минимальный тип, из которого транскрибация достаёт нужные
-  /// поля (в проде — `AppConfig.Provider`, в тестах — простой id).
+  /// `lastFailedProviderID` untouched here: caller sets it BEFORE the group,
+  /// cleared on success in `retranscribe`/`transcribeWithFailover`.
+  /// `Candidate` — minimal type transcribe reads fields from (prod —
+  /// `AppConfig.Provider`, tests — plain id).
   public static func parallelFailover<Candidate>(
     candidates: [Candidate],
     transcribe: @escaping (Candidate) async throws -> (TranscriptionResult, String)
@@ -290,8 +281,8 @@ public final class RetryProvider {
           } else {
             abortError = error
             group.cancelAll()
-            // Не-TranscribeError (микрофон и т.п.): прерываем,
-            // остальные результаты группы больше не нужны.
+            // Non-TranscribeError (mic etc.): abort, rest of group
+            // results unnecessary.
           }
         }
       }

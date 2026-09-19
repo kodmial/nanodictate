@@ -2,24 +2,18 @@ import Foundation
 @testable import NanoDictateCore
 
 // MARK: - Полный сбой STT в live-ветке не маскируется под «Пустой результат»
-//
-// Замечание ревью #112: при отключённой сети/провайдере все live-сегменты
-// падают (segmentCount == 0, anySegmentFailed == true), и ветка segmentCount
-// == 0 строит ПУСТОЙ Outcome → handleEmptyResult («Пустой результат», звук
-// Funk) — хотя пользователь реально говорил. Оффлайн-пути дали бы явный
-// failTranscription с текстом ошибки.
-//
-// Логика приватная и живёт в executable-таргете NanoDictateAgent (тест-таргет
-// зависит только от NanoDictateCore), поэтому тестируется структурно — по
-// исходнику Sources/NanoDictateAgent/main.swift (тот же приём, что в
+// Замечание ревью #112: offline all live segments fail → segmentCount == 0 branch
+// builds EMPTY Outcome → handleEmptyResult («Пустой результат»), user spoke;
+// offline paths would give explicit failTranscription. Logic is private in
+// NanoDictateAgent executable (test target depends on NanoDictateCore only), so it
+// is tested structurally from main.swift (same trick as
 // OverlayLifecycleTests.testEachTerminalPoint_SchedulesExactlyOneHide).
 
 final class LiveSegmentFailureTests: XCTestCase {
 
     // MARK: - finishLiveRun: ветка segmentCount == 0
 
-    /// Полный сбой всех сегментов (segmentCount == 0 && anySegmentFailed) —
-    /// явный failTranscription с текстом ошибки, а не пустой Outcome.
+    /// All segments failed → explicit failTranscription with error text, not empty Outcome.
     @objc func testAllSegmentsFailed_CallsFailTranscription() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -45,9 +39,7 @@ final class LiveSegmentFailureTests: XCTestCase {
         )
     }
 
-    /// Та же ветка без сбоя: прежнее поведение сохранено — пустой Outcome →
-    /// completeChunkedInsertion → handleEmptyResult («Пустой результат»).
-    /// «Сбой без речи» и «тишина» не должны превращаться в ошибку.
+    /// No failure → empty Outcome preserved; silence must not become an error.
     @objc func testNoFailure_EmptyOutcomePreserved() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -70,8 +62,7 @@ final class LiveSegmentFailureTests: XCTestCase {
 
     // MARK: - handleLiveSegment: catch запоминает текст ошибки
 
-    /// catch сбоя сегмента записывает текст ошибки в runState.lastErrorText
-    /// (рядом с anySegmentFailed), чтобы финал мог показать её пользователю.
+    /// Segment catch stores error text in runState.lastErrorText for the final report.
     @objc func testSegmentCatch_StoresLastErrorText() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -83,8 +74,7 @@ final class LiveSegmentFailureTests: XCTestCase {
         XCTAssertTrue(body.contains("lastErrorText = message"), "текст последней ошибки обязан запоминаться в runState")
     }
 
-    /// LiveRunState несёт поле lastErrorText (String?) для передачи в
-    /// failTranscription при полном сбое.
+    /// lastErrorText carries the error into failTranscription on total failure.
     @objc func testLiveRunState_HasLastErrorTextField() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -104,8 +94,7 @@ final class LiveSegmentFailureTests: XCTestCase {
 
     // MARK: - Helpers (зеркало OverlayLifecycleTests)
 
-    /// Ветка segmentCount == 0 из finishLiveRun (вся, обе половины: сбойная и
-    /// без-сбойная). Пустая строка — если ветка/функция не найдены.
+    /// segmentCount == 0 branch of finishLiveRun (both halves); empty if not found.
     private static func segmentZeroBranch(in source: String) -> String {
         let body = functionBody(named: "finishLiveRun", in: source)
         return substring(
@@ -115,7 +104,7 @@ final class LiveSegmentFailureTests: XCTestCase {
         )
     }
 
-    /// Загружает исходник агента (для структурных проверок).
+    /// Load agent source for structural checks.
     private static func agentMainSource() -> String? {
         let fileDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         let candidates = [
@@ -133,8 +122,7 @@ final class LiveSegmentFailureTests: XCTestCase {
         return source
     }
 
-    /// Возвращает тело функции (от «func NAME(» до следующей функции/секции
-    /// на том же уровне отступа). Если функция не найдена — пустая строка.
+    /// Function body from "func NAME(" to next function/MARK; empty if missing.
     private static func functionBody(named name: String, in source: String) -> String {
         guard let range = source.range(of: "func \(name)(") else { return "" }
         let tail = source[range.lowerBound...]
@@ -147,8 +135,7 @@ final class LiveSegmentFailureTests: XCTestCase {
         return String(tail)
     }
 
-    /// Подстрока между первым вхождением from и первым вхождением to ПОСЛЕ
-    /// него (границы не включаются). Пустая строка — если маркеры не найдены.
+    /// Substring after "from" up to next "to" (exclusive); empty if missing.
     private static func substring(from: String, to: String, in text: String) -> String {
         guard let start = text.range(of: from)?.upperBound,
               let end = text[start...].range(of: to)?.lowerBound else { return "" }

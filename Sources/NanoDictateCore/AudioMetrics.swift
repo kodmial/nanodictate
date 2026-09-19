@@ -3,13 +3,7 @@ import Foundation
 
 // MARK: - Статус доступа к микрофону (TCC)
 
-/// Читаемое строковое представление статуса разрешения на доступ к микрофону.
-///
-/// Чистая функция без I/O: маппинг `AVAuthorizationStatus` → короткая метка,
-/// которая попадает в `agent.log` при каждом старте записи и при каждом запросе
-/// доступа. Нужна для диагностики главной жалобы — повторных запросов доступа:
-/// если TCC-грант периодически «теряется» (статус снова `notDetermined`), это
-/// сразу видно в логе.
+/// Mic permission label for agent.log; `notDetermined` reveals periodically lost TCC grants.
 public enum MicrophoneAuth {
   public static func statusText(_ status: AVAuthorizationStatus) -> String {
     switch status {
@@ -29,16 +23,12 @@ public enum MicrophoneAuth {
 
 // MARK: - Метрики уровня записи (RMS)
 
-/// Сводные метрики уровня записи по истории RMS буферов: минимум, среднее и
-/// максимум (линейная шкала, 0...1), плюс флаг «около-тишины».
+/// Recording level metrics over RMS history: min/avg/max (0…1) + near-silence flag.
 public struct RecordingMetrics: Equatable {
-  /// Минимальный RMS по буферам записи (линейный, 0...1).
   public let minRMS: Float
-  /// Средний RMS по буферам записи (линейный, 0...1).
   public let avgRMS: Float
-  /// Максимальный RMS по буферам записи (линейный, 0...1).
   public let maxRMS: Float
-  /// «Около-тишина»: средний RMS ниже порога `AudioMetrics.nearSilenceThreshold`.
+  /// Avg RMS below AudioMetrics.nearSilenceThreshold.
   public let nearSilence: Bool
 
   public init(minRMS: Float, avgRMS: Float, maxRMS: Float, nearSilence: Bool) {
@@ -49,26 +39,17 @@ public struct RecordingMetrics: Equatable {
   }
 }
 
-/// Чистый расчёт уровней записи: сводные метрики по RMS-истории, RMS по Int16
-/// PCM-сэмплам и порог «около-тишины». Без I/O и без обращения к аудио-устройствам,
-/// поэтому полностью покрывается юнит-тестами.
+/// Pure recording-level math: RMS summary, Int16 RMS, silence threshold. No I/O — unit-tested.
 public enum AudioMetrics {
-  /// Порог «около-тишины» по среднему RMS: −50 dBFS (линейно ≈ 0.00316).
-  ///
-  /// Типовой VAD-порог: если средний уровень записи ниже него, в записи
-  /// почти наверняка только шум микрофона / паузы — именно такой «аудио»
-  /// не должен уходить в LLM как речь.
+  /// Near-silence VAD threshold (≈ 0.00316 = −50 dBFS): below is mic noise, not speech.
   public static let nearSilenceThreshold: Float = 0.00316  // −50 dBFS
 
-  /// Переводит линейную амплитуду (0...1) в децибелы относительно полной шкалы
-  /// (dBFS): 1.0 → 0 dBFS, 0.1 → −20 dBFS. Нулевая амплитуда — −120 dBFS (пол).
+  /// Linear amplitude → dBFS: 1.0 → 0, 0.1 → −20; zero → −120 dBFS floor.
   public static func dbfs(_ linear: Float) -> Float {
     linear > 0 ? 20 * log10(linear) : -120
   }
 
-  /// Сводные метрики по истории RMS буферов (линейные, 0...1).
-  /// Пустая история (запись без единого буфера) не считается «тишиной» —
-  /// метрики нулевые, `nearSilence == false`: судить не о чем.
+  /// RMS history summary; empty history → zeros, nearSilence false (nothing to judge).
   public static func summarize(
     rmsValues: [Float],
     threshold: Float = nearSilenceThreshold
@@ -87,9 +68,7 @@ public enum AudioMetrics {
     )
   }
 
-  /// RMS по Int16 PCM-сэмплам (линейный, 0...1); полная шкала Int16 = 32767.
-  /// Пустой массив → 0. Вычисляется над тем же массивом сэмплов, который
-  /// уходит в WAV/STT, — чтобы видеть фактический уровень запрашиваемого аудио.
+  /// RMS over Int16 samples (0…1, full scale 32767); empty → 0. Same array as goes to WAV/STT.
   public static func rms(samples: [Int16]) -> Float {
     guard !samples.isEmpty else { return 0 }
     var sum: Float = 0
@@ -100,8 +79,7 @@ public enum AudioMetrics {
     return sqrt(sum / Float(samples.count))
   }
 
-  /// Флаг «около-тишины» для среднего RMS: `avgRMS < threshold` (строго).
-  /// На границе (avg == threshold) запись к тишине не относится.
+  /// Near-silence: avgRMS strictly < threshold (boundary not silence).
   public static func isNearSilence(
     avgRMS: Float,
     threshold: Float = nearSilenceThreshold

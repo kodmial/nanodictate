@@ -3,9 +3,8 @@ import Foundation
 
 // MARK: - Тесты «Практики длинной речи» (пакетный путь): BatchLongForm
 //
-// Покрытие: BatchPromptChain.tail (контекстная склейка), BatchSTTParams
-// (стабильные параметры транскрибации), BatchStableMultipartFields.numberString
-// и гейтинг stable-полей по провайдерам.
+// Coverage: BatchPromptChain.tail, BatchSTTParams defaults, numberString,
+// provider gating of stable fields.
 
 final class BatchLongFormTests: XCTestCase {
 
@@ -28,8 +27,7 @@ final class BatchLongFormTests: XCTestCase {
     }
 
     @objc func testTailLongerTrimsToWindowAndStartsAtWordBoundary() {
-        // 12 слов «слово» с пробелами = 6*12-1 = 71 символ. Лимит 40 —
-        // окно начинается посередине слова: первое неполное «слово» дропается.
+        // 71-char text, limit 40 — window cuts mid-word, partial word dropped.
         let words = Array(repeating: "слово", count: 12)
         let text = words.joined(separator: " ")
         let tail = BatchPromptChain.tail(text, maxLength: 40)
@@ -39,9 +37,7 @@ final class BatchLongFormTests: XCTestCase {
     }
 
     @objc func testTailWindowStartingAtWordBoundaryKeepsWholeWord() {
-        // 10 слов «абв» через пробел: 3*10 + 9 = 39 символов. Лимит 30 →
-        // окно [-30..): попадает ровно на границу слов. Первое слово в окне
-        // целое — не дропается.
+        // 39-char text, limit 31 — window lands on word boundary, word kept.
         let words = Array(repeating: "абв", count: 10)
         let text = words.joined(separator: " ")
         let tail = BatchPromptChain.tail(text, maxLength: 31)
@@ -51,8 +47,8 @@ final class BatchLongFormTests: XCTestCase {
     }
 
     @objc func testTailSingleLongWordWithoutSpacesReturnsAsIs() {
-        let text = String(repeating: "длинноеслово", count: 100) // без пробелов
-        // Константная проверка: последние 10 символов «…длинноеслово» → «инноеслово».
+        let text = String(repeating: "длинноеслово", count: 100) // no spaces
+        // Last 10 chars of a space-less word returned as-is.
         XCTAssertEqual(BatchPromptChain.tail(text, maxLength: 10), "инноеслово",
                        "одно длинное слово — хвост возвращается как есть (обрезать нечего до пробела)")
     }
@@ -108,8 +104,7 @@ final class BatchLongFormTests: XCTestCase {
     }
 
     @objc func testGatingOpenAICompatibleTemperatureOnly() {
-        // gigaam/selfhosted (openAICompatible) + известные openai-совместимые —
-        // шлём только temperature
+        // openAICompatible (gigaam/selfhosted): temperature only.
         for adapter in ["gigaam", "openai-compatible", "selfhosted"] {
             let f = fields(for: adapter)
             XCTAssertEqual(f?.temperature, 0, "\(adapter): temperature шлётся")

@@ -1,20 +1,12 @@
 import Foundation
 import ObjectiveC
 
-// Тестовый раннер: помечаем процесс как тестовый (setenv — не аргумент CLI).
-// На этом признаке (RuntimeEnvironment.isTestRun) гейтятся реальные эффекты,
-// которые тревожат пользователя при прогонах тестов: системные звуки SysSounds
-// не играют, панель оверлея не выводится на экран, Logger не пишет в боевой
-// ~/Library/Logs/NanoDictate/agent.log (пишет в /tmp/nanodictate-tests/agent.log).
+// Test-process marker (RuntimeEnvironment.isTestRun): gates SysSounds, overlay, prod agent.log.
 setenv("NANODICTATE_TESTS", "1", 1)
 
 // MARK: - Раннер тестов (мини-XCTest без Xcode)
-//
-// Все suite-классы перечислены явно (objc_copyClassList неудобен из Swift).
-// Для класса берётся список test*-методов через class_copyMethodList, каждый
-// вызывается по селектору; ассерты копятся в XCTestCase.currentFailures.
-// Итог: ненулевой exit-код при любом провале + печать имён упавших тестов.
-// Запуск: `swift run NanoDictateCoreTests`.
+// Suites explicit (objc_copyClassList clumsy in Swift); any failure → non-zero exit + names.
+// Run: `swift run NanoDictateCoreTests`.
 
 let suites: [XCTestCase.Type] = [
     HotkeyServiceTests.self,
@@ -82,7 +74,7 @@ for cls in suites {
             testSelectors.append(method_getName(methods[m]))
         }
     }
-    // Детерминированный порядок (class_copyMethodList не сортирован).
+    // Deterministic order (class_copyMethodList is unsorted).
     testSelectors.sort { String(describing: $0) < String(describing: $1) }
 
     guard !testSelectors.isEmpty else { continue }

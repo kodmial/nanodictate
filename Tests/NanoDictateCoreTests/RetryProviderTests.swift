@@ -1,7 +1,7 @@
 import Foundation
 @testable import NanoDictateCore
 
-/// Ошибка, НЕ являющаяся TranscribeError (как ошибки микрофона в проде).
+/// Non-TranscribeError mirrors production mic errors (failover must skip them).
 private struct NonTranscribeError: Error {}
 
 final class RetryProviderTests: XCTestCase {
@@ -15,8 +15,7 @@ final class RetryProviderTests: XCTestCase {
     private let providerA = AppConfig.Provider(id: "a", name: "A", baseURL: "https://a", model: "m", apiKey: "keyA", apiKeyFile: nil, proxyKey: "")
     private let providerB = AppConfig.Provider(id: "b", name: "B", baseURL: "https://b", model: "m", apiKey: "keyB", apiKeyFile: nil, proxyKey: "")
 
-    /// Runs an async closure to completion inside a synchronous test method
-    /// (мини-XCTest без Xcode не умеет вызывать async-методы по селектору).
+    /// Async closure via expectation: mini-XCTest cannot call async selectors.
     private func runAsync(_ testName: String, _ body: @escaping () async throws -> Void) {
         let expectation = expectation(description: testName)
         Task {
@@ -110,7 +109,6 @@ final class RetryProviderTests: XCTestCase {
 
     @objc func testFailoverOnTranscribeError() {
         runAsync("testFailoverOnTranscribeError") {
-            // Первый вызов — сеть упала, второй — успех (характерно для failover-цепочки).
             var calls: [String] = []
             let rp = RetryProvider { wav, provider in
                 calls.append(provider.id)
@@ -249,8 +247,7 @@ final class RetryProviderTests: XCTestCase {
 
     // MARK: - Параллельный failover (RetryProvider.parallelFailover)
 
-    /// Потокобезопасный накопитель событий из group-тасков (модификация в
-    /// async-контексте из нескольких задач; box — @unchecked Sendable).
+    /// Thread-safe event sink for concurrent group tasks (@unchecked Sendable).
     private final class OrderBox: @unchecked Sendable {
         private let lock = NSLock()
         private var values: [String] = []
@@ -264,10 +261,7 @@ final class RetryProviderTests: XCTestCase {
         }
     }
 
-    /// (a) Первый успех выигрывает и отменяет остальных: быстрый кандидат №1,
-    /// кандидаты №2 и №3 перед «POST» спят — после cancelAll они НЕ делают
-    /// лишних POST (дефолтный retrySleep глотает отмену, но верх цикла
-    /// Transcriber.sendWithRetry её ловит).
+    /// (a) First success wins, cancels rest; sleep swallows cancel, loop-top catches it.
     @objc func testParallelFailoverFirstSuccessCancelsOthers() {
         runAsync("testParallelFailoverFirstSuccessCancelsOthers") {
             let completedPOSTs = OrderBox()
@@ -279,8 +273,7 @@ final class RetryProviderTests: XCTestCase {
                 if candidate == "1" {
                     return (self.makeResult("first"), "1")
                 }
-                // Медленные кандидаты: у них достаточно времени, чтобы кандидат
-                // №1 успел выиграть и отменить их (cancelAll).
+                // Sleep so candidate 1 wins and cancels the others first.
                 do {
                     try await Task.sleep(nanoseconds: 300_000_000)
                 } catch {
@@ -304,9 +297,7 @@ final class RetryProviderTests: XCTestCase {
         }
     }
 
-    /// (b) Все кандидаты кидают TranscribeError → наружу уходит ошибка
-    /// ПОСЛЕДНЕГО завершившегося (контролируемый порядок: «c» мгновенно,
-    /// «b» через 50 мс, «a» через 200 мс).
+    /// (b) All fail: last-completed error wins (c instant, b 50ms, a 200ms).
     @objc func testParallelFailoverAllTranscribeErrorsKeepsLastCompleted() {
         runAsync("testParallelFailoverAllTranscribeErrorsKeepsLastCompleted") {
             do {
@@ -334,10 +325,7 @@ final class RetryProviderTests: XCTestCase {
         }
     }
 
-    /// (c) Не-TranscribeError (abortError) пробрасывается независимо от уже
-    /// накопленного lastFailure: «a» мгновенно кидает TranscribeError, «b»
-    /// (после паузы) — NonTranscribeError. Наружу — abortError, даже если
-    /// lastFailure уже был увиден.
+    /// (c) Non-TranscribeError (abort) wins even after lastFailure was seen.
     @objc func testParallelFailoverAbortWinsOverLastFailure() {
         runAsync("testParallelFailoverAbortWinsOverLastFailure") {
             let order = OrderBox()

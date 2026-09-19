@@ -3,7 +3,7 @@ import Foundation
 
 // MARK: - DebugDumpTests
 
-/// Тесты отладочного дампа STT-запросов (включается при log_level == "debug").
+/// Tests STT debug dump (enabled when log_level == "debug").
 final class DebugDumpTests: XCTestCase {
 
     private var tempDirs: [String] = []
@@ -29,7 +29,6 @@ final class DebugDumpTests: XCTestCase {
         super.tearDown()
     }
 
-    /// Создаёт временный каталог и направляет туда запись дампа.
     private func redirectDumpToTempDir() -> String {
         let dir = NSTemporaryDirectory() + "nanodictate-debug-test-\(UUID().uuidString)"
         tempDirs.append(dir)
@@ -37,7 +36,6 @@ final class DebugDumpTests: XCTestCase {
         return dir
     }
 
-    /// Создаёт временный каталог и направляет туда сохранение аудиозаписей.
     private func redirectRecordingsToTempDir() -> String {
         let dir = NSTemporaryDirectory() + "nanodictate-recordings-test-\(UUID().uuidString)"
         tempDirs.append(dir)
@@ -52,7 +50,6 @@ final class DebugDumpTests: XCTestCase {
         )
     }
 
-    /// Прогоняет async-замыкание до завершения внутри синхронного теста.
     private func runAsync(_ testName: String, _ body: @escaping () async throws -> Void) {
         let expectation = expectation(description: testName)
         Task {
@@ -94,8 +91,7 @@ final class DebugDumpTests: XCTestCase {
 
     // MARK: - 1a. Маскировка: кастомное имя секретного заголовка и allowlist
 
-    /// Кастомное имя proxy-заголовка (`proxy_key_header = "X-Api-Key"`) должно
-    /// маскироваться так же, как дефолтные authorization/x-proxy-key.
+    /// Custom proxy header name masked like defaults authorization/x-proxy-key.
     @objc func testCustomNamedSecretHeaderIsMasked() {
         XCTAssertEqual(DebugDump.maskedHeaderValue(name: "X-Api-Key", value: "groq-secret"), "***")
         XCTAssertEqual(DebugDump.maskedHeaderValue(name: "x-api-key", value: "groq-secret"), "***")
@@ -103,7 +99,6 @@ final class DebugDumpTests: XCTestCase {
         XCTAssertEqual(DebugDump.maskedHeaderValue(name: "cookie", value: "__test=abc"), "***")
     }
 
-    /// Старые имена секретных заголовков по-прежнему маскируются.
     @objc func testLegacySecretHeaderNamesStillMasked() {
         XCTAssertEqual(DebugDump.maskedHeaderValue(name: "Authorization", value: "Bearer tok"), "Bearer ***")
         XCTAssertEqual(DebugDump.maskedHeaderValue(name: "authorization", value: "Bearer tok"), "Bearer ***")
@@ -111,7 +106,6 @@ final class DebugDumpTests: XCTestCase {
         XCTAssertEqual(DebugDump.maskedHeaderValue(name: "x-proxy-key", value: "proxy"), "***")
     }
 
-    /// Обычные незасекреченные заголовки НЕ перемаскируются.
     @objc func testSafeHeadersAreNotMasked() {
         XCTAssertEqual(
             DebugDump.maskedHeaderValue(name: "Content-Type", value: "multipart/form-data; boundary=x"),
@@ -123,8 +117,6 @@ final class DebugDumpTests: XCTestCase {
         )
     }
 
-    /// В собранной записи дампа значение кастомного proxy-заголовка уходит
-    /// маской, а обычный Content-Type остаётся видимым.
     @objc func testCustomProxyHeaderNameIsMaskedInDumpEntry() {
         let entry = DebugDump.summarize(
             timestamp: Date(timeIntervalSince1970: 0),
@@ -148,8 +140,7 @@ final class DebugDumpTests: XCTestCase {
                       "несекретный Content-Type остаётся видимым")
     }
 
-    /// End-to-end: транскрайбер с `proxyKeyHeader: "X-Api-Key"` при debug-логе
-    /// не должен писать значение proxy-ключа в файл дампа открытым текстом.
+    /// E2E: debug dump must never hold the proxy-key value in plaintext.
     @objc func testDebugDumpMasksCustomProxyKeyHeaderEndToEnd() {
         let dir = redirectDumpToTempDir()
         let transport = MockTransport(status: 200, body: Data(#"{"text":"привет"}"#.utf8))
@@ -307,7 +298,7 @@ final class DebugDumpTests: XCTestCase {
         XCTAssertTrue(binary.contains("HTTP 500"))
         XCTAssertTrue(binary.contains("Authorization: Bearer ***"))
 
-        // Некорректный / неписабельный каталог — не должно быть ни краха, ни исключения.
+        // Unwritable directory must not crash or throw.
         DebugDump.dumpDirectory = "/nonexistent-debug-\(UUID().uuidString)/logs"
         DebugDump.append(entry: "no crash")
     }
@@ -396,7 +387,7 @@ final class DebugDumpTests: XCTestCase {
     }
 
     @objc func testUnwritableRecordingsDirectoryDoesNotThrow() {
-        // Каталог записей — путь, который невозможно создать: родитель — обычный файл.
+        // Recordings dir uncreatable: parent is a regular file.
         let blocker = NSTemporaryDirectory() + "nanodictate-blocked-\(UUID().uuidString)"
         try? Data("x".utf8).write(to: URL(fileURLWithPath: blocker))
         tempDirs.append(blocker)
@@ -414,15 +405,14 @@ final class DebugDumpTests: XCTestCase {
             adapterID: "gigaam"
         )
 
-        // runAsync грохает тест, если transcribe бросит исключение.
+        // runAsync fails the test if transcribe throws — asserts no-throw.
         runAsync("transcribeDebugUnwritableDir") {
             _ = try await transcriber.transcribe(wav: Data([0x52, 0x49, 0x46, 0x46]))
         }
 
-        // Дамп при этом пишется как обычно.
         XCTAssertNotNil(readDebugLog(in: dumpDir), "неписабильный каталог записей не должен ломать дамп")
 
-        // Прямой вызов враппера с неписабильным путём тоже не бросает.
+        // Direct wrapper call with unwritable path also must not throw.
         DebugDump.saveRecording(data: Data([0x01, 0x02]), to: blocker + "/recordings/x.wav")
     }
 }

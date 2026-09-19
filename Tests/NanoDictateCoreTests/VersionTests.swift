@@ -1,8 +1,7 @@
 import Foundation
 @testable import NanoDictateCore
 
-/// Тесты константы версии (NanoDictateVersion): semver-форма и значение релиза.
-/// Единственный источник правды для `nanodictate --version` — см. Version.swift.
+/// Version constant tests; single source of truth for `nanodictate --version` (see Version.swift).
 final class VersionTests: XCTestCase {
 
     @objc func testVersionStringIsSemver() {

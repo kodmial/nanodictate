@@ -4,9 +4,9 @@ import Foundation
 
 // MARK: - Протоколы движка (инъекция в тестах)
 
-/// Минимальный интерфейс входного узла AVAudioEngine, используемый
-/// AudioService. Реальный класс AVAudioInputNode conforms через extension;
-/// тесты подставляют фейк и имитируют отказы старта без аудио-железа.
+/// Minimal AVAudioEngine input-node interface used by AudioService. Real
+/// AVAudioInputNode conforms via extension; tests inject a fake and imitate
+/// start failures without audio hardware.
 public protocol AudioInputNodeLike: AnyObject {
   func outputFormat(forBus bus: AVAudioNodeBus) -> AVAudioFormat
   func installTap(
@@ -18,7 +18,6 @@ public protocol AudioInputNodeLike: AnyObject {
   func removeTap(onBus bus: AVAudioNodeBus)
 }
 
-/// Минимальный интерфейс AVAudioEngine, используемый AudioService.
 public protocol AudioEngineLike: AnyObject {
   func makeInputNode() -> AudioInputNodeLike
   func prepare()
@@ -35,40 +34,36 @@ extension AVAudioEngine: AudioEngineLike {
 
 // MARK: - ObjC-шлюз для NSException AVFAudio
 
-// Тач-функции модуля AudioEngineGuard (см. AudioEngineExceptionGuard.h/m):
-// NanoDictateRunAudioEngineBlockGuarded выполняет блок под ObjC @try/@catch и
-// возвращает NSError вместо NSException, которое AVFAudio умеет поднимать
-// внутри installTap/prepare/start (SetOutputFormat) и которое в Swift не
-// ловится через try — падает SIGABRT.
+// AudioEngineGuard touch functions (see AudioEngineExceptionGuard.h/m):
+// NanoDictateRunAudioEngineBlockGuarded runs a block under ObjC @try/@catch and
+// returns NSError, not the NSException AVFAudio can raise inside
+// installTap/prepare/start (SetOutputFormat) — Swift cannot catch it via try,
+// would SIGABRT.
 
-/// Делегат для получения уровня звука (RMS) для анимации.
 public protocol AudioLevelDelegate: AnyObject {
   func audioLevelChanged(rms: Float)
 }
 
-/// Жёсткий лимит записи: не более `maxDuration` секунд и не более `maxSamples`
-/// сэмплов в буфере (16000 Гц × 60 c = 960 000 сэмплов ≈ 1.9 МБ в Int16).
-///
-/// Чистая тестируемая единица: не зависит от аудио-устройств, поэтому решение
-/// «остановить/не останавливать» можно проверять в мини-XCTest напрямую.
+/// Hard recording limit: no more than `maxDuration` seconds and no more than
+/// `maxSamples` in the buffer (16000 Hz × 60 s = 960 000 samples ≈ 1.9 MB Int16).
+/// Pure testable unit: independent of audio devices, stop decision verified in
+/// mini-XCTest directly.
 public struct RecordingLimit {
-  /// Максимальная длительность записи, секунды.
   public let maxDuration: TimeInterval
-  /// Максимум накопленных сэмплов (память): `sampleRate × maxDuration`.
   public let maxSamples: Int
-  /// Защёлка: после срабатывания лимита остаётся `true` — «хвост» записи
-  /// возобновить нельзя, пока не начат новый сеанс (новый экземпляр).
+  /// Latch: stays `true` once the limit fires — recording cannot resume until
+  /// a new session (new instance).
   public private(set) var isExhausted = false
 
   public init(maxDuration: TimeInterval, sampleRate: Int) {
     self.maxDuration = maxDuration
-    // Защита от pathологического zero sampleRate: приём всегда может
-    // накопить хотя бы один сэмпл до принудительной остановки.
+    // Guard against a pathological zero sampleRate: intake can always accumulate
+    // at least one sample before the forced stop.
     maxSamples = max(1, Int(Double(sampleRate) * maxDuration))
   }
 
-  /// Достигнут ли лимит (по времени ИЛИ по объёму). После первого срабатывания
-  /// метод всегда возвращает `true` — остановка необратима в рамках сеанса.
+  /// Limit reached (by time OR by volume)? After the first fire the method
+  /// always returns `true` — stop is irreversible within the session.
   public mutating func shouldStop(elapsed: TimeInterval, totalSamples: Int) -> Bool {
     if isExhausted {
       return true
@@ -79,179 +74,174 @@ public struct RecordingLimit {
     return isExhausted
   }
 
-  /// Сколько сэмплов ещё можно накопить поверх `totalSamples`.
-  /// 0 — предел достигнут, буфер дальше не растёт.
   public func remainingSamples(after totalSamples: Int) -> Int {
     max(0, maxSamples - totalSamples)
   }
 }
 
-/// Запись звука с микрофона через AVAudioEngine (16кГц моно).
+/// Mic recording via AVAudioEngine (16 kHz mono).
 ///
-/// Входной узел на macOS работает в аппаратном формате (обычно 48 кГц),
-/// и `connect(input, to:format:)` с чужим sample rate кидает исключение
-/// (`format.sampleRate == hwFormat.sampleRate`). Поэтому tap ставится на
-/// аппаратном формате, а пересэмплинг в 16 кГц/моно делает AVAudioConverter.
+/// On macOS the input node runs in hardware format (usually 48 kHz), and
+/// `connect(input, to:format:)` with a foreign sample rate throws
+/// (`format.sampleRate == hwFormat.sampleRate`). So the tap goes on the
+/// hardware format; AVAudioConverter resamples into 16 kHz mono.
 ///
-/// Три гарантии жизни/смерти движка (регрессия крашей и «зависаний»):
-/// 1. Все операции движка (installTap/prepare/start/stop/removeTap) — ТОЛЬКО
-///    на `engineQueue` и под ObjC-шлюзом `guardedEngineCall`: NSException
-///    AVFAudio (SetOutputFormat) превращается в Error, а не в SIGABRT.
-/// 2. Любая ошибка старта ВСЕГДА снимает tap и останавливает движок
-///    (teardownOnEngineQueue) — повторный старт на том же экземпляре не
-///    падает на «tap уже установлен».
-/// 3. Старт асинхронный (completion на главном): подъём движка не блокирует
-///    главный поток (наблюдали заморозку UI на ~11 с при смене устройства).
+/// Three engine life/death guarantees (crash and "freeze" regression):
+/// 1. Every engine op (installTap/prepare/start/stop/removeTap) runs ONLY on
+///    `engineQueue` under the ObjC gateway `guardedEngineCall`: an AVFAudio
+///    NSException (SetOutputFormat) becomes an Error, not SIGABRT.
+/// 2. Any start error ALWAYS removes the tap and stops the engine
+///    (teardownOnEngineQueue) — a restart on the same instance never hits
+///    "tap already installed".
+/// 3. Start is async (completion on main): engine bring-up never blocks the
+///    main thread (observed UI freeze ~11 s on device change).
 // swiftlint:disable:next type_body_length
 public final class AudioService {
   public weak var levelDelegate: AudioLevelDelegate?
 
-  /// Ошибка смены аудио-устройства во время записи: входной формат движка
-  /// изменился (`AVAudioEngineConfigurationChangeNotification`), живой
-  /// tap-конвертер под новый формат не пересоздан. Запись завершена
-  /// немедленно — продолжение со старым конвертером дало бы тишину или
-  /// рассинхрон сэмплов. Пользователь перезапускает запись одной командой.
+  /// Audio-device change during recording: the engine input format changed
+  /// (`AVAudioEngineConfigurationChangeNotification`), the live tap converter
+  /// was not recreated for the new format. Recording ends immediately —
+  /// continuing on the old converter would give silence or sample desync. User
+  /// restarts recording with one command.
   public var onDeviceChange: ((Error) -> Void)?
 
-  /// Уровень логирования: `"debug"` включает метрологию (min/avg/max RMS,
-  /// флаг «около-тишины»). Не влияет на логи доступа к микрофону и lifecycle
-  /// записи — они пишутся всегда, на уровне `info`.
+  /// Log level: `"debug"` enables metering (min/avg/max RMS, near-silence flag).
+  /// Mic-access and recording-lifecycle logs write always at `info`.
   private let logLevel: String
 
-  /// Вызывается после ПРИНУДИТЕЛЬНОЙ остановки по лимиту (на главной очереди)
-  /// с собранными сэмплами — тот же путь финализации, что и у `stop()`
-  /// (сборка сэмплов → WAV → транскрибация). nil-безопасно: если никто не
-  /// подписался, запись всё равно останавливается, а сэмплы отбрасываются.
+  /// Called after a FORCED limit stop (on main) with the collected samples —
+  /// same finalization path as `stop()` (samples → WAV → transcription).
+  /// nil-safe: nobody subscribed — recording still stops, samples dropped.
   public var onRecordingLimitReached: (([Int16]) -> Void)?
 
-  /// Речевой сегмент собран live-VAD (пауза ≥ pauseDuration закрыла уттеренс)
-  /// или отдан «хвост» незакрытого уттеренса при остановке записи (stop()
-  /// или принудительный стоп по лимиту). Сэмплы — КОПИЯ из общего буфера:
-  /// `collectedSamples` не трогается и продолжает собирать ВСЮ запись для
-  /// финального прохода. `isTail == true` — доставка при остановке записи
-  /// (сегмент покрывает запись до конца); false — сегмент live-VAD из
-  /// середины записи. Вызывается на аудио-потоке (сегменты) или на главном
-  /// (хвост stop()/лимита); обработчик должен быть лёгким (не блокировать).
+  /// Speech segment gathered by live-VAD (pause ≥ pauseDuration closed the
+  /// utterance) or the "tail" of an open utterance handed at recording stop
+  /// (stop() or forced limit stop). Samples are a COPY from the shared buffer:
+  /// `collectedSamples` stays untouched and keeps gathering the WHOLE recording
+  /// for the final pass. `isTail == true` — delivery at recording stop (segment
+  /// covers recording to the end); false — mid-recording live-VAD segment.
+  /// Called on the audio thread (segments) or main (tail of stop()/limit); the
+  /// handler must be light (no blocking).
   public var onSpeechSegment: (([Int16], _ isTail: Bool) -> Void)?
 
-  /// Автоостановка по непрерывной тишине (~3 c): срабатывает, когда живая
-  /// запись накопила непрерывное молчание ≥ `autoStopConfig.requiredSilenceDuration`
-  /// (RMS каждого буфера строго ниже `silenceRMSThreshold`). Вызывается на
-  /// главной очереди с собранными сэмплами — тот же путь финализации, что и
-  /// у `onRecordingLimitReached` (эквивалент ручного повторного Alt+Alt, но
-  /// без нажатия). В live-диктовке «хвост» незакрытого уттеренса отдаётся
-  /// `onSpeechSegment` ДО этого колбэка — клиент успевает поставить его в
-  /// очередь раньше финализации всей записи. nil-безопасно: запись всё равно
-  /// останавливается, сэмплы отбрасываются.
+  /// Auto-stop on continuous silence (~3 s): fires when the live recording
+  /// accumulated continuous silence ≥ `autoStopConfig.requiredSilenceDuration`
+  /// (each buffer RMS strictly below `silenceRMSThreshold`). Called on main
+  /// with the collected samples — same finalization path as
+  /// `onRecordingLimitReached` (equals a manual Alt+Alt, but without a press).
+  /// In live dictation the "tail" of an open utterance goes to `onSpeechSegment`
+  /// BEFORE this callback — the client queues it ahead of whole-recording
+  /// finalization. nil-safe: recording still stops, samples dropped.
   public var onAutoStop: (([Int16]) -> Void)?
 
-  // var, а не let: replaceEngineAfterWedge() подменяет «зависший» движок
-  // свежим экземпляром (восстановление после record-start таймаута).
+  // var, not let: replaceEngineAfterWedge() swaps a "wedged" engine for a fresh
+  // instance (recovery after a record-start timeout).
   private var engine: AudioEngineLike
   private let targetFormat: AVAudioFormat
   private var converter: AVAudioConverter?
   private var collectedSamples: [Int16] = []
   private var tapInstalled = false
-  /// Поколение движка: инкрементируется при КАЖДОЙ подмене «зависшего» движка
-  /// (replaceEngineAfterWedge). Вместе с (engine, queue) образует атомарный
-  /// слот: старты захватывают поколение при диспетчеризации, tap-блок и
-  /// терминальные ветки старта сверяют «я — всё ещё текущее поколение?».
-  /// Устаревшие движки (отброшенные подменой) молча дропают буферы и не
-  /// трогают state нового сеанса.
-  /// Регистр `session` держит ЕДИНСТВЕННУЮ копию тройки (generation, isRecording,
-  /// autoStopScheduled) — читать её можно и под `lock` (снимок буферов), и
-  /// lock-free с realtime-пути, не расходясь с записанным значением.
+  /// Engine generation: incremented on EVERY "wedged" engine swap
+  /// (replaceEngineAfterWedge). With (engine, queue) it forms an atomic slot:
+  /// starts capture the generation at dispatch, the tap block and start
+  /// terminal branches check "am I still the current generation?". Stale
+  /// engines (discarded by the swap) silently drop buffers and never touch
+  /// new-session state.
+  /// The `session` ledger holds the SINGLE copy of the trio (generation,
+  /// isRecording, autoStopScheduled) — readable under `lock` (buffer snapshot)
+  /// and lock-free from the realtime path without diverging from the recorded
+  /// value.
   private let session: SessionLedger
-  /// Жёсткий лимит: 60.0 c, 960 000 сэмплов. Ни при каких условиях запись не
-  /// может превысить эти значения (см. `process` и `scheduleLimitStop`).
+  /// Hard limit: 60.0 s, 960 000 samples. Recording can never exceed these
+  /// (see `process` and `scheduleLimitStop`).
   private var limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
   private var recordStartTime: CFAbsoluteTime = 0
-  /// История RMS (линейный, 0...1) по буферам текущей записи — источник
-  /// сводных метрик уровня (min/avg/max) в `logRecordingFinale`.
+  /// Per-buffer RMS history (linear 0...1) of the current recording — source of
+  /// level summary metrics (min/avg/max) in `logRecordingFinale`.
   private var rmsHistory: [Float] = []
-  /// Гарантирует, что принудительная остановка планируется ровно один раз.
+  /// Ensures the forced stop is scheduled exactly once.
   private let lock = NSLock()
   private var limitStopScheduled = false
-  /// Автоостановка по тишине: порог/длительность + рубильник `enabled`
-  /// (из init; Agent забирает их из окружения — см. AutoStopConfig.fromEnvironment)
-  /// и защёлка «финализация уже запланирована» — в регистре `session`
-  /// (бит autoStop), как у лимита: ровно один колбэк.
+  /// Auto-stop: silence threshold/duration + `enabled` kill switch (from init;
+  /// Agent takes them from environment — see `AutoStopConfig.fromEnvironment`)
+  /// and the "finalization already scheduled" latch — in the `session` ledger
+  /// (autoStop bit), like the limit: exactly one callback.
   private let autoStopConfig: AutoStopConfig
   private var autoStopDetector = SilenceAutoStopDetector()
-  /// Первый буфер сеанса логируется отдельно (debug): длительность и энергия
-  /// показывают, пошёл ли реально звук в движок после старта.
+  /// First session buffer logged separately (debug): piece duration and energy
+  /// show whether real sound reached the engine after start.
   private var didLogFirstBuffer = false
-  /// Цифровое усиление входа (AGC): применяется к Float32-буферу ПОСЛЕ
-  /// конвертации в 16 кГц/моно и ДО Int16-конверсии/метрики уровня — все
-  /// потребители (анимация уровня, live-VAD, автостоп, запись) видят уже
-  /// усиленный сигнал. Конфиг из окружения (`NANODICTATE_GAIN_*`), рубильник
-  /// `NANODICTATE_GAIN_DISABLED=1` пропускает буфер без изменений.
+  /// Digital input gain (AGC): applied to the Float32 buffer AFTER 16 kHz/mono
+  /// conversion and BEFORE Int16 conversion/level metering — all consumers
+  /// (level animation, live-VAD, auto-stop, recording) see the amplified
+  /// signal. Env config (`NANODICTATE_GAIN_*`); kill switch
+  /// `NANODICTATE_GAIN_DISABLED=1` passes the buffer unchanged.
   private let gain: InputGain
 
   // MARK: - Live-VAD (пошаговая диктовка)
 
-  /// Параметры live-VAD — те же, что у оффлайн-сегментера: порог «тишины»
-  /// и длительность паузы, после которой уттеренс считается законченным.
+  /// Live-VAD params — same as the offline segmenter: `silenceRMS` threshold
+  /// and the pause duration that closes an utterance.
   private let liveSilenceRMS: Float
-  /// Пауза ≥ этого числа сэмплов (16 кГц) закрывает уттеренс.
+  /// Pause ≥ this many samples (16 kHz) closes an utterance.
   private let livePauseSamples: Int
-  /// Pre-roll: сколько сэмплов (16 кГц) речи захватывать ДО обнаруженного
-  /// старта уттеренса, чтобы не срезать атаку первого слова.
+  /// Pre-roll: speech samples (16 kHz) captured BEFORE the detected utterance
+  /// start — first-word attack not cut.
   private let livePreRollSamples: Int
-  /// Post-roll: сколько сэмплов (16 кГц) тишины оставлять после последней
-  /// речи, чтобы не срезать хвост последнего слова.
+  /// Post-roll: trailing silence samples (16 kHz) after the last speech —
+  /// last-word tail not cut.
   private let livePostRollSamples: Int
-  /// Окно непрерывной речи (16 кГц): когда накопленная РЕЧЬ текущего
-  /// уттеренса достигла этого объёма — чанк готов к выдаче при ближайшей
-  /// микро-паузе (см. `liveMicroPauseSamples`), не дожидаясь полной
-  /// `pauseDuration`. 3.0 c = 48000 сэмплов — комфортная порция для STT.
+  /// Continuous-speech window (16 kHz): accumulated SPEECH of the current
+  /// utterance reached this volume — chunk ready at the next micro-pause (see
+  /// `liveMicroPauseSamples`), no full `pauseDuration` wait. 3.0 s = 48000
+  /// samples — comfortable STT portion.
   private let liveChunkWindowSamples: Int
-  /// Микро-пауза (16 кГц): при накопленной речи ≥ `liveChunkWindowSamples`
-  /// пауза ≥ этого порога режет чанк во время непрерывного говорения.
-  /// 0.25 c = 4000 сэмплов — короче нормального межсловного пробела.
+  /// Micro-pause (16 kHz): with accumulated speech ≥ `liveChunkWindowSamples`,
+  /// a pause ≥ this threshold cuts a chunk during continuous speech.
+  /// 0.25 s = 4000 samples — shorter than a normal inter-word gap.
   private let liveMicroPauseSamples: Int
-  /// Индекс начала текущего уттеренса в `collectedSamples`; nil — речи нет.
+  /// Utterance start index in `collectedSamples`; nil — no speech yet.
   private var liveUtteranceStart: Int?
-  /// Индекс (исключая) конца последней порции РЕЧИ уттеренса — хвостовая
-  /// тишина не включается.
+  /// Exclusive index of the last SPEECH portion end — trailing silence not
+  /// included.
   private var liveUtteranceEnd = 0
-  /// Индекс начала текущей паузы внутри уттеренса; nil — паузы нет.
-  /// Пауза короче `livePauseSamples` — внутренний пробел, уттеренс живёт.
+  /// Current in-utterance pause start; nil — no pause. Pause shorter than
+  /// `livePauseSamples` — inner gap, utterance lives.
   private var liveSilenceStart: Int?
-  /// Индекс сразу после конца последнего доставленного live-сегмента:
-  /// pre-roll не может заезжать в уже доставленный ранее кусок.
+  /// Index right after the last delivered live segment: pre-roll cannot
+  /// re-enter an already delivered piece.
   private var liveLastCutIndex = 0
-  /// Накопленная длительность РЕЧИ текущего уттеренса (16 кГц): растёт на
-  /// каждую порцию речи, НЕ сбрасывается микро-паузой (межсловный пробел не
-  /// обнуляет прогресс чанка); обнуляется со сбросом VAD после доставки.
+  /// Accumulated SPEECH duration of the current utterance (16 kHz): grows per
+  /// speech portion, NOT reset by micro-pause (inter-word gap does not zero
+  /// chunk progress); zeroed on VAD reset after delivery.
   private var liveSpeechDurationSamples = 0
 
-  /// Серийная очередь ВСЕХ операций движка: installTap/removeTap/prepare/start/
-  /// stop. Вне очереди их вызывать нельзя — это и есть гарантия отсутствия
-  /// гонок teardown↔start и блокировок главного потока.
-  /// НЕ `let`: вместе с зависшим движком подменяется и ЕГО очередь
-  /// (replaceEngineAfterWedge) — заблокированный engine.start() держит только
-  /// свою очередь, операции для свежего движка уходят на свежую очередь.
+  /// Serial queue for ALL engine operations: installTap/removeTap/prepare/start/
+  /// stop. Never call them off-queue — that is the guarantee of no
+  /// teardown↔start races and no main-thread blocking.
+  /// NOT `let`: a wedged engine swaps its queue too
+  /// (replaceEngineAfterWedge) — a blocked engine.start() holds only ITS queue,
+  /// operations for the fresh engine go to the fresh queue.
   private var engineQueue: DispatchQueue
-  /// Фабрика свежих движков при подмене после зависания (см.
-  /// replaceEngineAfterWedge). Инъекция тестов; по умолчанию — настоящий
-  /// AVAudioEngine.
+  /// Fresh-engine factory for post-wedge replacement (see
+  /// replaceEngineAfterWedge). Test injection; default — real AVAudioEngine.
   private let engineFactory: () -> AudioEngineLike
-  /// Наблюдатель смены аудио-устройства + движок, на который он подписан.
-  /// Сам токен (NSObjectProtocol) не хранит объект подписки, поэтому вместе с
-  /// ним держим движок: устаревший старт снимает ТОЛЬКО СВОЮ подписку (по
-  /// идентичности движка), не трогая наблюдатель живой сессии на свежей паре.
+  /// Device-change observer + the engine it subscribed on. The token
+  /// (NSObjectProtocol) does not keep the subscription object, so we keep the
+  /// engine alongside: a stale start removes ONLY ITS subscription (by engine
+  /// identity), not the live session's observer on the fresh pair.
   private struct ConfigurationChangeObserver {
     var token: NSObjectProtocol
     var engine: AudioEngineLike
   }
-  /// Наблюдатель `AVAudioEngineConfigurationChangeNotification`: смена
-  /// аудио-устройства во время записи делает живой tap-конвертер невалидным
-  /// (входной формат движка изменился). Храним токен (+ движок), чтобы снять
-  /// подписку в teardown — иначе колбэк бьёт в освобождённый state.
+  /// `AVAudioEngineConfigurationChangeNotification` observer: audio-device
+  /// change during recording invalidates the live tap converter (engine input
+  /// format changed). Token (+ engine) kept so teardown removes the
+  /// subscription — else the callback hits released state.
   private var configChangeObserver: ConfigurationChangeObserver?
-  /// Фоновая очередь движка или главная — определяется движком, не потоком
-  /// вызова. Используется только для диагностики.
+  /// Background engine queue or main — decided by the engine, not the calling
+  /// thread. Diagnostics only.
   private var isDebug: Bool {
     logLevel.lowercased() == "debug"
   }
@@ -265,14 +255,14 @@ public final class AudioService {
     gainConfig: InputGainConfig = .fromEnvironment()
   ) {
     self.logLevel = logLevel
-    // Фабрика движков: начальный экземпляр (если не инъектирован) и замена
-    // зависшего создаются ЕЮ — тесты подменяют её и получают контроль над
-    // «свежим» движком после подмены.
+    // Engine factory: the initial instance (if not injected) and the wedge
+    // replacement are created BY it — tests swap it and control the "fresh"
+    // post-swap engine.
     let factory = makeEngine ?? { AVAudioEngine() }
     engineFactory = factory
     self.engine = engine ?? factory()
-    // Регистр жизненного цикла: единственная копия (generation/isRecording/
-    // autoStopScheduled). Стартует с нулевого поколения, флаги сброшены.
+    // Lifecycle ledger: the single copy of (generation/isRecording/
+    // autoStopScheduled). Starts at generation 0, flags clear.
     session = SessionLedger(generation: 0)
     engineQueue = DispatchQueue(label: "nanodictate.audio.engine", qos: .userInitiated)
     self.autoStopConfig = autoStopConfig
@@ -285,21 +275,21 @@ public final class AudioService {
       minSpeechRun: autoStopConfig.minSpeechRun,
       minRecordingDuration: autoStopConfig.minRecordingDuration
     )
-    // Live-VAD живёт на тех же порогах, что оффлайн-сегментация записи:
-    // один и тот же `silenceRMS`, одна и та же пауза `pauseDuration`.
+    // Live-VAD lives on the same thresholds as offline recording segmentation:
+    // same `silenceRMS`, same `pauseDuration`.
     liveSilenceRMS = segmenterConfig.silenceRMS
     livePauseSamples = max(1, Int((segmenterConfig.pauseDuration * 16000).rounded()))
-    // Pre-roll 0.5 c (8000 сэмплов) и post-roll 0.25 c (4000 сэмплов)
-    // при 16 кГц — запас, который не даёт срезать атаку и хвост слова.
+    // Pre-roll 0.5 s (8000 samples) and post-roll 0.25 s (4000 samples) at
+    // 16 kHz — margin keeping word attack and tail uncut.
     livePreRollSamples = Int((0.5 * 16000).rounded())
     livePostRollSamples = Int((0.25 * 16000).rounded())
-    // Режим «чанков» при непрерывной речи: окно 3.0 c (48000 сэмплов)
-    // накопленной РЕЧИ + микро-пауза 0.25 c (4000 сэмплов) разрешают
-    // выдачу текста во время говорения — не дожидаясь полной паузы 1 c.
+    // Chunk mode for continuous speech: window 3.0 s (48000 samples) of
+    // accumulated SPEECH + micro-pause 0.25 s (4000 samples) allow text
+    // delivery mid-flow — no full 1 s pause wait.
     liveChunkWindowSamples = Int((3.0 * 16000).rounded())
     liveMicroPauseSamples = Int((0.25 * 16000).rounded())
-    // Формат, в который пересэмплируем всё аудио: 16 кГц, моно, Float32.
-    // Данный init гарантированно валиден на macOS 12+.
+    // Target format for all resampling: 16 kHz mono Float32. This init is
+    // guaranteed valid on macOS 12+.
     guard
       let format = AVAudioFormat(
         commonFormat: .pcmFormatFloat32,
@@ -315,17 +305,16 @@ public final class AudioService {
 
   // MARK: - Старт
 
-  /// Начинает запись. Асинхронно: подъём движка идёт на фоновой очереди
-  /// (`engineQueue`), completion вызывается на главном потоке. При недоступности
-  /// микрофона или сбое движка — `.failure` (движок при этом разобран и готов
-  /// к повторному старту, см. `startOnEngineQueue`).
+  /// Starts recording. Async: engine bring-up on the background queue
+  /// (`engineQueue`), completion on main. Mic unavailable or engine failure —
+  /// `.failure` (engine torn down, ready for restart, see `startOnEngineQueue`).
   public func start(completion: @escaping (Result<Void, Error>) -> Void) {
-    // Снимок пары (движок, очередь, поколение) под lock, ДО постановки в
-    // очередь: блок уходит на очередь ЭТОГО движка и работает с НИМ. Зависший
-    // старт блокирует только свою пару — после подмены (replaceEngineAfterWedge)
-    // свежая пара работает, не дожидаясь заблокированной очереди. Поколение,
-    // захваченное здесь, — «метка» этого старта: tap-блок и терминальные
-    // ветки сверяют по ней, что движок всё ещё текущий (см. startOnEngineQueue).
+    // Pair snapshot (engine, queue, generation) under lock, BEFORE dispatch:
+    // the block goes to THIS engine's queue and works with IT. A wedged start
+    // blocks only its own pair — after the swap (replaceEngineAfterWedge) the
+    // fresh pair works without waiting for the blocked queue. The generation
+    // captured here is the start "stamp": the tap block and terminal branches
+    // verify against it that the engine is still current (see startOnEngineQueue).
     let slot = captureEngineSlot()
     slot.queue.async { [weak self, engine = slot.engine, startGeneration = slot.generation] in
       guard let self else {
@@ -337,13 +326,13 @@ public final class AudioService {
     }
   }
 
-  /// Атомарный снимок «движок + его серийная очередь + поколение» в момент
-  /// диспетчеризации операции. Пара меняется только целиком
-  /// (replaceEngineAfterWedge), поэтому операция всегда попадает на очередь
-  /// СВОЕГО движка: серийность installTap/removeTap/prepare/start/stop на
-  /// одном экземпляре сохраняется, а заблокированная очередь зависшего
-  /// движка никого больше не держит. Поколение — «метка» старта: по ней
-  /// tap-блок и терминальные ветки отличают текущий движок от отброшенного.
+  /// Atomic snapshot of "engine + its serial queue + generation" at operation
+  /// dispatch. The pair changes only whole (replaceEngineAfterWedge), so the
+  /// operation always lands on ITS engine's queue: seriality of
+  /// installTap/removeTap/prepare/start/stop on one instance is preserved, and
+  /// a blocked queue of a wedged engine holds nobody else. Generation — the
+  /// start "stamp": by it the tap block and terminal branches tell the current
+  /// engine from the discarded one.
   private struct EngineSlot {
     var engine: AudioEngineLike
     var queue: DispatchQueue
@@ -353,10 +342,9 @@ public final class AudioService {
   private func captureEngineSlot() -> EngineSlot {
     lock.lock()
     defer { lock.unlock() }
-    // Поколение берём из регистра `session` (единственная копия — см.
-    // SessionLedger): продвигает его только replaceEngineAfterWedge, всегда
-    // под этим же `lock`, так что пара (engine, generation) по-прежнему
-    // снимается согласованно.
+    // Generation from the `session` ledger (single copy — see SessionLedger):
+    // only replaceEngineAfterWedge advances it, always under this same `lock`,
+    // so the pair (engine, generation) still snapshots consistently.
     return EngineSlot(
       engine: engine,
       queue: engineQueue,
@@ -364,17 +352,17 @@ public final class AudioService {
     )
   }
 
-  /// Весь подъём движка — строго на очереди этого движка. `startGeneration` —
-  /// поколение слота на момент диспетчеризации старта: терминальные ветки
-  /// разбирают движок и трогают state сеанса ТОЛЬКО если движок, что начал,
-  /// всё ещё текущий (не подменён wedge'ом после таймаута сторожа).
+  /// Whole engine bring-up — strictly on THIS engine's queue. `startGeneration`
+  /// — slot generation at start dispatch: terminal branches tear the engine
+  /// down and touch session state ONLY if the engine that started is still
+  /// current (not wedge-swapped after the watchdog timeout).
   // swiftlint:disable:next cyclomatic_complexity function_body_length
   private func startOnEngineQueue(using engine: AudioEngineLike, startGeneration: Int) -> Result<
     Void, Error
   > {
-    // Новый сеанс: чистые буферы, чистый лимит (после принудительной
-    // остановки или аварийной ветки). Всё состояние под lock — старт идёт
-    // на очереди движка, process/stop могут читать параллельно.
+    // New session: clean buffers, clean limit (after forced stop or failure
+    // branch). All state under lock — start runs on the engine queue,
+    // process/stop may read in parallel.
     didLogFirstBuffer = false
     limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
     recordStartTime = CFAbsoluteTimeGetCurrent()
@@ -382,29 +370,29 @@ public final class AudioService {
     collectedSamples = []
     rmsHistory = []
     limitStopScheduled = false
-    // Защёлка автостопа — в регистре (бит autoStop): новый сеанс стартует
-    // без «финализация уже запланирована».
+    // Auto-stop latch — in the ledger (autoStop bit): a new session starts
+    // without "finalization already scheduled".
     session.clearAutoStop()
     autoStopDetector.reset()
-    gain.reset()  // новый сеанс — с нулевого усиления, без остатка прошлой записи
+    gain.reset()  // new session — zero gain, no residue from the previous recording
     liveLastCutIndex = 0
     resetLiveVADLocked()
     lock.unlock()
 
-    // Безопасный старт с нуля: если предыдущая сессия оставила движок с
-    // установленным tap (аварийная ветка), снимаем его ДО installTap —
-    // повторный installTap на тот же bus поднимает NSException (краш).
+    // Safe start from scratch: if the previous session left the engine with a
+    // tap installed (failure branch), remove it BEFORE installTap — a repeat
+    // installTap on the same bus raises NSException (crash).
     if isTapInstalled {
       teardownOnEngineQueue(using: engine)
     }
 
-    // Подъём входного узла и формата — под тем же ObjC-шлюзом, что и весь
-    // движок ниже: makeInputNode/outputFormat(forBus:)/AVAudioConverter могут
-    // поднять NSException (SetOutputFormat при рассинхронизации формата после
-    // смены аудио-устройства или TCC-гранта — в Swift его нельзя поймать
-    // try, голый вызов уронил бы процесс SIGABRT). Результаты собираются
-    // во внешние capture-переменные (тело шлюза Void-возвращающее),
-    // исключение превращается в NSError и идёт в терминальную ветку ниже.
+    // Input node and format bring-up under the same ObjC gateway as the whole
+    // engine below: makeInputNode/outputFormat(forBus:)/AVAudioConverter can
+    // raise NSException (SetOutputFormat on format desync after an
+    // audio-device change or TCC-grant issue — Swift cannot catch it with try,
+    // a bare call would crash the process SIGABRT). Results go into outer
+    // capture variables (gateway body returns Void), the exception becomes
+    // NSError and goes to the terminal branch below.
     var capturedInput: AudioInputNodeLike?
     var capturedHWFormat: AVAudioFormat?
     var capturedConverter: AVAudioConverter?
@@ -418,11 +406,11 @@ public final class AudioService {
       }
     }
     if let setupFailure {
-      // Терминальная ветка — как у engine.start() ниже: движок обязан быть
-      // разобран, иначе следующий Alt+Alt упадёт на повторном installTap.
-      // Но сначала гард поколения: если движок, что начал, уже подменён
-      // (wedge) — state нового сеанса (session.end()/сброс буферов)
-      // трогать нельзя, разбираем только сам устаревший движок.
+      // Terminal branch — like engine.start() below: the engine MUST be torn
+      // down, else the next Alt+Alt crashes on a repeat installTap. Generation
+      // guard first: if the engine that started was already wedge-swapped —
+      // new-session state (session.end()/buffer reset) is off-limits, tear
+      // down only the stale engine itself.
       guard isCurrentGeneration(startGeneration) else {
         teardownEngineOnly(using: engine)
         return .failure(setupFailure)
@@ -434,7 +422,7 @@ public final class AudioService {
       return .failure(setupFailure)
     }
     guard let input = capturedInput, let hwFormat = capturedHWFormat else {
-      // Недостижимо (makeInputNode не возвращает nil) — страховка компайлеру.
+      // Unreachable (makeInputNode never returns nil) — compiler reassurance.
       Logger.log("record engine: input node unavailable", level: "error")
       return .failure(AudioServiceError.unsupportedFormat)
     }
@@ -449,22 +437,22 @@ public final class AudioService {
     lock.lock()
     self.converter = converter
     lock.unlock()
-    // Устаревший старт (разблокировался ПОСЛЕ wedge-подмены) не должен
-    // подписываться: его движок уже отброшен, а токен перетёр бы наблюдатель
-    // свежей сессии, оставив живое устройство без реакции на смену. Гард
-    // поколения здесь — ДО подписки; терминальные гарды ниже остаются для
-    // стадий tap/prepare/start.
+    // A stale start (unblocked AFTER the wedge swap) must not subscribe: its
+    // engine is already discarded, and the token would clobber the fresh
+    // session's observer, leaving the live device without a reaction to
+    // device change. Generation guard here — BEFORE subscription; terminal
+    // guards below stay for the tap/prepare/start stages.
     guard isCurrentGeneration(startGeneration) else {
       teardownEngineOnly(using: engine)
       return .failure(AudioServiceError.engineSuperseded)
     }
-    // Подписка на смену аудио-устройства — после того как конвертер лёг в
-    // state: уведомление может прийти сразу после регистрации.
+    // Device-change subscription AFTER the converter is in state: a
+    // notification may arrive right after registration.
     observeConfigurationChanges(for: engine)
 
-    // Доступ к микрофону (TCC) при каждом создании/повторном старте записи.
-    // Повторный системный запрос доступа (главная жалоба) выглядит в логе
-    // как статус notDetermined перед стартом — сразу видно, что грант теряется.
+    // Mic permission (TCC) on every create/restart of recording. A repeated
+    // system access prompt (top complaint) shows in the log as status
+    // notDetermined before start — instantly visible that the grant is lost.
     let mic = MicrophoneAuth.statusText(AVCaptureDevice.authorizationStatus(for: .audio))
     Logger.log("mic permission: \(mic) (record start)", level: "info")
     Logger.log(
@@ -472,9 +460,9 @@ public final class AudioService {
         + "hwFormat=\(Int(hwFormat.sampleRate)) Hz",
       level: "info"
     )
-    // Диагностика автоостановки: видно, включена ли фича, пара порогов
-    // гистерезиса, grace, гейт «речь была» и пол записи (все значения из
-    // окружения — см. fromEnvironment).
+    // Auto-stop diagnostics: visible whether the feature is on, the pair of
+    // hysteresis thresholds, grace, the "speech happened" gate and the
+    // recording floor (all values from environment — see fromEnvironment).
     Logger.log(
       "record auto-stop: enabled=\(autoStopConfig.enabled), "
         + "speech>=\(autoStopConfig.speechRMSThreshold), silence<\(autoStopConfig.silenceRMSThreshold), "
@@ -484,8 +472,8 @@ public final class AudioService {
         + "minRecord=\(String(format: "%.1f", autoStopConfig.minRecordingDuration))s",
       level: "info"
     )
-    // Диагностика AGC: видно, включено ли усиление и какими параметрами
-    // (рубильник/цель/потолок из окружения — см. InputGainConfig.fromEnvironment).
+    // AGC diagnostics: visible whether gain is on and with what params (kill
+    // switch/target/ceiling from environment — see InputGainConfig.fromEnvironment).
     Logger.log(
       "record input-gain: enabled=\(gain.config.enabled), "
         + "target=\(String(format: "%.1f", gain.config.targetRmsDb)) dBFS, "
@@ -493,10 +481,10 @@ public final class AudioService {
       level: "info"
     )
 
-    // Хлебная крошка перед installTap: если следующий вызов AVFoundation
-    // крэшнет, последняя строка лога укажет точное место. Повторный опрос
-    // аппаратного формата здесь НЕ делается — тот же вызов уже снят под
-    // ObjC-шлюзом в подъёме выше (дублирование не давало новой информации).
+    // Breadcrumb before installTap: if the next AVFoundation call crashes, the
+    // last log line pinpoints the exact place. No re-poll of the hardware
+    // format here — the same call was already taken under the ObjC gateway in
+    // the bring-up above (duplication added no information).
     if isDebug {
       Logger.log(
         "record engine: installing tap (bus 0, bufferSize 4096, hwFormat=\(Int(hwFormat.sampleRate)) Hz)",
@@ -504,7 +492,7 @@ public final class AudioService {
       )
     }
 
-    // Tap вешается на аппаратный формат; конвертация выполняется в блоке.
+    // Tap on the hardware format; conversion happens in the block.
     var failure = guardedEngineCall {
       input.installTap(
         onBus: 0,
@@ -512,10 +500,10 @@ public final class AudioService {
         format: hwFormat
       ) { [weak self, tapGeneration = startGeneration] buffer, _ in
         guard let self else { return }
-        // Tap отброшенного поколения (движок подменён wedge'ом ПОСЛЕ
-        // установки tap) молча дропает буферы: чужой аудио-поток не
-        // должен кормить новую сессию. Сам по себе старый tap не снять
-        // (его движок мог зависнуть) — гард поколения дешевле и надёжнее.
+        // Tap of a discarded generation (engine wedge-swapped AFTER tap
+        // install) silently drops buffers: a foreign audio stream must not
+        // feed the new session. The old tap itself cannot be removed (its
+        // engine may be stuck) — the generation guard is cheaper and safer.
         guard self.isCurrentGeneration(tapGeneration) else { return }
         self.process(buffer)
       }
@@ -534,8 +522,8 @@ public final class AudioService {
     if failure == nil, isDebug {
       Logger.log("record engine: prepared, engine.start()…", level: "debug")
     }
-    // isRecording включается ДО engine.start(): первый буфер, пришедший
-    // сразу после старта аудио-потока, не должен быть отброшен.
+    // isRecording set BEFORE engine.start(): the first buffer arriving right
+    // after the audio stream starts must not be dropped.
     if failure == nil {
       setRecording(true)
       failure = guardedEngineCall {
@@ -543,11 +531,11 @@ public final class AudioService {
       }
     }
     if let failure {
-      // Терминальная ветка: движок обязан быть разобран (tap снят, движок
-      // остановлен, буферы очищены) — иначе следующий Alt+Alt упадёт на
-      // повторном installTap на занятом bus. Гард поколения, как в ветке
-      // setup-сбоя: разблокировавшийся ПОСЛЕ подмены старт не трогает
-      // state новой сессии — только разбирает сам устаревший движок.
+      // Terminal branch: the engine MUST be torn down (tap removed, engine
+      // stopped, buffers cleared) — else the next Alt+Alt crashes on a repeat
+      // installTap on a busy bus. Generation guard, as in the setup-failure
+      // branch: a start unblocked AFTER the swap does not touch the new
+      // session's state — only tears down the stale engine itself.
       guard isCurrentGeneration(startGeneration) else {
         teardownEngineOnly(using: engine)
         return .failure(failure)
@@ -557,12 +545,12 @@ public final class AudioService {
       Logger.log("record engine: start failed: \(failure.localizedDescription)", level: "error")
       return .failure(failure)
     }
-    // Гард поколения успешной ветки: если движок, что НАЧАЛ запись, уже не
-    // текущий (его start() разблокировался после wedge-подмены) — вернуть
-    // .success нельзя: агент вызвал бы audio.cancel() на ТЕКУЩЕЙ (возможно,
-    // живой) свежей паре. Разбираем только устаревший движок и помечаем
-    // старт .failure(.engineSuperseded) — сторожевой completion агента его
-    // игнорирует, к cancel() не приводит.
+    // Success-branch generation guard: if the engine that STARTED recording is
+    // no longer current (its start() unblocked after the wedge swap) — .success
+    // cannot be returned: the agent would call audio.cancel() on the CURRENT
+    // (possibly live) fresh pair. Tear down only the stale engine and mark the
+    // start .failure(.engineSuperseded) — the agent's watchdog completion
+    // ignores it, no cancel() follows.
     guard isCurrentGeneration(startGeneration) else {
       Logger.log("record engine: stale start completed after wedge — discarded", level: "info")
       teardownEngineOnly(using: engine)
@@ -576,9 +564,9 @@ public final class AudioService {
 
   // MARK: - Стоп / отмена
 
-  /// Останавливает запись и возвращает собранные сэмплы (Int16, 16кГц).
-  /// Снимок сэмплов — синхронный (как и раньше); teardown движка уходит на
-  /// engineQueue, чтобы не блокировать главный поток.
+  /// Stops recording and returns the collected samples (Int16, 16 kHz). Sample
+  /// snapshot is synchronous (as before); engine teardown goes to engineQueue
+  /// so the main thread never blocks.
   public func stop() -> [Int16] {
     lock.lock()
     guard isRecordingLocked else {
@@ -587,8 +575,8 @@ public final class AudioService {
     }
     let duration = CFAbsoluteTimeGetCurrent() - recordStartTime
     setRecording(false)
-    // «Хвост» (незакрытый уттеренс) забираем тем же снимком, под той же
-    // блокировкой — VAD-состояние и буфер записи согласованы.
+    // "Tail" (open utterance) taken in the same snapshot, under the same
+    // lock — VAD state and recording buffer stay consistent.
     let tail = takeLiveTailLocked()
     let samples = collectedSamples
     collectedSamples = []
@@ -596,26 +584,24 @@ public final class AudioService {
     rmsHistory = []
     lock.unlock()
 
-    // Разборка — на очереди ТОГО движка, с которым шла эта запись (снимок
-    // пары под lock): серийность с уже стоящими там операциями сохраняется,
-    // а после подмены зависшего движка конкретный teardown уходит на очередь
-    // своего (уже отброшенного) экземпляра и никого больше не держит.
+    // Teardown on the queue of THE engine this recording used (pair snapshot
+    // under lock): seriality with operations already staged there is kept, and
+    // after a wedge swap the concrete teardown goes to its own (already
+    // discarded) instance's queue, holding nobody else.
     let slot = captureEngineSlot()
     slot.queue.async { [weak self, engine = slot.engine] in
       guard let self else { return }
       self.teardownOnEngineQueue(using: engine)
     }
     logRecordingFinale(samples: samples, duration: duration, rmsHistory: rms)
-    // Незакрытый уттеренс распознаётся как последний сегмент: к моменту
-    // стопа речи после его начала больше не было, значит он покрывает
-    // финальную фразу целиком.
+    // Open utterance recognized as the last segment: no speech since its
+    // start, so it covers the final phrase whole.
     if !tail.isEmpty {
       onSpeechSegment?(tail, true)
     }
     return samples
   }
 
-  /// Отменяет запись, отбрасывая данные.
   public func cancel() {
     lock.lock()
     guard isRecordingLocked else {
@@ -626,21 +612,21 @@ public final class AudioService {
     let frames = collectedSamples.count
     setRecording(false)
     collectedSamples = []
-    // Отмена отбрасывает ВСЁ, включая незакрытый уттеренс: колбэка
-    // onSpeechSegment нет (Esc = данные не доставляются).
+    // Cancel discards EVERYTHING, including the open utterance: no
+    // onSpeechSegment callback (Esc = no delivery).
     liveLastCutIndex = 0
     resetLiveVADLocked()
     lock.unlock()
 
-    // Разборка — на очереди того же движка (снимок пары под lock), см.
-    // комментарий в stop().
+    // Teardown on the same engine's queue (pair snapshot under lock), see the
+    // stop() comment.
     let cancelSlot = captureEngineSlot()
     cancelSlot.queue.async { [weak self, engine = cancelSlot.engine] in
       guard let self else { return }
       self.teardownOnEngineQueue(using: engine)
     }
-    // Отмена тоже завершает запись — без отправки в STT; длительность и
-    // объём помогают отличать «пустую» отмену от отмены после реальной речи.
+    // Cancel also finishes the recording — no STT send; duration and volume tell
+    // an "empty" cancel from one after real speech.
     if isDebug {
       Logger.log(
         String(
@@ -656,58 +642,57 @@ public final class AudioService {
 
   // MARK: - Восстановление после зависания
 
-  /// Замена «зависшего» движка — восстановление после record-start таймаута
-  /// (сторож подъёма в Agent зовёт её, когда engine.start() не вернулся за
-  /// отведённое время; типичный сценарий — смена аудио-устройства после
-  /// TCC-гранта блокирует старт в HAL навсегда). Старый экземпляр
-  /// отбрасывается, в свойство встаёт СВЕЖИЙ AVAudioEngine — следующий
-  /// start() переустановит tap/формат/конвертер с нуля.
-  /// Подмена идёт СИНХРОННО на вызывающем потоке (не через очередь движка!):
-  /// очередь зависшего экземпляра может быть заблокирована навсегда его
-  /// engine.start() — постановка подмены в ту же очередь означала бы, что
-  /// восстановление не наступит НИКОГДА (ровно та дефектная схема, ради
-  /// которой метод и существует). Под lock меняется вся пара
-  /// (движок + его очередь): свежий движок из фабрики получает СВОЮ очередь,
-  /// старая пара отбрасывается целиком. Разборка и отпускание СТАРОГО движка —
-  /// на отдельной глобальной очереди: его stop() может застрять на том же
-  /// HAL, что завис в start(), и не должен держать ничью очередь.
-  /// Безопасен в любом состоянии, идемпотентен: повторный вызов просто
-  /// заменяет уже свежий движок ещё раз.
+  /// Replaces a "wedged" engine — recovery after a record-start timeout (the
+  /// Agent's bring-up watchdog calls it when engine.start() did not return in
+  /// time; typical scenario — audio-device change after the TCC grant blocks
+  /// start in HAL forever). The old instance is discarded, a FRESH
+  /// AVAudioEngine lands in the property — the next start() reinstalls
+  /// tap/format/converter from scratch.
+  /// Swap runs SYNCHRONOUSLY on the calling thread (not via the engine queue!):
+  /// the wedged instance's queue may be blocked forever by its engine.start() —
+  /// staging the swap on the same queue would mean recovery NEVER happens
+  /// (exactly the defective scheme this method exists for). Under lock the WHOLE
+  /// pair changes (engine + its queue): the fresh factory engine gets ITS OWN
+  /// queue, the old pair is discarded whole. Teardown and release of the OLD
+  /// engine — on a separate global queue: its stop() may get stuck on the same
+  /// HAL that hung in start(), and must hold nobody's queue.
+  /// Safe in any state, idempotent: a repeat call just replaces the already
+  /// fresh engine once more.
   public func replaceEngineAfterWedge() {
     let oldEngine: AudioEngineLike
     lock.lock()
     oldEngine = engine
     engine = engineFactory()
     engineQueue = DispatchQueue(label: "nanodictate.audio.engine", qos: .userInitiated)
-    // Новое поколение: операции и tap-блоки старого движка (если его start()
-    // разблокируется позже) видят расхождение поколений и не трогают state,
-    // а новые старты получают свежую метку.
+    // New generation: operations and tap blocks of the old engine (if its
+    // start() unblocks later) see the generation mismatch and do not touch
+    // state; new starts get a fresh stamp.
     session.advanceGeneration()
-    // tap и конвертер принадлежали старому движку — свежий старт ставит их
-    // с нуля (повторный installTap на занятом bus = NSException).
+    // tap and converter belonged to the old engine — fresh start reinstalls
+    // them from scratch (repeat installTap on a busy bus = NSException).
     tapInstalled = false
     converter = nil
     lock.unlock()
-    // Подписка на смену устройства принадлежала СТАРОМУ движку: его
-    // configuration-change не должен гасить запись на свежей паре.
+    // Device-change subscription belonged to the OLD engine: its
+    // configuration-change must not stop recording on the fresh pair.
     removeConfigurationObserver()
     Logger.log(
       "record engine: wedged engine replaced — fresh AVAudioEngine installed", level: "info")
-    // Разборка старого движка вне очередей движка (см. комментарий метода).
+    // Old-engine teardown off the engine queues (see the method comment).
     DispatchQueue.global(qos: .utility).async { [weak self] in
       guard let self else { return }
       _ = self.guardedEngineCall {
         oldEngine.stop()
       }
-      // oldEngine отпускается по выходу из блока — dealloc вдали от очередей движка.
+      // oldEngine released on block exit — dealloc away from engine queues.
     }
   }
 
   // MARK: - Private
 
-  /// Выполняет блок операций движка под ObjC-шлюзом: NSException AVFAudio
-  /// превращается в NSError, Swift-ошибка (engine.start() throws) пробрасывается
-  /// как есть. nil — операция прошла без ошибок.
+  /// Runs a block of engine operations under the ObjC gateway: an AVFAudio
+  /// NSException becomes NSError, a Swift error (engine.start() throws) passes
+  /// through as-is. nil — the operation completed without errors.
   func guardedEngineCall(_ body: @escaping () throws -> Void) -> Error? {
     final class ErrorBox {
       var captured: Error?
@@ -723,11 +708,11 @@ public final class AudioService {
     return nsError ?? box.captured
   }
 
-  /// Разборка движка — строго на очереди ЭТОГО движка. Идемпотентна: снять
-  /// не установленный tap / остановить не запущенный движок безопасно (все
-  /// вызовы под шлюзом NSException). Движок передаётся явно (снимок пары), а
-  /// не берётся из свойства: teardown может выполняться для экземпляра, уже
-  /// отброшенного подменой.
+  /// Engine teardown — strictly on THIS engine's queue. Idempotent: removing an
+  /// uninstalled tap / stopping a non-running engine is safe (all calls under
+  /// the NSException gateway). Engine passed explicitly (pair snapshot), not
+  /// taken from the property: teardown may run for an instance already
+  /// discarded by the swap.
   private func teardownOnEngineQueue(using engine: AudioEngineLike) {
     if isTapInstalled {
       _ = guardedEngineCall {
@@ -739,8 +724,9 @@ public final class AudioService {
       engine.stop()
     }
     setRecording(false)
-    // Подписку на смену устройства снимаем ДО сброса state: уведомление —
-    // про сеанс записи, после разборки ему нечего делать.
+    // Device-change subscription removed BEFORE the state reset: the
+    // notification is about a recording session — after teardown it has
+    // nothing to do.
     removeConfigurationObserver()
     lock.lock()
     converter = nil
@@ -753,13 +739,12 @@ public final class AudioService {
     lock.unlock()
   }
 
-  /// Разборка ТОЛЬКО устаревшего движка (снять его tap, остановить его) —
-  /// без трогания глобального состояния сеанса (isRecording, буферы,
-  /// конвертер). Для стартов, завершившихся после подмены поколения: полная
-  /// разборка (teardownOnEngineQueue) сбросила бы живую новую сессию на
-  /// свежем движке. Подписку на смену устройства снимаем только для СВОЕГО
-  /// движка: наблюдатель живой сессии принадлежит другому экземпляру и
-  /// остаётся на месте.
+  /// Teardown of ONLY the stale engine (remove its tap, stop it) — without
+  /// touching the global session state (isRecording, buffers, converter). For
+  /// starts that completed after a generation swap: a full teardown
+  /// (teardownOnEngineQueue) would reset the live NEW session on the fresh
+  /// engine. Device-change subscription removed only for ITS engine: the live
+  /// session's observer belongs to another instance and stays in place.
   private func teardownEngineOnly(using engine: AudioEngineLike) {
     _ = guardedEngineCall {
       engine.makeInputNode().removeTap(onBus: 0)
@@ -770,15 +755,15 @@ public final class AudioService {
     removeConfigurationObserver(for: engine)
   }
 
-  /// Подписка на смену аудиоустройства для сеанса записи. В заголовках AVFAudio
-  /// НЕТ свойства `configurationChangeHandler` — единственный канал это
-  /// `AVAudioEngineConfigurationChangeNotification` (AVAudioEngine.h, macOS 10.10+).
-  /// Уведомление наблюдаем через NotificationCenter с объектом ЭТОГО сеанса:
-  /// чужие движки (подмена после wedge) своих наблюдателей не будят.
-  /// `userInfo` уведомления не разбираем — решение принимает
-  /// `handleConfigurationChange` (запись останавливается с явной ошибкой).
-  /// Токен наблюдателя живёт под lock: `replaceEngineAfterWedge` снимает
-  /// подписку с вызывающего потока, а не с очереди движка.
+  /// Device-change subscription for a recording session. AVFAudio headers have
+  /// NO `configurationChangeHandler` property — the only channel is
+  /// `AVAudioEngineConfigurationChangeNotification` (AVAudioEngine.h,
+  /// macOS 10.10+). Observed via NotificationCenter with the object of THIS
+  /// session: foreign engines (wedge swap) do not wake their observers.
+  /// `userInfo` not parsed — `handleConfigurationChange` decides (recording
+  /// stops with an explicit error). Token lives under lock:
+  /// `replaceEngineAfterWedge` removes the subscription from the calling
+  /// thread, not the engine queue.
   private func observeConfigurationChanges(for engine: AudioEngineLike) {
     let token = NotificationCenter.default.addObserver(
       forName: .AVAudioEngineConfigurationChange,
@@ -791,14 +776,14 @@ public final class AudioService {
     let stale = configChangeObserver
     configChangeObserver = ConfigurationChangeObserver(token: token, engine: engine)
     lock.unlock()
-    // Снятие старого токена — вне lock: NotificationCenter чужой код, под
-    // блокировкой state ему делать нечего.
+    // Old token removed outside lock: NotificationCenter is foreign code — no
+    // state work under the lock.
     if let stale = stale { NotificationCenter.default.removeObserver(stale.token) }
   }
 
-  /// Снятие подписки на смену устройства. Вызывают: точки разборки
-  /// (teardownOnEngineQueue), подмена движка после wedge, запись нового
-  /// сеанса (через observeConfigurationChanges).
+  /// Removes the device-change subscription. Callers: teardown points
+  /// (teardownOnEngineQueue), engine replacement after wedge, new session
+  /// recording (via observeConfigurationChanges).
   private func removeConfigurationObserver() {
     lock.lock()
     let observer = configChangeObserver
@@ -807,8 +792,8 @@ public final class AudioService {
     if let observer = observer { NotificationCenter.default.removeObserver(observer.token) }
   }
 
-  /// Снятие подписки ТОЛЬКО для конкретного движка (устаревшие ветки старта):
-  /// токен live-сессии на свежем движке не трогается.
+  /// Removes the subscription ONLY for a given engine (stale start branches):
+  /// the live session's token on the fresh engine is untouched.
   private func removeConfigurationObserver(for engine: AudioEngineLike) {
     lock.lock()
     let token: NSObjectProtocol?
@@ -822,26 +807,27 @@ public final class AudioService {
     if let token = token { NotificationCenter.default.removeObserver(token) }
   }
 
-  /// Обработчик смены аудиоустройства во время записи: tap и конвертер привязаны
-  /// к СТАРОМУ формату входа, движок пересобрал граф. Безопасное восстановление
-  /// tap/конвертера наживую НЕВОЗМОЖНО: tap висит на старом input node, а
-  /// повторный installTap на пересобранном bus бросает NSException; конвертер
-  /// resample рассчитан из старого hwFormat. Поэтому запись останавливается, а
-  /// пользователю отдаётся ЯВНАЯ ошибка `.deviceChanged` через onDeviceChange
-  /// (колбэк — UI сам решает: тост/алерт/автозапись заново).
-  /// Блокировка: читаем isRecording под lock, сбрасывать state НЕ ЗДЕСЬ —
-  /// stop() сам гасит флаги и разбирает tap/движок. Двойная остановка
-  /// безопасна (stop идемпотентен через тот же guard isRecording).
+  /// Device-change handler during recording: tap and converter are bound to the
+  /// OLD input format, the engine rebuilt its graph. Live recovery of
+  /// tap/converter is IMPOSSIBLE: the tap hangs on the old input node, a
+  /// repeat installTap on the rebuilt bus throws NSException; the resample
+  /// converter was computed from the old hwFormat. So recording stops, and
+  /// the user gets an EXPLICIT `.deviceChanged` error via onDeviceChange
+  /// (callback — the UI decides: toast/alert/auto re-record).
+  /// Locking: isRecording read under lock, state NOT reset HERE — stop()
+  /// itself clears flags and tears down tap/engine. Double stop safe (stop is
+  /// idempotent through the same isRecording guard).
   private func handleConfigurationChange() {
-    // Чтение флага записи без NSLock: уведомление может прийти на чужой
-    // очереди, а регистр `session` не удерживает блокировку state.
+    // isRecording read without NSLock: the notification may arrive on a
+    // foreign queue, and the `session` ledger holds no state lock.
     guard isRecordingLocked else { return }
     Logger.log("record engine: configuration changed — stopping, user must restart", level: "warn")
-    // Весь финал — на главной очереди: уведомление приходит на потоке постера
-    // (системная нить AVFAudio), а контракт stop()/onSpeechSegment/onDeviceChange
-    // требует «хвост и колбэки на главном». Повторная проверка флага внутри —
-    // если пользователь уже остановил запись, ничего не делаем. Сэмплы сеанса
-    // отдаёт сам stop() (его путь финализации) — здесь они не нужны.
+    // Whole finalization on the main queue: the notification arrives on the
+    // poster's thread (system AVFAudio thread), while the stop()/
+    // onSpeechSegment/onDeviceChange contract requires "tail and callbacks on
+    // main". Re-check of the flag inside — if the user already stopped, do
+    // nothing. Session samples are delivered by stop() itself (its
+    // finalization path) — not needed here.
     DispatchQueue.main.async { [weak self] in
       guard let self, self.isRecordingLocked else { return }
       _ = self.stop()
@@ -849,8 +835,6 @@ public final class AudioService {
     }
   }
 
-  /// Сброс live-VAD — строго под блокировкой (начало сеанса, teardown,
-  /// доставка сегмента, остановка записи).
   private func resetLiveVADLocked() {
     liveUtteranceStart = nil
     liveUtteranceEnd = 0
@@ -858,11 +842,11 @@ public final class AudioService {
     liveSpeechDurationSamples = 0
   }
 
-  /// Снимок незакрытого уттеренса («хвоста») под блокировкой. Хвост — речь
-  /// от начала уттеренса до последней порции РЕЧИ (без хвостовой тишины);
-  /// когда пауза длится до самого стопа, это скрывает «молчание» после фразы.
-  /// Пустой, если речь не начиналась. VAD-состояние сбрасывается. Общий
-  /// буфер записи не трогается — хвост передаётся КОПИЕЙ.
+  /// Snapshot of the open utterance ("tail") under lock. Tail — speech from
+  /// utterance start to the last SPEECH portion (no trailing silence); when
+  /// the pause lasts to the very stop, this hides the "silence" after the
+  /// phrase. Empty if speech never started. VAD state reset. The shared
+  /// recording buffer untouched — the tail is passed by COPY.
   private func takeLiveTailLocked() -> [Int16] {
     defer { resetLiveVADLocked() }
     guard let start = liveUtteranceStart else { return [] }
@@ -871,9 +855,10 @@ public final class AudioService {
     return Array(collectedSamples[start..<end])
   }
 
-  /// Значение фактически принадлежит записи: `begin` взводит бит записи в
-  /// регистре одной атомарной операцией (поколение не трогает — его меняет
-  /// только advanceGeneration подмены wedge), `end` — гасит запись и автостоп.
+  /// The value truly belongs to the recording: `begin` sets the recording bit
+  /// in the ledger with one atomic operation (generation untouched — only the
+  /// wedge swap's advanceGeneration changes it), `end` clears recording and
+  /// auto-stop.
   private func setRecording(_ value: Bool) {
     if value {
       session.begin()
@@ -886,8 +871,9 @@ public final class AudioService {
     session.isRecording
   }
 
-  /// Проверка поколения с realtime-пути, без NSLock: tap-блок отброшенного
-  /// движка не должен трогать state нового сеанса (см. SessionLedger).
+  /// Generation check from the realtime path, without NSLock: a discarded
+  /// engine's tap block must not touch the new session's state (see
+  /// SessionLedger).
   private func isCurrentGeneration(_ generation: Int) -> Bool {
     session.isCurrentGeneration(generation)
   }
@@ -908,22 +894,22 @@ public final class AudioService {
     return tapInstalled
   }
 
-  /// Снимок состояния приёма под одной блокировкой: признак записи,
-  /// флаги принудительных остановок и конвертер. Закрывает гонку
-  /// старт/стоп/подмена — process видит согласованную тройку.
+  /// Intake-state snapshot under one lock: recording flag, forced-stop flags
+  /// and the converter. Closes the start/stop/swap race — process sees a
+  /// consistent trio.
   private struct BufferedSnapshot {
     var alive: Bool
     var converter: AVAudioConverter?
   }
 
   private func takeBufferedSnapshot() -> BufferedSnapshot {
-    // Флаги сеанса читаем ПЕРВЫМИ и без NSLock: на заблокированном lock
-    // (например, во время пересборки VAD в stop/performForcedStop) realtime
-    // tap-поток успевает увидеть «записи нет» и выйти, не вставая в очередь
-    // за блокировкой. Счётчик защёлкивается в начале сеанса, так что живой
-    // буфер после снятия флага уже не нужен. Дальше полновесный снимок
-    // (конвертер) — под NSLock; оба источника согласованы, потому что
-    // пишутся одним потоком-владельцем сеанса.
+    // Session flags read FIRST and without NSLock: on a blocked lock (e.g.
+    // during a VAD rebuild inside stop/performForcedStop) the realtime
+    // tap thread gets to see "no recording" and exits instead of queueing
+    // behind the lock. The counter latches at session start, so a live buffer
+    // after the flag cleared is not needed. Then the full-weight snapshot
+    // (converter) — under NSLock; both sources are consistent because the
+    // session-owner thread writes both.
     guard isRecordingLocked else {
       return BufferedSnapshot(alive: false, converter: nil)
     }
@@ -933,24 +919,22 @@ public final class AudioService {
     return BufferedSnapshot(alive: alive, converter: converter)
   }
 
-  /// Регистр жизненного цикла сеанса: убирает NSLock (mutex с возможным
-  /// syscall и инверсией приоритета) с realtime-пути tap-колбэка. Примитив —
-  /// `os_unfair_lock`: в неспорном случае это один атомарный CAS в userspace
-  /// без системных вызовов и ObjC-рантайма (raw C11-атомики потребовали бы
-  /// правок вне зоны — C-обёртки в AudioEngineGuard; зависимости swift-atomics
-  /// в пакете нет). Слово состояния упаковывает тройку
-  /// (generation/isRecording/autoStopScheduled): поколение — в старшем слове,
-  /// флаги — в младших двух битах; снимается пакетно под одним захватом.
-  /// Захваты короткие (несколько инструкций). Вложение допускается ТОЛЬКО в
-  /// одну сторону: NSLock→unfair — NSLock берётся и, пока удерживается,
-  /// берётся unfair (так идут все обращения к регистру из-под `lock`:
-  /// вложенные вызовы stop/start/разборок и их тел). Обратное вложение
-  /// (взять NSLock, удерживая unfair) в коде не встречается и запрещено.
-  /// Цикл невозможен: unfair никогда не удерживается при взятии NSLock
-  /// (захваты unfair — короткие, без блокирующих вызовов и чужих очередей).
-  /// Полновесные снимки буферов/конвертера — по-прежнему NSLock в
-  /// `takeBufferedSnapshot`.
-  /// Снимок тройки (generation/isRecording/autoStopScheduled) пакетно.
+  /// Session-lifecycle ledger: takes NSLock (mutex with possible syscall and
+  /// priority inversion) off the realtime tap-callback path. Primitive —
+  /// `os_unfair_lock`: uncontended it is one atomic CAS in userspace, no
+  /// system calls or ObjC runtime (raw C11 atomics would need edits outside
+  /// the zone — C wrappers in AudioEngineGuard; no swift-atomics dependency in
+  /// the package). The state word packs the trio
+  /// (generation/isRecording/autoStopScheduled): generation in the high word,
+  /// flags in the low two bits; read in one packet under a single acquisition.
+  /// Acquisitions are short (a few instructions). Nesting allowed ONLY one
+  /// way: NSLock→unfair — NSLock taken and, while held, unfair is taken (that
+  /// is how all ledger accesses from under `lock` run: nested stop/start/
+  /// teardown calls and their bodies). The reverse nesting (taking NSLock
+  /// while holding unfair) does not occur in code and is forbidden. A cycle is
+  /// impossible: unfair is never held when taking NSLock (unfair acquisitions
+  /// are short, with no blocking calls or foreign queues). Full-weight
+  /// buffer/converter snapshots — still NSLock in `takeBufferedSnapshot`.
   struct SessionSnapshot {
     let generation: Int
     let isRecording: Bool
@@ -960,13 +944,12 @@ public final class AudioService {
   final class SessionLedger: @unchecked Sendable {
     private var unfair = os_unfair_lock()
     private var word: UInt64 = 0
-    /// Бит 0 — идёт запись; бит 1 — защёлка планировщика автостопа.
+    /// Bit 0 — recording; bit 1 — auto-stop scheduler latch.
     private static let recordingBit: UInt64 = 1
     private static let autoStopBit: UInt64 = 2
-    /// Старшее слово счётчика поколений; младшее — флаговое.
+    /// High word — generation counter; low — flag field.
     private static let generationShift: UInt64 = 32
 
-    /// Начальное поколение наследуют от сервиса, флаги — нулевые.
     init(generation: Int) {
       word = UInt64(clamping: generation) << Self.generationShift
     }
@@ -977,58 +960,58 @@ public final class AudioService {
       return unpack(word)
     }
 
-    /// Чтение `isRecording` вне NSLock для раннего выхода realtime-thread
-    /// (полный снимок — см. `takeBufferedSnapshot`).
+    /// `isRecording` read outside NSLock for the realtime thread's early exit
+    /// (full snapshot — see `takeBufferedSnapshot`).
     var isRecording: Bool {
       os_unfair_lock_lock(&unfair)
       defer { os_unfair_lock_unlock(&unfair) }
       return word & Self.recordingBit != 0
     }
 
-    /// Сверка поколения без NSLock (tap-блок, терминальные ветки старта).
+    /// Lock-free generation check (tap block, start terminal branches).
     func isCurrentGeneration(_ generation: Int) -> Bool {
       os_unfair_lock_lock(&unfair)
       defer { os_unfair_lock_unlock(&unfair) }
       return Int(word >> Self.generationShift) == generation
     }
 
-    /// Переход старта: взводит ТОЛЬКО бит recording, одним атомарным OR.
-    /// Поколение НЕ пишется: его меняет единственная операция
-    /// `advanceGeneration` (подмена wedge), а чтение-модификация-запись
-    /// поколения двумя отдельными захватами unfair (взять снимок, вернуть
-    /// поколение обратно) была бы TOCTOU — параллельный advanceGeneration
-    /// между ними откатил бы поколение назад. Флаг записи читается из
-    /// регистра без блокировки — `begin` вызывается на потоке, который уже
-    /// владеет сеансом (очередь движка либо main).
+    /// Start transition: sets ONLY the recording bit, one atomic OR. Generation
+    /// NOT written: the single `advanceGeneration` (wedge swap) changes it,
+    /// and a read-modify-write of the generation across two separate unfair
+    /// acquisitions (take snapshot, put the generation back) would be TOCTOU —
+    /// a parallel advanceGeneration between them would roll the generation
+    /// back. The flag is read from the ledger without a lock — `begin` is
+    /// called on the thread that already owns the session (engine queue or
+    /// main).
     func begin() {
       os_unfair_lock_lock(&unfair)
       defer { os_unfair_lock_unlock(&unfair) }
       word |= Self.recordingBit
     }
 
-    /// Переход останова: сброс recording + autoStop, поколение сохранить.
+    /// Stop transition: clears recording + autoStop, generation kept.
     func end() {
       os_unfair_lock_lock(&unfair)
       defer { os_unfair_lock_unlock(&unfair) }
       word &= ~(Self.recordingBit | Self.autoStopBit)
     }
 
-    /// Снятие защёлки автостопа — новый сеанс стартует без «финализация уже
-    /// запланирована» (флаг записи не трогаем: его взводит `begin`).
+    /// Clears the auto-stop latch — a new session starts without "finalization
+    /// already scheduled" (recording flag untouched: `begin` sets it).
     func clearAutoStop() {
       os_unfair_lock_lock(&unfair)
       defer { os_unfair_lock_unlock(&unfair) }
       word &= ~Self.autoStopBit
     }
 
-    /// Защёлка автостопа: бит планировщика; поколение/запись сохранить.
+    /// Auto-stop latch: the scheduler bit; generation/recording kept.
     func latchAutoStop() {
       os_unfair_lock_lock(&unfair)
       defer { os_unfair_lock_unlock(&unfair) }
       word |= Self.autoStopBit
     }
 
-    /// Шаг поколения подмены wedge: счётчик +1, сброс recording/autoStop.
+    /// Wedge-swap generation step: counter +1, recording/autoStop cleared.
     @discardableResult
     func advanceGeneration() -> Int {
       os_unfair_lock_lock(&unfair)
@@ -1038,7 +1021,6 @@ public final class AudioService {
       return generation
     }
 
-    /// Распаковка слова в тройку — только под захватом unfair.
     private func unpack(_ packed: UInt64) -> SessionSnapshot {
       SessionSnapshot(
         generation: Int(packed >> Self.generationShift),
@@ -1048,28 +1030,28 @@ public final class AudioService {
     }
   }
 
-  /// Реальный объём выхода при ресемплинге пропорционален частотам:
-  /// `inputFrames × outputRate / inputRate` + запас (¼), чтобы конвертер
-  /// наполнил выход за один проход из одного входного буфера.
+  /// Real resample output size scales with rates:
+  /// `inputFrames × outputRate / inputRate` + a ¼ margin, so the converter
+  /// fills the output in one pass from one input buffer.
   static func outputFrameCapacity(
     forInputFrames inputFrames: AVAudioFrameCount,
     inputRate: Double,
     outputRate: Double
   ) -> AVAudioFrameCount {
-    // Защита от деления на ноль: в проде недостижимо, но helper внутренний
-    // и тестируемый.
+    // Zero-division guard: unreachable in prod, but the helper is internal
+    // and tested.
     guard inputRate > 0, outputRate > 0 else { return 0 }
     let base = Int(Double(inputFrames) * outputRate / inputRate)
     return AVAudioFrameCount(base + max(1, base / 4))
   }
 
-  /// Один проход конвертера (драйв входа). Входной буфер отдаётся РОВНО один
-  /// раз (`.haveData`), при всех последующих запросах — `nil` + `.noDataNow`:
-  /// конвертер не тянет один и тот же кусок повторно, а `.noDataNow` (в отличие
-  /// от `.endOfStream`) не защёлкивает конвертер — он остаётся живым для
-  /// следующих буферов.
-  /// Непустой выход валиден при `.haveData`/`.inputRanDry`/`.endOfStream`;
-  /// отбрасываются только пустые результаты и ошибки.
+  /// One converter pass (input drive). The input buffer is handed exactly ONCE
+  /// (`.haveData`); on all later requests — nil + `.noDataNow`: the converter
+  /// does not pull the same piece again, and `.noDataNow` (unlike
+  /// `.endOfStream`) does not latch the converter — it stays alive for the
+  /// next buffers.
+  /// Non-empty output valid at `.haveData`/`.inputRanDry`/`.endOfStream`;
+  /// only empty results and errors are discarded.
   static func convertOnce(
     input: AVAudioPCMBuffer,
     inputFormat: AVAudioFormat,
@@ -1103,12 +1085,12 @@ public final class AudioService {
 
   // swiftlint:disable:next cyclomatic_complexity function_body_length
   private func process(_ buffer: AVAudioPCMBuffer) {
-    // Ранний гард «идёт ли запись» ДО конвертации и AGC: после stop()/start()
-    // поздний буфер старого тапа не должен трогать state InputGain — reset()
-    // нового сеанса (engineQueue, под lock) и apply (аудио-поток) не
-    // пересекаются (гард ниже на 635 остаётся — защита задублирована).
-    // Все флаги и конвертер снимаются под lock одним снимком: безлочный
-    // гард убран — гонка старт/стоп закрыта (см. takeBufferedSnapshot).
+    // Early "is recording?" guard BEFORE conversion and AGC: after stop()/start()
+    // a late buffer of the old tap must not touch InputGain state — reset() of
+    // the new session (engineQueue, under lock) and apply (audio stream) do
+    // not overlap (the guard below stays — protection duplicated).
+    // All flags and the converter are taken under lock in one snapshot: the
+    // lock-free guard is gone — start/stop race closed (see takeBufferedSnapshot).
     let snapshot = takeBufferedSnapshot()
     guard snapshot.alive else { return }
     guard let converter = snapshot.converter else {
@@ -1134,19 +1116,19 @@ public final class AudioService {
     let converted = result.converted
     let frameLength = Int(converted.frameLength)
 
-    // RMS ДО усиления — вход AGC: «сколько дБ не хватает до целевого
-    // уровня речи» (метеорология по сырому сигналу тапа).
+    // RMS BEFORE gain — AGC input: "how many dB short of the target speech
+    // level" (raw-tap-signal metering).
     var sum: Float = 0
     for i in 0..<frameLength {
       let sample = channel[i]
       sum += sample * sample
     }
     let rms = frameLength > 0 ? sqrt(sum / Float(frameLength)) : 0
-    // Цифровое усиление (AGC) — здесь, изменением буфера на месте: все
-    // потребители ниже (метрика уровня, live-VAD, автостоп, запись в Int16)
-    // видят уже усиленный сигнал. Уровень для метрик пересчитывается из
-    // усиленного буфера (с учётом клампа пиков); при выключенном AGC
-    // (`NANODICTATE_GAIN_DISABLED=1`) буфер проходит без изменений, метрика = rms.
+    // Digital gain (AGC) here, mutating the buffer in place: all consumers
+    // below (level metric, live-VAD, auto-stop, Int16 recording) see the
+    // amplified signal. The metering level is recomputed from the amplified
+    // buffer (peak clamp accounted); with AGC off
+    // (`NANODICTATE_GAIN_DISABLED=1`) the buffer passes unchanged, metric = rms.
     let meteredRms = gain.apply(
       to: channel,
       frameLength: frameLength,
@@ -1155,21 +1137,21 @@ public final class AudioService {
     )
     levelDelegate?.audioLevelChanged(rms: meteredRms)
 
-    // Вся общая память (isRecording, collectedSamples, rmsHistory, лимит,
-    // live-VAD) — под блокировкой: stop()/cancel() снимают снимок на
-    // главном потоке синхронно с накоплением здесь.
+    // All shared memory (isRecording, collectedSamples, rmsHistory, limit,
+    // live-VAD) — under the lock: stop()/cancel() take a snapshot on main
+    // synchronously with the accumulation here.
     var deliveredSegment: [Int16]?
     lock.lock()
     guard isRecordingLocked else {
       lock.unlock()
       return
     }
-    // История RMS по буферам — для сводных метрик уровня в конце записи.
-    // 60 c при буфере 4096 фреймов и 48 кГц ≈ 700 значений — памятью не жертвуем.
+    // Per-buffer RMS history — final level summary metrics. 60 s at 4096
+    // frames and 48 kHz ≈ 700 values — memory fine.
     rmsHistory.append(meteredRms)
 
-    // Первый буфер сеанса — доказательство, что звук реально пошёл в движок
-    // (длительность куска и его энергия; при сломанном микрофоне rms ≈ 0).
+    // First session buffer — proof sound really reached the engine (piece
+    // duration and energy; broken mic → rms ≈ 0).
     if !didLogFirstBuffer {
       didLogFirstBuffer = true
       if isDebug {
@@ -1189,8 +1171,8 @@ public final class AudioService {
       }
     }
 
-    // Ограничение памяти: добавляем не больше, чем укладывается в лимит
-    // (960 000 сэмплов на 60 с). Буфер никогда не превышает этот предел.
+    // Memory bound: append no more than the limit allows (960 000 samples per
+    // 60 s). Buffer never exceeds it.
     let sampleStart = collectedSamples.count
     let appendCount = min(frameLength, limit.remainingSamples(after: collectedSamples.count))
     collectedSamples.reserveCapacity(
@@ -1208,25 +1190,25 @@ public final class AudioService {
     }
     let sampleEnd = collectedSamples.count
 
-    // Live-VAD поверх только что посчитанного RMS: непрерывная речь — один
-    // уттеренс; пауза ≥ pauseDuration (в сэмплах) закрывает его сегментом,
-    // а при накопленной речи ≥ liveChunkWindowSamples тот же сегмент
-    // вырезает микро-пауза liveMicroPauseSamples — текст идёт во время
-    // говорения, не дожидаясь длинной паузы. Пороги те же, что у
-    // оффлайн-сегментера (silenceRMS, pauseDuration). Доставка сегмента —
-    // КОПИЕЙ наружу (onSpeechSegment ПОСЛЕ unlock); сам collectedSamples
-    // не трогается и продолжает собирать всю запись для финального прохода.
+    // Live-VAD over the just-computed RMS: continuous speech — one utterance; a
+    // pause ≥ pauseDuration (in samples) closes it with a segment, and with
+    // accumulated speech ≥ liveChunkWindowSamples the same segment is cut by
+    // the micro-pause liveMicroPauseSamples — text flows while speaking, no
+    // long-pause wait. Same thresholds as the offline segmenter (silenceRMS,
+    // pauseDuration). Segment delivery — by COPY outside (onSpeechSegment
+    // AFTER unlock); collectedSamples itself untouched and keeps collecting
+    // the whole recording for the final pass.
     //
-    // Общий код доставки для обеих веток (полная пауза и чанк): пост-ролл
-    // 0.25 c тишины к последней порции речи (индекс клампится концом
-    // буфера — пост-ролл не выходит за запись), запоминание индекса среза
-    // (pre-roll следующего уттеренса не заедет в уже доставленный кусок)
-    // и сброс VAD. Диапазон заведомо непуст: уттеренс содержит ≥1 сэмпла
-    // речи (liveUtteranceEnd > liveUtteranceStart), пост-ролл неотрицателен
-    // — срез без пустой-диапазонной ветки.
+    // Shared delivery code for both branches (full pause and chunk): post-roll
+    // 0.25 s of silence after the last speech portion (index clamped by the
+    // buffer end — post-roll never leaves the recording), the cut index is
+    // remembered (the next utterance's pre-roll cannot re-enter an already
+    // delivered piece) and VAD reset. The range is provably non-empty: the
+    // utterance holds ≥1 speech sample (liveUtteranceEnd > liveUtteranceStart),
+    // post-roll non-negative — cut without an empty-range branch.
     let deliverSegment: () -> Void = {
-      // Вызывается только при liveUtteranceStart != nil (см. ниже) — nil
-      // невозможен по инварианту, гард — страховка для компайлера.
+      // Called only with liveUtteranceStart != nil (see below) — nil is
+      // impossible by the invariant, the guard is compiler reassurance.
       guard let start = self.liveUtteranceStart else { return }
       let postEnd = min(
         self.liveUtteranceEnd + self.livePostRollSamples, self.collectedSamples.count)
@@ -1238,18 +1220,17 @@ public final class AudioService {
 
     if meteredRms < liveSilenceRMS {
       if liveUtteranceStart != nil {
-        // Пауза внутри уттеренса: открываем. Уттеренс закрывается
-        // ПОЛНОЙ паузой pauseDuration (как раньше) — либо микро-паузой
-        // liveMicroPauseSamples, если непрерывная речь накопила окно
-        // liveChunkWindowSamples (чанк вырезается при ближайшем
-        // межсловном пробеле). Пауза короче обоих порогов — внутренний
-        // пробел (мнимый «вздох» не рвёт фразу): накопленная речь при
-        // этом НЕ сбрасывается, прогресс чанка сохраняется.
+        // Pause inside the utterance: opened. The utterance closes on a
+        // FULL pause pauseDuration (as before) — or on the micro-pause
+        // liveMicroPauseSamples if continuous speech accumulated the window
+        // liveChunkWindowSamples (chunk cut at the nearest inter-word gap).
+        // Pause shorter than both — inner gap (a phantom "sigh" does not
+        // break the phrase): accumulated speech NOT reset, chunk progress kept.
         if liveSilenceStart == nil {
           liveSilenceStart = sampleStart
         }
-        // nil невозможен: только что инициализирован sampleStart (либо был
-        // установлен ранее) — ?? здесь страховка для компайлера.
+        // nil impossible: sampleStart just initialized (or set earlier) —
+        // ?? is compiler reassurance.
         let silenceStart = liveSilenceStart ?? sampleStart
         let pauseLen = sampleEnd - silenceStart
         let dueForChunk = liveSpeechDurationSamples >= liveChunkWindowSamples
@@ -1258,11 +1239,11 @@ public final class AudioService {
         }
       }
     } else {
-      // Речь: начинаем уттеренс (или продлеваем последнюю порцию речи),
-      // накопленная пауза сбрасывается, длительность РЕЧИ растёт — счётчик
-      // чанков, межсловные микро-паузы его не обнуляют. Pre-roll отступает
-      // от старта речи на 0.5 c, но не заезжает в уже доставленный сегмент
-      // (liveLastCutIndex) и не уходит в отрицательные индексы.
+      // Speech: starts the utterance (or extends the last speech portion),
+      // accumulated pause resets, SPEECH duration grows — chunk counter,
+      // inter-word micro-pauses never zero it. Pre-roll steps 0.5 s back from
+      // speech start but never re-enters an already delivered segment
+      // (liveLastCutIndex) nor goes negative.
       if liveUtteranceStart == nil {
         liveUtteranceStart = max(sampleStart - livePreRollSamples, liveLastCutIndex)
       }
@@ -1271,19 +1252,18 @@ public final class AudioService {
       liveSpeechDurationSamples += sampleEnd - sampleStart
     }
 
-    // Жёсткий лимит по времени (60 c) и/или по объёму буфера — принудительный
-    // стоп тем же путём, которым запись останавливается пользователем.
+    // Hard limits — time (60 s) and/or buffer size — forced stop via the
+    // same path as a user stop.
     let elapsed = CFAbsoluteTimeGetCurrent() - recordStartTime
     let shouldStop = limit.shouldStop(elapsed: elapsed, totalSamples: collectedSamples.count)
-    // Автоостановка по непрерывной тишине (~3 c): детектор кормим ТОЛЬКО
-    // если фича включена (`autoStopConfig.enabled` — рубильник из окружения,
-    // см. AutoStopConfig.fromEnvironment) и лимит в этом буфере не сработал
-    // (лимит имеет приоритет — запись в любом случае заканчивается, а тип
-    // финализации один). Длительность буфера — фактическая: конвертированные
-    // фреймы делим на целевую частоту 16 кГц. Накопление идёт по времени
-    // аудио, а не по числу буферов — частота колбэков зависит от частоты
-    // железа (~85 мс @ 48 кГц, ~93 мс @ 44.1 кГц), а «3 секунды тишины»
-    // меряются по звуку.
+    // Auto-stop on continuous silence (~3 s): the detector is fed ONLY
+    // when the feature is on (`autoStopConfig.enabled` — env kill switch,
+    // see AutoStopConfig.fromEnvironment) and the limit did not fire in this
+    // buffer (limit wins — the recording ends either way, one finalization
+    // type). Buffer duration — real: converted frames / target rate 16 kHz.
+    // Accumulation by audio time, not buffer count — callback frequency
+    // tracks hardware sample rate (~85 ms @ 48 kHz, ~93 ms @ 44.1 kHz),
+    // "3 s of silence" measured by sound.
     let autoStopFired =
       autoStopConfig.enabled && !shouldStop
       && autoStopDetector.feed(
@@ -1301,17 +1281,17 @@ public final class AudioService {
     }
   }
 
-  /// Диагностика молчаливого отбрасывания входного буфера в `process`
-  /// (debug-only, поведение не меняет): причина + размер куска.
+  /// Diagnostics of a silently dropped input buffer in `process` (debug-only,
+  /// no behavior change): reason + piece size.
   private func logDroppedBuffer(reason: String, frames: AVAudioFrameCount) {
     guard isDebug else { return }
     Logger.log("record drop buffer: \(reason) frames=\(frames)", level: "debug")
   }
 
-  /// Планирует принудительную остановку ровно один раз. Снимок сэмплов и
-  /// «хвоста» (незакрытый уттеренс) берётся в `performForcedStop` на главной
-  /// очереди под одной блокировкой — между планированием и финализацией
-  /// буферы продолжают накапливаться, хвост ничего не теряет.
+  /// Schedules a forced stop exactly once. The sample + tail snapshot (open
+  /// utterance) is taken in `performForcedStop` on the main queue under one
+  /// lock — buffers keep accumulating between scheduling and finalization,
+  /// the tail loses nothing.
   private func scheduleLimitStop() {
     lock.lock()
     guard !limitStopScheduled else {
@@ -1321,23 +1301,24 @@ public final class AudioService {
     limitStopScheduled = true
     lock.unlock()
 
-    // removeTap/engine.stop нельзя вызывать из колбэка tap (риск дедлока
-    // и повторного входа) — переносим на главную очередь, откуда teardown
-    // уйдёт на engineQueue, как обычный stop().
+    // removeTap/engine.stop not callable from the tap callback (deadlock +
+    // re-entry risk) — hop to the main queue, whence teardown goes to
+    // engineQueue like a regular stop().
     DispatchQueue.main.async { [weak self] in
       self?.performForcedStop(reason: .limit)
     }
   }
 
-  /// Планирует автоостановку по тишине ровно один раз — тот же поздний снимок
-  /// в `performForcedStop`, что у `scheduleLimitStop`: «хвост» незакрытого
-  /// уттеренса и полные сэмплы берутся на главной очереди, teardown движка
-  /// уходит туда же (из колбэка tap removeTap вызывать нельзя).
+  /// Schedules an auto-stop on silence exactly once — same late snapshot in
+  /// `performForcedStop` as `scheduleLimitStop`: the open-utterance tail and
+  /// full samples are taken on the main queue, engine teardown hops there too
+  /// (removeTap not callable from the tap callback).
   private func scheduleAutoStop() {
     lock.lock()
-    // Защёлка живёт в регистре `session` (бит autoStop), но проверяется под
-    // NSLock: планировщик вызывается с realtime-пути, где важна и ранняя
-    // отсечка без входа в буферы (автостоп — событие, не каждый буфер).
+    // The latch lives in the `session` register (autoStop bit) but is checked
+    // under NSLock: the scheduler runs on the realtime path, where early
+    // rejection without entering buffers matters (auto-stop is an event, not
+    // every buffer).
     guard !isAutoStopScheduled else {
       lock.unlock()
       return
@@ -1350,24 +1331,23 @@ public final class AudioService {
     }
   }
 
-  /// Причина принудительной остановки: лимит длительности или автоостановка
-  /// по непрерывной тишине. Механика финализации одна — различается только
-  /// колбэк, который получает сэмплы.
+  /// Forced-stop cause: duration limit or auto-stop on silence. One
+  /// finalization mechanic — only the callback receiving the samples differs.
   private enum ForcedStopReason {
     case limit
     case autoStopSilence
   }
 
-  /// Тех же путь, что и `stop()`: снятие tap, остановка движка, «drain»
-  /// конвертера, доставка собранных сэмплов через колбэк финализации.
-  /// «Хвост» отдаётся ДО колбэка — клиент успевает поставить его в очередь
-  /// распознавания раньше финализации всей записи.
-  /// Снимок — на главной очереди, максимально поздно: между `schedule*`
-  /// (аудиопоток) и финализацией tap успевает добрать ~100-200 мс, иначе
-  /// хвост последней фразы терялся.
+  /// Same path as `stop()`: tap removal, engine stop, converter "drain",
+  /// delivery of collected samples via the finalization callback.
+  /// The "tail" is delivered BEFORE the callback — the client queues it for
+  /// recognition before the whole recording finalizes.
+  /// Snapshot on the main queue, as late as possible: between `schedule*`
+  /// (audio thread) and finalization the tap picks up ~100-200 ms more,
+  /// otherwise the last phrase's tail was lost.
   private func performForcedStop(reason: ForcedStopReason) {
     lock.lock()
-    // Пользователь уже остановил запись — не дублируем финализацию.
+    // User already stopped the recording — finalization not duplicated.
     guard isRecordingLocked else {
       lock.unlock()
       return
@@ -1387,8 +1367,8 @@ public final class AudioService {
         level: "debug"
       )
     }
-    // Разборка — на очереди того же движка (снимок пары под lock), см.
-    // комментарий в stop().
+    // Teardown on the same engine's queue (pair snapshot under lock), see
+    // comment in stop().
     let forcedSlot = captureEngineSlot()
     forcedSlot.queue.async { [weak self, engine = forcedSlot.engine] in
       guard let self else { return }
@@ -1406,10 +1386,10 @@ public final class AudioService {
     }
   }
 
-  /// Единый финальный лог записи для `stop()` и принудительной остановки по
-  /// лимиту: lifecycle (всегда, `info`) + метрологию уровня (только при
-  /// `logLevel == "debug"`). Ошибок не бросает: логирование не должно ронять
-  /// запись.
+  /// Single final recording log for `stop()` and forced stop by limit:
+  /// lifecycle (always, `info`) + level metering (only when
+  /// `logLevel == "debug"`). Never throws: logging must not drop the
+  /// recording.
   private func logRecordingFinale(samples: [Int16], duration: TimeInterval, rmsHistory: [Float]) {
     Logger.log(
       String(
@@ -1444,16 +1424,16 @@ public final class AudioService {
 
 public enum AudioServiceError: Error, LocalizedError {
   case unsupportedFormat
-  /// Экземпляр AudioService уничтожен до завершения старта (в проде недостижимо).
+  /// AudioService deallocated before start finished (unreachable in prod).
   case engineGone
-  /// Старт завершился, когда движок уже подменён (wedge после таймаута
-  /// сторожа): сессия устарела. Пользователю НЕ показывается — completion
-  /// устаревшего старта агент игнорирует. Главное: такой старт не приводит
-  /// к audio.cancel()/переходу в .recording на живой свежей паре.
+  /// Engine already replaced when start finished (wedge after watchdog
+  /// timeout): session stale. NOT shown to the user — the agent ignores the
+  /// stale start's completion. Key: such a start never leads to
+  /// audio.cancel()/transition to .recording on the live fresh pair.
   case engineSuperseded
-  /// Смена аудио-устройства во время записи: живой tap-конвертер собран под
-  /// старый входной формат и пересоздан быть не может без разрыва сеанса.
-  /// Понятная ошибка пользователю вместо тишины в записи.
+  /// Audio device changed mid-recording: the live tap converter is built for
+  /// the old input format and cannot be rebuilt without breaking the session.
+  /// A clear error to the user instead of silence in the recording.
   case deviceChanged
   public var errorDescription: String? {
     switch self {
@@ -1461,8 +1441,8 @@ public enum AudioServiceError: Error, LocalizedError {
     case .engineGone: return L10n.tr("error.audioServiceUnavailable")
     case .engineSuperseded: return L10n.tr("error.audioServiceUnavailable")
     case .deviceChanged:
-      // Ключ error.audioDeviceChanged заведён в roadmap L10n-таблиц; пока
-      // таблиц нет — явная строка по L10n.language, не raw key в UI.
+      // Key error.audioDeviceChanged planned for L10n tables; none exist
+      // yet — explicit string by L10n.language, not a raw key in UI.
       switch L10n.language {
       case .ru: return "Аудио-устройство изменилось — запись остановлена. Начните запись заново."
       case .en: return "Audio device changed — recording stopped. Please start recording again."
@@ -1472,5 +1452,5 @@ public enum AudioServiceError: Error, LocalizedError {
 }
 
 // swiftlint:disable file_length
-// Причина отключения: AudioService — единый аудио-конвейер (старт/стоп/VAD/
+// Why disabled: AudioService is the single audio pipeline (start/stop/VAD/
 // лимиты/метрики); сокращение тела без удаления кода контракты не сохраняет.

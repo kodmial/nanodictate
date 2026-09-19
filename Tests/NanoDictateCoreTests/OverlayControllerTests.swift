@@ -2,23 +2,23 @@ import Foundation
 import AppKit
 @testable import NanoDictateCore
 
-/// Тесты на функционал, который ЧТО-ТО ВЫВОДИТ: оверлей (панель с микрофоном).
+/// Tests of functionality that DISPLAYS something: overlay (mic panel).
 ///
-/// Задача этих тестов — не дать оверлею снова «исчезнуть»: пользователь
-/// сообщил, что индикатор записи вообще нигде не виден (не в углу, а нигде).
-/// Здесь проверяется, что show() строит панель с корректным frame и фазами.
+/// Their task — never let overlay "disappear" again: user reported the
+/// recording indicator was not visible anywhere. Here show() must build
+/// panel with correct frame and phases.
 ///
-/// ВАЖНО: в тестовом раннере (NANODICTATE_TESTS=1) панель НЕ выводится на экран
-/// — OverlayController пропускает orderFront/активацию NSApp, чтобы прогоны
-/// тестов не тревожили пользователя мигающим оверлеем. Тесты проверяют
-/// состояние и frame через testPanel/testPanelFrame/testState и отдельно
-/// доказывают, что панель на экране НЕ появилась (isVisible == false).
+/// IMPORTANT: in test runner (NANODICTATE_TESTS=1) panel NOT shown on
+/// screen — OverlayController skips orderFront/NSApp activation so runs
+/// don't flash overlay at user. Tests check state/frame via
+/// testPanel/testPanelFrame/testState and separately prove panel did NOT
+/// appear on screen (isVisible == false).
 final class OverlayControllerTests: XCTestCase {
 
     override func setUp() {
-        // XCTest runner — обычный CLI-процесс без NSApp; без AppKit-init
-        // NSPanel не создастся, а значит тест «оверлей выводится» упадёт
-        // с понятной ошибкой, а не молча покажет «false».
+        // XCTest runner — plain CLI process without NSApp; without AppKit-init
+        // NSPanel won't create, so the "overlay shown" test fails with a clear
+        // error instead of silently returning "false".
         _ = NSApplication.shared
         NSApp.setActivationPolicy(.accessory)
     }
@@ -30,13 +30,13 @@ final class OverlayControllerTests: XCTestCase {
         let caret = CGPoint(x: 700, y: 500)
         let frame = OverlayLayout.panelFrame(near: caret, inside: screen, panelSize: CGSize(width: 260, height: 120))
 
-        // Панель над кареткой: верхний край не выше каретки, низ — на 12pt выше
+        // Panel above caret: top edge no higher than caret, bottom 12pt above.
         XCTAssertEqual(frame.maxY, 500 - 12, accuracy: 0.001)
         XCTAssertFalse(frame.contains(caret))
         XCTAssertLessThanOrEqual(frame.maxY, caret.y)
-        // Горизонтально центрирована по каретке
+        // Horizontally centered on caret.
         XCTAssertEqual(frame.midX, caret.x, accuracy: 0.001)
-        // Не вылезает за экран
+        // Does not leave screen.
         XCTAssertGreaterThanOrEqual(frame.minX, screen.minX)
         XCTAssertLessThanOrEqual(frame.maxX, screen.maxX)
         XCTAssertGreaterThanOrEqual(frame.minY, screen.minY)
@@ -44,8 +44,8 @@ final class OverlayControllerTests: XCTestCase {
     }
 
     @objc func testPanelFrameMovesBelowCaret_WhenNoRoomAbove() {
-        // Каретка у нижнего края экрана — над ней нет места. Панель должна
-        // встать ПОД кареткой и НЕ пропасть за экран.
+        // Caret at screen bottom edge — no room above. Panel must go BELOW
+        // caret and not sink off screen.
         let screen = CGRect(x: 0, y: 0, width: 1440, height: 900)
         let caret = CGPoint(x: 700, y: 30) // panel above needs y >= 8; 30-120-12 < 8
         let frame = OverlayLayout.panelFrame(near: caret, inside: screen, panelSize: CGSize(width: 260, height: 120))
@@ -56,7 +56,7 @@ final class OverlayControllerTests: XCTestCase {
     }
 
     @objc func testPanelFrameClampedToScreenEdges_Horizontal() {
-        // Каретка у самого левого края — панель не должна вылезти налево.
+        // Caret at far left edge — panel must not overflow left.
         let screen = CGRect(x: 100, y: 0, width: 800, height: 600)
         let caret = CGPoint(x: 102, y: 300)
         let frame = OverlayLayout.panelFrame(near: caret, inside: screen, panelSize: CGSize(width: 260, height: 120))
@@ -66,9 +66,9 @@ final class OverlayControllerTests: XCTestCase {
     }
 
     @objc func testScreenContaining_FallsBackToMainScreen() {
-        // Для точек вне real-экранов канвас должен быть непустым frame
-        // (берётся NSScreen.main) — панель никогда не останется без экрана,
-        // а значит никогда не «пропадёт» из-за координат.
+        // Points outside real screens: canvas must fall back to non-empty
+        // frame (NSScreen.main) — panel never left without screen,
+        // so never "lost" due to coordinates.
         let caret = CGPoint(x: -5000, y: -5000)
         let screen = OverlayLayout.screenContaining(caret)
         XCTAssertTrue(screen.width > 0)
@@ -78,7 +78,7 @@ final class OverlayControllerTests: XCTestCase {
     // MARK: - resolvePoint (чистая цепочка фоллбэков позиционирования)
 
     @objc func testResolvePoint_UsesCaret_WhenValid() {
-        // Валидная каретка → берётся именно её точка.
+        // Valid caret → exactly its point taken.
         let caret = CGPoint(x: 100, y: 200)
         let mouse = CGPoint(x: 300, y: 400)
         let center = CGPoint(x: 720, y: 450)
@@ -91,7 +91,7 @@ final class OverlayControllerTests: XCTestCase {
     }
 
     @objc func testResolvePoint_FallsBackToMouse_WhenCaretNilOrOffScreen() {
-        // Каретка nil или вне экрана → позиция мыши.
+        // Caret nil or off-screen → mouse position.
         let mouse = CGPoint(x: 300, y: 400)
         let center = CGPoint(x: 720, y: 450)
         let isValid = { (p: CGPoint) -> Bool in
@@ -111,7 +111,7 @@ final class OverlayControllerTests: XCTestCase {
     }
 
     @objc func testResolvePoint_FallsBackToCenter_WhenMouseOffScreen() {
-        // Мышь вне экрана (и каретка отсутствует) → центр главного экрана.
+        // Mouse off-screen (and caret missing) → main screen center.
         let mouse = CGPoint(x: -9999, y: -9999)
         let center = CGPoint(x: 720, y: 450)
         let isValid = { (p: CGPoint) -> Bool in
@@ -130,19 +130,18 @@ final class OverlayControllerTests: XCTestCase {
         let controller = OverlayController()
         controller.show(at: CGPoint(x: 700, y: 500))
 
-        // В тестовом раннере панель на экран не выводится (см. doc-комментарий
-        // класса), но обязана создаться и зафреймиться — это и проверяем.
+        // Test runner: panel not shown on screen (see class doc), but must
+        // be created and framed — that's what we check.
         XCTAssertNotNil(controller.testPanel, "Панель должна создаваться при show()")
         XCTAssertNotNil(controller.testPanelFrame)
 
-        // Frame действительно рядом с точкой показа.
+        // Frame really near the show point.
         if let frame = controller.testPanelFrame {
             XCTAssertEqual(frame.midX, 700, accuracy: 2)
             XCTAssertLessThanOrEqual(frame.maxY, 500)
         }
 
-        // Панель НЕ появилась на экране: прогоны тестов не тревожат
-        // пользователя мигающим оверлеем.
+        // Panel NOT on screen: test runs don't flash overlay at user.
         XCTAssertFalse(controller.isVisible, "В тестовом раннере панель не должна выводиться на экран")
 
         controller.hide()
@@ -171,7 +170,7 @@ final class OverlayControllerTests: XCTestCase {
         let panel = controller.testPanel
         XCTAssertNotNil(panel)
 
-        // Уровень за пределами [0,1] клампится, панель не «уходит» со сцены.
+        // Level beyond [0,1] clamps; panel stays in scene.
         controller.updateLevel(3.14)
         XCTAssertEqual(Double(controller.testState?.level ?? 0), 1.0, accuracy: 0.001)
         XCTAssertTrue(controller.testPanel === panel)
@@ -215,12 +214,12 @@ final class OverlayControllerTests: XCTestCase {
     // MARK: - Таймер записи (форматирование + фазы)
 
     @objc func testTimeFormat_PadsSecondsAndMinutes() {
-        // Требование: «0:00» / «0:07» — минуты без паддинга, секунды с ведущим нулём.
+        // Requirement: "0:00"/"0:07" — minutes no padding, seconds leading zero.
         XCTAssertEqual(OverlayTimeFormat.format(0), "0:00")
         XCTAssertEqual(OverlayTimeFormat.format(7), "0:07")
         XCTAssertEqual(OverlayTimeFormat.format(65), "1:05")
         XCTAssertEqual(OverlayTimeFormat.format(599), "9:59")
-        // Дробные секунды обрезаются вниз, как тикает таймер.
+        // Fractional seconds floor-down, as the timer ticks.
         XCTAssertEqual(OverlayTimeFormat.format(7.4), "0:07")
         XCTAssertEqual(OverlayTimeFormat.format(7.9), "0:07")
     }
@@ -231,8 +230,8 @@ final class OverlayControllerTests: XCTestCase {
 
     @objc func testSetRecordingPhase_StoresStartAndSetsRecording() {
         let controller = OverlayController()
-        // Старт-тайм передаётся извне (вью считает секунды именно от него —
-        // не от локального «когда успели»).
+        // Start-time comes from outside (view counts seconds from it —
+        // not from its own "when it happened").
         let start = Date().addingTimeInterval(-65)
         controller.setRecordingPhase(startedAt: start)
         XCTAssertEqual(controller.testState?.phase, .recording)
@@ -279,9 +278,9 @@ final class OverlayControllerTests: XCTestCase {
     }
 
     @objc func testPanelHeights_FollowPhases() {
-        // Высоты зависят от фазы: idle ~150 (компактная плашка), recording
-        // ~178 (под иконкой таймер «0:07»); при смене фазы панель пересчитывает
-        // frame, оставаясь привязанной к точке показа.
+        // Heights depend on phase: idle ~150 (compact slab), recording
+        // ~178 (timer "0:07" under icon); panel reframes on phase change,
+        // staying anchored to show point.
         let controller = OverlayController()
         controller.show(at: CGPoint(x: 700, y: 500))
         XCTAssertEqual(controller.testPanelFrame?.height ?? 0, 150,
@@ -299,15 +298,15 @@ final class OverlayControllerTests: XCTestCase {
     }
 
     @objc func testPanelWidth_AutofitsWithinClamp() {
-        // Ширина больше не жёсткая 280: считается из fittingSize контента и
-        // клампится в [180, 240] — компактная плашка, а не фикс под «шапку».
+        // Width no longer fixed 280: computed from content fittingSize and
+        // clamped to [180, 240] — compact slab, not fixed for "header".
         let controller = OverlayController()
         controller.show(at: CGPoint(x: 700, y: 500))
         let width = controller.testPanelFrame?.width ?? 0
         XCTAssertGreaterThanOrEqual(width, 180, "автоширина не уже мин-клампа 180")
         XCTAssertLessThanOrEqual(width, 240, "автоширина не шире макс-клампа 240")
 
-        // Смена фазы меняет только высоту — ширина остаётся той же.
+        // Phase change alters only height — width stays same.
         controller.setRecordingPhase()
         XCTAssertEqual(controller.testPanelFrame?.width ?? 0, width,
                        accuracy: 0.001, "recording не меняет ширину")
@@ -318,7 +317,7 @@ final class OverlayControllerTests: XCTestCase {
     }
 
     @objc func testClampedPanelWidth_BoundsAutofit() {
-        // Чистый кламп автоширины: min 180 / max 240.
+        // Pure autowidth clamp: min 180 / max 240.
         XCTAssertEqual(OverlayLayout.clampedPanelWidth(from: -50), 180)
         XCTAssertEqual(OverlayLayout.clampedPanelWidth(from: 0), 180)
         XCTAssertEqual(OverlayLayout.clampedPanelWidth(from: 100), 180)
@@ -330,7 +329,7 @@ final class OverlayControllerTests: XCTestCase {
     // MARK: - Маппинг сетевых ошибок на текст оверлея (OverlayErrorText)
 
     @objc func testOverlayErrorText_NoInternet() {
-        // Нет интернета → короткое сообщение «No internet» (а не безликий текст ошибки).
+        // No internet → short "No internet" (not featureless error text).
         XCTAssertEqual(
             OverlayErrorText.text(for: TranscribeError.network(Transcriber.noInternetMessage)),
             "No internet"
@@ -347,7 +346,7 @@ final class OverlayControllerTests: XCTestCase {
     }
 
     @objc func testOverlayErrorText_NonNetworkErrorsAreNotMapped() {
-        // HTTP/JSON-ошибки оверлей НЕ трогает — текст берётся из обычного message(for:).
+        // HTTP/JSON errors overlay does NOT touch — text from message(for:) as usual.
         XCTAssertNil(OverlayErrorText.text(for: TranscribeError.http(500, "boom")))
         XCTAssertNil(OverlayErrorText.text(for: TranscribeError.invalidResponse("no text")))
         XCTAssertNil(OverlayErrorText.networkText("some arbitrary network error"))
@@ -357,7 +356,7 @@ final class OverlayControllerTests: XCTestCase {
     // MARK: - Гарантия завершения фазы «обработка»
 
     @objc func testProcessingMaxDuration_BoundsProcessingPhase() {
-        // Анимация точек не может жить дольше жёсткого таймаута запроса + запас.
+        // Dot animation cannot outlive hard request timeout + margin.
         XCTAssertEqual(
             OverlayController.processingMaxDuration,
             Transcriber.networkRequestTimeout + 5,

@@ -3,8 +3,8 @@ import NanoDictateCore
 
 // MARK: - Действия
 
-/// Выполняет подкоманду через сам бинарь (reuse cmdStart/cmdStop без дублирования),
-/// возвращая её печатный вывод одной строкой.
+/// Runs a subcommand through this same binary (reuses cmdStart/cmdStop
+/// without duplication), returning its printable output in one line.
 func runSelfCommand(_ subcommand: String) -> String {
   let exe = CommandLine.arguments.first ?? ""
   let result = runProcess(exe, [subcommand])
@@ -16,7 +16,7 @@ func runSelfCommand(_ subcommand: String) -> String {
   return err.isEmpty ? String(format: L10n.tr("menu.agent.notfound"), "\(result.status)") : err
 }
 
-/// Перевод клавиши меню в жест подтверждения (чистую логику принимает AgentScreen).
+/// Maps a menu key to a confirmation gesture (AgentScreen takes the pure logic).
 func confirmationGesture(_ key: MenuKey) -> ConfirmationGesture {
   switch key {
   case .yes: return .yes
@@ -25,9 +25,9 @@ func confirmationGesture(_ key: MenuKey) -> ConfirmationGesture {
   }
 }
 
-/// Перезапуск агента из меню: канонический plist перезаписывается реальным
-/// путём бинаря (не протухает после обновления), затем kickstart -k;
-/// при незагруженной службе — полная установка. Текст для notice.
+/// Agent restart from the menu: the canonical plist is overwritten with the
+/// real binary path (does not go stale after an update), then kickstart -k;
+/// if the service is not loaded — a full install. Text for notice.
 func restartAgentNow() -> String {
   let agentBinary = findAgentBinaryPath()
   guard !agentBinary.isEmpty else {
@@ -50,8 +50,9 @@ func restartAgentNow() -> String {
   return String(format: L10n.tr("cli.provider.kickfail"), msg.isEmpty ? result.loadError : msg)
 }
 
-/// Подтверждение + переключение активного провайдера + рестарт агента
-/// (как `nanodictate provider use`, без --no-restart). Возвращает текст для notice.
+/// Confirmation + switching the active provider + agent restart
+/// (like `nanodictate provider use`, without --no-restart). Returns text
+/// for notice.
 func confirmAndSwitchProvider(_ provider: STTProvider, _: inout MenuView) -> String {
   let display = provider.name.isEmpty ? provider.id : provider.name
   render(
@@ -68,7 +69,7 @@ func confirmAndSwitchProvider(_ provider: STTProvider, _: inout MenuView) -> Str
   return String(format: L10n.tr("menu.switch.ok"), display, restartAgentNow())
 }
 
-/// Выполняет действие пункта меню. true — нужно выйти из меню.
+/// Runs a menu entry action. true — leave the menu.
 @discardableResult
 func execute(_ action: MenuAction, _ view: inout MenuView) -> Bool {
   switch action {
@@ -82,15 +83,15 @@ func execute(_ action: MenuAction, _ view: inout MenuView) -> Bool {
   return false
 }
 
-/// Обновляет списки провайдеров/лога и сбрасывает курсор наверх.
+/// Refreshes the provider/log lists and resets the cursor to the top.
 func refreshMenu(_ view: inout MenuView) {
   view.providers = (try? ProviderStore.loadProviders()) ?? []
   view.logLines = readLogFile()
   view.cursor = 0
-  view.lastStatusRefresh = .distantPast  // r — принудительно свежий статус
+  view.lastStatusRefresh = .distantPast  // r forces a fresh status
 }
 
-/// Простые действия: переходы по страницам и смена состояния без ветвлений.
+/// Simple actions: page transitions and state changes without branches.
 func applySimpleAction(_ action: MenuAction, _ view: inout MenuView) {
   switch action {
   case .back:
@@ -111,7 +112,7 @@ func applySimpleAction(_ action: MenuAction, _ view: inout MenuView) {
     view.notice = agentIsRunning() ? runSelfCommand("stop") : runSelfCommand("start")
     view.page = .status
     view.cursor = 0
-    view.lastStatusRefresh = .distantPast  // агент старт/стоп → статус
+    view.lastStatusRefresh = .distantPast  // agent start/stop → status
   case .showLastResult:
     view.notice = runSelfCommand("last")
   case .toggleLanguage:
@@ -126,8 +127,8 @@ func applySimpleAction(_ action: MenuAction, _ view: inout MenuView) {
   }
 }
 
-/// Действия с ветвлениями (подтверждение, ретраи, конфиг) — вынесены отдельно,
-/// чтобы не раздувать цикломатическую сложность `execute`.
+/// Actions with branches (confirmation, retries, config) — moved out
+/// so they do not bloat the cyclomatic complexity of `execute`.
 func applyComplexAction(_ action: MenuAction, _ view: inout MenuView) {
   switch action {
   case .switchProvider(let id):
@@ -138,11 +139,11 @@ func applyComplexAction(_ action: MenuAction, _ view: inout MenuView) {
     toggleReview(&view)
   case .quit, .back, .showProviders, .showLogs, .refresh, .toggleAgent, .showLastResult,
     .toggleLanguage:
-    break  // сюда не приходят: execute направляет их в applySimpleAction
+    break  // never arrives here: execute routes them to applySimpleAction
   }
 }
 
-/// Переключение активного провайдера с подтверждением и рестартом агента.
+/// Switches the active provider with confirmation and an agent restart.
 func switchToProvider(id: String, view: inout MenuView) {
   guard let provider = view.providers.first(where: { $0.id == id }) else {
     view.notice = String(format: L10n.tr("menu.switch.error"), id)
@@ -154,7 +155,7 @@ func switchToProvider(id: String, view: inout MenuView) {
   view.providers = (try? ProviderStore.loadProviders()) ?? []
 }
 
-/// Повторный транскрайб последнего аудио через выбранный провайдер.
+/// Re-transcribes the last audio through the chosen provider.
 func retryTranscribe(_ view: inout MenuView) {
   guard !view.providers.isEmpty else {
     view.notice = L10n.tr("menu.no.providers.retry")
@@ -175,7 +176,7 @@ func retryTranscribe(_ view: inout MenuView) {
   view.notice = runSelfCommand("retry \(view.providers[number - 1].id)")
 }
 
-/// Переключает гейт ревью перед вставкой + рестарт агента.
+/// Toggles the pre-insert review gate + agent restart.
 func toggleReview(_ view: inout MenuView) {
   let current = (try? AppConfig.load(from: nil))?.reviewBeforeInsert ?? false
   let newValue = !current
@@ -183,8 +184,8 @@ func toggleReview(_ view: inout MenuView) {
     try AppConfig.writeReviewBeforeInsert(value: newValue, to: AppConfig.defaultPath())
     let restart = restartAgentNow()
     if newValue {
-      // Под launchd у агента нет терминала: гейт ревью пропускается
-      // (см. hasInteractiveStdin в main.swift) — предупреждаем заранее.
+      // Under launchd the agent has no terminal: the review gate is skipped
+      // (see hasInteractiveStdin in main.swift) — warn in advance.
       view.notice = String(format: L10n.tr("menu.review.on"), restart)
     } else {
       view.notice = String(format: L10n.tr("menu.review.off"), restart)
@@ -194,7 +195,7 @@ func toggleReview(_ view: inout MenuView) {
   }
 }
 
-/// Обрабатывает клавишу в главном цикле. true — выйти из меню (return 0).
+/// Handles a key in the main loop. true — leave the menu (return 0).
 func handleMenuKey(_ key: MenuKey, entries: [MenuEntry], _ view: inout MenuView) -> Bool {
   switch key {
   case .quit:
@@ -215,8 +216,8 @@ func handleMenuKey(_ key: MenuKey, entries: [MenuEntry], _ view: inout MenuView)
   return false
 }
 
-/// q/esc на Статусе — выход из меню; на остальных страницах — возврат на Статус
-/// (так обещает подсказка «q/esc — назад», и так подключён живой .back).
+/// q/esc on Status — leave the menu; on other pages — return to Status
+/// (as the "q/esc — back" hint promises, and the live .back is wired that way).
 func handleQuit(view: inout MenuView) -> Bool {
   if view.page == .status {
     return true
@@ -225,7 +226,7 @@ func handleQuit(view: inout MenuView) -> Bool {
   return false
 }
 
-/// Enter по текущему пункту: выполнить действие; true — выйти из меню.
+/// Enter on the current entry: run the action; true — leave the menu.
 func handleEnter(entries: [MenuEntry], view: inout MenuView) -> Bool {
   if view.cursor < entries.count, execute(entries[view.cursor].action, &view) {
     return true
@@ -233,7 +234,7 @@ func handleEnter(entries: [MenuEntry], view: inout MenuView) -> Bool {
   return false
 }
 
-/// Цифра-клавиша: найти пункт с таким номером и выполнить; true — выйти из меню.
+/// Digit key: find the entry with that number and run it; true — leave the menu.
 func handleNumber(_ number: Int, entries: [MenuEntry], view: inout MenuView) -> Bool {
   if let entry = entries.first(where: { $0.key == .number(number) }), execute(entry.action, &view) {
     return true
@@ -241,7 +242,7 @@ func handleNumber(_ number: Int, entries: [MenuEntry], view: inout MenuView) -> 
   return false
 }
 
-/// Стрелка вниз: курсор вниз с учётом текущей страницы.
+/// Down arrow: cursor down, respecting the current page.
 func moveCursorDown(view: inout MenuView, entries: [MenuEntry]) {
   switch view.page {
   case .logs:

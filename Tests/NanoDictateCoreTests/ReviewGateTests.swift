@@ -30,8 +30,7 @@ final class ReviewGateTests: XCTestCase {
     }
 
     @objc func testYesStringCancels() {
-        // По контракту (см. ReviewGate) вставку подтверждают только пустой ввод
-        // и «y»/«Y»; «yes» целиком — отмена.
+        // Contract (see ReviewGate): only empty input and y/Y insert; "yes" cancels.
         XCTAssertEqual(confirmWithInput("yes"), .cancel)
     }
 

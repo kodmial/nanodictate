@@ -11,16 +11,10 @@ let package = Package(
         .executable(name: "NanoDictateAgent", targets: ["NanoDictateAgent"]),
         .executable(name: "nanodictate", targets: ["nanodictate"]),
     ],
-    // SwiftLint подключён только как command-плагин: его верб вызывается явно
-    // (`swift package plugin swiftlint`) в CI, но НЕ запускается автоматически
-    // при `swift build`. Иначе замечание линтера ломало бы сборку и, вместе
-    // с ней, деплой через MCP.
-    dependencies: [
-        // SwiftLint < 0.55.0 публикует только build-tool-плагин, который
-        // запускается на каждой сборке; command-плагин (верб `swiftlint`)
-        // появился в 0.55.0. Это первый релиз с нужной нам командой.
-        .package(url: "https://github.com/realm/SwiftLint", from: "0.55.0"),
-    ],
+    // Линтеры не живут в SPM-графе: свежие релизы SwiftLint требуют
+    // tools-version 5.9, локальный тулчейн — 5.7; резолвинг зависимостей
+    // падает. Линтеры работают как внешние бинари: pre-commit хук (.githooks)
+    // и отдельные шаги CI.
     targets: [
         // ObjC-шлюз NSException AVFAudio: SPM 5.7 не допускает подмешивание
         // ObjC в Swift-таргеты, поэтому шлюз живёт отдельным clang-таргетом.
@@ -30,24 +24,15 @@ let package = Package(
         ),
         .target(
             name: "NanoDictateCore",
-            dependencies: ["AudioEngineGuard"],
-            plugins: [
-                .plugin(name: "SwiftLintCommandPlugin", package: "SwiftLint"),
-            ]
+            dependencies: ["AudioEngineGuard"]
         ),
         .executableTarget(
             name: "NanoDictateAgent",
-            dependencies: ["NanoDictateCore"],
-            plugins: [
-                .plugin(name: "SwiftLintCommandPlugin", package: "SwiftLint"),
-            ]
+            dependencies: ["NanoDictateCore"]
         ),
         .executableTarget(
             name: "nanodictate",
-            dependencies: ["NanoDictateCore"],
-            plugins: [
-                .plugin(name: "SwiftLintCommandPlugin", package: "SwiftLint"),
-            ]
+            dependencies: ["NanoDictateCore"]
         ),
         // Компактный раннер тестов: на этой машине нет Xcode / XCTest.framework,
         // поэтому `swift test` физически не работает ("XCTest not available").

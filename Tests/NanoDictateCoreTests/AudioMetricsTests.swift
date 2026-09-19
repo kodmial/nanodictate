@@ -4,9 +4,8 @@ import Foundation
 
 // MARK: - AudioMetricsTests
 
-/// Тесты чистых функций диагностики аудио: строковое представление статуса
-/// доступа к микрофону (TCC) и метрики уровня записи (min/avg/max RMS,
-/// порог «около-тишины»). Аудио-устройства не используются — только математика.
+/// Mic access status text (TCC) and RMS level metrics —
+/// pure math, no audio devices.
 final class AudioMetricsTests: XCTestCase {
 
     // MARK: - 1. Статус доступа к микрофону
@@ -38,7 +37,7 @@ final class AudioMetricsTests: XCTestCase {
     }
 
     @objc func testDbfsZeroIsFloor() {
-        // 0 амплитуда → −120 dBFS (пол), не −∞: безопасно для интерполяции в лог.
+        // Zero amplitude → −120 dBFS floor, not −∞: safe for log interpolation.
         XCTAssertEqual(AudioMetrics.dbfs(0.0), -120)
     }
 
@@ -67,26 +66,26 @@ final class AudioMetricsTests: XCTestCase {
     }
 
     @objc func testSummarizeQuietIsNearSilence() {
-        // Все буферы заметно ниже порога (−50 dBFS ≈ 0.00316) — тишина.
+        // All buffers below threshold (−50 dBFS ≈ 0.00316) → silence.
         let m = AudioMetrics.summarize(rmsValues: [0.001, 0.002, 0.001])
         XCTAssertTrue(m.nearSilence)
     }
 
     @objc func testSummarizeLoudIsNotNearSilence() {
-        // Обычная речь: RMS порядка 0.05...0.3 — не тишина.
+        // Typical speech RMS 0.05–0.3 — not silence.
         let m = AudioMetrics.summarize(rmsValues: [0.05, 0.2, 0.1])
         XCTAssertFalse(m.nearSilence)
     }
 
     @objc func testSummarizeMixedDecidedByAverage() {
-        // Среднее (0.01) всё ещё выше порога → к тишине не относится.
+        // Average 0.01 still above threshold → not silence.
         let m = AudioMetrics.summarize(rmsValues: [0.001, 0.019])
         XCTAssertEqual(m.avgRMS, 0.01, accuracy: 1e-6)
         XCTAssertFalse(m.nearSilence)
     }
 
     @objc func testSummarizeCustomThreshold() {
-        // Свой порог: тот же набор буферов при пороге 0.005 — тишина.
+        // Custom threshold 0.005 reclassifies the same buffers as silence.
         let m = AudioMetrics.summarize(rmsValues: [0.001, 0.002], threshold: 0.005)
         XCTAssertTrue(m.nearSilence)
     }
@@ -102,7 +101,7 @@ final class AudioMetricsTests: XCTestCase {
     }
 
     @objc func testRmsFullScaleIsOne() {
-        // Все сэмплы на полной шкале Int16 (32767) → RMS 1.0 (0 dBFS).
+        // Full-scale Int16 (32767) → RMS 1.0 (0 dBFS).
         let samples = [Int16](repeating: 32767, count: 4)
         XCTAssertEqual(AudioMetrics.rms(samples: samples), 1.0, accuracy: 1e-3)
     }
@@ -114,7 +113,7 @@ final class AudioMetricsTests: XCTestCase {
     }
 
     @objc func testRmsQuietSamplesBelowThreshold() {
-        // Уровень «мурашек» (±64 из 32767) — заметно ниже порога тишины.
+        // Noise floor ±64/32767 — far below the silence threshold.
         let samples: [Int16] = [64, -64, 64, -64]
         let rms = AudioMetrics.rms(samples: samples)
         XCTAssertTrue(rms < AudioMetrics.nearSilenceThreshold, "rms \(rms) должен быть ниже порога тишины")
@@ -124,12 +123,12 @@ final class AudioMetricsTests: XCTestCase {
 
     @objc func testNearSilenceStrictlyBelowThreshold() {
         XCTAssertTrue(AudioMetrics.isNearSilence(avgRMS: 0.001))
-        // Чуть-чуть ниже порога — всё ещё тишина.
+        // Just below threshold — still silence.
         XCTAssertTrue(AudioMetrics.isNearSilence(avgRMS: AudioMetrics.nearSilenceThreshold * 0.999))
     }
 
     @objc func testNearSilenceExactThresholdIsNotSilence() {
-        // Ровно на пороге — не тишина (строгое сравнение <).
+        // Exactly at threshold — not silence (strict <).
         XCTAssertFalse(AudioMetrics.isNearSilence(avgRMS: AudioMetrics.nearSilenceThreshold))
     }
 

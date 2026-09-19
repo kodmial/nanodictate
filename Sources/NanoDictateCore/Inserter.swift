@@ -5,8 +5,7 @@ import Darwin
 // MARK: - TextRefinement
 
 public enum TextRefinement {
-  /// Капитализация первой буквы предложения; если предложение не
-  /// заканчивается знаком препинания — добавить точку.
+  /// Capitalize first letter of sentence; append period if none at end.
   public static func finalize(_ text: String) -> String {
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return "" }
@@ -33,49 +32,43 @@ public enum TextRefinement {
 // MARK: - Inserter
 
 public enum Inserter {
-  /// Размер пачки символов/backspace'ов между паузами (вставки и отката).
+  /// Chunk size (chars/backspaces) between pauses (insert and undo).
   static let chunkSize = 16
-  private static let delayUSec: useconds_t = 5000  // 5 мс
+  private static let delayUSec: useconds_t = 5000  // 5 ms
 
-  /// Тестовые хуки (internal, видны через @testable): подменяют побочные
-  /// эффекты — сон между пачками и post CGEvent-ов. В production не
-  /// выставляются; нужны юнит-тесту, чтобы посчитать число пауз/событий
-  /// и не печатать в активное приложение. Не синхронизированы: тесты
-  /// однопоточные.
+  /// Test hooks (internal, visible via @testable): replace side effects — sleep
+  /// between chunks and post CGEvent. Nil in prod; unit tests count pauses/events
+  /// without typing into the active app. Not synchronized: tests are single-threaded.
   static var sleepHook: ((useconds_t) -> Void)?
   static var postHook: ((CGEvent, CGEventTapLocation) -> Void)?
 
-  /// Вставить текст через CGEvent keyDown/keyUp с
-  /// keyboardSetUnicodeString, пакетами по chunkSize символов.
-  /// Пауза 5 мс — только между пачками (не на каждый символ).
+  /// Insert text via CGEvent keyDown/keyUp with keyboardSetUnicodeString,
+  /// chunks of chunkSize chars. 5 ms pause only between chunks (not per char).
   public static func insert(text: String) {
     guard !text.isEmpty else { return }
     typeText(text)
   }
 
-  /// Пошаговая диктовка: добавить следующий сегмент В КОНЕЦ уже вставленного
-  /// текста. Курсор после предыдущей вставки остаётся в конце (вставка не
-  /// двигает его), поэтому просто печатаем — как insert, но с оговоркой в
-  /// контракте для pipeline (append ≠ перезапись выделения).
+  /// Step-by-step dictation: append next segment at END of already inserted text.
+  /// Insert leaves cursor at end (does not move it), so just type — same as insert,
+  /// contract for pipeline (append ≠ overwrite selection).
   public static func append(_ text: String) {
     insert(text: text)
   }
 
-  /// Пошаговая диктовка, финальный проход: заменить ОДИН диапазон `old`
-  /// (старый текст сегмента, уже вставленный) на `new`. Сегменты вставляются
-  /// последовательно подряд, поэтому диапазон находится отступами
-  /// Option+Shift+влево/вправо по словам — одно действие, undo не ломается.
+  /// Step-by-step dictation, final pass: replace ONE range `old` (already inserted)
+  /// with `new`. Segments insert sequentially, so range found by Option+Shift+arrow
+  /// word jumps — single action, undo intact.
   ///
-  /// Контракт: `old` — ровно то, что сейчас находится в тексте под курсором
-  /// (последняя вставка); при `old == new` — no-op. Клавиатурный ввод:
-  /// вырезаем лишнее количество символов backspace, печатаем diff-span.
+  /// Contract: `old` is exactly what sits under the cursor (last insertion);
+  /// `old == new` — no-op. Input: backspace excess chars, type diff-span.
   public static func replaceRange(old: String, new: String) {
     replaceText(old: old, new: new)
   }
 
   // MARK: - Private
 
-  /// Печать текста пакетами (общий путь для insert/append).
+  /// Common chunked path for insert/append.
   private static func typeText(_ text: String) {
     guard !text.isEmpty else { return }
 
@@ -98,18 +91,15 @@ public enum Inserter {
 
   // MARK: - Откат (undo)
 
-  /// Стереть ровно столько графем, сколько было вставлено: backspace
-  /// (virtualKey 51 / kVK_Delete) по числу символов — симметричный откат
-  /// к `insert(text:)` с той же паузой 5 мс. Пауза — между пачками по
-  /// chunkSize символов (как в insert), а НЕ на каждый символ: длинное
-  /// undo (~500–1000 графем) не блокирует главный поток агента на секунды
-  /// (было ~count пауз по 5 мс — стало ~count/16). count = 0 — no-op;
-  /// отрицательные безопасно обрезаются до no-op.
+  /// Erase exactly as many graphemes as inserted: backspace (virtualKey 51 /
+  /// kVK_Delete) per char — symmetric undo to `insert(text:)`, same 5 ms pause.
+  /// Pause between chunks of chunkSize (like insert), NOT per char: long undo
+  /// (~500–1000 graphemes) must not block agent's main thread for seconds
+  /// (was ~count × 5 ms — now ~count/16). count = 0 — no-op; negative clamps
+  /// to no-op.
   ///
-  /// Ограничение подхода: undo бьёт backspace'ами по текущей позиции
-  /// курсора / фронт-аппу. Если за время между вставкой и откатом курсор
-  /// уехал или активное приложение сменилось — сотрётся не то, что
-  /// вставили.
+  /// Limitation: undo backspaces at current cursor position / front app. If cursor
+  /// moved or active app changed between insert and undo — wrong text erased.
   public static func delete(characters: String) {
     delete(count: characters.count)
   }
@@ -122,39 +112,38 @@ public enum Inserter {
       let batch = min(remaining, chunkSize)
       pressBackspace(batch, source: source)
       remaining -= batch
-      // Пауза только между пачками, после последней — нет (как в insert).
+      // Pause only between chunks, none after last (as in insert).
       if remaining > 0 {
         sleepAWhile(delayUSec)
       }
     }
   }
 
-  /// Замена диапазона: backspace на длину `old`, затем печать `new`.
-  /// Курсор после последней вставки стоит сразу после её текста.
+  /// Range replace: backspace `old` length, then type `new`.
+  /// Cursor sits right after last insertion's text.
   private static func replaceText(old: String, new: String) {
     guard old != new else { return }
     if old.isEmpty {
-      // Пустой old — просто допечатываем (вставка слова в середину
-      // через diff получится backspace+печать, но пустую строку
-      // заменять нечем — только печатаем).
+      // Empty old — just type (mid-word insert via diff would be backspace+type,
+      // but empty string has nothing to erase — type only).
       typeText(new)
       return
     }
 
     let source = CGEventSource(stateID: .hidSystemState)
-    // Backspace удаляет один графемный кластер за нажатие, а WordDiff
-    // отдаёт `old` целиком по границам графем — считаем Characters, не
-    // UTF-16 единиц (иначе эмодзи удалялись бы в два раза дольше).
+    // Backspace erases one grapheme cluster per press; WordDiff yields `old` whole
+    // along grapheme boundaries — count Characters, not UTF-16 units (else emoji
+    // would take twice as many presses).
     let backspaceCount = old.count
 
-    // Backspace: клавиша 51 (delete). Несколько нажатий — несколько раз.
+    // Backspace: key 51 (delete). Multiple presses — multiple times.
     for _ in 0..<backspaceCount {
       postKey(virtualKey: 51, source: source)
     }
     typeText(new)
   }
 
-  /// Одиночное нажатие клавиши (keyDown+keyUp) через CGEvent.
+  /// Single key press (keyDown+keyUp) via CGEvent.
   private static func postKey(virtualKey: CGKeyCode, source: CGEventSource?) {
     if let keyDown = CGEvent(
       keyboardEventSource: source,
@@ -172,12 +161,11 @@ public enum Inserter {
     }
   }
 
-  /// Синтетический Enter (Return, kVK 36): keyDown + keyUp в .cghidEventTap.
-  /// Используется агентом ПОСЛЕ вставки текста, когда латч Enter-останова
-  /// стоит (Enter стопит запись → после распознавания и вставки постится
-  /// ровно один Enter). Идёт через общий post() — тестовый postHook и гейт
-  /// isTestRun применяются (в отличие от приватного postKey), так что
-  /// юнит-тесты считают события, не печатая в активное приложение.
+  /// Synthetic Enter (Return, kVK 36): keyDown + keyUp into .cghidEventTap.
+  /// Agent posts it AFTER text insertion when Enter-stop latch is armed (Enter stops
+  /// recording → post exactly one Enter after recognition+insert). Goes through the
+  /// common post() — test postHook and isTestRun gate apply (unlike private postKey),
+  /// so unit tests count events without typing into the active app.
   public static func postReturnKeyDownUp() {
     let source = CGEventSource(stateID: .hidSystemState)
     if let keyDown = CGEvent(
@@ -185,9 +173,8 @@ public enum Inserter {
       virtualKey: 36,
       keyDown: true
     ) {
-      // Маркер СВОЕГО синтетического Return: наш session-тап видит
-      // событие повторно на следующей итерации run loop — по полю
-      // .eventSourceUserData он исключает его из роутинга и глотания.
+      // Marker of OUR synthetic Return: session tap re-sees the event on next
+      // run-loop iteration — via .eventSourceUserData it excludes it from routing.
       SyntheticReturnMarker.mark(keyDown)
       post(keyDown, tap: .cghidEventTap)
     }
@@ -204,7 +191,6 @@ public enum Inserter {
   private static func sendChunk(_ chunk: String, source: CGEventSource?) {
     let utf16 = Array(chunk.utf16)
 
-    // keyDown
     if let keyDown = CGEvent(
       keyboardEventSource: source,
       virtualKey: 0,
@@ -214,7 +200,6 @@ public enum Inserter {
       post(keyDown, tap: .cghidEventTap)
     }
 
-    // keyUp
     if let keyUp = CGEvent(
       keyboardEventSource: source,
       virtualKey: 0,
@@ -225,10 +210,8 @@ public enum Inserter {
     }
   }
 
-  /// Отправить `times` нажатий backspace (keyDown + keyUp каждое).
   private static func pressBackspace(_ times: Int, source: CGEventSource?) {
     for _ in 0..<times {
-      // keyDown
       if let keyDown = CGEvent(
         keyboardEventSource: source,
         virtualKey: 51,
@@ -236,7 +219,6 @@ public enum Inserter {
       ) {
         post(keyDown, tap: .cghidEventTap)
       }
-      // keyUp
       if let keyUp = CGEvent(
         keyboardEventSource: source,
         virtualKey: 51,
@@ -269,15 +251,15 @@ public enum Inserter {
 // MARK: - Вставка выбранным способом (insert_method)
 
 extension Inserter {
-  /// Вставить текст выбранным способом.
-  /// - `.cgevent`: прежний путь — прямая эмуляция клавиатуры (прод-дефолт).
-  /// - `.clipboard`: через буфер обмена с Cmd+V и восстановлением старого буфера.
+  /// Insert text using selected method.
+  /// - `.cgevent`: legacy path — direct keyboard emulation (prod default).
+  /// - `.clipboard`: via pasteboard with Cmd+V and old-buffer restore.
   public static func insert(text: String, method: InsertMethod) {
     insert(text: text, method: method, bridge: .default)
   }
 
-  /// Тестовая расшифровка: тот же выбор ветки, но с инжектированным мостом
-  /// буфера обмена (закрывает и путь `.clipboard`, и ветку над `cgEventInsertOverride`).
+  /// Test-stamped entry: same branch choice, but with injected clipboard bridge
+  /// (covers both `.clipboard` path and branch over `cgEventInsertOverride`).
   static func insert(text: String, method: InsertMethod, bridge: ClipboardInsertBridge) {
     switch method {
     case .cgevent:
@@ -291,25 +273,25 @@ extension Inserter {
     }
   }
 
-  /// Тестовый хук: переопределяется в тестах, чтобы `.cgevent`-ветка не постила
-  /// реальные CGEvent в сфокусированное приложение. В проде nil — прежнее поведение.
+  /// Test hook: overridden in tests so `.cgevent` branch posts no real CGEvent to the
+  /// focused app. Prod — nil, legacy behavior.
   static var cgEventInsertOverride: ((String) -> Void)?
 }
 
 // MARK: - Вставка через буфер обмена
 
-/// Мост к буферу обмена; все операции инжектятся для тестов (никакого реального
-/// NSPasteboard/CGEvent). `.default` — реальная реализация для прода.
+/// Clipboard bridge; all ops injected for tests (no real NSPasteboard/CGEvent).
+  /// `.default` — real prod implementation.
 public struct ClipboardInsertBridge {
-  /// Чтение текущего содержимого буфера (nil — буфер пуст).
+  /// Current pasteboard content (nil = empty).
   public var readClipboard: () -> String?
-  /// Запись текста в буфер обмена (пустая строка = очистить).
+  /// Write text to pasteboard (empty string = clear).
   public var writeClipboard: (String) -> Void
-  /// Эмуляция Cmd+V.
+  /// Emulate Cmd+V.
   public var sendPaste: () -> Void
-  /// Задержка перед восстановлением старого буфера (сек; по умолчанию 0.5).
+  /// Delay before restoring old buffer (sec; default 0.5).
   public var restoreDelay: TimeInterval
-  /// Отложенное выполнение восстановления.
+  /// Delayed execution of the restore.
   public var scheduleRestore: (@escaping () -> Void, TimeInterval) -> Void
 
   public init(
@@ -327,7 +309,7 @@ public struct ClipboardInsertBridge {
     self.scheduleRestore = scheduleRestore
   }
 
-  /// Реальная реализация (прод): NSPasteboard + CGEvent Cmd+V + async-восстановление.
+  /// Real prod impl: NSPasteboard + CGEvent Cmd+V + async restore.
   public static var `default`: ClipboardInsertBridge {
     ClipboardInsertBridge()
   }
@@ -346,7 +328,7 @@ public struct ClipboardInsertBridge {
     }
   }
 
-  /// Cmd+V (kVK_ANSI_V = 9) по hidSystemState.
+  /// Cmd+V (kVK_ANSI_V = 9) via hidSystemState.
   public static func defaultSendPaste() {
     let source = CGEventSource(stateID: .hidSystemState)
     if let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true) {
@@ -365,8 +347,8 @@ public struct ClipboardInsertBridge {
 }
 
 extension Inserter {
-  /// Вставить текст через буфер обмена: сохранить текущий буфер → записать
-  /// текст → Cmd+V → восстановить старый буфер через `restoreDelay` (~0.5 c).
+  /// Insert via clipboard: save current buffer → write text → Cmd+V → restore
+  /// old buffer after `restoreDelay` (~0.5 s).
   public static func insertViaClipboard(
     text: String,
     bridge: ClipboardInsertBridge = .default

@@ -36,10 +36,10 @@ final class ProviderTests: XCTestCase {
         XCTAssertEqual(config.providers.count, 2)
         XCTAssertEqual(config.providerNames, ["groq", "gigaam"])
         XCTAssertEqual(config.activeProvider, "")
-        // Без active_provider и без legacy-ключей → активен первый по порядку.
+        // No active_provider or legacy keys → first provider wins.
         XCTAssertEqual(config.baseURL, "https://groq.test/v1")
         XCTAssertEqual(config.model, "whisper-large-v3")
-        // Effective apiKeyFile берётся из активного провайдера (groq) — у него файла нет.
+        // Effective apiKeyFile from active provider (groq) — it has none.
         XCTAssertNil(config.apiKeyFile)
 
         let groq = config.providers[0]
@@ -83,7 +83,7 @@ final class ProviderTests: XCTestCase {
 
     // MARK: - Правила резолва
 
-    /// legacy-only без секций → ровно прежнее поведение.
+    /// Legacy-only config keeps exactly the previous behavior.
     @objc func testLegacyOnlyKeepsPreviousBehavior() throws {
         let content = """
         base_url = "https://gigaam.test/v1"
@@ -103,7 +103,7 @@ final class ProviderTests: XCTestCase {
         XCTAssertEqual(config.activeProvider, "")
     }
 
-    /// legacy-ключи + секции без active_provider → ОШИБКА «неоднозначно».
+    /// Legacy keys + sections without active_provider → ambiguity error.
     @objc func testLegacyPlusProvidersWithoutActiveThrows() {
         let content = """
         base_url = "https://legacy.test/v1"
@@ -119,7 +119,6 @@ final class ProviderTests: XCTestCase {
         }
     }
 
-    /// active_provider не существует → ошибка со списком доступных.
     @objc func testActiveProviderNotFoundThrowsWithList() {
         let content = """
         active_provider = "nope"
@@ -138,7 +137,6 @@ final class ProviderTests: XCTestCase {
         }
     }
 
-    /// Дубликат имени секции → ошибка.
     @objc func testDuplicateProviderThrows() {
         let content = """
         [providers.groq]
@@ -171,7 +169,7 @@ final class ProviderTests: XCTestCase {
 
         XCTAssertEqual(config.baseURL, "https://global.test/v1")
         XCTAssertEqual(config.apiKey, "global-key")
-        // model не тронут ключом из [api]; timeout тоже.
+        // [api] section keys must not leak to the top level.
         XCTAssertEqual(config.model, AppConfig.defaults.model)
         XCTAssertEqual(config.timeoutSeconds, AppConfig.defaults.timeoutSeconds)
         XCTAssertTrue(config.providers.isEmpty)
@@ -243,8 +241,7 @@ final class ProviderTests: XCTestCase {
         try "tilde-key".data(using: .utf8)!.write(to: URL(fileURLWithPath: keyPath))
         defer { try? FileManager.default.removeItem(atPath: keyPath) }
 
-        // Превращаем абсолютный путь в "~/..." — единственный способ проверить
-        // раскрытие тильды, не кладя файл в реальный .config/nanodictate.
+        // Absolute → "~/..." path: tests tilde expansion without touching real config.
         let tildePath = (keyPath as NSString).replacingOccurrences(of: home, with: "~")
         XCTAssertTrue(tildePath.hasPrefix("~/"))
 
@@ -279,7 +276,7 @@ final class ProviderTests: XCTestCase {
         XCTAssertEqual(providers[0].baseURL, "https://groq.test/v1")
         XCTAssertFalse(providers[1].isActive)
         XCTAssertEqual(ProviderStore.activeProvider?.id, "groq")
-        XCTAssertEqual(ProviderStore.activeProvider?.name, "groq") // нет name → fallback на id
+        XCTAssertEqual(ProviderStore.activeProvider?.name, "groq") // no name → fallback to id
     }
 
     @objc func testProviderStoreSetActiveWritesConfig() throws {
@@ -297,7 +294,7 @@ final class ProviderTests: XCTestCase {
 
         let content = try String(contentsOf: url, encoding: .utf8)
         XCTAssertTrue(content.contains("active_provider = \"ya\""))
-        // Остальной файл не пострадал.
+        // Rest of the file untouched.
         XCTAssertTrue(content.contains("[providers.groq]"))
         XCTAssertEqual(ProviderStore.activeProvider?.id, "ya")
         let providers = try ProviderStore.loadProviders()
@@ -323,8 +320,7 @@ final class ProviderTests: XCTestCase {
         }
     }
 
-    /// Загрузка провайдеров не бросает из-за stale active_provider —
-    /// меню должно позволять починить выбор.
+    /// Load must not throw on a stale active_provider — menu lets user fix it.
     @objc func testProviderStoreLoadWorksWithStaleActive() throws {
         let url = try tmpFile("store_stale", """
         active_provider = "stale"
@@ -336,6 +332,6 @@ final class ProviderTests: XCTestCase {
 
         let providers = try ProviderStore.loadProviders()
         XCTAssertEqual(providers.count, 1)
-        XCTAssertNil(ProviderStore.activeProvider) // stale не совпал ни с одним
+        XCTAssertNil(ProviderStore.activeProvider) // stale matches no provider
     }
 }

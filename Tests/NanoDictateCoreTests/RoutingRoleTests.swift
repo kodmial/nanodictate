@@ -3,25 +3,16 @@ import Foundation
 
 // MARK: - Маршрутизация [routing] по ролям в агентных путях
 //
-// Ревью (итерация маршрутизации): offline-чанковый путь processChunked отдавал
-// ОДНО stt-замыкание (роль segment) и для сегментов, и для финального прохода
-// по всему WAV — большой финальный проход должен уходить на final_provider.
-// ChunkedPipeline вызывает stt с различимым filename: сегменты "segment-N.wav",
-// финальный проход "final.wav" (ChunkedPipeline.swift finalize) — замыкание
-// обязано выбирать роль по этому признаку.
-//
-// Логика приватная и живёт в executable-таргете NanoDictateAgent (тест-таргет
-// зависит только от NanoDictateCore), поэтому тестируется структурно — по
-// исходнику Sources/NanoDictateAgent/main.swift (тот же приём, что в
-// LiveSegmentFailureTests).
+// Routing review: processChunked gave segments AND final whole-WAV pass the
+// same stt closure (segment role); final pass must go to final_provider.
+// ChunkedPipeline marks passes by filename ("segment-N.wav" / "final.wav").
+// Role logic is private to executable NanoDictateAgent (tests reach only Core),
+// so we assert structurally on main.swift source (same as LiveSegmentFailureTests).
 
 final class RoutingRoleTests: XCTestCase {
 
-    /// processChunked: сегменты (filename "segment-N.wav") — роль segment
-    /// (segmentRoleProviderID), финальный проход (filename "final.wav") —
-    /// роль final (finalRoleProviderID). Обе ветки фолбэчат на активный
-    /// transcriber (`?? self.transcriber`) — без [routing] поведение
-    /// байт-в-байт прежнее.
+    /// Filename picks role (segment/final); both branches fall back to active
+    /// transcriber — same behavior without [routing].
     @objc func testProcessChunked_FinalPassUsesFinalRole() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -41,16 +32,14 @@ final class RoutingRoleTests: XCTestCase {
             body.contains("self.roleTranscriber(self.segmentRoleProviderID)"),
             "сегменты идут ролью segment"
         )
-        // Фолбэк без [routing]/совпадающей роли — активный transcriber (прежнее
-        // поведение), failover на ролях не поднимается.
+        // Both branches fall back to active transcriber; no failover on roles.
         XCTAssertEqual(
             body.components(separatedBy: "?? self.transcriber").count - 1, 2,
             "обе ветки ролей фолбэчат на активный transcriber"
         )
     }
 
-    /// live-путь уже был корректен (ревью): сегменты — роль segment,
-    /// финальный проход — роль final; страхуем от регресса.
+    /// Live-path roles were already correct post-review; guard regression.
     @objc func testLivePathRoles() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -70,7 +59,6 @@ final class RoutingRoleTests: XCTestCase {
 
     // MARK: - Helpers (зеркало LiveSegmentFailureTests)
 
-    /// Загружает исходник агента (для структурных проверок).
     private static func agentMainSource() -> String? {
         let fileDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         let candidates = [
@@ -88,8 +76,7 @@ final class RoutingRoleTests: XCTestCase {
         return source
     }
 
-    /// Возвращает тело функции (от «func NAME(» до следующей функции/секции
-    /// на том же уровне отступа). Если функция не найдена — пустая строка.
+    /// Body from "func NAME(" to next top-level func/MARK; empty if missing.
     private static func functionBody(named name: String, in source: String) -> String {
         guard let range = source.range(of: "func \(name)(") else { return "" }
         let tail = source[range.lowerBound...]

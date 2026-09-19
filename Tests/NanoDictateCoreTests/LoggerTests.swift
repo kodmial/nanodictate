@@ -6,7 +6,7 @@ final class LoggerTests: XCTestCase {
 
     private var tempDirs: [String] = []
 
-    /// Создаёт временный каталог, направляет туда Logger и запоминает его для очистки.
+    /// Tracks temp dir for tearDown cleanup.
     private func setUpTempLogDirectory() -> String {
         let dir = NSTemporaryDirectory() + "nanodictate-logger-test-\(UUID().uuidString)"
         Logger.logDirectory = dir
@@ -19,7 +19,6 @@ final class LoggerTests: XCTestCase {
             try? FileManager.default.removeItem(atPath: dir)
         }
         tempDirs = []
-        // Восстанавливаем значение по умолчанию.
         Logger.logDirectory = "~/Library/Logs/NanoDictate"
         super.tearDown()
     }
@@ -45,7 +44,7 @@ final class LoggerTests: XCTestCase {
         let fileURL = URL(fileURLWithPath: dir).appendingPathComponent("agent.log")
         let content = try String(contentsOf: fileURL, encoding: .utf8)
 
-        // Формат: yyyy-MM-dd HH:mm:ss [level] message
+        // Format: yyyy-MM-dd HH:mm:ss [level] message
         let pattern = #"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[info\] date check\n$"#
         XCTAssertNotNil(
             content.range(of: pattern, options: .regularExpression),
@@ -70,7 +69,6 @@ final class LoggerTests: XCTestCase {
 
     @objc func testLogDoesNotThrowWithUnwritableDirectory() {
         Logger.logDirectory = "/nonexistent-dir-\(UUID().uuidString)/logs"
-        // Не должно быть ни краха, ни исключения.
         Logger.log("no crash", level: "error")
     }
 }

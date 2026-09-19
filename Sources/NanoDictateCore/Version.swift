@@ -1,9 +1,6 @@
-/// Версия приложения (semver, без префикса `v`).
+/// App version (semver, no `v` prefix).
 ///
-/// Единственный источник правды для `nanodictate --version`, а также
-/// справочная точка для CHANGELOG-релизов. Обновляется вручную при выпуске
-/// новой версии.
+/// Single source for `nanodictate --version` and CHANGELOG; bumped manually per release.
 public enum NanoDictateVersion {
-  /// Текущая версия, напр. "0.1.0".
   public static let string = "0.1.0"
 }

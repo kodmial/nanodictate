@@ -4,42 +4,39 @@ import Foundation
 
 // MARK: - STTAdapterID
 
-/// Известные id адаптеров STT-провайдеров. ID выбирается по имени секции
-/// `[providers.<id>]` (и, как следствие, по `active_provider`). Неизвестный id
-/// отображается на `.openAICompatible` — ручной провайдер со своими
-/// base_url/model работает как раньше.
+/// Known STT adapter ids, chosen by the `[providers.<id>]` section name
+/// (hence `active_provider`). Unknown id maps to `.openAICompatible` — a
+/// manual provider with its own base_url/model works as before.
 public enum STTAdapterID: String, Equatable {
   case openai
   case groq
-  /// Cloudflare Workers AI Whisper: сырые WAV-байты + `Authorization: Bearer` +
-  /// `Content-Type: audio/wav` (multipart эта сторона отвергает: 400 code 8001).
-  /// base_url обязателен (модель зашита в URL), дефолтов нет.
+  /// Cloudflare Workers AI Whisper: raw WAV bytes + `Authorization: Bearer` +
+  /// `Content-Type: audio/wav` (multipart rejected: 400 code 8001).
+  /// base_url required (model baked into URL), no defaults.
   case cloudflare
-  /// Неизвестный id: OpenAI-совместимый запрос с собственными base_url/model,
-  /// дефолты НЕ подставляются (никакого личного endpoint у нас больше нет).
+  /// Unknown id: OpenAI-compatible request with own base_url/model, no
+  /// defaults injected (no personal endpoint remains).
   case openAICompatible = "openai-compatible"
 
   public static func from(_ id: String) -> STTAdapterID {
     STTAdapterID(rawValue: id) ?? .openAICompatible
   }
 
-  /// Дефолтный endpoint базы — используется, когда у провайдера base_url пуст
-  /// (шаблон `config init` создаёт секции без личных значений).
+  /// Default endpoint when config base_url empty (`config init` template).
   public var defaultBaseURL: String {
     switch self {
     case .openai: return "https://api.openai.com/v1/audio/transcriptions"
     case .groq: return "https://api.groq.com/openai/v1/audio/transcriptions"
-    // cloudflare/openAICompatible — ручные: base_url обязателен.
+    // cloudflare/openAICompatible — manual: base_url required.
     case .cloudflare, .openAICompatible: return ""
     }
   }
 
-  /// Дефолтная модель — когда у провайдера model пуст.
   public var defaultModel: String {
     switch self {
     case .openai: return "whisper-1"
     case .groq: return "whisper-large-v3"
-    // Cloudflare: модель в URL Workers AI, отдельной дефолтной нет.
+    // Cloudflare: model in Workers AI URL, no separate default.
     case .cloudflare, .openAICompatible: return ""
     }
   }
@@ -47,24 +44,20 @@ public enum STTAdapterID: String, Equatable {
 
 // MARK: - STTRequestSpec
 
-/// Полная спецификация HTTP-запроса распознавания, которую собирает адаптер
-/// (`ProviderRequestBuilder.plan`). Transcriber исполняет её: URLRequest из
-/// полей поступает в `send`; транспорт, cookie-relay-слой, preflight сети и
-/// ретраи остаются в Transcriber.
+/// Full STT request spec built by the adapter plan; Transcriber executes it
+/// (transport, cookie relay, network preflight, retries).
 public struct STTRequestSpec {
-  /// Конечный URL (включая query-параметры). nil — не собрался («Invalid base URL»).
+  /// Final URL (query included). nil = not built ("Invalid base URL").
   public var url: URL?
-  /// Дополнительные заголовки (Authorization, …) — готовые к установке.
   public var headers: [(String, String)]
   public var body: STTRequestBody
-  /// JSON-путь к тексту распознавания в ответе; nil — плоский ключ "text"
-  /// (OpenAI-совместимый формат).
+  /// JSON path to transcript text; nil = flat "text" (OpenAI-compatible).
   public var transcriptPath: [String]?
 
   public enum STTRequestBody: Equatable {
-    /// OpenAI-совместимый multipart/form-data: file первым, затем поля.
+    /// OpenAI-compatible multipart/form-data: file first, then fields.
     case multipart(data: Data, contentType: String)
-    /// Сырое аудио (cloudflare): тело = WAV целиком, Content-Type задаёт формат.
+    /// Raw audio (cloudflare): body = whole WAV; Content-Type sets format.
     case rawAudio(data: Data, contentType: String)
   }
 
@@ -77,8 +70,7 @@ public struct STTRequestSpec {
     self.transcriptPath = transcriptPath
   }
 
-  /// Значение Content-Type для URLRequest («multipart/form-data; boundary=…»,
-  /// «audio/wav», …).
+  /// Content-Type for URLRequest ("multipart/form-data; boundary=…", …).
   public var contentType: String {
     switch body {
     case .multipart(_, let contentType), .rawAudio(_, let contentType):
@@ -86,7 +78,6 @@ public struct STTRequestSpec {
     }
   }
 
-  /// Тело запроса (мультипарт или сырое аудио).
   public var bodyData: Data {
     switch body {
     case .multipart(let data, _), .rawAudio(let data, _):
@@ -97,21 +88,19 @@ public struct STTRequestSpec {
 
 // MARK: - ProviderRequestBuilder
 
-/// Единственный строитель STT-запросов: из полей конфига провайдера собирает
-/// `STTRequestSpec`. В HTTP-запрос его превращает Transcriber; транспорт,
-/// cookie-relay-слой, preflight сети и ретраи — тоже зона Transcriber.
+/// Sole STT request builder: provider config fields → `STTRequestSpec`.
+/// Transcriber turns it into HTTP; transport, cookie relay, network
+/// preflight and retries live there too.
 ///
-/// baseURL/model перед вызовом `plan` уже разрешены в дефолты адаптера
-/// (пусто в конфиге → свой дефолт адаптера). Для cloudflare/openAICompatible
-/// дефолтов нет — пустое base_url даёт spec.url == nil, Transcriber отвечает
-/// понятной ошибкой «Invalid base URL».
+/// baseURL/model resolved to adapter defaults before `plan` (empty config →
+/// adapter default). cloudflare/openAICompatible have none — empty base_url
+/// yields spec.url == nil, Transcriber answers with "Invalid base URL".
 public enum ProviderRequestBuilder {
-  /// Имена известных адаптеров в каноническом порядке (справочник CLI).
+  /// Known adapter ids in canonical order (CLI reference).
   public static let knownProviderIDs: [String] =
     ["openai", "groq", "cloudflare"]
 
-  /// «Human name» провайдера для подписи оверлея/логов; неизвестный id —
-  /// сам id.
+  /// Human name for overlay/log labels; unknown id — the id itself.
   public static func displayName(for id: String) -> String {
     switch STTAdapterID.from(id) {
     case .openai: return "OpenAI"
@@ -121,19 +110,18 @@ public enum ProviderRequestBuilder {
     }
   }
 
-  /// Собирает спецификацию запроса под известный адаптер.
+  /// Builds the request spec for a known adapter.
   ///
   /// - Parameters:
-  ///   - adapterID: id провайдера («openai», «groq», …). Неизвестный —
-  ///     OpenAI-совместимый формат.
-  ///   - baseURL/model/apiKey: поля секции; пустые baseURL/model
-  ///     разрешаются в дефолты адаптера здесь же (единая точка).
-  ///   - language: код языка (для OpenAI-совместимых — form-поле language).
-  ///   - wav/filename/prompt: аудио и опциональный контекст (multipart-поля).
-  ///   - batchParams: пакетные параметры устойчивой транскрибации
-  ///     (контекстный prompt chaining + temperature + stable-поля). nil —
-  ///     пакетный путь не задействован (пошаговая диктовка): поведение
-  ///     байт-в-байт прежнее.
+  ///   - adapterID: provider id ("openai", "groq", ...); unknown →
+  ///     OpenAI-compatible format.
+  ///   - baseURL/model/apiKey: section fields; empty baseURL/model resolve
+  ///     to adapter defaults here (single point).
+  ///   - language: language code (OpenAI-compatible: form field `language`).
+  ///   - wav/filename/prompt: audio and optional context (multipart fields).
+  ///   - batchParams: stable-transcription batch params (contextual prompt
+  ///     chaining + temperature + stable fields). nil = batch path unused
+  ///     (stepwise dictation): byte-identical behavior.
   // swiftlint:disable:next function_parameter_count
   public static func plan(
     adapterID: String,
@@ -146,13 +134,12 @@ public enum ProviderRequestBuilder {
     prompt: String? = nil,
     batchParams: BatchSTTParams? = nil
   ) -> STTRequestSpec {
-    // Пустые baseURL/model из конфига (шаблон `config init`) разрешаются
-    // в дефолты адаптера. Повторный вызов resolve для уже непустых
-    // значений — no-op, так что вызывающий может резолвить заранее.
+    // Empty config baseURL/model resolve to adapter defaults; re-resolve of
+    // already non-empty values is a no-op — caller may resolve in advance.
     let resolvedBaseURL = resolveBaseURL(baseURL, for: adapterID)
     let resolvedModel = resolveModel(model, for: adapterID)
-    // Пакетный контекстный prompt (chaining) имеет приоритет над явным;
-    // stable-поля — гейтинг по провайдеру (cloudflare = nil).
+    // Batch chaining prompt wins over explicit; stable fields gated per
+    // provider (cloudflare = nil).
     let effectivePrompt = batchParams?.prompt ?? prompt
     let stable = BatchStableMultipartFields.stableFields(for: adapterID, params: batchParams)
     switch STTAdapterID.from(adapterID) {
@@ -173,7 +160,6 @@ public enum ProviderRequestBuilder {
     }
   }
 
-  /// Разрешение пустых полей провайдера в дефолты адаптера.
   public static func resolveBaseURL(_ baseURL: String, for adapterID: String) -> String {
     if !baseURL.isEmpty {
       return baseURL
@@ -188,9 +174,8 @@ public enum ProviderRequestBuilder {
     return STTAdapterID.from(adapterID).defaultModel
   }
 
-  /// Извлечение текста распознавания из тела ответа.
-  /// - `path == nil` — плоский JSON `{"text": "…"}` (OpenAI-совместимый);
-  /// - `path == ["result","text"]` — cloudflare (часть JSON-пути адаптера).
+  /// Transcript text from response body. path == nil → flat {"text": "…"}
+  /// (OpenAI-compatible); ["result","text"] → cloudflare JSON path.
   public static func extractText(from body: Data, path: [String]?) throws -> String {
     guard !body.isEmpty,
       let json = try? JSONSerialization.jsonObject(with: body)
@@ -226,12 +211,10 @@ public enum ProviderRequestBuilder {
     return text
   }
 
-  /// Извлечение word-таймстампов из тела ответа (пустое — провайдер их не
-  /// вернул, и это НЕ ошибка: сшивка сегментов деградирует к по-словному diff).
-  /// - `path == nil` — OpenAI-совместимый `verbose_json`: массив `words` на
-  ///   верхнем уровне (`[{"word":…,"start":…,"end":…}]`).
-  /// Битые/частичные записи в массиве пропускаются, битый JSON — пустой
-  /// результат.
+  /// Word timestamps from response body. Empty — provider returned none,
+  /// NOT an error: stitching degrades to word diff. path == nil → top-level
+  /// `words` array (OpenAI-compatible verbose_json). Broken entries skipped;
+  /// broken JSON yields empty result.
   public static func extractWords(from body: Data, path: [String]?) -> [TimedWord] {
     guard !body.isEmpty,
       let json = try? JSONSerialization.jsonObject(with: body)
@@ -240,7 +223,7 @@ public enum ProviderRequestBuilder {
     }
     var wordsValue: Any?
     if let path {
-      // Тот же путь, что для текста, но последний сегмент — "words".
+      // Same path as for text, but the last segment is "words".
       guard path.count > 1 else { return [] }
       var current: Any = json
       var pathValid = true
@@ -282,14 +265,13 @@ public enum ProviderRequestBuilder {
 // MARK: - Мультипарт-тело и адаптеры
 
 extension ProviderRequestBuilder {
-  /// OpenAI-совместимый multipart/form-data: file первым, затем model,
-  /// language (если не пусто), prompt (если не пусто), опционально
-  /// response_format/timestamp_granularities[] (word-таймстампы), затем
-  /// stable-поля устойчивой транскрибации (температура/vad_filter/пороги —
-  /// только не-nil, после гейтинга), закрывающий boundary. Это ЕДИНЫЙ
-  /// источник правды о формате тела — адаптеры openai/groq дают
-  /// байт-в-байт те же данные (поля таймстампов и stable добавляются только
-  /// явными параметрами).
+  /// OpenAI-compatible multipart/form-data: file first, then model,
+  /// language (if non-empty), prompt (if non-empty), optionally
+  /// response_format / timestamp_granularities[] (word timestamps), then
+  /// stable-transcription fields (temperature/vad_filter/thresholds — only
+  /// non-nil, post-gating), closing boundary. THE single source of truth for
+  /// the body format — openai/groq adapters produce byte-identical data
+  /// (timestamp and stable fields added only by explicit params).
   // swiftlint:disable:next function_parameter_count
   public static func multipartBody(
     wav: Data,
@@ -332,23 +314,22 @@ extension ProviderRequestBuilder {
       appendField("language", value: language)
     }
 
-    // Field: prompt — контекст уже распознанных сегментов (пошаговая диктовка)
+    // Field: prompt — context of already-recognized segments (stepwise dictation)
     if let prompt, !prompt.isEmpty {
       appendField("prompt", value: prompt)
     }
 
-    // Field: response_format — просим verbose_json (даёт word-таймстампы)
+    // Field: response_format — request verbose_json (yields word timestamps)
     if let responseFormat, !responseFormat.isEmpty {
       appendField("response_format", value: responseFormat)
     }
 
-    // Fields: timestamp_granularities[] — включаем word-таймстампы
+    // Fields: timestamp_granularities[] — word timestamps for stitching
     for granularity in timestampGranularities {
       appendField("timestamp_granularities[]", value: granularity)
     }
 
-    // Fields: stable — устойчивая транскрибация (порядок полей фиксирован,
-    // значения компактны: «0» вместо «0.0», «-1» вместо «-1.0»).
+    // Fields: stable — fixed field order, compact values ("0" not "0.0").
     if let stable {
       if let temperature = stable.temperature {
         appendField("temperature", value: BatchStableMultipartFields.numberString(temperature))
@@ -377,7 +358,7 @@ extension ProviderRequestBuilder {
 
   // MARK: - Адаптеры
 
-  /// OpenAI / Groq / openAI-compatible: мультипарт + Bearer.
+  /// OpenAI / Groq / openai-compatible: multipart + Bearer.
   // swiftlint:disable:next function_parameter_count
   private static func planOpenAICompatible(
     adapterID: String,
@@ -391,7 +372,7 @@ extension ProviderRequestBuilder {
     stable: BatchStableMultipartFields? = nil
   ) -> STTRequestSpec {
     let boundary = "Boundary-\(UUID().uuidString)"
-    // Word-таймстампы (verbose_json) — только где поддержка гарантирована.
+    // Word timestamps (verbose_json) — only where support is guaranteed.
     let timestamps = supportsWordTimestamps(adapterID)
     let verbose = supportsVerboseJSON(adapterID)
     let multipart = multipartBody(
@@ -412,9 +393,9 @@ extension ProviderRequestBuilder {
     )
   }
 
-  /// Провайдеры, у которых включаем word-таймстампы (verbose_json +
-  /// timestamp_granularities[]=word). cloudflare не включаем: он ходит сырым
-  /// WAV-телом (см. planCloudflare).
+  /// Providers with word timestamps (verbose_json +
+  /// timestamp_granularities[]=word). Not cloudflare: raw WAV body
+  /// (see planCloudflare).
   private static func supportsWordTimestamps(_ adapterID: String) -> Bool {
     switch STTAdapterID.from(adapterID) {
     case .openai, .openAICompatible: return true
@@ -422,9 +403,9 @@ extension ProviderRequestBuilder {
     }
   }
 
-  /// Провайдеры, где просим verbose_json. Groq формально поддерживает
-  /// verbose_json (word-таймстампы в ответе), но отвергает параметр
-  /// timestamp_granularities[] — HTTP 400. Поэтому granularities отдельно.
+  /// Providers asked for verbose_json. Groq formally supports it (word
+  /// timestamps in response) but rejects timestamp_granularities[] — HTTP
+  /// 400. So granularities stay separate.
   private static func supportsVerboseJSON(_ adapterID: String) -> Bool {
     switch STTAdapterID.from(adapterID) {
     case .openai, .groq, .openAICompatible: return true
@@ -432,10 +413,10 @@ extension ProviderRequestBuilder {
     }
   }
 
-  /// Cloudflare Workers AI Whisper: тело — сырые WAV-байты (мультипарт эта
-  /// сторона отвергает: 400 code 8001), `Authorization: Bearer <key>`,
-  /// `Content-Type: audio/wav`. Модель зашита в base_url
-  /// (`/@cf/openai/whisper-large-v3-turbo`). Текст ответа — `result.text`.
+  /// Cloudflare Workers AI Whisper: body — raw WAV bytes (multipart
+  /// rejected: 400 code 8001), `Authorization: Bearer <key>`,
+  /// `Content-Type: audio/wav`. Model baked into base_url
+  /// (`/@cf/openai/whisper-large-v3-turbo`). Transcript at `result.text`.
   private static func planCloudflare(
     baseURL: String,
     apiKey: String,

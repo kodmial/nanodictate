@@ -2,29 +2,19 @@ import Foundation
 
 // MARK: - ReviewGate
 
-//
-// Ревью распознанного текста ПЕРЕД вставкой (ключ конфига
-// `review_before_insert = true`). Текст НЕ вставляется сразу: печатается в stdout
-// с предложением «Вставить [Enter] / Отменить [Esc]». Enter (или пустой ввод) —
-// вставка, всё остальное/Esc — отмена.
-//
-// Режим рассчитан на запуск агента из терминала (локальная разработка): под
-// launchd/overlay stdout нет, поэтому по умолчанию (false) поведение — прежнее,
-// текст вставляется сразу.
+// review_before_insert: text printed to stdout, Enter/empty = insert, else/Esc = cancel.
+// Terminal-only: launchd/overlay have no stdout, so default false inserts immediately.
 
 public enum ReviewGate {
-  /// Решение пользователя.
   public enum Decision: Equatable {
     case insert
     case cancel
   }
 
-  /// Ввод строки; инжектится в тестах. Дефолт — readLine().
+  /// Input line; injectable in tests, default readLine().
   public static var readLineFunction: () -> String? = { readLine() }
 
-  /// Показать текст и дождаться решения.
-  /// - Enter/пустой ввод/«y»/«Y» → .insert
-  /// - любое другое (в т.ч. Esc через escape-последовательность) → .cancel
+  /// Show text, await decision: Enter/empty/y/Y → .insert; else (incl. Esc) → .cancel.
   public static func confirm(text: String) -> Decision {
     print("\(L10n.tr("review.prompt")): \(text)")
     print(L10n.tr("review.confirmInsert"), terminator: " ")

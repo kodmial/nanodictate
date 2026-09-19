@@ -5,7 +5,7 @@ import Foundation
 
 final class BatchSegmenterTests: XCTestCase {
 
-    /// Сэмплы с постоянным значением `value` (уникальный маркер на секунду).
+    /// Constant-value samples: unique marker per second.
     private func tone(_ seconds: Double, value: Int16, sampleRate: Int = 16000) -> [Int16] {
         Array(repeating: value, count: max(0, Int((seconds * Double(sampleRate)).rounded())))
     }
@@ -36,7 +36,7 @@ final class BatchSegmenterTests: XCTestCase {
         let samples = tone(duration, value: 50)
         let chunks = BatchSegmenter.segments(samples: samples, sampleRate: 16000, maxSegment: 30, overlap: 2.5)
 
-        // 100 с / 30 с = 4 чанка (последний короче).
+        // 100 s / 30 s = 4 chunks (last shorter).
         XCTAssertEqual(chunks.count, 4)
         XCTAssertEqual(chunks[0].bodyStart, 0, accuracy: 0.001)
         XCTAssertEqual(chunks.last!.bodyEnd, 100, accuracy: 0.001)
@@ -44,7 +44,7 @@ final class BatchSegmenterTests: XCTestCase {
             XCTAssertEqual(chunks[i].bodyStart, chunks[i - 1].bodyEnd, accuracy: 0.001,
                            "тела чанков идут подряд без пропусков и перекрытий")
         }
-        // Каждый чанк (кроме первого) длиннее чистого тела за счёт оверлэпа.
+        // Overlap makes every chunk (except first) longer than bare body.
         XCTAssertGreaterThanOrEqual(chunks[1].samples.count, 480_000,
                                     "оверлэп добавляет контекст предыдущего тела")
     }
@@ -52,9 +52,8 @@ final class BatchSegmenterTests: XCTestCase {
     // MARK: Оверлэп: голова следующего = хвост тела предыдущего
 
     @objc func testOverlapPrependsTailOfPreviousBody() {
-        let bodySize = 480_000 // 30 с * 16000
-        let overlapCount = 40_000 // 2.5 с * 16000
-        // Файл: 2 полных тела.
+        let bodySize = 480_000 // 30 s * 16000
+        let overlapCount = 40_000 // 2.5 s * 16000
         var samples = tone(30, value: 1)
         samples += tone(30, value: 2)
 
@@ -75,7 +74,7 @@ final class BatchSegmenterTests: XCTestCase {
     }
 
     @objc func testOverlapLimitedToFileLength() {
-        // Короткий файл, оверлэп больше всего файла — голова = всё предыдущее тело.
+        // Overlap wider than file: head = full previous body.
         let samples = tone(4, value: 3, sampleRate: 1000)
         let chunks = BatchSegmenter.segments(samples: samples, sampleRate: 1000, maxSegment: 2, overlap: 10)
         XCTAssertEqual(chunks.count, 2)
@@ -121,9 +120,8 @@ final class BatchSegmenterTests: XCTestCase {
 
         XCTAssertEqual(specs.count, 2, "два чанка: [0, ~13.2s) и [~13.2s, 20.4s)")
 
-        // Chunk 0: boundary сдвинут к началу ВТОРОЙ паузы (13200) — с точностью
-        // до окна RMS-сканирования (windowSize = 0.085s * sr = 85 сэмплов):
-        // первое полностью тихое окно начинается в 13245 (13.245s).
+        // Chunk 0: boundary shifted to second pause start (13200), within RMS
+        // scan window (0.085 s * sr = 85 samples): first silent window at 13245.
         XCTAssertEqual(specs[0].bodyStart, 0, accuracy: 0.001)
         XCTAssertGreaterThanOrEqual(specs[0].bodyEnd, 13.2,
                                     "граница не раньше начала паузы (13200 = 13.2s)")
@@ -135,11 +133,11 @@ final class BatchSegmenterTests: XCTestCase {
                       "тело чанка 0 заканчивается на паузе (13200±окно), было: \(specs[0].bodyRange)")
         XCTAssertNil(specs[0].overlapRange, "первый чанк без оверлэпа")
 
-        // Chunk 1: последний чанк — без обрезания (bodyEnd = totalSamples).
+        // Chunk 1: last chunk not trimmed (bodyEnd = totalSamples).
         XCTAssertEqual(specs[1].bodyEnd, 20.4, accuracy: 0.001)
         XCTAssertEqual(specs[1].bodyRange.upperBound, 20_400)
 
-        // Bodies andдут подряд: граница чанка 1 = граница чанка 0.
+        // Bodies contiguous: chunk 1 boundary = chunk 0 boundary.
         XCTAssertEqual(specs[1].bodyStart, specs[0].bodyEnd, accuracy: 0.001,
                        "тела чанков идут подряд — общая граница = граница паузы")
         XCTAssertEqual(specs[1].bodyRange.lowerBound, specs[0].bodyRange.upperBound,
@@ -151,9 +149,8 @@ final class BatchSegmenterTests: XCTestCase {
     // MARK: plan() дефолты — выравнивание на паузу включено (0.3 с)
 
     @objc func testPlanDefaultCutsAtPause() throws {
-        // Речь 6 с + пауза 0.4 с (≥ дефолтные 0.3 с) + речь 4 с. ДЕФОЛТНЫЕ
-        // параметры (cutAtPauses=true, pauseDuration=0.3) — никаких явных
-        // аргументов нарезки.
+        // Speech 6 s + 0.4 s pause (≥ 0.3 s default) + 4 s speech; default
+        // cutAtPauses/pauseDuration — no explicit slicing arguments.
         let sr = 1000
         var samples = tone(6, value: 500, sampleRate: sr)
         samples += tone(0.4, value: 0, sampleRate: sr)
@@ -163,7 +160,7 @@ final class BatchSegmenterTests: XCTestCase {
         let specs = try BatchSegmenter.plan(content: content, maxSegment: 10, overlap: 1.0)
 
         XCTAssertEqual(specs.count, 2, "пауза 0.4 с ≥ 0.3 с — граница в тишину")
-        // Граница = начало паузы (6000) с точностью до окна RMS (0.085·sr = 85).
+        // Boundary = pause start (6000) within RMS window (0.085·sr = 85).
         XCTAssertGreaterThanOrEqual(specs[0].bodyEnd, 6.0, "граница не раньше начала паузы")
         XCTAssertLessThanOrEqual(specs[0].bodyEnd, 6.1, "граница не дальше одного окна RMS")
         XCTAssertEqual(specs[0].bodyRange.upperBound, specs[1].bodyRange.lowerBound,
@@ -171,9 +168,8 @@ final class BatchSegmenterTests: XCTestCase {
     }
 
     @objc func testPlanDefaultKeepsFixedBoundaryWhenPauseTooShort() throws {
-        // Пауза 0.2 с < дефолтные 0.3 с — границу не сдвигаем: чанк
-        // фиксированной длины 10.0 с (пауза не набирает порог, речь продолжается
-        // внутри чанка).
+        // Pause 0.2 s < 0.3 s default — boundary not shifted: chunk stays fixed
+        // 10.0 s (pause below threshold, speech continues inside chunk).
         let sr = 1000
         var samples = tone(6, value: 500, sampleRate: sr)
         samples += tone(0.2, value: 0, sampleRate: sr)
@@ -189,8 +185,7 @@ final class BatchSegmenterTests: XCTestCase {
     }
 
     @objc func testPlanDefaultLastChunkNeverTrimmed() throws {
-        // Последний чанк не выравнивается (bodyEnd = totalSamples), даже если
-        // по дефолтным параметрам рядом есть тишина.
+        // Last chunk never aligned (bodyEnd = totalSamples) even with silence nearby.
         let sr = 1000
         var samples = tone(6, value: 500, sampleRate: sr)
         samples += tone(1.0, value: 0, sampleRate: sr)

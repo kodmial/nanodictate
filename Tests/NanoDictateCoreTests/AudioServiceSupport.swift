@@ -5,9 +5,8 @@ import AudioEngineGuard
 
 // MARK: - Общие фейки AudioService (инъекция движка в тестах)
 
-/// Тестовый входной узел. Формат МУТАБЕЛЬНЫЙ (в отличие от константного
-/// формата настоящего движка): ветки nil-конвертера и повторного старта после
-/// «починки» формата меняют `format` на лету.
+/// Mutable format (engine's is constant): nil-converter and format-fix restart
+/// branches update it on the fly.
 final class FakeInputNode: AudioInputNodeLike {
     var format: AVAudioFormat
     var tapBlock: AVAudioNodeTapBlock?
@@ -18,7 +17,7 @@ final class FakeInputNode: AudioInputNodeLike {
         if let format = format {
             self.format = format
         } else {
-            // Стандартный 44.1 кГц/моно — как в «боевых» тестах lifecycle.
+            // Match lifecycle tests' 44.1 kHz/mono default.
             self.format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
         }
     }
@@ -41,22 +40,16 @@ final class FakeInputNode: AudioInputNodeLike {
         removeTapCount += 1
     }
 
-    /// Эмитирует один буфер из tap-колбэка (в проде это делает аудио-поток).
     func emit(_ buffer: AVAudioPCMBuffer) {
         tapBlock?(buffer, AVAudioTime())
     }
 }
 
-/// Тестовый движок с переключателями отказов:
-///   • `failStart` — engine.start() бросает ошибку (путь «движок не поднялся»);
-///     проверяется ПОСЛЕ hangStart.wait() — тот же переключатель даёт ветку
-///     «вис → throw» (разблокировавшийся после подмены старт падает сбоем);
-///   • `hangStart` — engine.start() БЛОКИРУЕТСЯ на семафоре: модель HAL-wedge,
-///     когда start() не возвращается никогда (очередь движка зависает);
-///   • `failSetup` — makeInputNode() поднимает NSException под ObjC-шлюзом
-///     (ветка «сбой подъёма входного узла»);
-///   • `overrideNode` — подмена входного узла (для nil-конвертера: формат
-///     AVAudioFormat() даёт nil из AVAudioConverter(from:to:)).
+/// Test engine with failure-injection switches:
+///   • `failStart` — start() throws, checked AFTER hangStart.wait() (hang→throw);
+///   • `hangStart` — start() blocks on a semaphore (models HAL-wedge: never returns);
+///   • `failSetup` — makeInputNode() raises NSException under ObjC gateway;
+///   • `overrideNode` — replaces input node (AVAudioFormat() → nil converter).
 final class FakeEngine: AudioEngineLike {
     let node = FakeInputNode()
     var failStart = false
@@ -69,7 +62,7 @@ final class FakeEngine: AudioEngineLike {
 
     func makeInputNode() -> AudioInputNodeLike {
         if failSetup {
-            // NSException под шлюзом (см. testEngineExceptionGuardConvertsExceptionToError).
+            // NSException under gateway; see testEngineExceptionGuardConvertsExceptionToError.
             NanoDictateRaiseAudioEngineTestException()
         }
         return overrideNode ?? node
@@ -82,16 +75,13 @@ final class FakeEngine: AudioEngineLike {
     func start() throws {
         startCount += 1
         if let hangStart = hangStart {
-            // Блокирует ДО проверки failStart: счётчик уже вырос — тест
-            // отличает «успел зависнуть» от «вообще не стартовал». Очередь
-            // движка застревает навсегда, пока тест не отпустит семафор.
+            // Blocks before failStart check: startCount already grew — test
+            // distinguishes "hung" from "never started".
             hangStart.wait()
         }
         if failStart {
-            // Проверка ПОСЛЕ wait(): «вис → throw» — движок, разблокировавшийся
-            // после wedge-подмены, завершает старт СБОЕМ engine.start(), а не
-            // успехом (покрывает stale-guard ветки сбоя старта).
-            // Любая ошибка: путь «движок не поднялся» в AudioService.
+            // Checked after wait(): hang→throw covers stale-guard start-failure
+            // branch; any error = AudioService "engine not up" path.
             throw AudioServiceError.unsupportedFormat
         }
     }
@@ -103,15 +93,13 @@ final class FakeEngine: AudioEngineLike {
 
 // MARK: - Общие helpers тестов
 
-/// `runStart`/`drainEngineQueue`/`eventually` в extension, чтобы не дублировать
-/// их в каждом suite (мини-XCTest без общего базового класса).
+/// Shared async-start helpers: avoid per-suite duplication (no common base class).
 
 typealias AudioStartResult = Result<Void, Error>
 
 extension XCTestCase {
 
-    /// Ждёт completion асинхронного старта (RunLoop крутится — как в проде
-    /// главный поток). Возвращает результат старта.
+    /// Spin RunLoop until async start completes (as prod main thread does).
     func runStart(_ service: AudioService, file: StaticString = #file, line: UInt = #line) -> AudioStartResult {
         let done = expectation(description: "audio start completion")
         var result: AudioStartResult = .failure(AudioServiceError.engineGone)
@@ -123,7 +111,7 @@ extension XCTestCase {
         return done.isFulfilled ? result : .failure(AudioServiceError.engineGone)
     }
 
-    /// Даёт engineQueue несколько проходов RunLoop для асинхронного teardown.
+    /// Give engineQueue RunLoop passes for async teardown.
     func drainEngineQueue() {
         let deadline = Date().addingTimeInterval(0.3)
         while Date() < deadline {
@@ -131,9 +119,7 @@ extension XCTestCase {
         }
     }
 
-    /// Поллинг условия с прогоном RunLoop (для событий на фоновых очередях
-    /// и глобальной queue разборки движка). Возвращает true, если условие
-    /// выполнилось в пределах таймаута.
+    /// Poll condition spinning RunLoop (background-queue / engine teardown events).
     @discardableResult
     func eventually(
         timeout: TimeInterval = 2.0,

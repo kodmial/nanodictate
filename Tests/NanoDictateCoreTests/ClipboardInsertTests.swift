@@ -47,9 +47,7 @@ final class ClipboardInsertTests: XCTestCase {
 
         Inserter.insertViaClipboard(text: "hello", bridge: bridge)
 
-        // Текст пишется в буфер первым действием; к моменту чтения буфер уже
-        // восстановлен (scheduleRestore в тестах синхронный), поэтому проверяем
-        // историю записей.
+        // Buffer already restored (sync scheduleRestore in tests); assert write history instead.
         let writes = restoreHistory()
         XCTAssertEqual(writes.first, "hello")
         XCTAssertEqual(writes.count, 2, "запись текста + восстановление старого буфера")
@@ -61,7 +59,6 @@ final class ClipboardInsertTests: XCTestCase {
         Inserter.insertViaClipboard(text: "new-text", bridge: bridge)
 
         let writes = restoreHistory()
-        // Записи: [new-text, old-text] — вставка, затем восстановление
         XCTAssertEqual(writes.count, 2)
         XCTAssertEqual(writes[0], "new-text")
         XCTAssertEqual(writes[1], "old-text")
@@ -118,7 +115,7 @@ final class ClipboardInsertTests: XCTestCase {
     }
 
     @objc func testPublicDefaultMethodSelection() {
-        // Публичный API без моста: .cgevent по умолчанию — уходит на override.
+        // Public API without bridge: default .cgevent routes to override.
         var receivedText: String?
         Inserter.cgEventInsertOverride = { text in receivedText = text }
         defer { Inserter.cgEventInsertOverride = nil }

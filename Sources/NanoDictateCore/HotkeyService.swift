@@ -7,18 +7,14 @@ import CoreGraphics
 
 public protocol HotkeyDelegate: AnyObject {
   func altDoubleTapped()
-  /// Единственная клавиша отмены — Escape (53). Enter/Keypad Enter отменой
-  /// больше НЕ являются (см. enterKeyPressed).
+  /// Escape (53) is the only cancel key; Enter/Keypad Enter are not.
   func cancelKeyPressed()
-  /// Enter/Keypad Enter (36/76): агент сам решает по своему состоянию
-  /// (.recording → стоп записи + латч синтетического Enter; .transcribing
-  /// → no-op; .idle сюда не приходит — тап пропускает физический Enter).
+  /// Enter (36/76): agent decides by state — .recording stops + latches
+  /// synthetic Enter, .transcribing no-op, .idle never reaches here.
   func enterKeyPressed()
-  /// Синхронный предикат «глотать ли физический Return»: true — событие
-  /// НЕ доходит до приложения. Агент отвечает от своего состояния:
-  /// .recording/.transcribing глотают (физический Enter не вставляет
-  /// перевод строки в поле ввода), .idle — пропускает как обычно.
-  /// Вызывается синхронно из event-тапа на main run loop — гонок нет.
+  /// Swallow physical Return? true hides event from apps. Agent decides:
+  /// .recording/.transcribing swallow (no newline in input field),
+  /// .idle passes. Called synchronously from event tap on main run loop.
   func shouldSwallowReturnKeyEvent() -> Bool
 }
 
@@ -32,19 +28,16 @@ public final class HotkeyService {
 
   // MARK: Private
 
-  /// Уровень логирования: при `"debug"` каждая клавиатурная активность (keyDown/
-  /// flagsChanged) и каждое состояние детектора двойного Alt пишутся в agent.log.
-  /// При `"info"` горячие клавиши молчат (только lifecycle).
+  /// debug: log every key event + double-Alt detector state; info: hotkeys silent.
   private let logLevel: String
 
   private var eventTap: CFMachPort?
   private var runLoopSource: CFRunLoopSource?
   private var optionDetector: DoubleAltDetector
 
-  /// Timestamp последнего события клавиатуры — для debug-дельт между событиями.
+  /// Last key event timestamp — debug deltas between events.
   private var lastEventTime: CFAbsoluteTime?
-  /// Timestamp последнего нажатия Option — для debug-дельт между тапами
-  /// (дубль состояния самого детектора, вычисляемый только для лога).
+  /// Last Option-down timestamp — debug-only delta; duplicates detector state.
   private var lastOptionDownAt: CFAbsoluteTime?
 
   // MARK: - Init
@@ -64,8 +57,7 @@ public final class HotkeyService {
   public func start() throws {
     guard eventTap == nil else { return }
 
-    // Модификаторы (Option/Shift/Cmd) на многих клавиатурах приходят как
-    // flagsChanged, а не keyDown — слушаем оба типа.
+    // Modifiers often arrive as flagsChanged, not keyDown — listen to both.
     let mask: CGEventMask =
       (1 << CGEventType.keyDown.rawValue)
       | (1 << CGEventType.flagsChanged.rawValue)
@@ -116,12 +108,9 @@ public final class HotkeyService {
     let service = Unmanaged<HotkeyService>.fromOpaque(userInfo).takeUnretainedValue()
     service.handleEvent(type: type, event: event)
 
-    // Физический Return/Keypad Enter вне .idle глотается: .defaultTap —
-    // активный тап, возврат nil подавляет событие, перевод строки в поле
-    // ввода не вставляется. Синтетический Return (постинг после
-    // Enter-останова) тап видит повторно на следующей итерации run loop,
-    // но тот помечен маркером SyntheticReturnMarker — по нему событие
-    // исключается и доходит до приложения.
+    // Return outside .idle is swallowed (nil suppresses, no newline in field).
+    // Own synthetic Return (posted after Enter stop) reappears next run-loop
+    // iteration — SyntheticReturnMarker lets it through to the app.
     if service.shouldSwallowEvent(
       type: type,
       keyCode: event.getIntegerValueField(.keyboardEventKeycode),
@@ -160,13 +149,9 @@ public final class HotkeyService {
     )
   }
 
-  /// Решение event-тапа «подавить ли событие»: сегодня — keyDown
-  /// физического Return/Keypad Enter (36/76), когда делегат (агент) отвечает
-  /// «глотать» (состояние не .idle). Свой синтетический Return (маркер
-  /// SyntheticReturnMarker в поле события) НЕ глотается — должен дойти до
-  /// приложения. Внутренний шов — юнит-тесты проверяют предикат без живого
-  /// CGEvent-тапа: `event` опционален, маркерная ветка проверяется по
-  /// реальному CGEvent.
+  /// Suppress keyDown of physical Return/Keypad Enter (36/76) when delegate
+  /// says so (state ≠ .idle). Own synthetic Return (SyntheticReturnMarker)
+  /// passes through. Test seam: event optional, marker path via real CGEvent.
   func shouldSwallowEvent(type: CGEventType, keyCode: Int64, event: CGEvent? = nil) -> Bool {
     guard type == .keyDown, keyCode == 36 || keyCode == 76 else { return false }
     if let event, isOwnSyntheticReturnEvent(event) {
@@ -175,23 +160,16 @@ public final class HotkeyService {
     return delegate?.shouldSwallowReturnKeyEvent() ?? false
   }
 
-  /// Предикат «это СВОЙ синтетический Return?» — тест-хук: принимает
-  /// CGEvent, реальная реализация проверяет поле события
-  /// (SyntheticReturnMarker), тест гоняет это же поле через реальный CGEvent.
+  /// Is this our synthetic Return? Test hook over SyntheticReturnMarker field.
   func isOwnSyntheticReturnEvent(_ event: CGEvent) -> Bool {
     SyntheticReturnMarker.isOwnSyntheticReturn(event)
   }
 
-  /// Внутренний шов без CGEvent: вся маршрутизация клавиш, вызывается из
-  /// event-тапа (`handleEvent`) и напрямую из тестов; `type` — keyDown или
-  /// flagsChanged (маска тапа).
+  /// CGEvent-free key routing, called by event tap and directly by tests.
   ///
-  /// Ключевое правило (чинит ложный двойной Alt): `flagsChanged` приходит при
-  /// смене ЛЮБОГО модификатора, `flags` содержат текущий полный набор зажатых.
-  /// «Alt + Control» даёт flagsChanged по Control с флагом Option — это не
-  /// второй Alt. Нажатием Alt считается только событие, у которого keyCode —
-  /// сама Option (58/61); любая другая клавиша между нажатиями Option рвёт
-  /// пару: незавершённый первый тап аннулируется.
+  /// Key rule (fixes false double-Alt): flagsChanged fires on ANY modifier
+  /// change; "Alt + Control" is not a second Alt. Only keyCode 58/61 counts
+  /// as Alt; any other key between Alt presses cancels the pending first tap.
   func handleKeyboardEvent(
     type: CGEventType,
     keyCode: Int64,
@@ -201,7 +179,6 @@ public final class HotkeyService {
     event: CGEvent? = nil
   ) {
     let now = time
-    // Дельта от ПРЕДЫДУЩЕГО события клавиатуры — период нажатий наглядно виден.
     let delta = lastEventTime.map { now - $0 } ?? 0
     lastEventTime = now
 
@@ -220,22 +197,18 @@ public final class HotkeyService {
     }
   }
 
-  /// flagsChanged: смена состояния ЛЮБОГО модификатора. Нажатием Alt считается
-  /// только событие с keyCode самой Option (58/61); «Alt + Control» — не второй Alt.
+  /// Any modifier state change; only Option keyCode (58/61) counts as Alt tap.
   private func handleFlagsChanged(keyCode: Int64, optionDown: Bool, now: TimeInterval) {
     let isOptionKeyCode = keyCode == 58 || keyCode == 61
     if isOptionKeyCode {
-      // Сменилось состояние самой Option: нажатие (флаг есть) — тап;
-      // отпускание (флага нет) — не тап и не рвёт незавершённый первый
-      // тап, чтобы чистый «Alt down/up/down» остался валидным.
+      // Option state changed: down = tap; up keeps pending first tap valid
+      // (clean "Alt down/up/down" stays valid).
       if optionDown {
         handleOptionTap(at: now)
       }
     } else {
-      // Сменилось состояние ДРУГОГО модификатора (Control/Shift/Cmd…),
-      // нажатие или отпускание, пока между нажатиями Option — это
-      // «Alt + что угодно ещё», а не второй Alt: аннулируем незавершённый
-      // первый тап.
+      // Other modifier (Control/Shift/Cmd) between Alt presses cancels the
+      // pending first tap — "Alt + anything else" is not a double Alt.
       if isDebug, optionDetector.lastTimestamp != nil {
         Logger.log("other modifier keyCode=\(keyCode) — pending Alt tap cancelled", level: "debug")
       }
@@ -243,42 +216,37 @@ public final class HotkeyService {
     }
   }
 
-  /// keyDown: Option — тап (без автоповтора), Escape — отмена, Return/Keypad
-  /// Enter — Enter-предикат, прочее между двумя нажатиями Option — сброс тапа.
   private func handleKeyDownCode(
     _ keyCode: Int64, isRepeat: Bool, now: TimeInterval, event: CGEvent?
   ) {
     switch keyCode {
     case 58, 61:
-      // Автоповтор зажатой Option — не новое нажатие.
+      // Held Option autorepeat is not a new tap.
       if !isRepeat {
         handleOptionTap(at: now)
       }
-    case 53:  // Escape (53) — ЕДИНСТВЕННАЯ клавиша отмены
+    case 53:  // Escape (53) — the only cancel key
       if isDebug, optionDetector.lastTimestamp != nil {
         Logger.log(
           "cancel key pressed keyCode=\(keyCode) — pending Alt tap cancelled", level: "debug")
       }
       optionDetector.cancelPendingTap()
       delegate?.cancelKeyPressed()
-    case 36, 76:  // Return (36), Keypad Enter (76) — НЕ клавиша отмены
+    case 36, 76:  // Return (36), Keypad Enter (76) — not cancel keys
       if isDebug, optionDetector.lastTimestamp != nil {
         Logger.log(
           "enter key pressed keyCode=\(keyCode) — pending Alt tap cancelled", level: "debug")
       }
-      // Свой синтетический Return (постинг после Enter-останова) тап
-      // видит повторно на следующей итерации run loop — по маркеру в
-      // поле события исключаем его целиком: ни cancelPendingTap (иначе
-      // пере-просмотр между двумя Alt-тапами съел бы первый тап), ни
-      // enterKeyPressed (иначе синтетика остановила бы новую запись).
+      // Own synthetic Return (posted after Enter stop) reappears next
+      // run-loop iteration — marker excludes it entirely: no cancelPendingTap
+      // (would eat the first Alt tap), no enterKeyPressed (would stop new
+      // recording).
       let isOwnSynthetic = event.map { isOwnSyntheticReturnEvent($0) } ?? false
       if !isOwnSynthetic {
         optionDetector.cancelPendingTap()
         delegate?.enterKeyPressed()
       }
     default:
-      // Любая другая клавиша между двумя нажатиями Option — не двойной Alt:
-      // первый тап аннулируется.
       if isDebug, optionDetector.lastTimestamp != nil {
         Logger.log("foreign key keyCode=\(keyCode) — pending Alt tap cancelled", level: "debug")
       }
@@ -286,7 +254,6 @@ public final class HotkeyService {
     }
   }
 
-  /// Дебаг-лог клавиатурного события: строка совпадает с исходным форматом.
   private func logKeyboardEvent(
     kind: String, optionDown: Bool?, keyCode: Int64, delta: TimeInterval, flags: CGEventFlags
   ) {
@@ -300,8 +267,7 @@ public final class HotkeyService {
     )
   }
 
-  /// Регистрирует нажатие Option в момент `now` (время берётся из `handleKeyboardEvent`,
-  /// чтобы тестовый шов мог управлять окном детекта детерминированно).
+  /// Alt tap at `now`; time passed in so tests control the detect window.
   private func handleOptionTap(at now: TimeInterval) {
     logOptionTapState(at: now)
     if optionDetector.registerTap(at: now) {
@@ -312,9 +278,7 @@ public final class HotkeyService {
     }
   }
 
-  /// Debug-лог состояния машины детектора ПЕРЕД регистрацией тапа:
-  /// первый тап / второй тап в окне / таймаут (окно перезапущено).
-  /// Ничего не меняет — только читает состояние и пишет строку.
+  /// Read-only debug log of detector state before registering the tap.
   private func logOptionTapState(at now: TimeInterval) {
     guard isDebug else { return }
     let last = optionDetector.lastTimestamp
@@ -353,32 +317,28 @@ public final class HotkeyService {
 
 // MARK: - DoubleAltDetector
 
-/// Чистая логика детекта двойного нажатия Option, вынесенная из `HotkeyService`
-/// для возможности юнит-тестирования: не зависит от `CGEventTap`, работает
-/// только с timestamp'ами нажатий.
+/// Pure double-Option detection, extracted from `HotkeyService` for unit
+/// testing: CGEventTap-free, works on tap timestamps only.
 public struct DoubleAltDetector {
-  /// Максимальный интервал между двумя нажатиями (секунды) для детекта двойного тапа.
+  /// Max interval between two presses (seconds) to count as double tap.
   public let maxInterval: TimeInterval
 
-  /// Допуск при сравнении интервалов: `5.4 - 5.0` в Double равно
-  /// `0.40000000000000036`, поэтому граница сравнивается с эпсилоном.
+  /// Double precision (5.4 - 5.0 = 0.40000000000000036) — compare
+  /// intervals against the boundary with epsilon.
   private let epsilon: TimeInterval = 1e-9
 
-  /// Timestamp последнего нажатия; `nil` — «нет предыдущего нажатия».
-  /// Optional вместо sentinel-нуля: тап секунда в момент 0.0 (как в тестах)
-  /// не должен «съедать» следующий тап (0.0 не `> 0`).
-  /// `internal private(set)` — setter приватный (детект меняет состояние только
-  /// через `registerTap`/`reset`/`cancelPendingTap`), чтение открыто для
-  /// debug-лога HotkeyService.
+  /// Last tap timestamp; nil = none. Optional, not sentinel 0: a tap at
+  /// exactly 0.0 (tests) must not swallow the next (0.0 not > 0).
+  /// `internal private(set)` — detect mutates only via
+  /// registerTap/reset/cancelPendingTap; read open for debug log.
   private(set) var lastTimestamp: TimeInterval?
 
   public init(maxInterval: TimeInterval = 0.4) {
     self.maxInterval = maxInterval
   }
 
-  /// Регистрирует нажатие в момент `timestamp` и возвращает `true`, если это
-  /// второй тап в пределах `maxInterval` от предыдущего. После срабатывания
-  /// детектор сбрасывается: следующее нажатие начинает новое окно детекта.
+  /// True when this is a second tap within maxInterval of the previous;
+  /// detector then resets, so the next tap opens a new window.
   public mutating func registerTap(at timestamp: TimeInterval) -> Bool {
     guard let last = lastTimestamp else {
       lastTimestamp = timestamp
@@ -386,7 +346,7 @@ public struct DoubleAltDetector {
     }
 
     if timestamp - last <= maxInterval + epsilon {
-      lastTimestamp = nil  // сброс — детектируем пары, а не серии
+      lastTimestamp = nil  // reset — detect pairs, not series
       return true
     }
 
@@ -394,14 +354,12 @@ public struct DoubleAltDetector {
     return false
   }
 
-  /// Полный сброс состояния.
   public mutating func reset() {
     lastTimestamp = nil
   }
 
-  /// Аннулирует незавершённый первый тап: между двумя нажатиями Option была
-  /// другая клавиша (или другой модификатор) — это «Alt + что угодно ещё»,
-  /// а не двойной Alt. Идемпотентна: при отсутствии первого тапа — no-op.
+  /// Cancel pending first tap: any other key or modifier between Alt
+  /// presses — "Alt + anything else", not a double Alt. Idempotent.
   public mutating func cancelPendingTap() {
     lastTimestamp = nil
   }

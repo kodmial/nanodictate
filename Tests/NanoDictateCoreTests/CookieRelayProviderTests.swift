@@ -2,7 +2,6 @@ import Foundation
 @testable import NanoDictateCore
 
 // MARK: - CookieRelayMockTransport
-//
 // One transport pretending to be a cookie-challenge proxy: any request without
 // the __test cookie gets the JS-challenge HTML; with the cookie (and
 // honorCookie) gets a normal JSON body. Mirrors the real proxy behavior.
@@ -11,7 +10,7 @@ final class CookieRelayMockTransport: HTTPTransport, @unchecked Sendable {
 
     let challengeBody: String
     var honorCookie: Bool
-    /// Число STT-POST (multipart), которые получают челлендж вместо ответа.
+    /// STT-POST (multipart) count that gets a challenge instead of a reply.
     var rejectPostCount: Int
 
     private let lock = NSLock()
@@ -45,7 +44,6 @@ final class CookieRelayMockTransport: HTTPTransport, @unchecked Sendable {
         requests.append(request)
     }
 
-    /// Синхронное потребление счётчика челленджей для STT-POST.
     private func consumeReject() -> Bool {
         lock.lock(); defer { lock.unlock() }
         if rejectPostCount > 0 {
@@ -73,12 +71,12 @@ final class CookieRelayMockTransport: HTTPTransport, @unchecked Sendable {
 
 // MARK: - CookieRelayProviderTests
 
-/// Реальный челлендж-фикстур (снят с https://proxy.example.com): константы a/b/c и
-/// ожидаемый результат — эталон посчитан openssl (`-aes-128-cbc -nopad`).
-///   a=f655ba9d09a112d4968c63579db590b4 (ключ AES-128)
+/// Real challenge fixture (captured from https://proxy.example.com); reference
+/// value computed with openssl (-aes-128-cbc -nopad).
+///   a=f655ba9d09a112d4968c63579db590b4 (AES-128 key)
 ///   b=98344c2eee86c3994890592585b49f80 (IV)
-///   c=3e512bc3e42f39a757e79f4739c74138 (единственный 16-байтный блок)
-///   d74696de7d49fcda5f03f4d247e07cf4 = slowAES.decrypt(c,2,a,b) = значение cookie.
+///   c=3e512bc3e42f39a757e79f4739c74138 (single 16-byte block)
+///   d74696de7d49fcda5f03f4d247e07cf4 = slowAES.decrypt(c,2,a,b) = cookie value.
 final class CookieRelayProviderTests: XCTestCase {
 
     private let challengeHTML = """
@@ -87,7 +85,7 @@ final class CookieRelayProviderTests: XCTestCase {
 
     private let expectedCookie = "d74696de7d49fcda5f03f4d247e07cf4"
 
-    /// Тестовые часы: injectable now() для «старения» токена без реальных пауз.
+    /// Injectable now() ages the token without real pauses.
     private final class TestClock {
         var value = Date()
     }
@@ -106,7 +104,6 @@ final class CookieRelayProviderTests: XCTestCase {
         wait(for: [expectation], timeout: 10)
     }
 
-    /// Крутит event loop, пока mock не насчитает нужное число запросов.
     private func waitForRequests(_ transport: CookieRelayMockTransport, count: Int, timeout: TimeInterval = 3) async {
         let deadline = CFAbsoluteTimeGetCurrent() + timeout
         while transport.requestCount < count && CFAbsoluteTimeGetCurrent() < deadline {
@@ -154,8 +151,7 @@ final class CookieRelayProviderTests: XCTestCase {
     }
 
     @objc func testExtractConstantsToleratesSpacesAndUppercaseAndOrder() {
-        // Реальная страница может отличаться от эталона: пробелы вокруг «=» и
-        // скобок, UPPER-HEX, другой порядок констант. Разбор обязан пережить всё.
+        // Real page may vary: spaces, UPPER-HEX, constant order — parser must survive.
         let page = """
         <script>var c=toNumbers("3E512BC3E42F39A757E79F4739C74138") ;
         b = toNumbers( "98344c2eee86c3994890592585b49f80" ) ,  a=toNumbers("F655BA9D09A112D4968C63579DB590B4");
@@ -166,7 +162,7 @@ final class CookieRelayProviderTests: XCTestCase {
         XCTAssertEqual(consts?.keyHex.lowercased(), "f655ba9d09a112d4968c63579db590b4")
         XCTAssertEqual(consts?.ivHex, "98344c2eee86c3994890592585b49f80")
         XCTAssertEqual(consts?.cipherHex.lowercased(), "3e512bc3e42f39a757e79f4739c74138")
-        // Расшифровка uppercase-констант даёт ту же куку, что и lowercase.
+        // Uppercase constants decrypt to the same cookie.
         if let consts = consts {
             let value = CookieRelayProvider.decrypt(a: consts.keyHex, b: consts.ivHex, c: consts.cipherHex)
             XCTAssertEqual(value, expectedCookie)
@@ -193,7 +189,6 @@ final class CookieRelayProviderTests: XCTestCase {
             XCTAssertEqual(cookie, "__test=" + self.expectedCookie)
             XCTAssertEqual(transport.requestCount, 2,
                            "полный цикл = GET челленджа + probe GET с новой кукой")
-            // Probe ушёл с готовым Cookie-заголовком.
             let probe = transport.requests.dropFirst().first
             XCTAssertEqual(probe?.value(forHTTPHeaderField: "Cookie"), "__test=" + self.expectedCookie)
         }
@@ -266,7 +261,7 @@ final class CookieRelayProviderTests: XCTestCase {
             XCTAssertEqual(cookie, "__test=" + self.expectedCookie, "старый токен отдаётся мгновенно")
             await self.waitForRequests(transport, count: 4)
             XCTAssertEqual(transport.requestCount, 4, "фоновый пересчёт честно сходил за токеном")
-            // Probe получил челлендж → новый токен НЕ принят → старый жив.
+            // Probe got challenge → new token rejected → old stays alive.
             XCTAssertEqual(provider.currentCookie(), "__test=" + self.expectedCookie)
         }
     }
@@ -286,11 +281,9 @@ final class CookieRelayProviderTests: XCTestCase {
     }
 
     @objc func testRefreshFailureReturnsNilDespiteOldToken() {
-        // Старый токен есть в памяти, но повторный цикл не прошёл (probe снова
-        // вернул челлендж — кука не принята). refreshBlocking обязан вернуть nil,
-        // а НЕ старый токен: челлендж-ретрай не должен уходить с заведомо
-        // мёртвой кукой и тратить POST. Старый токен при этом остаётся доступен
-        // для неблокирующего пути ensureFresh (пока не протух по TTL).
+        // Probe still challenged: refreshBlocking must return nil, not the stale
+        // cookie — challenge retry must not keep POSTing a dead cookie. Old cookie
+        // stays available for ensureFresh until TTL.
         let transport = CookieRelayMockTransport(challengeBody: challengeHTML)
         let provider = makeProvider(transport: transport)
 
@@ -298,7 +291,7 @@ final class CookieRelayProviderTests: XCTestCase {
             _ = await provider.refreshBlocking()
             XCTAssertEqual(transport.requestCount, 2, "первый цикл успешен — токен в памяти")
 
-            // Прокси «разонравилась» кука: любые запросы — снова челлендж.
+            // Proxy now rejects the cookie: every request gets a challenge.
             transport.honorCookie = false
             let refreshed = await provider.refreshBlocking()
             XCTAssertNil(refreshed, "неудачный пересчёт → nil, а не старый токен")

@@ -2,18 +2,12 @@ import Foundation
 
 // MARK: - Ответственность: склейка текстов чанков с дедупом по границе
 
-// Из-за оверлэпа хвост предыдущего чанка пересекается с головой следующего
-// (одна и та же речь распознана дважды). Дедуп: сравниваем суффикс слов
-// предыдущего текста с префиксом слов следующего (тот же словесный механизм,
-// что WordDiff — words() через split по пробелам) и при совпадении выбрасываем
-// из головы следующего чанка первые совпавшие слова. Выбирается НАИБОЛЬШЕЕ
-// совпадение (максимум k, где k последних слов prev == k первых слов next).
-// Без совпадения — фолбэк: склейка с разделительным пробелом.
+// Overlap duplicates prev tail in next head (same speech twice).
+// Dedup: largest k where prev's last k words == next's first k (WordDiff words).
+// No match → join with a single space.
 
 public enum BatchTextJoiner {
-  /// Сколько первых слов `next` дублируют хвост `previous` (дедуп по границе).
-  /// 0 — совпадения нет. Слова сравниваются без учёта регистра; пунктуация
-  /// внутри слова сравнивается как есть (как в WordDiff.words).
+  /// `next` head dup of `previous` tail; 0 = none. Case-insensitive, punctuation as-is.
   public static func boundaryDropCount(previous: String, next: String) -> Int {
     let prevWords = words(previous)
     let nextWords = words(next)
@@ -22,7 +16,7 @@ public enum BatchTextJoiner {
     let maxK = min(prevWords.count, nextWords.count)
     guard maxK >= 1 else { return 0 }
 
-    // Наибольшее candidate, где candidate последних слов previous == candidate первых слов next.
+    // Largest k where prev suffix == next prefix.
     for candidate in stride(from: maxK, through: 1, by: -1) {
       let prevSuffix = prevWords.suffix(candidate).map { $0.lowercased() }
       let nextPrefix = nextWords.prefix(candidate).map { $0.lowercased() }
@@ -33,9 +27,7 @@ public enum BatchTextJoiner {
     return 0
   }
 
-  /// Склейка текстов чанков с дедупом по каждой границе. Каждый текст
-  /// тримится, внутренние переводы строк схлопываются в пробел; чанки
-  /// соединяются одним пробелом.
+  /// Join chunk texts with boundary dedup; trim, collapse newlines, single-space join.
   public static func join(_ texts: [String]) -> String {
     var parts: [String] = []
     var previous = ""
@@ -52,12 +44,12 @@ public enum BatchTextJoiner {
     return parts.joined(separator: " ")
   }
 
-  /// Разбиение на слова (run-ы не-пробелов) — как WordDiff.words.
+  /// Split into non-whitespace runs (WordDiff.words).
   static func words(_ text: String) -> [String] {
     text.split { $0.isWhitespace }.map(String.init)
   }
 
-  /// Трим + схлопывание whitespace (включая переводы строк) в один пробел.
+  /// Trim + collapse whitespace (incl. newlines) to single spaces.
   static func collapse(_ text: String) -> String {
     text.split { $0.isWhitespace }.joined(separator: " ")
   }

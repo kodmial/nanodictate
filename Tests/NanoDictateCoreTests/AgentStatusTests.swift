@@ -1,9 +1,8 @@
 import Foundation
 @testable import NanoDictateCore
 
-/// Тесты чистой логики интерактивного меню (AgentStatus + MenuGate).
-/// Никакого реального ввода/вывода: только строки, структуры и ProviderStore
-/// поверх tmp-конфига (configPathOverride — как в ProviderTests).
+/// Pure interactive-menu logic tests (AgentStatus + MenuGate): no real IO —
+/// strings, structures, ProviderStore over tmp-config (configPathOverride).
 final class AgentStatusTests: XCTestCase {
 
     private func tmpFile(_ name: String, _ content: String) throws -> URL {
@@ -16,11 +15,9 @@ final class AgentStatusTests: XCTestCase {
     // MARK: - Гейт меню (fallback на usage при не-TTY)
 
     @objc func testMenuGateRequiresNoCommandAndTTY() {
-        // Без команды в TTY → меню.
         XCTAssertTrue(MenuGate.shouldRunMenu(hasCommand: false, tty: true))
-        // Без команды в pipe/скрипте → прежнее поведение (usage + exit 0).
+        // Pipe without command → legacy behavior (usage + exit 0).
         XCTAssertFalse(MenuGate.shouldRunMenu(hasCommand: false, tty: false))
-        // С командой — меню не мешает командам.
         XCTAssertFalse(MenuGate.shouldRunMenu(hasCommand: true, tty: true))
         XCTAssertFalse(MenuGate.shouldRunMenu(hasCommand: true, tty: false))
     }
@@ -51,7 +48,7 @@ final class AgentStatusTests: XCTestCase {
     }
 
     @objc func testRecordingActiveAcrossPreviousCycle() {
-        // Вторая запись началась после завершения первой — активна.
+        // Recording restarted after previous cycle completed → active.
         let lines = [
             "record start",
             "transcription inserted (10 chars)",
@@ -182,8 +179,8 @@ final class AgentStatusTests: XCTestCase {
 
     @objc func testStatusMenuItemsWhenAgentRunning() {
         let items = AgentScreen.statusMenuItems(agentRunning: true)
-        // 0 — язык; 4/5/6 — пункты UX-улучшений: последний текст, retry другим
-        // провайдером, тумблер ревью. Базовые 1/2/3/q сохраняют места.
+        // 0 = language; 4/5/6 = UX items (last text, retry provider, review
+        // toggle); base 1/2/3/q keep their slots.
         XCTAssertEqual(items.map { $0.key }, ["0", "1", "2", "3", "4", "5", "6", "q"])
         XCTAssertEqual(items[0].label, "Language")
         XCTAssertEqual(items[1].label, "Providers")
@@ -208,7 +205,7 @@ final class AgentStatusTests: XCTestCase {
         XCTAssertEqual(AgentScreen.logsTitle(lineCount: 7), "Logs — agent.log (7 lines total)")
         XCTAssertTrue(AgentScreen.statusHint().contains("q/esc"))
         XCTAssertTrue(AgentScreen.providersHint().contains("r — refresh"))
-        // Подсказка честно обещает подтверждение смены: y/Enter — да.
+        // Hint truthfully promises y/Enter confirmation.
         XCTAssertTrue(AgentScreen.providersHint().contains("y/Enter — confirm"))
         XCTAssertTrue(AgentScreen.logsHint().contains("↑/↓"))
     }
@@ -229,7 +226,7 @@ final class AgentStatusTests: XCTestCase {
         let idle = STTProvider(id: "ya", name: "", baseURL: "https://ya.test/v1",
                                model: "gigaam-v3", isActive: false)
         XCTAssertEqual(AgentScreen.providerItemLine(active), "* Groq [groq] — whisper-large-v3")
-        // Пустое name → fallback на id.
+        // Empty name → fallback to id.
         XCTAssertEqual(AgentScreen.providerItemLine(idle), "  ya [ya] — gigaam-v3")
         let body = AgentScreen.providersBody(providers: [active, idle])
         XCTAssertTrue(body.contains("* Groq"))
@@ -269,7 +266,6 @@ final class AgentStatusTests: XCTestCase {
         defer { ProviderStore.configPathOverride = nil }
 
         let providers = try ProviderStore.loadProviders()
-        // Валидация проходит → реальное переключение через ProviderStore.
         XCTAssertEqual(AgentScreen.validateProviderSwitch(targetID: "ya", providers: providers), .isValid(targetID: "ya"))
         try ProviderStore.setActive(providerID: "ya")
 

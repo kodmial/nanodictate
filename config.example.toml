@@ -1,17 +1,10 @@
-# NanoDictate — канонический конфиг
-# При первом запуске приложение автоматически копирует его в
-# ~/.config/nanodictate/config.toml, если того файла ещё нет. Правки вноси
-# в юзер-конфиг (~/.config/nanodictate/config.toml), а не в этот файл.
-# Секреты — только плейсхолдеры: api_key / api_key_file в секциях провайдеров
-# либо env-переменная NANODICTATE_API_KEY (приоритет над файлом — только у
-# активного провайдера; failover-кандидаты и роли сохраняют свои api_key/
-# api_key_file; в файл не пишется).
-# Пустые base_url/model — агент подставит дефолты адаптера.
-# This file is the canonical default config. On first launch the app copies it
-# to ~/.config/nanodictate/config.toml if that file does not exist.
-
-# Язык STT-подсказки (пусто = авто-детект Whisper, параметр не шлётся).
-# Явное значение (language = "ru") форвардится в запрос.
+# Canonical config. Copied to ~/.config/nanodictate/config.toml on first launch.
+# Edit user config, not this file.
+# Secrets: placeholders. Provider api_key/api_key_file or env NANODICTATE_API_KEY.
+# Env beats api_key_file for active provider only. Failover candidates and roles
+# keep their own api_key/api_key_file. Not written to config. Empty base_url/model = adapter defaults.
+# STT language hint (empty = Whisper auto-detect, param omitted).
+# Explicit value (language = "ru") is forwarded in the request.
 language = ""
 ui_language = "en"
 sounds_enabled = true
@@ -33,33 +26,23 @@ model = ""
 api_key = ""
 # api_key_file = "~/.config/nanodictate/keys/groq.txt"
 
-[providers.cookie-relay]
-name = "Cookie Relay"
-base_url = ""
-model = ""
-api_key = ""
-transport = "cookie-relay"
-# proxy_key = ""
-# proxy_key_header = "X-Proxy-Key"
-
 [providers.cloudflare]
 name = "Cloudflare Workers AI"
-# base_url для Cloudflare — полный URL с account_id и моделью в пути, например:
+# Cloudflare: full Workers AI URL (account_id + model in path), e.g.:
 # base_url = "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/run/@cf/openai/whisper-large-v3-turbo"
 model = ""
 api_key = ""
-# transport у cloudflare не указывается: "cloudflare" — это id секции
-# (адаптер STT), а не HTTPTransport. Транспорт задают только для
-# http/gateway/cookie-relay.
+# No transport for cloudflare: section id = STT adapter, not HTTPTransport.
+# Transport is set only for http/gateway/cookie-relay.
 
 [providers.airubiz]
-name = "Airubiz GigaAM (sherpa)"
+name = "Airubiz"
 base_url = "https://api.airubiz.site/v1/audio/transcriptions"
 model = "gigaam-v3-ctc-sherpa"
 api_key = ""
-# Анонимный STT-сервер: ключ не нужен, транспорт по умолчанию direct.
+# Anonymous keyless STT. Default transport: direct.
 
-# Примеры транспортов для секций (раскомментируй нужный):
+# Transport examples (uncomment the one you need):
 #
 # [providers.http-proxy]
 # name = "HTTP Proxy example"
@@ -80,17 +63,17 @@ api_key = ""
 # proxy_key = ""
 # proxy_key_header = "X-Custom-Auth"
 
-# Маршрутизация STT по ролям (см. [routing] в Config.swift):
-# final_provider — финальный проход (чанковый и не-чанковый путь),
-# segment_provider — только сегменты чанковой диктовки.
-# Не задано — роль играет active_provider. auto_failover на ролях не действует.
-# Чтобы включить — раскомментируй секцию:
+# Routing by role (see [routing] in Config.swift).
+# final_provider: final pass (chunked and plain path).
+# segment_provider: chunked segments only.
+# Unset -> role = active_provider. auto_failover ignored on roles.
+# Uncomment to enable:
 #
 # [routing]
 # segment_provider = "cloudflare"
 # final_provider = "groq"
 
-# Дополнительные top-level опции (значения по умолчанию):
+# Extra top-level options (defaults):
 # double_alt_max_interval = 0.4
 # undo_max_interval = 2.0
 # undo_sound_enabled = true

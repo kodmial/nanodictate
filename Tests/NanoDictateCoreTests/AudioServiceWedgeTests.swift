@@ -3,27 +3,27 @@ import AVFoundation
 import AudioEngineGuard
 @testable import NanoDictateCore
 
-/// Тесты веток вокруг зависаний движка (регрессия фикса replaceEngineAfterWedge):
-///   • зависший engine.start() держит только СВОЮ очередь — подмена движка
-///     синхронная, свежий движок получает СВОЮ очередь, следующий старт
-///     проходит, не дожидаясь заблокированной;
-///   • сбой подъёма входного узла (NSException под ObjC-шлюзом) — терминальная
-///     ошибка с разборкой движка и успешным повторным стартом;
-///   • не-создавшийся конвертер (AVAudioFormat() → nil из
-///     AVAudioConverter(from:to:)) — .unsupportedFormat ДО установки tap и БЕЗ
-///     teardown; повторный старт после «починки» формата успешен;
-///   • разблок устаревшего старта ПОСЛЕ подмены (гонка поколений) — .failure
-///     (.engineSuperseded), новый сеанс не тронут, старый движок разобран;
-///   • разблок устаревшего старта со СБОЕМ engine.start() после подмены —
-///     .failure(сбой старта), новая сессия жива, разобран только свой движок;
-///   • старт из очереди зависшего движка, упавший в setup на устаревшем
-///     поколении, — .failure(сбой подъёма), разобран только свой движок,
-///     текущая пара не тронута.
+/// Branches around engine hangs (regression of replaceEngineAfterWedge fix):
+///   • hung engine.start() holds ONLY its own queue — engine swap is
+///     synchronous, fresh engine gets its own queue, next start passes
+///     without waiting for the blocked one;
+///   • input-node setup failure (NSException under ObjC gateway) — terminal
+///     error with engine teardown and successful retry;
+///   • converter not created (AVAudioFormat() → nil from
+///     AVAudioConverter(from:to:)) — .unsupportedFormat BEFORE tap install and
+///     WITHOUT teardown; retry after format 'fix' succeeds;
+///   • stale start unblocks AFTER swap (generation race) — .failure
+///     (.engineSuperseded), new session untouched, old engine torn down;
+///   • stale start unblock WITH engine.start() failure after swap —
+///     .failure(start failure), new session alive, only its own engine torn down;
+///   • start from hung engine's queue, failing in setup on stale
+///     generation — .failure(setup failure), only its own engine torn down,
+///     current pair untouched.
 final class AudioServiceWedgeTests: XCTestCase {
 
-    /// Восстановление после зависшего старта: подмена движка возвращается
-    /// немедленно, повторный старт успешен на свежей паре, teardown идёт на
-    /// очереди свежего движка, старый разобран на глобальной очереди.
+    /// Recovery after hung start: engine swap returns immediately, retry
+    /// succeeds on fresh pair, teardown runs on fresh engine's queue, old
+    /// engine torn down on global queue.
     @objc func testWedgeRecoveryReplacesEngineAndRestarts() {
         let hanging = FakeEngine()
         let working = FakeEngine()
@@ -39,22 +39,22 @@ final class AudioServiceWedgeTests: XCTestCase {
         let hangSignal = DispatchSemaphore(value: 0)
         hanging.hangStart = hangSignal
 
-        // Старт уходит на очередь зависшего движка и застревает в start().
+        // Start goes to hung engine's queue, stalls in start().
         service.start { _ in }
-        // Дождаться, что старт РЕАЛЬНО завис (startCount == 1 → поток в
-        // semaphore.wait(), очередь движка заблокирована навсегда).
+        // Wait until start REALLY hung (startCount == 1 → thread in
+        // semaphore.wait(), engine queue blocked forever).
         XCTAssertTrue(
             eventually { hanging.startCount == 1 },
             "старт обязан дойти до engine.start() и заблокироваться"
         )
 
-        // Уже висим: подмена обязана вернуться немедленно (она НЕ идёт через
-        // очередь движка — иначе восстановление не наступило бы никогда).
+        // Already hung: swap must return immediately (NOT via engine queue —
+        // else recovery would never happen).
         service.replaceEngineAfterWedge()
         XCTAssertEqual(factoryCalls, 1, "подмена создаёт ровно один свежий движок")
 
-        // Повторный старт — на свежей паре (движок + СВОЯ очередь): успешен,
-        // несмотря на навсегда заблокированную очередь старого движка.
+        // Retry on fresh pair (engine + own queue): succeeds despite old
+        // engine's queue blocked forever.
         guard case .success = runStart(service) else {
             XCTFail("повторный старт после подмены обязан пройти")
             return
@@ -63,29 +63,29 @@ final class AudioServiceWedgeTests: XCTestCase {
         XCTAssertEqual(working.startCount, 1, "свежий движок реально стартовал")
         XCTAssertEqual(hanging.startCount, 1, "зависший движок стартовал ровно один раз")
 
-        // stop() после восстановления уходит на очередь СВЕЖЕГО движка и
-        // доезжает до teardown, хотя очередь старого всё ещё заблокирована.
+        // stop() after recovery goes to FRESH engine's queue and reaches
+        // teardown, though old queue still blocked.
         let samples = service.stop()
         XCTAssertTrue(
             eventually { working.stopCount == 1 },
             "teardown свежего движка обязан дойти"
         )
 
-        // Старый движок разобран на глобальной очереди (не на своей
-        // заблокированной): stop() старого экземпляра вызван.
+        // Old engine torn down on global queue (not its own blocked one):
+        // old instance's stop() called.
         XCTAssertTrue(
             eventually { hanging.stopCount == 1 },
             "зависший движок обязан быть остановлен вне своих очередей"
         )
 
-        // Освободить зависший поток, чтобы тестовый процесс завершился чисто.
+        // Release hung thread so test process exits cleanly.
         hangSignal.signal()
         XCTAssertEqual(samples, [])
     }
 
-    /// Сбой подъёма входного узла: NSException makeInputNode() → NSError под
-    /// шлюзом → терминальный .failure с разборкой движка (stop вызван, tap не
-    /// ставился — снимать нечего) и успешный повторный старт на том же сервисе.
+    /// Input-node setup failure: NSException makeInputNode() → NSError under
+    /// gateway → terminal .failure with engine teardown (stop called, tap never
+    /// installed — nothing to remove) and successful retry on same service.
     @objc func testSetupFailureRaisesAndAllowsRestart() {
         let engine = FakeEngine()
         engine.failSetup = true
@@ -100,7 +100,7 @@ final class AudioServiceWedgeTests: XCTestCase {
         XCTAssertEqual(engine.node.removeTapCount, 0, "снимать tap нечего")
         XCTAssertEqual(engine.stopCount, 1, "движок остановлен в teardown терминальной ветки")
 
-        // «Починка» узла — повторный старт на ТОМ ЖЕ сервисе успешен.
+        // 'Fix' the node — retry on SAME service succeeds.
         engine.failSetup = false
         guard case .success = runStart(service) else {
             XCTFail("повторный старт после сбоя подъёма обязан пройти")
@@ -109,16 +109,16 @@ final class AudioServiceWedgeTests: XCTestCase {
         XCTAssertEqual(engine.node.tapCount, 1, "повторный старт ставит свежий tap")
     }
 
-    /// Не-создавшийся конвертер: аппаратный формат AVAudioFormat() (rate 0)
-    /// даёт nil из AVAudioConverter(from:to:) → .unsupportedFormat ДО установки
-    /// tap (снимать нечего, движок не остановлен); после «починки» формата
-    /// повторный старт успешен — та же механика, что и у регрессии «формат
-    /// рассинхронизировался после смены устройства».
+    /// Converter not created: hardware format AVAudioFormat() (rate 0) gives
+    /// nil from AVAudioConverter(from:to:) → .unsupportedFormat BEFORE tap
+    /// install (nothing to remove, engine not stopped); after format 'fix'
+    /// retry succeeds — same mechanism as 'format drifted after device
+    /// change' regression.
     @objc func testNilConverterFailsBeforeTapAndRetrySucceeds() {
         let engine = FakeEngine()
         let service = AudioService(logLevel: "info", engine: engine)
 
-        // Нулевой формат: AVAudioConverter(from:to:) возвращает nil.
+        // Zero format: AVAudioConverter(from:to:) returns nil.
         engine.node.format = AVAudioFormat()
 
         let first = runStart(service)
@@ -131,8 +131,7 @@ final class AudioServiceWedgeTests: XCTestCase {
         XCTAssertEqual(engine.node.removeTapCount, 0, "снимать tap нечего")
         XCTAssertEqual(engine.stopCount, 0, "движок не тронут — teardown в этой ветке не нужен")
 
-        // «Починка» формата (как при восстановлении после смены устройства) —
-        // повторный старт успешен.
+        // 'Fix' the format (like recovery after device change) — retry succeeds.
         engine.node.format = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1)!
         guard case .success = runStart(service) else {
             XCTFail("повторный старт после починки формата обязан пройти")
@@ -142,12 +141,12 @@ final class AudioServiceWedgeTests: XCTestCase {
         XCTAssertEqual(engine.node.removeTapCount, 0, "старт без аварийной ветки tap не снимал")
     }
 
-    /// Гонка поколений: зависший старт СТАРОГО движка разблокируется только
-    /// ПОСЛЕ wedge-подмены и старта новой записи на свежем движке. Устаревший
-    /// старт обязан: вернуть .failure(.engineSuperseded) (НЕ .success — иначе
-    /// агент вызвал бы audio.cancel() на живой свежей паре), НЕ тронуть state
-    /// нового сеанса (isRecording/буферы), разобрать ТОЛЬКО свой движок, а tap
-    /// старого поколения — молча дропать буферы, не подмешивая их в новую запись.
+    /// Generation race: hung OLD-engine start unblocks only AFTER wedge swap
+    /// and new recording on fresh engine. Stale start must: return
+    /// .failure(.engineSuperseded) (NOT .success — else agent would call
+    /// audio.cancel() on live fresh pair), NOT touch new session state
+    /// (isRecording/buffers), tear down ONLY its engine, and old-generation
+    /// tap must silently drop buffers, not mix into new recording.
     @objc func testStaleStartUnblockAfterWedgeDoesNotTouchNewSession() {
         let hanging = FakeEngine()
         let working = FakeEngine()
@@ -163,8 +162,8 @@ final class AudioServiceWedgeTests: XCTestCase {
         let hangSignal = DispatchSemaphore(value: 0)
         hanging.hangStart = hangSignal
 
-        // Старт №1 уходит на очередь зависшего движка и застревает в start().
-        // Его completion ловим отдельно — это и есть «устаревший старт».
+        // Start #1 to hung engine's queue, stalls in start(). Catch its
+        // completion separately — that IS the 'stale start'.
         var staleResult: AudioStartResult?
         service.start { result in
             if staleResult == nil {
@@ -176,30 +175,29 @@ final class AudioServiceWedgeTests: XCTestCase {
             "старт обязан дойти до engine.start() и заблокироваться"
         )
 
-        // Wedge: подмена движка + его очереди + инкремент поколения.
+        // Wedge: replace engine + its queue + bump generation.
         service.replaceEngineAfterWedge()
         XCTAssertEqual(factoryCalls, 1, "подмена создаёт ровно один свежий движок")
 
-        // Новая запись на свежем движке — успешно пошла.
+        // New recording on fresh engine — went fine.
         guard case .success = runStart(service) else {
             XCTFail("повторный старт после подмены обязан пройти")
             return
         }
 
-        // Сэмплы новой сессии через tap СВЕЖЕГО движка.
+        // New session samples via FRESH engine's tap.
         working.node.emit(makeToneBuffer(engine: working))
-        // Tap СТАРОГО движка всё ещё установлен и пытается кормить: его
-        // поколение устарело — буфер обязан быть молча дропнут, а не попасть
-        // в накопление новой сессии.
+        // OLD engine's tap still installed and feeding: generation stale —
+        // buffer must be silently dropped, not mixed into new session.
         hanging.node.emit(makeToneBuffer(engine: hanging))
-        // Ещё кусок новой сессии — накопление живо и далее.
+        // More new-session samples — accumulation alive.
         working.node.emit(makeToneBuffer(engine: working))
 
-        // Отпускаем зависший start() старого движка: он завершается, когда его
-        // поколение уже НЕ текущее.
+        // Release hung old start(): it finishes when its generation is
+        // no longer current.
         hangSignal.signal()
 
-        // Устаревший старт обязан завершиться .failure(.engineSuperseded).
+        // Stale start must end .failure(.engineSuperseded).
         XCTAssertTrue(
             eventually { staleResult != nil },
             "разблокированный старт обязан завершиться"
@@ -211,33 +209,33 @@ final class AudioServiceWedgeTests: XCTestCase {
             XCTFail("устаревший старт обязан дать .failure(.engineSuperseded), получили \(String(describing: staleResult))")
         }
 
-        // Старый движок разобран устаревшей веткой (tap снят ровно один раз;
-        // stop мог прийти и раньше — wedge-разборкой на глобальной очереди).
+        // Old engine torn down by stale branch (tap removed exactly once; stop
+        // may have come earlier — wedge teardown on global queue).
         XCTAssertTrue(
             eventually { hanging.node.removeTapCount == 1 },
             "устаревший старт обязан снять tap со СВОЕГО движка"
         )
         XCTAssertGreaterThanOrEqual(hanging.stopCount, 1, "устаревший движок обязан быть остановлен")
 
-        // Новая сессия не тронута: сэмплы двух буферов свежего движка на месте,
-        // буфер старого tap в них не попал (нет задвоения сверх 2 буферов).
+        // New session untouched: samples of two fresh-engine buffers present, old
+        // tap's buffer not in them (no duplication beyond 2 buffers).
         let samples = service.stop()
         XCTAssertGreaterThanOrEqual(samples.count, 2 * 1410, "сэмплы нового сеанса обязаны сохраниться (два буфера свежего движка)")
         XCTAssertLessThanOrEqual(samples.count, 2 * 1560, "сэмплы не должны задваиваться — буфер старого tap дропнут")
 
-        // stop() разобрал СВЕЖИЙ движок: его teardown дошёл до конца.
+        // stop() tore down FRESH engine: its teardown completed.
         XCTAssertTrue(
             eventually { working.stopCount == 1 },
             "teardown свежего движка обязан дойти"
         )
     }
 
-    /// Гонка поколений + сбой engine.start(): зависший старт СТАРОГО движка
-    /// разблокировался ПОСЛЕ wedge-подмены и падает на engine.start() (вис →
-    /// throw, см. FakeEngine.start). Устаревшая ветка сбоя обязана: вернуть
-    /// .failure(сбой старта) (НЕ .success и НЕ .engineSuperseded-«успех»), НЕ
-    /// тронуть state нового сеанса (isRecording/буферы — булевая часть teardown
-    /// не выполняется), разобрать ТОЛЬКО свой движок.
+    /// Generation race + engine.start() failure: hung OLD-engine start
+    /// unblocked AFTER wedge swap, crashes in engine.start() (hang → throw,
+    /// see FakeEngine.start). Stale failure branch must: return .failure
+    /// (start failure) (NOT .success, NOT .engineSuperseded-'success'), NOT
+    /// touch new session state (isRecording/buffers — boolean teardown part
+    /// not run), tear down ONLY its engine.
     @objc func testStaleStartFailureAfterWedgeDoesNotTouchNewSession() {
         let hanging = FakeEngine()
         let working = FakeEngine()
@@ -254,8 +252,8 @@ final class AudioServiceWedgeTests: XCTestCase {
         let hangSignal = DispatchSemaphore(value: 0)
         hanging.hangStart = hangSignal
 
-        // Старт №1 уходит на очередь зависшего движка и застревает в start().
-        // Его completion ловим отдельно — это и есть «устаревший старт».
+        // Start #1 to hung engine's queue, stalls in start(). Catch its
+        // completion separately — that IS the 'stale start'.
         var staleResult: AudioStartResult?
         service.start { result in
             if staleResult == nil {
@@ -267,30 +265,29 @@ final class AudioServiceWedgeTests: XCTestCase {
             "старт обязан дойти до engine.start() и заблокироваться"
         )
 
-        // Wedge: подмена движка + его очереди + инкремент поколения.
+        // Wedge: replace engine + its queue + bump generation.
         service.replaceEngineAfterWedge()
         XCTAssertEqual(factoryCalls, 1, "подмена создаёт ровно один свежий движок")
 
-        // Новая запись на свежем движке — успешно пошла.
+        // New recording on fresh engine — went fine.
         guard case .success = runStart(service) else {
             XCTFail("повторный старт после подмены обязан пройти")
             return
         }
 
-        // Сэмплы новой сессии через tap СВЕЖЕГО движка.
+        // New session samples via FRESH engine's tap.
         working.node.emit(makeToneBuffer(engine: working))
-        // Tap СТАРОГО движка всё ещё установлен и пытается кормить: его
-        // поколение устарело — буфер обязан быть молча дропнут.
+        // OLD engine's tap still installed and feeding: generation stale —
+        // buffer must be silently dropped.
         hanging.node.emit(makeToneBuffer(engine: hanging))
-        // Ещё кусок новой сессии — накопление живо и далее.
+        // More new-session samples — accumulation alive.
         working.node.emit(makeToneBuffer(engine: working))
 
-        // Отпускаем зависший start() старого движка: он завершается СБОЕМ
-        // (failStart проверяется ПОСЛЕ разблокировки), когда его поколение уже
-        // НЕ текущее.
+        // Release hung old start(): it fails (failStart checked AFTER
+        // unblock) when its generation is no longer current.
         hangSignal.signal()
 
-        // Устаревший старт обязан завершиться .failure(сбой engine.start()).
+        // Stale start must end .failure(engine.start() failure).
         XCTAssertTrue(
             eventually { staleResult != nil },
             "разблокированный старт обязан завершиться"
@@ -302,35 +299,35 @@ final class AudioServiceWedgeTests: XCTestCase {
             XCTFail("устаревший старт со сбоем engine.start() обязан дать .failure(.unsupportedFormat), получили \(String(describing: staleResult))")
         }
 
-        // Старый движок разобран устаревшей веткой (tap снят ровно один раз;
-        // stop мог прийти и раньше — wedge-разборкой на глобальной очереди).
+        // Old engine torn down by stale branch (tap removed exactly once; stop
+        // may have come earlier — wedge teardown on global queue).
         XCTAssertTrue(
             eventually { hanging.node.removeTapCount == 1 },
             "устаревший старт обязан снять tap со СВОЕГО движка"
         )
         XCTAssertGreaterThanOrEqual(hanging.stopCount, 2, "устаревший движок обязан быть остановлен (wedge + stale-разборка)")
 
-        // Новая сессия НЕ тронута: булевая часть teardown (setRecording(false)/
-        // сброс буферов) НЕ выполнялась — запись всё ещё идёт, stop() отдаёт
-        // сэмплы двух буферов свежего движка (буфер старого tap не задваивает).
+        // New session NOT touched: boolean teardown part (setRecording(false)/
+        // buffer reset) NOT run — recording still on, stop() returns samples
+        // of two fresh-engine buffers (old tap's buffer not duplicated).
         let samples = service.stop()
         XCTAssertGreaterThanOrEqual(samples.count, 2 * 1410, "сэмплы нового сеанса обязаны сохраниться — запись не убита устаревшей веткой сбоя")
         XCTAssertLessThanOrEqual(samples.count, 2 * 1560, "сэмплы не должны задваиваться — буфер старого tap дропнут")
 
-        // stop() разобрал СВЕЖИЙ движок: его teardown дошёл до конца.
+        // stop() tore down FRESH engine: its teardown completed.
         XCTAssertTrue(
             eventually { working.stopCount == 1 },
             "teardown свежего движка обязан дойти"
         )
     }
 
-    /// Гонка поколений + сбой подъёма узла: старт №2 ПОСТАВЛЕН В ОЧЕРЕДЬ
-    /// зависшего движка (позади «висящего» start №1). После wedge-подмены он
-    /// выполняется на устаревшем поколении и падает в setup (makeInputNode под
-    /// шлюзом). Stale-guard ветки setup-сбоя обязан: вернуть .failure(сбой
-    /// подъёма), разобрать ТОЛЬКО свой (старый) движок, НЕ выполнять булевую
-    /// часть teardown (setRecording(false)/сброс буферов/tapInstalled) и НЕ
-    /// задеть текущую пару — старт на ней после разборок успешен.
+    /// Generation race + input node setup failure: start #2 QUEUED on hung
+    /// engine's queue (behind hanging start #1). After wedge swap it runs on
+    /// stale generation and fails in setup (makeInputNode under gateway).
+    /// Stale setup-failure guard must: return .failure(setup failure), tear
+    /// down ONLY its (old) engine, NOT run boolean teardown part
+    /// (setRecording(false)/buffer reset/tapInstalled), NOT touch current
+    /// pair — restart on it after teardowns succeeds.
     @objc func testStaleSetupFailureAfterWedgeTearsDownOnlyOldEngine() {
         let hanging = FakeEngine()
         let working = FakeEngine()
@@ -346,16 +343,16 @@ final class AudioServiceWedgeTests: XCTestCase {
         let hangSignal = DispatchSemaphore(value: 0)
         hanging.hangStart = hangSignal
 
-        // Старт №1 уходит на очередь зависшего движка и застревает в start().
+        // Start #1 to hung engine's queue, stalls in start().
         service.start { _ in }
         XCTAssertTrue(
             eventually { hanging.startCount == 1 },
             "старт обязан дойти до engine.start() и заблокироваться"
         )
 
-        // Старт №2 — в ту же очередь старого движка, ЗА висящим start №1: он не
-        // начнётся, пока очередь не разблокируется, и выполнит setup уже на
-        // устаревшем поколении (тот же снимок поколения W).
+        // Start #2 on old engine's queue BEHIND hanging start #1: won't start
+        // until queue unblocks; does setup on stale generation (same W
+        // generation snapshot).
         var staleSetupResult: AudioStartResult?
         service.start { result in
             if staleSetupResult == nil {
@@ -363,20 +360,20 @@ final class AudioServiceWedgeTests: XCTestCase {
             }
         }
 
-        // Wedge: поколение W+1, свежий движок и его очередь.
+        // Wedge: generation W+1, fresh engine + its queue.
         service.replaceEngineAfterWedge()
         XCTAssertEqual(factoryCalls, 1, "подмена создаёт ровно один свежий движок")
 
-        // «Поломка» setup до разблокировки очереди: старт №2 упадёт на
-        // makeInputNode уже на устаревшем поколении.
+        // Break setup before queue unblock: start #2 will fail in
+        // makeInputNode on stale generation.
         hanging.failSetup = true
 
-        // Разблокируем очередь: сначала доезжает висящий start №1 (устаревший
-        // УСПЕХ → .failure(.engineSuperseded), см. тест выше), затем — старт №2.
+        // Unblock queue: hanging start #1 finishes first (stale SUCCESS →
+        // .failure(.engineSuperseded), see test above), then start #2.
         hangSignal.signal()
 
-        // Старт №2 обязан завершиться .failure(сбой подъёма узла) — НЕ успеть
-        // считаться «текущим» стартом.
+        // Start #2 must end .failure(input node failure) — not become
+        // 'current' start.
         XCTAssertTrue(
             eventually { staleSetupResult != nil },
             "старт из очереди зависшего движка обязан завершиться"
@@ -386,29 +383,30 @@ final class AudioServiceWedgeTests: XCTestCase {
             return
         }
 
-        // Оба устаревших старта разобрали СВОЙ движок: stop вызван наверняка
-        // (подмена на глобальной очереди + teardownEngineOnly двух stale-веток).
-        // removeTap не счётчик: teardownEngineOnly идёт через makeInputNode, а у
-        // фейка failSetup=true он падает ДО removeTap — снимать нечего.
+        // Both stale starts tore down THEIR engine: stop certainly called
+        // (wedge on global queue + teardownEngineOnly of two stale branches).
+        // removeTap is NOT a counter: teardownEngineOnly goes through
+        // makeInputNode — fake with failSetup=true crashes BEFORE removeTap,
+        // nothing to remove.
         XCTAssertTrue(
             eventually { hanging.stopCount >= 3 },
             "старый движок обязан быть остановлен (wedge-global + две stale-разборки)"
         )
 
-        // Ключевой гард: stale-ветка setup-сбоя НЕ выполнила булевую часть
-        // teardown (setRecording(false)). isRecording остался true (его ставил
-        // старт №1 до зависания, wedge его не трогает) — stop() обязан пойти в
-        // teardown ТЕКУЩЕЙ пары (working), а не вернуться рано. Незащищённая
-        // ветка сбросила бы флаг → stop() вернул бы [] без разборки →
-        // working.stopCount остался бы 0 — ассерт ловит регрессию гарда.
+        // KEY guard: stale setup-failure branch did NOT run boolean teardown part
+        // (setRecording(false)). isRecording stayed true (set by start #1
+        // before hang; wedge does not touch it) — stop() must go to CURRENT
+        // pair teardown (working), not return early. Unprotected branch would
+        // reset the flag → stop() returns [] without teardown → working.
+        // stopCount stays 0 — assert catches guard regression.
         _ = service.stop()
         XCTAssertTrue(
             eventually { working.stopCount == 1 },
             "isRecording не сбит stale-разборками — stop() разобрал текущую пару"
         )
 
-        // Текущая пара жива: следующий старт на ней успешен, tap ставится без
-        // коллизии.
+        // Current pair alive: next start on it succeeds, tap installed without
+        // collision.
         guard case .success = runStart(service) else {
             XCTFail("старт на текущей паре после stale-разборок обязан пройти")
             return
@@ -421,8 +419,8 @@ final class AudioServiceWedgeTests: XCTestCase {
         )
     }
 
-    /// Буфер 44.1 кГц/моно с постоянной амплитудой 0.2 («тон», не тишина) —
-    /// эмуляция буфера из tap-колбэка в формате узла движка.
+    /// Buffer 44.1 kHz/mono with constant amplitude 0.2 ('tone', not
+    /// silence) — emulates tap-callback buffer in engine node format.
     private func makeToneBuffer(engine: FakeEngine) -> AVAudioPCMBuffer {
         let buffer = AVAudioPCMBuffer(pcmFormat: engine.node.format, frameCapacity: 4096)!
         buffer.frameLength = 4096

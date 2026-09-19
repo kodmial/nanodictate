@@ -1,30 +1,21 @@
 import Foundation
 
-/// Отменяемое отложенное действие: один синтетический Enter после вставки
-/// текста Enter-останова.
-///
-/// Зачем отдельный класс: пост планируется через ~250 мс (приложение в фокусе
-/// успевает обработать вставленный текст), и Esc ДОЛЖЕН уметь отменять УЖЕ
-/// запланированный пост (латч к этому моменту уже снят — consume() произошёл
-/// в момент вставки). Голый `DispatchQueue.main.asyncAfter` не отменяется;
-/// здесь планирование держится в `DispatchWorkItem` + поколении: отмена или
-/// перепланирование инвалидирует срабатывание.
+/// Cancellable post of one synthetic Enter after Enter-stop insert.
+/// Esc must cancel a scheduled post; asyncAfter alone can't — DispatchWorkItem + generation.
 public final class ScheduledEnterPoster {
-  /// Что выполняется при срабатывании (если действие не отменено).
+  /// Runs when fired, unless cancelled.
   public var action: (() -> Void)?
 
-  /// Пауза от планирования до срабатывания. По умолчанию 0.25 с — целевое
-  /// приложение успевает обработать вставленный текст.
+  /// Schedule→fire delay (0.25 s): target app processes inserted text first.
   public var delay: TimeInterval = 0.25
 
-  /// Поколение планирования: каждый schedule/cancel инвалидирует предыдущее.
+  /// Bumped on schedule/cancel; invalidates stale work items.
   private var generation: UInt64 = 0
   private var workItem: DispatchWorkItem?
 
   public init() {}
 
-  /// Запланировать действие через `delay`. Повторный вызов отменяет
-  /// предыдущее планирование (сработать может только последнее).
+  /// Fire action after delay; re-schedule cancels previous (last wins).
   public func schedule() {
     cancelScheduled()
     generation &+= 1
@@ -32,7 +23,7 @@ public final class ScheduledEnterPoster {
     let item = DispatchWorkItem { [weak self] in
       guard let self else { return }
       self.workItem = nil
-      // Отменено (cancelScheduled / перепланировано schedule-ом)?
+      // Stale if cancelled (cancelScheduled) or re-scheduled?
       guard self.generation == myGeneration else { return }
       self.action?()
     }
@@ -40,8 +31,7 @@ public final class ScheduledEnterPoster {
     DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
   }
 
-  /// Отменить запланированное действие (Esc). Идемпотентна; действие
-  /// не выполнится, если срабатывание ещё не наступило.
+  /// Cancel scheduled action (Esc). Idempotent; pending fire won't run.
   public func cancelScheduled() {
     workItem?.cancel()
     workItem = nil

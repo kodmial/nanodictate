@@ -3,32 +3,27 @@ import Foundation
 // MARK: - Пошаговая (чанковая) диктовка
 
 //
-// Конвейер прогрессивной диктовки: VAD-сегментация записи → по-сегментная
-// транскрибация (каждый следующий сегмент получает `prompt` = уже распознанный
-// текст) → инкрементальная вставка сегментов → финальный проход по ВСЕМУ WAV
-// одним запросом → по-словный diff с уже-вставленным текстом → замена только
-// изменившегося диапазона (одно действие).
+// Progressive dictation: VAD-segment → transcribe each (prompt = prior text)
+// → incremental insert → final pass over WHOLE WAV (one request) → word diff
+// → replace changed range (single undoable action).
 //
-// Конвейер ЧИСТЫЙ: STT и клавиатурную вставку инъецируют замыканиями, поэтому
-// в тестах — моки без сети и без CGEvent; NanoDictateAgent прокидывает реальный
-// Transcriber и Inserter.
+// Pure pipeline: STT + insert injected via closures — tests use mocks, no
+// network/CGEvent; agent passes real Transcriber/Inserter.
 
 public struct ChunkedPipeline {
   // MARK: - Инъекции (моки в тестах)
 
-  /// Транскрибация WAV → результат (текст + word-таймстампы, если провайдер
-  /// их вернул). `prompt` — контекст уже распознанных сегментов (для
-  /// продолжения); `filename` — для отладки.
+  /// Transcribe WAV → text + word timestamps (if provider returned).
+  /// `prompt` — prior segments context; `filename` — debug only.
   public typealias STTHandler = (_ wav: Data, _ filename: String, _ prompt: String?) async throws ->
     SttResult
-  /// Одно клавиатурное действие, сделанное над активным приложением.
+  /// One keyboard action over active app.
   public typealias InsertHandler = (Operation) -> Void
-  /// Статусная фаза конвейера — для оверлея («Распознаю… (часть N)»,
-  /// «Финальная обработка…»).
+  /// Pipeline phase for overlay ("Recognizing… (part N)", "Finalizing…").
   public typealias PhaseHandler = (Phase) -> Void
 
-  /// Результат транскрибации сегмента: текст и word-таймстампы (пусто —
-  /// провайдер таймстампы не вернул, доступен только текст).
+  /// Segment transcription result: text + timestamps (empty = text only,
+  /// provider gave no timestamps).
   public struct SttResult: Equatable {
     public let text: String
     public let words: [TimedWord]
@@ -39,29 +34,28 @@ public struct ChunkedPipeline {
     }
   }
 
-  /// Что конвейер делает сейчас (вызывается перед началом соответствующего
-  /// шага). Индексы 0-based.
+  /// Current pipeline step (fired before it runs). Indices 0-based.
   public enum Phase: Equatable {
     case segment(Int)
     case finalizing
   }
 
   public enum Operation: Equatable {
-    /// Инкрементальная вставка распознанного сегмента (в конец).
+    /// Insert recognized segment at end (incremental).
     case appendSegment(index: Int, text: String)
-    /// Финальный проход: замена хвоста (одно действие).
-    /// `old`/`new` — что под backspace и что печатать.
+    /// Final pass: replace tail, single action (`old` under backspace,
+    /// `new` typed).
     case replaceTail(old: String, new: String)
   }
 
-  /// Итог прогона: что вставлено, был ли финальный проход и изменил ли он текст.
+  /// Run outcome: inserted text, final pass done, text changed?
   public struct Outcome: Equatable {
     public let segmentCount: Int
-    /// Итоговый текст (чанки после финального diff).
+    /// Final text (chunks after diff).
     public let insertedText: String
-    /// Был ли выполнен финальный проход по всему WAV.
+    /// Final pass executed.
     public let finalized: Bool
-    /// Изменил ли финальный проход вставленный текст (diff не пуст).
+    /// Final pass changed inserted text (diff not empty).
     public let finalChanged: Bool
 
     public init(segmentCount: Int, insertedText: String, finalized: Bool, finalChanged: Bool) {
@@ -82,30 +76,26 @@ public struct ChunkedPipeline {
 
   // MARK: - Хелперы
 
-  /// Промпт-контекст для STT ограничен: у OpenAI лимит prompt ~224 токена
-  /// (~600-700 символов русского текста). Контекст обрезаем С ХВОСТА —
-  /// последние сегменты важнее (продолжение речи): оставляем последние
-  /// `maxLength` символов и подрезаем первое (обрезанное) слово до границы,
-  /// чтобы промпт не начинался с середины слова. Результат ≤ maxLength.
+  /// STT prompt limited: OpenAI ~224 tokens (~600-700 Cyrillic chars). Cut
+  /// FROM TAIL — recent segments matter (speech continuation). Trim first
+  /// (cut) word to boundary — prompt must not start mid-word. ≤ maxLength.
   public static func truncatedPrompt(_ parts: [String], maxLength: Int = 600) -> String {
     guard !parts.isEmpty else { return "" }
     let joined = parts.joined(separator: " ")
     guard joined.count > maxLength else { return joined }
     let tail = String(joined.suffix(maxLength))
-    // Обрезанное первое слово: отбрасываем от него по первый пробел.
+    // Cut first word: drop it up to first space.
     if let firstSpace = tail.firstIndex(of: " ") {
       return String(tail[tail.index(after: firstSpace)...])
     }
     return tail
   }
 
-  /// Временнáя сшивка сегментов: в оверлэпе STT транскрибирует конец
-  /// предыдущего сегмента повторно. По word-таймстампам (если провайдер их
-  /// вернул) отбрасываем слова, закончившиеся внутри оверлэпа
-  /// (`end <= overlapSeconds`), а хвост текста режем по СИМВОЛЬНОМУ смещению
-  /// (raw-слайс, а не реконструкция из слов — внутренняя пунктуация цела).
-  /// Таймстампов нет — текст не трогаем: дубликаты счистит финальный проход
-  /// по-словным diff-ом (испорченный/пустой `words` НЕ ломает конвейер).
+  /// Overlap join: STT re-transcribes prior segment tail. Drop words ended
+  /// inside overlap by timestamps (`end <= overlapSeconds`), cut tail by
+  /// CHAR offset (raw slice — internal punctuation intact). No timestamps —
+  /// text untouched: final word-diff pass cleans duplicates (corrupt/empty
+  /// `words` does NOT break pipeline).
   public static func dedupeOverlap(text: String, words: [TimedWord], overlapSeconds: TimeInterval)
     -> String
   {  // swiftlint:disable:this opening_brace
@@ -118,10 +108,9 @@ public struct ChunkedPipeline {
 
   // MARK: - Отдельные шаги конвейера (reuse live-диктовкой)
 
-  /// Распознаёт ОДИН речевой сегмент: WAV → STT (с prompt-контекстом уже
-  /// распознанного текста) → финализация. Возвращает текст ДЛЯ ВСТАВКИ
-  /// (с разделительным пробелом для сегмента i>0, F2) и чистый текст для
-  /// накопления в prompt.
+  /// Recognize ONE speech segment: WAV → STT (prompt = prior context) →
+  /// finalize. Returns text FOR INSERT (space-prefixed for i>0) and clean
+  /// text for prompt accumulation.
   public static func recognizeSegment(
     samples: [Int16],
     index: Int,
@@ -134,25 +123,22 @@ public struct ChunkedPipeline {
   ) async throws -> (insertText: String, promptText: String) {
     let bytes = WAVEncoder.encode(samples: samples, sampleRate: sampleRate)
     let result = try await stt(bytes, filename, prompt)
-    // В начале сегмента (i>0) AudioSegmenter приклеивает оверлэп — хвост
-    // предыдущего сегмента. STT может продублировать шовное слово: по
-    // таймстампам выкидываем слова, жившие внутри оверлэпа (или оставляем
-    // как есть, если таймстампов нет — финальный проход их счистит).
+    // Segment head (i>0): AudioSegmenter glues overlap — prior segment
+    // tail. STT may duplicate seam word: drop overlap words by timestamps;
+    // no timestamps — leave as is, final pass cleans.
     let raw = Self.dedupeOverlap(text: result.text, words: result.words, overlapSeconds: overlap)
     let text = TextRefinement.finalize(raw)
     var insertText = text
-    // F2: между сегментами — разделительный пробел, иначе слова соседних
-    // чанков слипаются при инкрементальной вставке.
+    // F2: space between segments, else adjacent chunk words merge.
     if index > 0, !insertedText.isEmpty, !insertedText.hasSuffix(" ") {
       insertText = " " + text
     }
     return (insertText, text)
   }
 
-  /// Финальный проход по ВСЕМУ WAV: один STT-запрос (prompt не нужен),
-  /// по-словный diff с уже-вставленным текстом → замена изменившегося
-  /// диапазона ОДНИМ действием. `changed == false` — финальный текст совпал
-  /// с уже-вставленным, правки нет.
+  /// Final pass over WHOLE WAV: one STT request (no prompt), word diff with
+  /// inserted → replace changed range in ONE action. `changed == false` —
+  /// final text equals inserted, no edit.
   public static func finalize(
     samples: [Int16],
     sampleRate: Int = 16000,
@@ -185,8 +171,8 @@ public struct ChunkedPipeline {
       samples: samples, sampleRate: sampleRate, config: segmenterConfig
     )
 
-    // Нет сегментов (пустая запись) — считаем одной пустой вставкой без
-    // финального прохода: транскрибация пустоты бессмысленна и дорога.
+    // Empty recording (no segments) — empty insert, no final pass:
+    // transcribing silence pointless and costly.
     guard !segments.isEmpty else {
       return Outcome(segmentCount: 0, insertedText: "", finalized: false, finalChanged: false)
     }
@@ -194,7 +180,6 @@ public struct ChunkedPipeline {
     var insertedText = ""
     var promptParts: [String] = []
 
-    // По-сегментная транскрибация + инкрементальная вставка.
     for (index, segment) in segments.enumerated() {
       onPhase?(.segment(index))
       let result = try await Self.recognizeSegment(
@@ -205,27 +190,25 @@ public struct ChunkedPipeline {
         prompt: promptParts.isEmpty ? nil : Self.truncatedPrompt(promptParts),
         stt: stt,
         filename: "segment-\(index + 1).wav",
-        // Фактически приклеенный оверлэп (min(config.overlap, тело
-        // предыдущего сегмента)), а не конфиг: при overlap > minSegment
-        // dedupeOverlap иначе срезал бы слова тела нового сегмента.
+        // ACTUAL glued overlap (min(config.overlap, prior segment body)),
+        // not config: overlap > minSegment would cut new segment words.
         overlap: segment.overlapSeconds
       )
       insert(.appendSegment(index: index, text: result.insertText))
       insertedText += result.insertText
-      // В prompt уходит чистый текст без ведущего пробела.
+      // Prompt gets clean text, no leading space.
       promptParts.append(result.promptText)
     }
 
-    // Один сегмент — это и есть вся запись целиком: финальный проход не
-    // нужен (нечем «полировать»), двойной запрос только удорожает.
+    // Single segment = whole recording: final pass pointless, double
+    // request only costs.
     guard segments.count > 1 else {
       return Outcome(
         segmentCount: 1, insertedText: insertedText, finalized: false, finalChanged: false)
     }
 
-    // Финальный проход: весь WAV одним запросом (полный контекст), затем
-    // по-словный diff с уже-вставленным текстом → замена изменившегося
-    // диапазона ОДНИМ действием (backspace хвоста + печать хвоста).
+    // Final pass: whole WAV one request (full context), word diff → replace
+    // tail in ONE action (backspace + type).
     let result = try await Self.finalize(
       samples: samples,
       sampleRate: sampleRate,
@@ -234,7 +217,7 @@ public struct ChunkedPipeline {
       insert: insert
     ) { onPhase?(.finalizing) }
     guard result.changed else {
-      // Финальный текст совпал с уже-вставленным — ничего не трогаем.
+      // Final text matches inserted — nothing to touch.
       return Outcome(
         segmentCount: segments.count,
         insertedText: insertedText,

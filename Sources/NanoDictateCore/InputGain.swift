@@ -2,40 +2,32 @@ import Foundation
 
 // MARK: - Цифровое усиление входного сигнала (AGC)
 
-/// Конфигурация цифрового усиления входа (AGC).
+/// AGC input gain config.
 ///
-/// Идея фичи: штатный вход речи лежит в районе −55…−40 dBFS (метеорология
-/// записи: min/avg/max RMS по буферам) — это в 2–3 раза тише «нормального»
-/// речевого уровня −25…−18 dBFS, поэтому STT-провайдеры и WAV-снимки получают
-/// тихий сигнал. AGC доводит текущий RMS буфера до целевого уровня `targetRmsDb`,
-/// но не более чем на `maxGainDb` децибел: `gain = clamp(target − current, 0, max)`.
-/// Тишина (RMS ≤ порога «около-тишины», −50 dBFS) не усиливается вовсе — шум
-/// микрофона не тянется вверх и не сбивает VAD/автостоп.
+/// Speech sits at −55…−40 dBFS — 2–3× quieter than normal −25…−18 dBFS, so STT
+/// gets weak signal. AGC lifts current RMS toward `targetRmsDb`, capped by
+/// `maxGainDb`: gain = clamp(target − current, 0, max). Silence (≤ −50 dBFS)
+/// never amplified — mic noise must not confuse VAD/autostop.
 ///
-/// Усиление применяется к Float32-буферу ПОСЛЕ конвертации в 16 кГц/моно и ДО
-/// Int16-конверсии (и до расчёта метрики уровня): все потребители — анимация
-/// уровня, live-VAD, автоостановка, запись в WAV — видят уже усиленный сигнал.
-/// Сглаживание — one-pole с разными постоянными времени: быстрый attack (~25 мс)
-/// при подъёме, медленный release (~300 мс) при спаде; пики после усиления
-/// клампятся в [−1.0, 1.0], чтобы не клиппить Int16-конверсию.
+/// Applied to Float32 buffer AFTER 16 kHz/mono conversion, BEFORE Int16: all
+/// consumers (level meter, live-VAD, autostop, WAV) see amplified signal.
+/// One-pole smoothing: fast attack (~25 ms) up, slow release (~300 ms) down;
+/// peaks clamped to [−1.0, 1.0] to avoid Int16 clipping.
 public struct InputGainConfig: Equatable {
-  /// Рубильник фичи: `false` полностью выключает AGC (буфер проходит без
-  /// изменений). Спасательный люк — `NANODICTATE_GAIN_DISABLED=1`. По умолчанию
-  /// включено — ровно по задаче.
+  /// Master switch; `false` passes buffer through untouched.
+  /// Kill switch: NANODICTATE_GAIN_DISABLED=1. Default on per spec.
   public var enabled: Bool
 
-  /// Целевой RMS речи в dBFS: к нему тянется текущий уровень. Задача: −20 dBFS
-  /// (речь −55…−40 dBFS доводится до −25…−18 dBFS, середины диапазона).
+  /// Target speech RMS in dBFS. Spec: −20 dBFS (speech −55…−40 lifted to −25…−18).
   public var targetRmsDb: Float
 
-  /// Потолок усиления в дБ: даже очень тихий вход не усиливается более чем
-  /// на это значение (защита от раздувания шума/шипения в 30+ раз).
+  /// Gain ceiling in dB: prevents 30×+ noise/hiss amplification.
   public var maxGainDb: Float
 
-  /// Постоянная времени сглаживания при ПОДЪЁМЕ усиления, секунды (~25 мс).
+  /// Smoothing time constant on gain RISE, seconds (~25 ms).
   public var attackTime: TimeInterval
 
-  /// Постоянная времени сглаживания при СПАДЕ усиления, секунды (~300 мс).
+  /// Smoothing time constant on gain FALL, seconds (~300 ms).
   public var releaseTime: TimeInterval
 
   public init(
@@ -46,29 +38,24 @@ public struct InputGainConfig: Equatable {
     releaseTime: TimeInterval = 0.300
   ) {
     self.enabled = enabled
-    // Защита от патологического конфига: цель всегда ниже полной шкалы,
-    // потолок — в разумных пределах (0…60 дБ), постоянные времени > 0.
+    // Pathological config guard: target below full scale, ceiling 1…60 dB, τ > 0.
     self.targetRmsDb = min(max(targetRmsDb, -120), -1)
     self.maxGainDb = min(max(maxGainDb, 1), 60)
     self.attackTime = max(attackTime, 0.001)
     self.releaseTime = max(releaseTime, 0.001)
   }
 
-  /// Конфигурация по умолчанию: включено, цель −20 dBFS, потолок +30 дБ,
-  /// attack ~25 мс, release ~300 мс.
+  /// Defaults: enabled, −20 dBFS target, +30 dB ceiling, attack 25 ms, release 300 ms.
   public static let defaults = InputGainConfig()
 
-  /// Фабрика из окружения — пломбинг конфига из Agent без правки конфиг-файлов
-  /// (тот же путь, что `NANODICTATE_AUTOSTOP_*` в `AutoStopConfig.fromEnvironment`).
+  /// Env-based factory — config stamping from Agent without editing config files
+  /// (same path as `NANODICTATE_AUTOSTOP_*` in `AutoStopConfig.fromEnvironment`).
   ///
-  /// Пустое окружение даёт ровно `.defaults` — поведение по задаче (включено,
-  /// −20 dBFS, +30 дБ). Переопределения (все опциональны, некорректные значения
-  /// игнорируются и оставляют значение по умолчанию):
-  ///   • `NANODICTATE_GAIN_DISABLED=1` (или `true`) — рубильник: AGC выключен,
-  ///     буфер проходит без изменений;
-  ///   • `NANODICTATE_GAIN_TARGET_DB=-25` — целевой RMS речи в dBFS (Double,
-  ///     строго ниже 0 и выше −120);
-  ///   • `NANODICTATE_GAIN_MAX_DB=40` — потолок усиления в дБ (Double, 1…60).
+  /// Empty env yields exactly `.defaults`. Overrides (all optional; invalid values
+  /// ignored, default kept):
+  ///   • `NANODICTATE_GAIN_DISABLED=1` (or `true`) — kill switch: AGC off, buffer passes untouched;
+  ///   • `NANODICTATE_GAIN_TARGET_DB=-25` — target speech RMS in dBFS (below 0, above −120);
+  ///   • `NANODICTATE_GAIN_MAX_DB=40` — gain ceiling in dB (1…60).
   public static func fromEnvironment(
     _ env: [String: String] = ProcessInfo.processInfo.environment
   ) -> InputGainConfig {
@@ -102,66 +89,57 @@ public struct InputGainConfig: Equatable {
     )
   }
 
-  /// Признак «AGC выключен» для `NANODICTATE_GAIN_DISABLED`.
   private static func parseDisabledFlag(_ raw: String) -> Bool {
     raw == "1" || raw == "true" || raw == "TRUE"
   }
 }
 
-/// Процессор цифрового усиления входа. Чистая единица — только математика над
-/// Float32-буфером, без аудио-железа, поэтому полностью юнит-тестируема.
+/// Input gain processor. Pure math over Float32 buffer, no audio hardware — fully unit-testable.
 ///
-/// Семантика `apply`: целевое усиление считается по ТЕКУЩЕМУ (неусиленному) RMS
-/// буфера — «сколько дБ не хватает до targetRmsDb», но не более maxGainDb и
-/// только если RMS выше порога тишины (−50 dBFS). Фактическое усиление плавно
-/// догоняет цель one-pole-фильтром: каждый сэмпл сдвигает `currentGainDb` на
-/// долю `α` от разницы с целью (α — из attack при подъёме, из release при спаде;
-/// постоянные времени выражены в сэмплах: секунды × sampleRate). Сэмпл после
-/// усиления клампится в [−1.0, 1.0]. Возвращает RMS УСИЛЕННОГО буфера (с учётом
-/// клампа) — им кормится метрика уровня, live-VAD и автостоп.
+/// `apply` semantics: target gain from CURRENT (unamplified) RMS — dB shortfall to
+/// `targetRmsDb`, capped by maxGainDb, zero at/below silence threshold (−50 dBFS).
+/// Actual gain chases target via one-pole: each sample shifts `currentGainDb` by α
+/// of the gap (α from attack on rise, release on fall; τ in samples = seconds × sampleRate).
+/// Post-gain sample clamped to [−1.0, 1.0]. Returns RMS of AMPLIFIED buffer
+/// (post-clamp) — feeds level metric, live-VAD and autostop.
 public final class InputGain {
   public let config: InputGainConfig
 
-  /// Текущее сглаженное усиление в дБ (0 — без усиления). Меняется one-pole
-  /// от сэмпла к сэмплу внутри `apply`; доступно для диагностики и тестов.
+  /// Current smoothed gain in dB (0 = none). One-pole updated per sample inside
+  /// `apply`; exposed for diagnostics and tests.
   public private(set) var currentGainDb: Float = 0
 
   public init(config: InputGainConfig = .defaults) {
     self.config = config
   }
 
-  /// Сброс сглаженного усиления в ноль (новый сеанс записи): первый буфер
-  /// сеанса не стартует с остаточного усиления прошлой записи.
+  /// Reset gain to zero (new recording session): first buffer must not start from
+  /// previous recording's residual gain.
   public func reset() {
     currentGainDb = 0
   }
 
-  /// Целевое усиление для текущего RMS буфера (дБ): сколько не хватает до
-  /// `targetRmsDb`, в диапазоне 0…maxGainDb. Тишина (RMS ≤ −50 dBFS) и
-  /// выключенный рубильник дают 0 — шум микрофона не усиливается.
+  /// Target gain for current RMS (dB): shortfall to `targetRmsDb`, range 0…maxGainDb.
+  /// Silence (≤ −50 dBFS) or disabled switch give 0 — mic noise never amplified.
   public func targetGainDb(forRms rms: Float) -> Float {
     guard config.enabled else { return 0 }
     let currentDb = AudioMetrics.dbfs(rms)
-    // Порог «около-тишины» — общая константа кодовой базы (−50 dBFS).
-    // Строго: усиливаем только то, что выше тишины; на самой тишине (≤ порога)
-    // усиление 0 — иначе фоновый шум тянулся бы к речевому уровню и
-    // сбивал VAD/автостоп.
+    // Near-silence threshold — codebase-wide constant (−50 dBFS). Amplify only
+    // above it: else background noise would climb toward speech level and
+    // confuse VAD/autostop.
     guard currentDb > AudioMetrics.dbfs(AudioMetrics.nearSilenceThreshold) else { return 0 }
     return min(max(config.targetRmsDb - currentDb, 0), config.maxGainDb)
   }
 
-  /// Применяет усиление к Float32-каналу на месте (inout-семантика через
-  /// указатель, чтобы не копировать буфер тапа).
+  /// Applies gain to Float32 channel in place (pointer inout — avoids tap-buffer copy).
   ///
   /// - Parameters:
-  ///   - channel: буфер сэмплов (16 кГц моно), модифицируется на месте.
-  ///   - frameLength: число сэмплов в `channel`.
-  ///   - rms: RMS буфера ДО усиления (линейный 0…1) — вход расчёта цели.
-  ///   - sampleRate: частота дискретизации для перевода постоянных времени
-  ///     сглаживания из секунд в сэмплы (по умолчанию 16000 — формат конвертера).
-  /// - Returns: RMS УСИЛЕННОГО буфера (0…1) — уровень, который реально
-  ///   уходит в метрику/запись. При выключенном AGC или пустом буфере — `rms`
-  ///   без изменений.
+  ///   - channel: 16 kHz mono sample buffer, modified in place.
+  ///   - frameLength: sample count in `channel`.
+  ///   - rms: pre-gain RMS (linear 0…1) — target calc input.
+  ///   - sampleRate: converts smoothing τ from seconds to samples (default 16000 — converter format).
+  /// - Returns: RMS of AMPLIFIED buffer (0…1) — what actually reaches metric/recording.
+  ///   Disabled AGC or empty buffer: `rms` unchanged.
   @discardableResult
   public func apply(
     to channel: UnsafeMutablePointer<Float>,
@@ -170,33 +148,28 @@ public final class InputGain {
     sampleRate: Int = 16000
   ) -> Float {
     guard config.enabled, frameLength > 0 else { return rms }
-    // Тишина (RMS ≤ порога «около-тишины», −50 dBFS) НЕ усиливается ВООБЩЕ:
-    // целью — 0 (см. targetGainDb), но без этого гарда и СГЛАЖЕННЫЙ gain
-    // после речи утекал бы в тишину хвостом release (~0.3 c) — тишина
-    // тянулась бы вверх и сбивала VAD/автостоп. Тишина — passthrough плюс
-    // сброс накопленного усиления: пауза разрывает контекст, следующая
-    // речь атакует с нуля, без наследия прошлой порции.
+    // Silence (≤ −50 dBFS) NEVER amplified: without this guard even smoothed gain
+    // would leak into silence via release tail (~0.3 s), lifting noise and confusing
+    // VAD/autostop. Silence = passthrough + gain reset: pause breaks context, next
+    // speech attacks from zero.
     guard AudioMetrics.dbfs(rms) > AudioMetrics.dbfs(AudioMetrics.nearSilenceThreshold) else {
       currentGainDb = 0
       return rms
     }
     let target = targetGainDb(forRms: rms)
-    // One-pole α = 1 − e^(−dt/τ): при τ в секундах и dt в сэмплах
-    // постоянная времени в сэмплах = τ·sampleRate (время × частота).
+    // One-pole α = 1 − e^(−dt/τ): τ seconds, dt samples → τ in samples = τ·sampleRate.
     let rate = max(1, sampleRate)
     let attackAlpha = 1 - exp(-1 / max(1, config.attackTime * Double(rate)))
     let releaseAlpha = 1 - exp(-1 / max(1, config.releaseTime * Double(rate)))
 
     var sum: Float = 0
     for i in 0..<frameLength {
-      // Направление сглаживания: подъём — быстрый attack, спад — медленный
-      // release. Разница ровно 0 не двигает gain — ветка не важна.
+      // Smoothing direction: rise — fast attack, fall — slow release; 0 diff moves nothing.
       let alpha = Float(target > currentGainDb ? attackAlpha : releaseAlpha)
       currentGainDb += alpha * (target - currentGainDb)
       let factor = powf(10, currentGainDb / 20)
       let amplified = channel[i] * factor
-      // Кламп пиков: усиленный сэмпл никогда не выходит из [−1.0, 1.0] —
-      // Int16-конверсия ниже не клиппит.
+      // Peak clamp: amplified sample stays in [−1.0, 1.0] — Int16 conversion below never clips.
       let clamped = min(max(amplified, -1), 1)
       channel[i] = clamped
       sum += clamped * clamped
@@ -204,9 +177,8 @@ public final class InputGain {
     return sqrt(sum / Float(frameLength))
   }
 
-  /// Удобная обёртка над `apply(to:frameLength:rms:sampleRate:)` для тестов и
-  /// владельцев `[Float]`-буферов: модифицирует массив на месте и возвращает
-  /// RMS усиленного сигнала.
+  /// Convenience wrapper over `apply(to:frameLength:rms:sampleRate:)` for tests and
+  /// `[Float]` owners: mutates array in place, returns amplified RMS.
   @discardableResult
   public func apply(
     to samples: inout [Float],

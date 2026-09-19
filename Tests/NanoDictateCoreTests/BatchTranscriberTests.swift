@@ -3,8 +3,8 @@ import Foundation
 
 // MARK: - Тесты BatchTranscriber (ретраи, плейсхолдеры, чекпоинт/resume)
 //
-// Сеть и сон инъецируются: sendOne/delay — замыкания, чекпоинт — реальный
-// JSON во временной папке (как и в проде). Реальных HTTP-запросов нет.
+// Network and sleep injected: sendOne/delay closures, checkpoint real JSON
+// in temp dir (like prod). No real HTTP.
 
 final class BatchTranscriberTests: XCTestCase {
 
@@ -22,15 +22,14 @@ final class BatchTranscriberTests: XCTestCase {
     }
 
     private func tone(_ seconds: Double, sampleRate: Int, value: Int16 = 500) -> [Int16] {
-        // Дефолт 500 = речь: rms(500)/32767 ≈ 0.0153 > nearSilenceThreshold
-        // (~0.00316 ≈ 103.5 в Int16) — тишины нет, plan() с cutAtPauses
-        // не сдвигает границы, геометрия фиксированная (чанки по maxSegment).
-        // Значение 100 < порога читалось бы как полная тишина → паузная
-        // нарезка (~1 с чанки) и сломанные ожидания 2-секундных чанков.
+        // Default 500 = speech: rms(500)/32767 ≈ 0.0153 > nearSilenceThreshold
+        // (~0.00316 ≈ 103.5 in Int16). Silence-free: cutAtPauses keeps fixed
+        // geometry (maxSegment chunks). Value 100 reads as full silence —
+        // 1s pause slicing would break 2s-chunk expectations.
         Array(repeating: value, count: max(0, Int((seconds * Double(sampleRate)).rounded())))
     }
 
-    /// Мгновенная задержка (в проде — Task.sleep).
+    /// Instant delay (prod: Task.sleep).
     private func instantDelay(_ seconds: TimeInterval) async throws {}
 
     private func tempCheckpointPath(_ name: String) -> String {
@@ -120,14 +119,12 @@ final class BatchTranscriberTests: XCTestCase {
             }
             XCTFail("исчерпание ретраев должно бросать")
         } catch {
-            // ожидаемо
         }
         XCTAssertEqual(attempts, 4, "1 + 3 ретрая")
         XCTAssertEqual(waits, [2, 4, 8])
     }
 
     @objc func testChunkTreatsNonBatchErrorsAsRetryable() throws {
-        // Транспортная ошибка (не BatchHTTPError) тоже ретраится.
         var attempts = 0
         let text = try runAsync {
             try await BatchTranscriber.transcribeChunk(
@@ -148,7 +145,7 @@ final class BatchTranscriberTests: XCTestCase {
     // MARK: run — основной прогон
 
     @objc func testRunJoinsChunksWithDedup() throws {
-        // 8 с файла, чанки по 2 с с оверлэпом 0.5 с → 4 чанка.
+        // 8s file, 2s chunks, 0.5s overlap → 4 chunks.
         let samples = tone(8, sampleRate: 1000)
         let texts = ["alpha beta", "beta gamma", "gamma delta", "delta omega"]
         var sentIndexes: [Int] = []
@@ -205,8 +202,8 @@ final class BatchTranscriberTests: XCTestCase {
     }
 
     @objc func testChainingSkipsPlaceholderChunks() throws {
-        // Чанк 1 падает → плейсхолдер; чанк 2 должен цеплять текст чанка 0
-        // (плейсхолдер "[…]" не участвует в цепочке).
+        // Chunk 1 fails → placeholder; chunk 2 chains text of chunk 0
+        // (placeholder "[…]" excluded from chain).
         let samples = tone(6, sampleRate: 1000)
         var prompts: [String?] = []
         let outcome = try runAsync {
@@ -234,8 +231,8 @@ final class BatchTranscriberTests: XCTestCase {
     }
 
     @objc func testParallelPassesNilPrompt() throws {
-        // Параллельный путь (maxConcurrent > 1): порядок воркеров произвольный,
-        // цепочка не выстраивается — prompt всегда nil.
+        // Parallel path (maxConcurrent > 1): worker order arbitrary,
+        // no chain — prompt always nil.
         let samples = tone(4, sampleRate: 1000)
         var prompts: [String?] = []
         let lock = NSLock()
@@ -264,8 +261,8 @@ final class BatchTranscriberTests: XCTestCase {
     }
 
     @objc func testChainingUsesResumeSeededRecordsAsContext() throws {
-        // Resume: чанк 0 уже в чекпоинте (ok) — sendOne для него не вызывается,
-        // но его текст входит в цепочку для следующих чанков.
+        // Resume: chunk 0 already in checkpoint (ok) — sendOne skipped,
+        // its text still enters the chain for later chunks.
         let samples = tone(8, sampleRate: 1000)
         let path = tempCheckpointPath("chaining-resume")
         defer { try? FileManager.default.removeItem(atPath: path) }
@@ -379,7 +376,7 @@ final class BatchTranscriberTests: XCTestCase {
         let path = tempCheckpointPath("resume")
         defer { try? FileManager.default.removeItem(atPath: path) }
 
-        // Первый прогон: всё распознаётся, чекпоинт пишется после каждого чанка.
+        // First run: all recognized, checkpoint written after each chunk.
         var firstCalls = 0
         let first = try runAsync {
             try await BatchTranscriber.run(
@@ -394,7 +391,7 @@ final class BatchTranscriberTests: XCTestCase {
         XCTAssertEqual(first.text, "текст 0 текст 1 текст 2 текст 3")
         XCTAssertTrue(FileManager.default.fileExists(atPath: path), "чекпоинт написан")
 
-        // Resume: чанки уже разрешены — sendOne НЕ вызывается вообще.
+        // Resume: chunks resolved — sendOne not called at all.
         var resumedCalls = 0
         let second = try runAsync {
             try await BatchTranscriber.run(
@@ -415,7 +412,6 @@ final class BatchTranscriberTests: XCTestCase {
         let path = tempCheckpointPath("mismatch")
         defer { try? FileManager.default.removeItem(atPath: path) }
 
-        // Чекпоинт другого провайдера — resume его игнорирует.
         _ = try runAsync {
             try await BatchTranscriber.run(
                 samples: samples, sampleRate: 1000, maxSegment: 2, overlap: 0.5,
@@ -463,7 +459,7 @@ final class BatchTranscriberTests: XCTestCase {
         let path = tempCheckpointPath("source-mismatch")
         defer { try? FileManager.default.removeItem(atPath: path) }
 
-        // Первый прогон — файл /tmp/a.wav: чекпоинт пишется с его sourceFile.
+        // First run /tmp/a.wav: checkpoint records its sourceFile.
         _ = try runAsync {
             try await BatchTranscriber.run(
                 samples: samples, sampleRate: 1000, maxSegment: 2, overlap: 0.5,
@@ -474,8 +470,8 @@ final class BatchTranscriberTests: XCTestCase {
             )
         }
 
-        // Resume с ДРУГИМ файлом (та же нарезка): чекпоинт НЕ применяется —
-        // все чанки распознаются заново, тексты чужого чекпоинта не берутся.
+        // Resume with different file (same slicing): checkpoint ignored —
+        // all chunks re-recognized, foreign texts not used.
         var calls = 0
         let outcome = try runAsync {
             try await BatchTranscriber.run(
@@ -514,12 +510,11 @@ final class BatchTranscriberTests: XCTestCase {
                 )
                 XCTFail("отменённая задача должна прерваться, а не вернуть текст")
             } catch is CancellationError {
-                // ожидаемо
             } catch {
                 XCTFail("ожидался CancellationError, получен \(error)")
             }
         }
-        started.wait()   // дождались первой попытки, теперь отменяем
+        started.wait()   // first attempt reached — now cancel
         worker.cancel()
         wait(for: [expect], timeout: 10.0)
         XCTAssertEqual(attempts.value, 1, "отмена не ретраится — одна попытка и выход")
@@ -646,9 +641,8 @@ final class BatchTranscriberTests: XCTestCase {
     }
 
     @objc func testMakeRequestAppendsStableFieldsForBatchParams() throws {
-        // Пакетный путь (gigaam = openAICompatible): batchParams → prompt +
-        // temperature=0 добавляются в мультипарт; vad_filter не шлётся
-        // (гейтинг: только groq).
+        // Batch path (gigaam = openAICompatible): batchParams → prompt +
+        // temperature=0 in multipart; vad_filter not sent (gating: groq only).
         guard let prepared = BatchRequestBuilder.makeRequest(
             provider: makeBatchProvider(),
             apiKey: "secret",
@@ -673,8 +667,8 @@ final class BatchTranscriberTests: XCTestCase {
     }
 
     @objc func testMakeRequestWithoutBatchParamsHasNoStableFields() throws {
-        // Legacy-путь без batchParams: тело запроса байт-в-байт как раньше —
-        // никаких temperature/vad_filter/порогов.
+        // Legacy path without batchParams: body byte-identical to before —
+        // no temperature/vad_filter/thresholds.
         guard let prepared = BatchRequestBuilder.makeRequest(
             provider: makeBatchProvider(),
             apiKey: "secret",
@@ -773,10 +767,9 @@ final class BatchTranscriberTests: XCTestCase {
     }
 
     @objc func testRunParallelResumePartialCheckpoint() throws {
-        // Чекпоинт с ЧАСТИЧНЫМ префиксом (3 из 4 разрешены): resume в parallel
-        // идёт не по раннему выходу (completedCount == total), а по
-        // seeded-слотам с остатком работы — воркер распознаёт только
-        // недостающий чанк и дописывает префикс до конца.
+        // Partial-prefix checkpoint (3 of 4 resolved): parallel resume runs
+        // seeded slots, not early exit (completedCount == total) — worker
+        // recognizes only missing chunk, appends prefix to full.
         let path = tempCheckpointPath("par-resume-partial")
         defer { try? FileManager.default.removeItem(atPath: path) }
 
@@ -811,16 +804,16 @@ final class BatchTranscriberTests: XCTestCase {
                        "resume частичного чекпоинта — дослышается только недостающий чанк 3")
         XCTAssertEqual(outcome.text, "p 0 p 1 p 2 p 3")
 
-        // После досылки чекпоинт дописан до полного префикса.
+        // After refill, checkpoint appended to full prefix.
         let full = try BatchTranscriber.loadCheckpoint(from: path)
         XCTAssertEqual(full?.segments.count, 4, "чекпоинт дописан до полного префикса")
         XCTAssertEqual(full?.segments.map { $0.index }, [0, 1, 2, 3])
     }
 
     @objc func testCheckpointWriterGuardsStalePrefix() throws {
-        // Сердце фикса: надежда на то, что МЕНЬШИЙ префикс не перезапишет
-        // уже сохранённый БОЛЬШИЙ (это и ломалось гонкой rename'ов).
-        // Тест детерминирован — без параллелизма, напрямую на классе.
+        // Fix core: smaller prefix must not overwrite bigger saved one
+        // (it broke via rename race). Deterministic test — no parallelism,
+        // direct class calls.
         let path = tempCheckpointPath("par-ck-writer")
         defer { try? FileManager.default.removeItem(atPath: path) }
         let writer = CheckpointWriter()
@@ -843,18 +836,18 @@ final class BatchTranscriberTests: XCTestCase {
         var cp = try BatchTranscriber.loadCheckpoint(from: path)
         XCTAssertEqual(cp?.segments.count, 3, "первый префикс сохраняется")
 
-        // Устаревший (меньший) префикс приходит позже — должен быть пропущен.
+        // Stale smaller prefix arrives later — must be skipped.
         writer.saveIfLonger(end: 2, path: path, saveCheckpoint: save, makeCheckpoint: make)
         cp = try BatchTranscriber.loadCheckpoint(from: path)
         XCTAssertEqual(cp?.segments.count, 3,
                        "устаревший меньший префикс не должен перезаписывать больший")
 
-        // Равный префикс — тоже не нужна перезапись (можно: guard end > savedEnd).
+        // Equal prefix — no rewrite needed either (guard end > savedEnd).
         writer.saveIfLonger(end: 3, path: path, saveCheckpoint: save, makeCheckpoint: make)
         cp = try BatchTranscriber.loadCheckpoint(from: path)
         XCTAssertEqual(cp?.segments.count, 3)
 
-        // Новый бОльший префикс — сохраняется и растёт файл.
+        // New larger prefix — saved, file grows.
         writer.saveIfLonger(end: 4, path: path, saveCheckpoint: save, makeCheckpoint: make)
         cp = try BatchTranscriber.loadCheckpoint(from: path)
         XCTAssertEqual(cp?.segments.count, 4, "бОльший префикс дописывает файл")
@@ -887,19 +880,19 @@ final class BatchTranscriberTests: XCTestCase {
     }
 }
 
-/// Коробка для передачи результата async в синхронный тест.
+/// Box passing async result to synchronous test.
 final class ResultBox<T> {
     var value: T?
     var error: Error?
 }
 
-/// Счётчик для конкурентных замыканий (прямая мутация захваченного `var`
-/// из `Task { }` запрещена компилятором как гонка).
+/// Counter for concurrent closures (mutating captured `var` from `Task { }`
+/// is a compiler race error).
 final class AttemptBox {
     var value = 0
 }
 
-/// Thread-safe recorder of chunk indices (для проверки порядка в parallel).
+/// Thread-safe recorder of chunk indices (parallel-order checks).
 final class OrderRecorder {
     private var items: [Int] = []
     private let lock = NSLock()

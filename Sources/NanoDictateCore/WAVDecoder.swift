@@ -2,18 +2,16 @@ import Foundation
 
 // MARK: - Ответственность: декодирование WAV (RIFF/PCM) в Int16-сэмплы
 
-// Батч-распознавание работает с сэмплами (чанки, длительность), поэтому WAV
-// разбирается в [Int16], а не отправляется сырыми байтами. Поддерживается
-// canonical PCM WAV (и типичные afconvert-продукты с LIST/fact-чанками):
-// fmt-чанк (PCM, каналы, sampleRate, битность) + data-чанк; неизвестные
-// чанки пропускаются. Не-WAV/не-PCM — nil (вызывающий конвертирует через
-// afconvert).
+// Batch recognition works on samples (chunks, duration), so WAV decodes into
+// [Int16], not raw bytes. Canonical PCM WAV supported (typical afconvert output
+// with LIST/fact chunks): fmt chunk (PCM, channels, sampleRate, bit depth) +
+// data chunk; unknown chunks skipped. Non-WAV/non-PCM → nil (caller converts
+// via afconvert).
 
-/// Разобранный WAV.
 public struct WAVInfo: Equatable {
   public let sampleRate: Int
   public let channels: Int
-  /// PCM Int16-сэмплы (по каналам подряд для многоканального).
+  /// PCM Int16 samples (channel-interleaved for multichannel).
   public let samples: [Int16]
 
   public init(sampleRate: Int, channels: Int, samples: [Int16]) {
@@ -23,7 +21,7 @@ public struct WAVInfo: Equatable {
   }
 }
 
-/// Метаданные WAV-файла: fmt+data (без копирования сэмплов).
+/// WAV file metadata: fmt+data (no sample copy).
 public struct WAVPCMHeader: Equatable {
   public let sampleRate: Int
   public let channels: Int
@@ -36,20 +34,19 @@ public struct WAVPCMHeader: Equatable {
 }
 
 public enum WAVDecoder {
-  /// Разбирает ЗАГОЛОВОК WAV (RIFF/fmt/data: PCM, каналы, sampleRate, битность,
-  /// оффсет и размер PCM-данных) БЕЗ копирования сэмплов. Только canonical PCM
-  /// 16-бит (как decodePCM16); неизвестные чанки (LIST/fact/...) пропускаются.
-  /// Двигается по цепочке чанков (4 байта id + 4 байта size, выравнивание по
-  /// 2 байта — нечётный payload дополняется байтом паддинга). Требования
-  /// canonical layout: fmt-чанк обязан идти ДО data (data раньше fmt → nil);
-  /// из нескольких data-чанков учитывается ПЕРВЫЙ, остальные игнорируются.
-  /// Для файла достаточно окна, покрывающего чанки ДО data: заголовок
-  /// самого data-чанка (id+size, 8 байт) должен быть в окне, его payload
-  /// (весь звук) в окне НЕ обязателен — запоминаются только оффсет и размер.
+  /// Parse WAV HEADER (RIFF/fmt/data: PCM, channels, sampleRate, bit depth,
+  /// offset and size of PCM data) WITHOUT copying samples. Only canonical PCM
+  /// 16-bit (like decodePCM16); unknown chunks (LIST/fact/...) skipped.
+  /// Walks chunk chain (4-byte id + 4-byte size, 2-byte alignment — odd payload
+  /// padded with one byte). Canonical layout requirements: fmt chunk must come
+  /// BEFORE data (data before fmt → nil); of several data chunks FIRST counts,
+  /// rest ignored. File needs only window covering chunks UP TO data: data
+  /// chunk header (id+size, 8 bytes) must be in window, its payload (whole
+  /// sound) NOT required — only offset and size remembered.
   public static func pcmHeader(in data: Data) -> WAVPCMHeader? {
     guard data.count >= 44, isRIFFWAVEPrefix(data) else { return nil }
 
-    // Двигаемся по чанкам: fmt обязателен до data, остальные пропускаем.
+    // Walk chunks: fmt required before data, others skipped.
     var cursor = 12
     var sampleRate = 0
     var channels = 0
@@ -63,17 +60,15 @@ public enum WAVDecoder {
       let payloadStart = cursor + 8
 
       if chunkID == "data" {
-        // data-чанк найден: дальше можно не идти. ПЕРВАЯ data wins —
-        // последующие data-чанки (нестандартные файлы) игнорируются.
-        // Payload может быть сколь угодно большим (весь звук) и в окне
-        // не нужен — берём только оффсет и размер из заголовка.
+        // data chunk found: stop here. FIRST data wins — later data chunks
+        // (nonstandard files) ignored. Payload may be huge (whole sound) and
+        // not needed in window — take only offset and size from header.
         dataOffset = payloadStart
         dataSize = size
         break
       }
 
-      // Для остальных чанков нужно знать payload, чтобы перешагнуть через
-      // него к следующему заголовку.
+      // Other chunks: need payload length to skip to next header.
       guard payloadStart + size <= data.count else { return nil }
 
       switch chunkID {
@@ -88,13 +83,13 @@ public enum WAVDecoder {
         break
       }
 
-      cursor = payloadStart + size + (size % 2)  // чанки выровнены по 2 байта
+      cursor = payloadStart + size + (size % 2)  // chunks 2-byte aligned
     }
 
     guard sampleRate > 0, channels > 0, dataOffset >= 0, dataSize > 0 else { return nil }
-    // Заголовок data-чанка (id+size) гарантированно в окне условием цикла
-    // (dataOffset = курсор найденного чанка + 8 ≤ data.count); сам payload
-    // в окне НЕ обязателен — для файла достаточно префикса до data.
+    // data chunk header (id+size) guaranteed in window by loop condition
+    // (dataOffset = found chunk cursor + 8 ≤ data.count); payload not needed
+    // in window — file prefix up to data suffices.
     guard dataOffset <= data.count else { return nil }
     return WAVPCMHeader(
       sampleRate: sampleRate,
@@ -105,16 +100,15 @@ public enum WAVDecoder {
     )
   }
 
-  /// Декодирует WAV ЦЕЛИКОМ в [Int16]. В отличие от pcmHeader (работает по
-  /// префиксу) требует, чтобы payload data-чанка полностью присутствовал в
-  /// буфере: объявленный dataSize больше фактического → nil (усечённый WAV).
+  /// Decode whole WAV into [Int16]. Unlike pcmHeader (prefix-based) requires
+  /// data payload fully in buffer: declared dataSize > actual → nil (truncated WAV).
   public static func decodePCM16(_ data: Data) -> WAVInfo? {
     guard let header = pcmHeader(in: data) else { return nil }
     let sampleCount = header.sampleCount
     guard sampleCount > 0 else { return nil }
-    // Резерв ограничиваем реально доступными байтами: объявленный dataSize
-    // может быть огромным (префикс большого файла, size=2^32-1) — не
-    // аллоцируем резерв под несуществующие сэмплы перед проверкой.
+    // Cap reserve at available bytes: declared dataSize may be huge (prefix
+    // of big file, size=2^32-1) — no huge reserve for nonexistent samples
+    // before check.
     let availableSamples = max(0, (data.count - header.dataOffset) / 2)
 
     var samples: [Int16] = []
@@ -129,22 +123,20 @@ public enum WAVDecoder {
     return WAVInfo(sampleRate: header.sampleRate, channels: header.channels, samples: samples)
   }
 
-  /// Проверяет RIFF/WAVE-префикс файла (canonical WAV).
   private static func isRIFFWAVEPrefix(_ data: Data) -> Bool {
     String(bytes: data[0..<4], encoding: .ascii) == "RIFF"
       && String(bytes: data[8..<12], encoding: .ascii) == "WAVE"
   }
 
-  /// Поля fmt-чанка, значимые для декодирования (PCM 16-bit).
+  /// fmt chunk fields meaningful for decoding (PCM 16-bit).
   private struct PCMFmtChunk {
     var channels: Int
     var sampleRate: Int
     var bitsPerSample: Int
   }
 
-  /// Разбирает fmt-чанк (canonical PCM 16-bit). Возвращает nil, если чанк
-  /// не соответствует требованиям: минимальный размер, audioFormat == 1,
-  /// битность == 16.
+  /// Parse fmt chunk (canonical PCM 16-bit). nil unless requirements met:
+  /// minimal size, audioFormat == 1, bit depth == 16.
   private static func readFmtChunk(
     _ data: Data,
     payloadStart: Int,
