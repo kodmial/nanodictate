@@ -11,7 +11,11 @@ permissions:
 jobs:
   build-and-test:
     name: Build & Test (macOS)
-    runs-on: macos-latest
+    # macos-latest now tracks macOS 26 (Xcode 26.x), whose SDK's .swiftinterface
+    # syntax is too new for the Swift 5.10.1 toolchain we pin below (SwiftPM
+    # manifest compilation crashes). macos-15 ships Xcode 16.4 with an SDK
+    # Swift 5.10.1 can parse; pin both the runner and the Xcode version.
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -21,9 +25,10 @@ jobs:
         uses: swift-actions/setup-swift@v2
         with:
           # Package manifest is swift-tools-version:5.7 and the code is Swift 5
-          # throughout. Pin a recent 5.x toolchain: any 5.9+ handles current
-          # runner SDKs while keeping the Swift 5 language mode.
+          # throughout. Pin a recent 5.x toolchain: the macOS 15.5 SDK shipped
+          # with Xcode 16.4 keeps the Swift 5 language mode and is parseable.
           swift-version: "5.10.1"
+          xcode-version: "16.4"
 
       # Форматтер — swift-format (Apple) из стандартного места установки, как
       # локально: /usr/local/bin/swift-format (Homebrew). Без сборки
