@@ -271,9 +271,17 @@ The running binary registers the service itself: `nanodictate start` writes
 the canonical `~/Library/LaunchAgents/com.nanodictate.agent.plist` (Label
 `com.nanodictate.agent`, ProgramArguments = symlink-resolved real path of
 the agent) and bootstraps it into `launchd`. `start` takes over an existing
-service (bootout → rewrite → bootstrap), so the path never goes stale after
+service (rewrite → bootout → bootstrap — the file is written first so a
+write error never stops a working agent), so the path never goes stale after
 updates; on a binary path change it prints a hint that macOS may ask again
 for Microphone/Accessibility permission.
+
+With `brew install` / `sudo port install` the launch service is registered
+**at install time**: the formula's `post_install` and the port's
+`post-destroot` write the same canonical plist (same single label, no second
+daemon) and activate it once — after a clean install the agent is registered
+without a manual first run and starts at login (RunAtLoad + KeepAlive).
+`nanodictate start` remains for re-registration and management.
 
 ### CLI & TUI (nanodictate)
 

@@ -29,10 +29,10 @@ class NanoDictate < Formula
   def install
     # Каждая релизная тарболка содержит на верхнем уровне два бинаря и
     # config.example.toml (плюс Resources/ для справки — см. release.yml).
-    # Только бинарь + конфиг: СЛУЖБУ регистрирует сам запущенный бинарь
-    # (`nanodictate start` пишет канонический plist в ~/Library/LaunchAgents),
-    # формула службу НЕ ставит — никаких service-блоков/startupitem, чтобы
-    # не плодить второй демон (homebrew.mxcl.*).
+    # Только бинарь + конфиг: службу формула регистрирует в post_install
+    # (тот же единственный Label com.nanodictate.agent, что и `nanodictate
+    # start`, — никаких service-блоков/startupitem и НИКАКИХ новых label,
+    # чтобы не плодить второй демон homebrew.mxcl.*).
     bin.install "nanodictate", "NanoDictateAgent"
 
     # config.example.toml — копируемый источник, не живой конфиг: CLI всегда
@@ -41,12 +41,68 @@ class NanoDictate < Formula
     (share/"nanodictate").install "config.example.toml"
   end
 
+  def post_install
+    # Гибрид A+B: упаковка сама создаёт канонический plist и РАЗОВО активирует
+    # службу — после чистой установки (без ручного первого запуска) демон уже
+    # зарегистрирован, RunAtLoad + KeepAlive: стартует при входе в систему и
+    # Alt+Alt работает сразу. Тот же канонический файл
+    # ~/Library/LaunchAgents/com.nanodictate.agent.plist и тот же единственный
+    # Label com.nanodictate.agent, что у `nanodictate start`, — второй менеджер
+    # подменяет, повторный запуск идемпотентен.
+    # post_install исполняется от пользователя (brew), HOME — реальный дом.
+    home = Pathname.new(ENV.fetch("HOME"))
+    launch_agents = home + "Library" + "LaunchAgents"
+    launch_agents.mkpath
+    logs = home + "Library" + "Logs" + "NanoDictate"
+    logs.mkpath
+    plist = launch_agents + "com.nanodictate.agent.plist"
+
+    # Путь бинаря: $(brew --prefix)/bin/NanoDictateAgent — симлинк Homebrew на
+    # текущий Cellar (brew перенаправляет его при апгрейде), поэтому пути не
+    # протухают между релизами (launchd разрешает симлинк в момент старта).
+    agent = "#{HOMEBREW_PREFIX}/bin/NanoDictateAgent"
+    log_path = (logs + "agent.log").to_s
+    plist.write(<<~PLIST)
+      <?xml version="1.0" encoding="UTF-8"?>
+      <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+      <plist version="1.0">
+      <dict>
+        <key>Label</key>
+        <string>com.nanodictate.agent</string>
+        <key>ProgramArguments</key>
+        <array>
+          <string>#{agent}</string>
+        </array>
+        <key>RunAtLoad</key>
+        <true/>
+        <key>KeepAlive</key>
+        <true/>
+        <key>StandardOutPath</key>
+        <string>#{log_path}</string>
+        <key>StandardErrorPath</key>
+        <string>#{log_path}</string>
+      </dict>
+      </plist>
+    PLIST
+    plist.chmod(0o600)
+
+    # Takeover: выгрузить прежнего (терпимо — при первой установке службы
+    # нет), затем загрузить новый план. Ошибки НЕ роняют `brew install`:
+    # например, установка по SSH без GUI-сессии — служба всё равно стартует
+    # при следующем входе в систему (RunAtLoad) либо её поднимет
+    # `nanodictate start`.
+    target = "gui/#{Process.uid}/com.nanodictate.agent"
+    system "/bin/launchctl", "bootout", target
+    system "/bin/launchctl", "bootstrap", "gui/#{Process.uid}", plist.to_s
+  end
+
   def caveats
-    # NB: post_install нет намеренно — Homebrew запускает его с root-овым HOME
-    # и не может надёжно писать в ~/.config пользователя. Механизм первого
-    # запуска в коде (автокопия config.example.toml в ~/.config/nanodictate/
-    # config.toml) покрывает это; регистрация службы — тоже работа запущенного
-    # бинаря, а не формулы.
+    # Регистрация службы — работа post_install (запускается от пользователя,
+    # HOME — реальный дом), а не первого запуска бинаря: post_install сам
+    # пишет канонический ~/Library/LaunchAgents/com.nanodictate.agent.plist и
+    # грузит службу через launchctl. Первый запуск бинаря лишь перезаписывает
+    # тот же plist (realpath) при необходимости. config.example.toml копируется
+    # в ~/.config/nanodictate/config.toml при первом запуске приложения.
     <<~EOS
       NanoDictate needs manual macOS privacy grants (System Settings → Privacy & Security):
         - Microphone:     enable NanoDictateAgent (recording)
@@ -63,13 +119,17 @@ class NanoDictate < Formula
         nanodictate provider list
         nanodictate config set-key <provider>
 
-      Start the background agent as a user LaunchAgent (auto-restarts at login).
-      The running binary registers the service itself — it writes the canonical
-      plist ~/Library/LaunchAgents/com.nanodictate.agent.plist with the real
-      (symlink-resolved) binary path, so the path never goes stale after updates:
-        nanodictate start
+      The install registers the background agent as a user LaunchAgent
+      (auto-restarts at login): the canonical
+      ~/Library/LaunchAgents/com.nanodictate.agent.plist is written by
+      post_install with the brew binary path and bootstrapped into launchd —
+      no manual `nanodictate start` is required after a clean install. Run it
+      anyway to re-register with the symlink-resolved real path (e.g. after
+      moving things around), or to print the current state:
 
-      Manage it with `nanodictate status`, `nanodictate stop`, `nanodictate logs`.
+        nanodictate start
+        nanodictate status
+        nanodictate stop
 
       Release binaries are ad-hoc signed — there is no Developer ID signature
       and no notarization. Homebrew's download does not set the quarantine

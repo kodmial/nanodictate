@@ -76,9 +76,16 @@ download fails the install.
 
 The formula installs `nanodictate` and `NanoDictateAgent` into
 `$(brew --prefix)/bin` and ships `config.example.toml` into
-`$(brew --prefix)/share/nanodictate/` — binaries and config only. The
-launch service is registered by the running binary itself, never by the
-formula (no service block, no duplicate daemon).
+`$(brew --prefix)/share/nanodictate/`. The `post_install` step then
+registers the launch service **once**: it writes the canonical
+`~/Library/LaunchAgents/com.nanodictate.agent.plist` (label
+`com.nanodictate.agent`, ProgramArguments = the brew binary path, RunAtLoad +
+KeepAlive) and bootstraps it into launchd — so after a clean install the daemon
+is registered without a manual first run and starts at login. The same single
+label and file are used by `nanodictate start` — never a second daemon (no
+`homebrew.mxcl.*`). If the install runs without a GUI session (e.g. over SSH)
+the bootstrap is skipped; the plist is still written, RunAtLoad starts the
+daemon at the next login or `nanodictate start` does it.
 
 1. **TCC grants (required, manual).** In **System Settings → Privacy &
    Security** add the `NanoDictateAgent` binary to **Microphone** (recording)
@@ -96,18 +103,12 @@ formula (no service block, no duplicate daemon).
    nanodictate provider list
    ```
 
-3. **Start the agent.** The running binary registers the service itself: no
-   template lookup, no env vars. `nanodictate start` writes the canonical
-   plist `~/Library/LaunchAgents/com.nanodictate.agent.plist` with the
-   symlink-resolved binary path and bootstraps the LaunchAgent
-   (auto-restarts at login):
-
-   ```sh
-   nanodictate start
-   ```
-
-   This renders `~/Library/LaunchAgents/com.nanodictate.agent.plist` and
-   bootstraps the LaunchAgent (auto-restarts at login). Manage it with:
+3. **The agent is already registered by the install** — no first-run step
+   needed. `nanodictate start` is still there to re-register with the
+   symlink-resolved real path and to manage the service: it rewrites the
+   canonical `~/Library/LaunchAgents/com.nanodictate.agent.plist` and
+   reloads it (a binary path change prints a note that macOS may ask again
+   for Microphone/Accessibility):
 
    ```sh
    nanodictate status   # or: launchctl print gui/$(id -u)/com.nanodictate.agent
