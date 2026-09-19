@@ -87,13 +87,17 @@ class NanoDictate < Formula
     plist.chmod(0o600)
 
     # Takeover: выгрузить прежнего (терпимо — при первой установке службы
-    # нет), затем загрузить новый план. Ошибки НЕ роняют `brew install`:
-    # например, установка по SSH без GUI-сессии — служба всё равно стартует
-    # при следующем входе в систему (RunAtLoad) либо её поднимет
+    # ещё нет, bootout выходит с «Boot-out failed: No such process»), затем
+    # загрузить новый план. Kernel.system (многоаргументная форма, без шелла)
+    # возвращает false вместо throw — в отличие от Formula#system, который
+    # кидает BuildError на любом ненулевом exit и ронял бы `brew install` на
+    # чистой установке. Оба вызова терпимы: провал bootstrap (например,
+    # установка по SSH без GUI-сессии) не роняет установку — служба всё равно
+    # стартует при следующем входе в систему (RunAtLoad) либо её поднимет
     # `nanodictate start`.
     target = "gui/#{Process.uid}/com.nanodictate.agent"
-    system "/bin/launchctl", "bootout", target
-    system "/bin/launchctl", "bootstrap", "gui/#{Process.uid}", plist.to_s
+    Kernel.system "/bin/launchctl", "bootout", target
+    Kernel.system "/bin/launchctl", "bootstrap", "gui/#{Process.uid}", plist.to_s
   end
 
   def caveats
