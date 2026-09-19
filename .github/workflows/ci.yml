@@ -25,6 +25,12 @@ jobs:
           # runner SDKs while keeping the Swift 5 language mode.
           swift-version: "5.10.1"
 
+      - name: Run SwiftFormat
+        run: swift package plugin --allow-writing-to-package-directory swiftformat --lint .
+
+      - name: Run SwiftLint
+        run: swift package plugin swiftlint
+
       - name: Build
         run: swift build
 

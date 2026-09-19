@@ -16,9 +16,8 @@ import Foundation
 /// setenv в раннере был виден в любой момент; во-вторых, чтобы тесты могли
 /// переопределить её точечно, если потребуется.
 public enum RuntimeEnvironment {
-
-    /// `true` — процесс является тестовым раннером NanoDictateCoreTests.
-    public static var isTestRun: Bool {
-        ProcessInfo.processInfo.environment["NANODICTATE_TESTS"] == "1"
-    }
+  /// `true` — процесс является тестовым раннером NanoDictateCoreTests.
+  public static var isTestRun: Bool {
+    ProcessInfo.processInfo.environment["NANODICTATE_TESTS"] == "1"
+  }
 }

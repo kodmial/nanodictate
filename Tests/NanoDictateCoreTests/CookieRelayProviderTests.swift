@@ -127,9 +127,9 @@ final class CookieRelayProviderTests: XCTestCase {
     @objc func testExtractConstantsFromChallenge() {
         let consts = CookieRelayProvider.extractConstants(from: challengeHTML)
         XCTAssertNotNil(consts)
-        XCTAssertEqual(consts?.a, "f655ba9d09a112d4968c63579db590b4")
-        XCTAssertEqual(consts?.b, "98344c2eee86c3994890592585b49f80")
-        XCTAssertEqual(consts?.c, "3e512bc3e42f39a757e79f4739c74138")
+        XCTAssertEqual(consts?.keyHex, "f655ba9d09a112d4968c63579db590b4")
+        XCTAssertEqual(consts?.ivHex, "98344c2eee86c3994890592585b49f80")
+        XCTAssertEqual(consts?.cipherHex, "3e512bc3e42f39a757e79f4739c74138")
     }
 
     @objc func testDecryptMatchesReferenceValue() {
@@ -163,12 +163,12 @@ final class CookieRelayProviderTests: XCTestCase {
         """
         let consts = CookieRelayProvider.extractConstants(from: page)
         XCTAssertNotNil(consts, "пробелы/UPPER-HEX/порядок не должны ломать разбор")
-        XCTAssertEqual(consts?.a.lowercased(), "f655ba9d09a112d4968c63579db590b4")
-        XCTAssertEqual(consts?.b, "98344c2eee86c3994890592585b49f80")
-        XCTAssertEqual(consts?.c.lowercased(), "3e512bc3e42f39a757e79f4739c74138")
+        XCTAssertEqual(consts?.keyHex.lowercased(), "f655ba9d09a112d4968c63579db590b4")
+        XCTAssertEqual(consts?.ivHex, "98344c2eee86c3994890592585b49f80")
+        XCTAssertEqual(consts?.cipherHex.lowercased(), "3e512bc3e42f39a757e79f4739c74138")
         // Расшифровка uppercase-констант даёт ту же куку, что и lowercase.
         if let consts = consts {
-            let value = CookieRelayProvider.decrypt(a: consts.a, b: consts.b, c: consts.c)
+            let value = CookieRelayProvider.decrypt(a: consts.keyHex, b: consts.ivHex, c: consts.cipherHex)
             XCTAssertEqual(value, expectedCookie)
         }
     }

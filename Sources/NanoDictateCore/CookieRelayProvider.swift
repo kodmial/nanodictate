@@ -1,7 +1,8 @@
-import Foundation
 import CommonCrypto
+import Foundation
 
 // MARK: - CookieRelayProvider
+
 //
 // Унифицированный транспорт STT-провайдера (ключ `transport` в конфиге),
 // режим "cookie-relay": ретрансляция через прокси, встречающий «небраузерные»
@@ -23,284 +24,321 @@ import CommonCrypto
 //      STT-запросы через прокси.
 
 public final class CookieRelayProvider {
+  /// TTL токена в памяти (сек). Cookie прокси выдаёт на ≥ 120 секунд —
+  /// до этого срока свежий токен не пересчитывается вообще.
+  public static let tokenTTL: TimeInterval = 120
 
-    /// TTL токена в памяти (сек). Cookie прокси выдаёт на ≥ 120 секунд —
-    /// до этого срока свежий токен не пересчитывается вообще.
-    public static let tokenTTL: TimeInterval = 120
+  /// Единственный User-Agent, которым агент «ходит»: и за челленджем, и на
+  /// STT-запросы через cookie-relay прокси (браузерный UA обязателен —
+  /// curl/8.0 получает «Empty reply from server»).
+  public static let chromeUA =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+      + "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-    /// Единственный User-Agent, которым агент «ходит»: и за челленджем, и на
-    /// STT-запросы через cookie-relay прокси (браузерный UA обязателен —
-    /// curl/8.0 получает «Empty reply from server»).
-    public static let chromeUA =
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+  /// Имя cookie в заголовке (без "=").
+  private static let cookieName = "__test"
 
-    /// Имя cookie в заголовке (без "=").
-    private static let cookieName = "__test"
+  /// Таймаут refresh-запросов (челлендж-GET и probe-GET), сек. Страницы
+  /// маленькие, ответ приходит быстро, а refreshBlocking() может выполняться
+  /// ВНУТРИ STT-цикла (челлендж-ретрай) — дефолтные 60 с URLSession повисли
+  /// бы на диктовке сверх документированного networkRequestTimeout (20 с).
+  private static let refreshTimeout: TimeInterval = 8
 
-    /// Таймаут refresh-запросов (челлендж-GET и probe-GET), сек. Страницы
-    /// маленькие, ответ приходит быстро, а refreshBlocking() может выполняться
-    /// ВНУТРИ STT-цикла (челлендж-ретрай) — дефолтные 60 с URLSession повисли
-    /// бы на диктовке сверх документированного networkRequestTimeout (20 с).
-    private static let refreshTimeout: TimeInterval = 8
+  /// Значение токена в памяти.
+  private struct Token {
+    let value: String // lowerHex значения cookie, БЕЗ "__test="
+    let createdAt: Date
+  }
 
-    /// Значение токена в памяти.
-    private struct Token {
-        let value: String   // lowerHex значения cookie, БЕЗ "__test="
-        let createdAt: Date
+  private let lock = NSLock()
+  private var token: Token?
+  /// Одновременно идёт НЕ более одного фонового пересчёта (дедупликация):
+  /// параллельные ensureFresh/refreshBlocking дожидаются одного и того же Task.
+  /// Результат Task — значение из performRefresh(): свежий токен или nil.
+  private var refreshInFlight: Task<String?, Never>?
+
+  private let origin: String // схема+хост прокси, где живёт челлендж
+  private let userAgent: String
+  private let transport: HTTPTransport?
+  /// Инъекцируемые часы — тесты «старят» токен без реальных задержек.
+  private let now: () -> Date
+
+  public init(
+    origin: String,
+    userAgent: String = CookieRelayProvider.chromeUA,
+    transport: HTTPTransport? = nil,
+    now: @escaping () -> Date = { Date() }
+  ) {
+    self.origin = origin
+    self.userAgent = userAgent
+    self.transport = transport
+    self.now = now
+  }
+
+  /// Фабрика для `transport == "cookie-relay"`: origin выводится из baseURL
+  /// STT-эндпоинта (прокси). nil — URL непарсится, cookie-слой не поднять.
+  public static func makeForCookieRelay(
+    baseURL: String,
+    transport: HTTPTransport? = nil
+  ) -> CookieRelayProvider? {
+    guard let origin = origin(from: baseURL) else { return nil }
+    return CookieRelayProvider(origin: origin, transport: transport)
+  }
+
+  /// Схема+хост из URL STT-эндпоинта — origin, где прокси раздаёт челлендж.
+  /// Например "https://proxy.example.com/go/…" → "https://proxy.example.com".
+  public static func origin(from baseURL: String) -> String? {
+    guard
+      let url = URL(string: baseURL),
+      let scheme = url.scheme,
+      let host = url.host
+    else { return nil }
+    var components = URLComponents()
+    components.scheme = scheme
+    components.host = host
+    if let port = url.port {
+      components.port = port
     }
+    return components.string
+  }
 
-    private let lock = NSLock()
-    private var token: Token?
-    /// Одновременно идёт НЕ более одного фонового пересчёта (дедупликация):
-    /// параллельные ensureFresh/refreshBlocking дожидаются одного и того же Task.
-    /// Результат Task — значение из performRefresh(): свежий токен или nil.
-    private var refreshInFlight: Task<String?, Never>?
+  // MARK: - API для Transcriber
 
-    private let origin: String   // схема+хост прокси, где живёт челлендж
-    private let ua: String
-    private let transport: HTTPTransport?
-    /// Инъекцируемые часы — тесты «старят» токен без реальных задержек.
-    private let now: () -> Date
+  /// Полностью готовое значение заголовка Cookie («__test=<hex>») или nil.
+  /// Синхронно, без сети.
+  public func currentCookie() -> String? {
+    lock.lock(); defer { lock.unlock() }
+    return token.map { "\(Self.cookieName)=\($0.value)" }
+  }
 
-    public init(
-        origin: String,
-        ua: String = CookieRelayProvider.chromeUA,
-        transport: HTTPTransport? = nil,
-        now: @escaping () -> Date = { Date() }
-    ) {
-        self.origin = origin
-        self.ua = ua
-        self.transport = transport
-        self.now = now
+  /// Неблокирующее поддержание токена:
+  /// - токен МОЛОЖЕ 120 с и обновление не идёт → ничего не запускает,
+  ///   возвращает текущий токен мгновенно, сетевых запросов нет;
+  /// - токен протух/отсутствует ИЛИ обновление уже идёт → запускает фоновый
+  ///   пересчёт (дедуплицированный) и возвращает ТЕКУЩИЙ токен сразу.
+  public func ensureFresh() async -> String? {
+    let header = currentCookie()
+    let decision = refreshDecision()
+    if decision.fresh, !decision.inFlight {
+      return header
     }
+    _ = startRefresh()
+    return header
+  }
 
-    /// Фабрика для `transport == "cookie-relay"`: origin выводится из baseURL
-    /// STT-эндпоинта (прокси). nil — URL непарсится, cookie-слой не поднять.
-    public static func makeForCookieRelay(
-        baseURL: String,
-        transport: HTTPTransport? = nil
-    ) -> CookieRelayProvider? {
-        guard let origin = origin(from: baseURL) else { return nil }
-        return CookieRelayProvider(origin: origin, transport: transport)
+  /// Блокирующий пересчёт «до результата»: дожидается завершения (своего или
+  /// уже идущего) пересчёта и возвращает результат пересчёта: НОВЫЙ токен,
+  /// либо nil, если пересчёт не удался. Старый токен при неудаче остаётся
+  /// в памяти (currentCookie() его вернёт), но ретраить ИМ бессмысленно —
+  /// челлендж уже показал, что сервер его отверг; челлендж-ретрай обязан
+  /// уходить с nil-семантикой → Transcriber прерывает попытку, а не тратит
+  /// POST на заведомо мёртвую куку.
+  public func refreshBlocking() async -> String? {
+    let task = startRefresh()
+    guard let value = await task.value else { return nil }
+    return "\(Self.cookieName)=\(value)"
+  }
+
+  // MARK: - Статика: разбор челленджа и AES-128-CBC
+
+  /// Признак cookie-челленджа: страница содержит aes.js, toNumbers и
+  /// document.cookie — то есть вместо контента сервер прислал JS-заглушку.
+  public static func looksLikeChallenge(_ body: String) -> Bool {
+    body.contains("aes.js") && body.contains("toNumbers") && body.contains("document.cookie")
+  }
+
+  public static func looksLikeChallenge(_ body: Data) -> Bool {
+    guard let text = strictUTF8(body) else { return false }
+    return looksLikeChallenge(text)
+  }
+
+  /// Аналог JS `toNumbers(d)`: hex-строка → массив байт.
+  public static func toNumbers(_ hex: String) -> [UInt8] {
+    var result: [UInt8] = []
+    var index = hex.startIndex
+    while index < hex.endIndex {
+      let next = hex.index(index, offsetBy: 2, limitedBy: hex.endIndex) ?? hex.endIndex
+      if let byte = UInt8(hex[index ..< next], radix: 16) {
+        result.append(byte)
+      }
+      index = next
     }
+    return result
+  }
 
-    /// Схема+хост из URL STT-эндпоинта — origin, где прокси раздаёт челлендж.
-    /// Например "https://proxy.example.com/go/…" → "https://proxy.example.com".
-    public static func origin(from baseURL: String) -> String? {
-        guard let url = URL(string: baseURL),
-              let scheme = url.scheme,
-              let host = url.host else { return nil }
-        var components = URLComponents()
-        components.scheme = scheme
-        components.host = host
-        if let port = url.port { components.port = port }
-        return components.string
+  /// Аналог JS `toHex(arr)`: массив байт → lowerHex.
+  public static func toHex(_ bytes: [UInt8]) -> String {
+    bytes.map { String(format: "%02x", $0) }.joined()
+  }
+
+  /// Строгий UTF-8-декодер: `String(decoding:as:)` чинит битые байты
+  /// заменителем, а здесь nil-семантика `String(data:encoding:)` сохранена
+  /// явно — недействительная последовательность возвращает nil.
+  private static func strictUTF8(_ data: Data) -> String? {
+    let text = String(decoding: data, as: UTF8.self)
+    guard text.utf8.elementsEqual(data) else { return nil }
+    return text
+  }
+
+  /// Константы челленджа, извлечённые из страницы (hex-строки по 32 символа).
+  /// Вместо 3-элементного кортежа — именованная структура (large_tuple).
+  public struct ChallengeConstants {
+    /// a: ключ AES-128.
+    public let keyHex: String
+    /// b: вектор инициализации.
+    public let ivHex: String
+    /// c: шифротекст (один 16-байтный блок).
+    public let cipherHex: String
+  }
+
+  /// Константы a/b/c из тела челленджа. Разные страницы форматируются по-разному
+  /// (пробелы вокруг «=» и скобок, переносы строк, UPPERCASE-HEX), поэтому
+  /// каждая константа ищется отдельно — порядок a,b,c не важен:
+  ///   `\ba\s*=\s*toNumbers\s*\(\s*"([0-9A-Fa-f]{32})"\s*\)`
+  /// Все три найдены → набор, иначе nil (такая страница — не наш челлендж).
+  public static func extractConstants(from page: String) -> ChallengeConstants? {
+    var found: [String: String] = [:]
+    for name in ["a", "b", "c"] {
+      let pattern = "\\b\(name)\\s*=\\s*toNumbers\\s*\\(\\s*\"([0-9A-Fa-f]{32})\"\\s*\\)"
+      guard
+        let regex = try? NSRegularExpression(pattern: pattern),
+        let match = regex.firstMatch(in: page, range: NSRange(page.startIndex..., in: page)),
+        match.numberOfRanges == 2,
+        let hexRange = Range(match.range(at: 1), in: page)
+      else { return nil }
+      found[name] = String(page[hexRange])
     }
+    guard
+      let keyHex = found["a"],
+      let ivHex = found["b"],
+      let cipherHex = found["c"]
+    else { return nil }
+    return ChallengeConstants(keyHex: keyHex, ivHex: ivHex, cipherHex: cipherHex)
+  }
 
-    // MARK: - API для Transcriber
-
-    /// Полностью готовое значение заголовка Cookie («__test=<hex>») или nil.
-    /// Синхронно, без сети.
-    public func currentCookie() -> String? {
-        lock.lock(); defer { lock.unlock() }
-        return token.map { "\(Self.cookieName)=\($0.value)" }
-    }
-
-    /// Неблокирующее поддержание токена:
-    /// - токен МОЛОЖЕ 120 с и обновление не идёт → ничего не запускает,
-    ///   возвращает текущий токен мгновенно, сетевых запросов нет;
-    /// - токен протух/отсутствует ИЛИ обновление уже идёт → запускает фоновый
-    ///   пересчёт (дедуплицированный) и возвращает ТЕКУЩИЙ токен сразу.
-    public func ensureFresh() async -> String? {
-        let header = currentCookie()
-        let decision = refreshDecision()
-        if decision.fresh && !decision.inFlight { return header }
-        _ = startRefresh()
-        return header
-    }
-
-    /// Блокирующий пересчёт «до результата»: дожидается завершения (своего или
-    /// уже идущего) пересчёта и возвращает результат пересчёта: НОВЫЙ токен,
-    /// либо nil, если пересчёт не удался. Старый токен при неудаче остаётся
-    /// в памяти (currentCookie() его вернёт), но ретраить ИМ бессмысленно —
-    /// челлендж уже показал, что сервер его отверг; челлендж-ретрай обязан
-    /// уходить с nil-семантикой → Transcriber прерывает попытку, а не тратит
-    /// POST на заведомо мёртвую куку.
-    public func refreshBlocking() async -> String? {
-        let task = startRefresh()
-        guard let value = await task.value else { return nil }
-        return "\(Self.cookieName)=\(value)"
-    }
-
-    // MARK: - Статика: разбор челленджа и AES-128-CBC
-
-    /// Признак cookie-челленджа: страница содержит aes.js, toNumbers и
-    /// document.cookie — то есть вместо контента сервер прислал JS-заглушку.
-    public static func looksLikeChallenge(_ body: String) -> Bool {
-        body.contains("aes.js") && body.contains("toNumbers") && body.contains("document.cookie")
-    }
-
-    public static func looksLikeChallenge(_ body: Data) -> Bool {
-        guard let text = String(data: body, encoding: .utf8) else { return false }
-        return looksLikeChallenge(text)
-    }
-
-    /// Аналог JS `toNumbers(d)`: hex-строка → массив байт.
-    public static func toNumbers(_ hex: String) -> [UInt8] {
-        var result: [UInt8] = []
-        var index = hex.startIndex
-        while index < hex.endIndex {
-            let next = hex.index(index, offsetBy: 2, limitedBy: hex.endIndex) ?? hex.endIndex
-            if let byte = UInt8(hex[index..<next], radix: 16) {
-                result.append(byte)
-            }
-            index = next
+  /// slowAES.decrypt(c, 2, a, b) байт-в-байт = стандартный AES-128-CBC:
+  /// единственный 16-байтный блок из hex(c) расшифровать ключом hex(a),
+  /// IV hex(b), БЕЗ снятия padding (kCCOptionPKCS7Padding не передаём).
+  /// Результат — lowerHex расшифрованного блока → значение cookie.
+  public static func decrypt(a keyHex: String, b ivHex: String, c cipherHex: String) -> String? {
+    let key = toNumbers(keyHex)
+    let ivBytes = toNumbers(ivHex)
+    let dataIn = toNumbers(cipherHex)
+    guard key.count == 16, ivBytes.count == 16, dataIn.count == 16 else { return nil }
+    var dataOut = [UInt8](repeating: 0, count: dataIn.count)
+    let dataOutCount = dataOut.count
+    var dataOutMoved = 0
+    let status = dataIn.withUnsafeBytes { inPtr -> CCCryptorStatus in
+      key.withUnsafeBytes { keyPtr in
+        ivBytes.withUnsafeBytes { ivPtr in
+          dataOut.withUnsafeMutableBytes { outPtr in
+            CCCrypt(
+              CCOperation(kCCDecrypt),
+              CCAlgorithm(kCCAlgorithmAES),
+              CCOptions(0), // БЕЗ kCCOptionPKCS7Padding
+              keyPtr.baseAddress,
+              kCCKeySizeAES128,
+              ivPtr.baseAddress,
+              inPtr.baseAddress,
+              dataIn.count,
+              outPtr.baseAddress,
+              dataOutCount,
+              &dataOutMoved
+            )
+          }
         }
-        return result
+      }
     }
+    guard status == kCCSuccess else { return nil }
+    return toHex(dataOut)
+  }
 
-    /// Аналог JS `toHex(arr)`: массив байт → lowerHex.
-    public static func toHex(_ bytes: [UInt8]) -> String {
-        bytes.map { String(format: "%02x", $0) }.joined()
+  // MARK: - Внутреннее
+
+  /// Свежесть токена и факт идущего пересчёта — под одним замком (синхронно).
+  private func refreshDecision() -> (fresh: Bool, inFlight: Bool) {
+    lock.lock(); defer { lock.unlock() }
+    return (isFreshLocked(), refreshInFlight != nil)
+  }
+
+  private func isFreshLocked() -> Bool {
+    guard let token else { return false }
+    return now().timeIntervalSince(token.createdAt) < Self.tokenTTL
+  }
+
+  /// Запускает пересчёт, если его ещё нет; возвращает (в т.ч. уже идущий) Task.
+  /// Результат Task — значение из performRefresh(): новый токен или nil.
+  private func startRefresh() -> Task<String?, Never> {
+    lock.lock()
+    if let existing = refreshInFlight {
+      lock.unlock()
+      return existing
     }
-
-    /// Константы a/b/c из тела челленджа. Разные страницы форматируются по-разному
-    /// (пробелы вокруг «=» и скобок, переносы строк, UPPERCASE-HEX), поэтому
-    /// каждая константа ищется отдельно — порядок a,b,c не важен:
-    ///   `\ba\s*=\s*toNumbers\s*\(\s*"([0-9A-Fa-f]{32})"\s*\)`
-    /// Все три найдены → набор, иначе nil (такая страница — не наш челлендж).
-    public static func extractConstants(from page: String) -> (a: String, b: String, c: String)? {
-        var found: [String: String] = [:]
-        for name in ["a", "b", "c"] {
-            let pattern = "\\b\(name)\\s*=\\s*toNumbers\\s*\\(\\s*\"([0-9A-Fa-f]{32})\"\\s*\\)"
-            guard let regex = try? NSRegularExpression(pattern: pattern),
-                  let match = regex.firstMatch(in: page, range: NSRange(page.startIndex..., in: page)),
-                  match.numberOfRanges == 2,
-                  let hexRange = Range(match.range(at: 1), in: page) else { return nil }
-            found[name] = String(page[hexRange])
-        }
-        guard let a = found["a"], let b = found["b"], let c = found["c"] else { return nil }
-        return (a, b, c)
+    let task = Task { [weak self] () -> String? in
+      defer { self?.clearInFlight() }
+      guard let self else { return nil }
+      return await self.performRefresh()
     }
+    refreshInFlight = task
+    lock.unlock()
+    return task
+  }
 
-    /// slowAES.decrypt(c, 2, a, b) байт-в-байт = стандартный AES-128-CBC:
-    /// единственный 16-байтный блок из hex(c) расшифровать ключом hex(a),
-    /// IV hex(b), БЕЗ снятия padding (kCCOptionPKCS7Padding не передаём).
-    /// Результат — lowerHex расшифрованного блока → значение cookie.
-    public static func decrypt(a: String, b: String, c: String) -> String? {
-        let key = toNumbers(a)
-        let iv = toNumbers(b)
-        let dataIn = toNumbers(c)
-        guard key.count == 16, iv.count == 16, dataIn.count == 16 else { return nil }
-        var dataOut = [UInt8](repeating: 0, count: dataIn.count)
-        let dataOutCount = dataOut.count
-        var dataOutMoved = 0
-        let status = dataIn.withUnsafeBytes { inPtr -> CCCryptorStatus in
-            key.withUnsafeBytes { keyPtr in
-                iv.withUnsafeBytes { ivPtr in
-                    dataOut.withUnsafeMutableBytes { outPtr in
-                        CCCrypt(
-                            CCOperation(kCCDecrypt),
-                            CCAlgorithm(kCCAlgorithmAES),
-                            CCOptions(0), // БЕЗ kCCOptionPKCS7Padding
-                            keyPtr.baseAddress, kCCKeySizeAES128,
-                            ivPtr.baseAddress,
-                            inPtr.baseAddress, dataIn.count,
-                            outPtr.baseAddress, dataOutCount,
-                            &dataOutMoved
-                        )
-                    }
-                }
-            }
-        }
-        guard status == kCCSuccess else { return nil }
-        return toHex(dataOut)
+  private func clearInFlight() {
+    lock.lock(); defer { lock.unlock() }
+    refreshInFlight = nil
+  }
+
+  /// Полный цикл вычисления и проверки токена:
+  /// 1) GET origin (UA браузера) → страница-челлендж;
+  /// 2) извлечь a/b/c, расшифровать AES-128-CBC → значение cookie;
+  /// 3) probe: GET origin с новой кукой → сервер отвечает НЕ челленджем —
+  ///    кука принята, кладём в память.
+  /// Любой сбой → nil, старый токен (если был) сохраняется.
+  private func performRefresh() async -> String? {
+    guard
+      let page = await fetchText(origin),
+      let consts = Self.extractConstants(from: page),
+      let value = Self.decrypt(a: consts.keyHex, b: consts.ivHex, c: consts.cipherHex)
+    else {
+      return nil
     }
-
-    // MARK: - Внутреннее
-
-    /// Свежесть токена и факт идущего пересчёта — под одним замком (синхронно).
-    private func refreshDecision() -> (fresh: Bool, inFlight: Bool) {
-        lock.lock(); defer { lock.unlock() }
-        return (isFreshLocked(), refreshInFlight != nil)
+    guard
+      let probe = await fetchText(origin, cookie: value),
+      !Self.looksLikeChallenge(probe)
+    else {
+      return nil
     }
+    storeToken(value)
+    return value
+  }
 
-    private func isFreshLocked() -> Bool {
-        guard let token = token else { return false }
-        return now().timeIntervalSince(token.createdAt) < Self.tokenTTL
-    }
+  /// Кладёт принятый кукой токен в память (синхронно — ключ в безопасности).
+  private func storeToken(_ value: String) {
+    lock.lock(); defer { lock.unlock() }
+    token = Token(value: value, createdAt: now())
+  }
 
-    /// Запускает пересчёт, если его ещё нет; возвращает (в т.ч. уже идущий) Task.
-    /// Результат Task — значение из performRefresh(): новый токен или nil.
-    private func startRefresh() -> Task<String?, Never> {
-        lock.lock()
-        if let existing = refreshInFlight {
-            lock.unlock()
-            return existing
-        }
-        let task = Task { [weak self] () -> String? in
-            defer { self?.clearInFlight() }
-            guard let self else { return nil }
-            return await self.performRefresh()
-        }
-        refreshInFlight = task
-        lock.unlock()
-        return task
+  /// GET origin (и опционально с cookie) → тело текстом; nil при любой ошибке.
+  /// Таймаут refreshTimeout (8 с) — жёстко: вызовы идут и из STT-цикла.
+  private func fetchText(_ urlString: String, cookie: String? = nil) async -> String? {
+    guard let url = URL(string: urlString) else { return nil }
+    var request = URLRequest(url: url)
+    request.timeoutInterval = Self.refreshTimeout
+    request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+    if let cookie {
+      request.setValue("\(Self.cookieName)=\(cookie)", forHTTPHeaderField: "Cookie")
     }
-
-    private func clearInFlight() {
-        lock.lock(); defer { lock.unlock() }
-        refreshInFlight = nil
+    do {
+      if let transport {
+        let response = try await transport.send(request: request)
+        return Self.strictUTF8(response.body)
+      }
+      let (data, response) = try await URLSession.shared.data(for: request)
+      guard response is HTTPURLResponse else { return nil }
+      return Self.strictUTF8(data)
+    } catch {
+      return nil
     }
-
-    /// Полный цикл вычисления и проверки токена:
-    /// 1) GET origin (UA браузера) → страница-челлендж;
-    /// 2) извлечь a/b/c, расшифровать AES-128-CBC → значение cookie;
-    /// 3) probe: GET origin с новой кукой → сервер отвечает НЕ челленджем —
-    ///    кука принята, кладём в память.
-    /// Любой сбой → nil, старый токен (если был) сохраняется.
-    private func performRefresh() async -> String? {
-        guard let page = await fetchText(origin),
-              let consts = Self.extractConstants(from: page),
-              let value = Self.decrypt(a: consts.a, b: consts.b, c: consts.c) else {
-            return nil
-        }
-        guard let probe = await fetchText(origin, cookie: value),
-              !Self.looksLikeChallenge(probe) else {
-            return nil
-        }
-        storeToken(value)
-        return value
-    }
-
-    /// Кладёт принятый кукой токен в память (синхронно — ключ в безопасности).
-    private func storeToken(_ value: String) {
-        lock.lock(); defer { lock.unlock() }
-        token = Token(value: value, createdAt: now())
-    }
-
-    /// GET origin (и опционально с cookie) → тело текстом; nil при любой ошибке.
-    /// Таймаут refreshTimeout (8 с) — жёстко: вызовы идут и из STT-цикла.
-    private func fetchText(_ urlString: String, cookie: String? = nil) async -> String? {
-        guard let url = URL(string: urlString) else { return nil }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = Self.refreshTimeout
-        request.setValue(ua, forHTTPHeaderField: "User-Agent")
-        if let cookie = cookie {
-            request.setValue("\(Self.cookieName)=\(cookie)", forHTTPHeaderField: "Cookie")
-        }
-        let result: (status: Int, body: Data, headers: [String: String])
-        do {
-            if let transport = transport {
-                result = try await transport.send(request: request)
-            } else {
-                let (data, response) = try await URLSession.shared.data(for: request)
-                guard let http = response as? HTTPURLResponse else { return nil }
-                result = (http.statusCode, data, [:])
-            }
-        } catch {
-            return nil
-        }
-        return String(data: result.body, encoding: .utf8)
-    }
+  }
 }

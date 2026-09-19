@@ -32,3 +32,7 @@ Resources/nanodictate-agent.plist
 *.log
 *.bak
 *~
+
+# Generated packaging outputs (filled by scripts/release-prep.rb — keep the .tpl sources only)
+/packaging/homebrew/nanodictate.rb
+/packaging/macports/Portfile

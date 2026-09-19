@@ -138,10 +138,10 @@ final class LiveSegmentFailureTests: XCTestCase {
     private static func functionBody(named name: String, in source: String) -> String {
         guard let range = source.range(of: "func \(name)(") else { return "" }
         let tail = source[range.lowerBound...]
-        if let end = tail.range(of: "\n    private func ") {
+        if let end = tail.range(of: "\n  private func ") {
             return String(tail[..<end.lowerBound])
         }
-        if let end = tail.range(of: "\n    // MARK: ") {
+        if let end = tail.range(of: "\n  // MARK: ") {
             return String(tail[..<end.lowerBound])
         }
         return String(tail)

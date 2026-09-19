@@ -243,7 +243,7 @@ final class AgentStatusTests: XCTestCase {
             STTProvider(id: "groq", name: "", baseURL: "", model: "", isActive: true),
             STTProvider(id: "ya", name: "", baseURL: "", model: "", isActive: false),
         ]
-        XCTAssertEqual(AgentScreen.validateProviderSwitch(targetID: "ya", providers: providers), .ok(targetID: "ya"))
+        XCTAssertEqual(AgentScreen.validateProviderSwitch(targetID: "ya", providers: providers), .isValid(targetID: "ya"))
     }
 
     @objc func testValidateProviderSwitchUnknownAndEmpty() {
@@ -270,7 +270,7 @@ final class AgentStatusTests: XCTestCase {
 
         let providers = try ProviderStore.loadProviders()
         // Валидация проходит → реальное переключение через ProviderStore.
-        XCTAssertEqual(AgentScreen.validateProviderSwitch(targetID: "ya", providers: providers), .ok(targetID: "ya"))
+        XCTAssertEqual(AgentScreen.validateProviderSwitch(targetID: "ya", providers: providers), .isValid(targetID: "ya"))
         try ProviderStore.setActive(providerID: "ya")
 
         let after = try ProviderStore.loadProviders()

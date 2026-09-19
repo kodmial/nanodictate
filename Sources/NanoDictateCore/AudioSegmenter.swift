@@ -1,6 +1,7 @@
 import Foundation
 
 // MARK: - VAD-сегментация записи (пошаговая диктовка)
+
 //
 // Чистое разбиение аудио на сегменты по паузам голоса (RMS-порог, как в
 // AudioMetrics.nearSilenceThreshold). Никакого I/O: работаем с RMS-таймлайном
@@ -12,188 +13,209 @@ import Foundation
 // целиком выпадает из обоих сегментов), чтобы слова на стыке получали контекст.
 
 public struct AudioSegmenterConfig: Equatable {
-    /// Длительность непрерывной паузы (RMS ниже порога), после которой режем.
-    public var pauseDuration: TimeInterval
-    /// Минимальная длина сегмента: короче не отрезаем (нет — сегмент длиннее).
-    public var minSegment: TimeInterval
-    /// Жёсткая максимальная длина сегмента: по её достижении режем всегда.
-    public var maxSegment: TimeInterval
-    /// Хвост предыдущего сегмента, приклеиваемый к началу следующего.
-    public var overlap: TimeInterval
-    /// Порог «тишины» по RMS (линейный 0...1) — reuse AudioMetrics.
-    public var silenceRMS: Float
+  /// Длительность непрерывной паузы (RMS ниже порога), после которой режем.
+  public var pauseDuration: TimeInterval
+  /// Минимальная длина сегмента: короче не отрезаем (нет — сегмент длиннее).
+  public var minSegment: TimeInterval
+  /// Жёсткая максимальная длина сегмента: по её достижении режем всегда.
+  public var maxSegment: TimeInterval
+  /// Хвост предыдущего сегмента, приклеиваемый к началу следующего.
+  public var overlap: TimeInterval
+  /// Порог «тишины» по RMS (линейный 0...1) — reuse AudioMetrics.
+  public var silenceRMS: Float
 
-    public init(
-        pauseDuration: TimeInterval = 1.0,
-        minSegment: TimeInterval = 3.0,
-        maxSegment: TimeInterval = 45.0,
-        overlap: TimeInterval = 1.0,
-        silenceRMS: Float = AudioMetrics.nearSilenceThreshold
-    ) {
-        self.pauseDuration = pauseDuration
-        self.minSegment = minSegment
-        self.maxSegment = maxSegment
-        self.overlap = overlap
-        self.silenceRMS = silenceRMS
-    }
+  public init(
+    pauseDuration: TimeInterval = 1.0,
+    minSegment: TimeInterval = 3.0,
+    maxSegment: TimeInterval = 45.0,
+    overlap: TimeInterval = 1.0,
+    silenceRMS: Float = AudioMetrics.nearSilenceThreshold
+  ) {
+    self.pauseDuration = pauseDuration
+    self.minSegment = minSegment
+    self.maxSegment = maxSegment
+    self.overlap = overlap
+    self.silenceRMS = silenceRMS
+  }
 
-    public static let defaults = AudioSegmenterConfig()
+  public static let defaults = AudioSegmenterConfig()
 }
 
 /// Один распознаваемый кусок: тело сегмента плюс приклеенный оверлэп.
 public struct AudioSegment: Equatable {
-    /// Начало тела сегмента (без оверлэпа) от начала записи, секунды.
-    public let start: TimeInterval
-    /// Конец тела сегмента (без оверлэпа) от начала записи, секунды.
-    public let end: TimeInterval
-    /// PCM-сэмплы: тело сегмента + последние `overlap` секунд предыдущего
-    /// (или целый предыдущий, если он короче оверлэпа). У первого — без оверлэпа.
-    public let samples: [Int16]
-    /// ФАКТИЧЕСКИ приклеенный оверлэп предыдущего тела, секунды. Всегда 0 у
-    /// первого сегмента; у следующих — `min(конфигурируемый overlap, длина
-    /// предыдущего тела)` в сэмплах → секунды. dedupeOverlap режет дубликаты
-    /// РОВНО по этой величине (а не по `config.overlap`, который при коротком
-    /// предыдущем сегменте больше реально приклеенного хвоста).
-    public let overlapSeconds: TimeInterval
+  /// Начало тела сегмента (без оверлэпа) от начала записи, секунды.
+  public let start: TimeInterval
+  /// Конец тела сегмента (без оверлэпа) от начала записи, секунды.
+  public let end: TimeInterval
+  /// PCM-сэмплы: тело сегмента + последние `overlap` секунд предыдущего
+  /// (или целый предыдущий, если он короче оверлэпа). У первого — без оверлэпа.
+  public let samples: [Int16]
+  /// ФАКТИЧЕСКИ приклеенный оверлэп предыдущего тела, секунды. Всегда 0 у
+  /// первого сегмента; у следующих — `min(конфигурируемый overlap, длина
+  /// предыдущего тела)` в сэмплах → секунды. dedupeOverlap режет дубликаты
+  /// РОВНО по этой величине (а не по `config.overlap`, который при коротком
+  /// предыдущем сегменте больше реально приклеенного хвоста).
+  public let overlapSeconds: TimeInterval
 
-    public init(start: TimeInterval, end: TimeInterval, samples: [Int16], overlapSeconds: TimeInterval = 0) {
-        self.start = start
-        self.end = end
-        self.samples = samples
-        self.overlapSeconds = overlapSeconds
-    }
+  public init(start: TimeInterval, end: TimeInterval, samples: [Int16], overlapSeconds: TimeInterval = 0) {
+    self.start = start
+    self.end = end
+    self.samples = samples
+    self.overlapSeconds = overlapSeconds
+  }
 }
 
 public enum AudioSegmenter {
+  /// Оконная длительность при работе с сэмплами: 85 мс при 16 кГц = 1360
+  /// сэмплов (как RMS-буферы AudioService.rmsHistory).
+  public static let defaultWindowDuration: TimeInterval = 0.085
 
-    /// Оконная длительность при работе с сэмплами: 85 мс при 16 кГц = 1360
-    /// сэмплов (как RMS-буферы AudioService.rmsHistory).
-    public static let defaultWindowDuration: TimeInterval = 0.085
+  // MARK: - Разбиение по RMS-таймлайну
 
-    // MARK: - Разбиение по RMS-таймлайну
+  /// Делит RMS-таймлайн (одно значение на окно) на диапазоны окон сегментов.
+  ///
+  /// Гарантии:
+  /// - граница только после непрерывной паузы длиной ≥ `pauseDuration`;
+  /// - сегмент короче `minSegment` не отрезается (склеивается со следующим);
+  /// - при достижении `maxSegment` граница ставится принудительно (даже
+  ///   посреди речи — жёсткий потолок);
+  /// - на стыке тишина не входит ни в один сегмент (режем у кромок паузы);
+  /// - на выходе сегменты покрывают запись без пропусков и перекрытий.
+  static func splitRanges(
+    rms: [Float],
+    windowDuration: TimeInterval,
+    config: AudioSegmenterConfig = .defaults
+  ) -> [Range<Int>] {
+    guard !rms.isEmpty else { return [] }
+    let pauseWindows = max(1, Int(round(config.pauseDuration / windowDuration)))
 
-    /// Делит RMS-таймлайн (одно значение на окно) на диапазоны окон сегментов.
-    ///
-    /// Гарантии:
-    /// - граница только после непрерывной паузы длиной ≥ `pauseDuration`;
-    /// - сегмент короче `minSegment` не отрезается (склеивается со следующим);
-    /// - при достижении `maxSegment` граница ставится принудительно (даже
-    ///   посреди речи — жёсткий потолок);
-    /// - на стыке тишина не входит ни в один сегмент (режем у кромок паузы);
-    /// - на выходе сегменты покрывают запись без пропусков и перекрытий.
-    static func splitRanges(
-        rms: [Float],
-        windowDuration: TimeInterval,
-        config: AudioSegmenterConfig = .defaults
-    ) -> [Range<Int>] {
-        guard !rms.isEmpty else { return [] }
-        let pauseWindows = max(1, Int(round(config.pauseDuration / windowDuration)))
+    var segments: [Range<Int>] = []
+    var segStart = 0
+    var silenceStart: Int?
 
-        var segments: [Range<Int>] = []
-        var segStart = 0
-        var silenceStart: Int?
+    for i in 0 ..< rms.count {
+      // Жёсткий потолок: режем по достижении максимальной длины.
+      let segmentDuration = TimeInterval(i - segStart + 1) * windowDuration
+      if segmentDuration >= config.maxSegment {
+        appendSegmentIfHasSpeech(rms: rms, range: segStart ..< (i + 1), threshold: config.silenceRMS, to: &segments)
+        segStart = i + 1
+        silenceStart = nil
+        continue
+      }
 
-        for i in 0..<rms.count {
-            // Жёсткий потолок: режем по достижении максимальной длины.
-            let segmentDuration = TimeInterval(i - segStart + 1) * windowDuration
-            if segmentDuration >= config.maxSegment {
-                if (rms[segStart..<(i + 1)].max() ?? 0) >= config.silenceRMS {
-                    segments.append(segStart..<(i + 1))
-                }
-                segStart = i + 1
-                silenceStart = nil
-                continue
-            }
-
-            if rms[i] < config.silenceRMS {
-                if silenceStart == nil { silenceStart = i }
-                continue
-            }
-
-            // Окончание паузы: снова речь.
-            if let pauseStart = silenceStart {
-                silenceStart = nil
-                let sustained = (i - pauseStart) >= pauseWindows
-                guard sustained else { continue }
-                // Кромка паузы закрывает предыдущий сегмент; пауза — ничейная.
-                let boundary = pauseStart - 1
-                guard boundary >= segStart else { continue }
-                let duration = TimeInterval(boundary - segStart + 1) * windowDuration
-                guard duration >= config.minSegment else { continue }
-                segments.append(segStart..<(boundary + 1))
-                segStart = i
-            }
+      if rms[i] < config.silenceRMS {
+        if silenceStart == nil {
+          silenceStart = i
         }
-        // Хвост записи после последней границы: только если в нём ЕСТЬ речь.
-        // Полностью тихий хвост (и вся запись без голоса) в сегменты не входит —
-        // иначе молчание порождало бы «пустой» сегмент и лишний STT-запрос.
-        if segStart < rms.count, (rms[segStart..<rms.count].max() ?? 0) >= config.silenceRMS {
-            let trail = segStart..<rms.count
-            let trailSeconds = TimeInterval(trail.count) * windowDuration
-            // F3: если хвост короче minSegment, приклеиваем его к предыдущему
-            // сегменту, если суммарная длина не превысит maxSegment.
-            if trailSeconds < config.minSegment,
-               let last = segments.last,
-               TimeInterval(last.count) * windowDuration + trailSeconds <= config.maxSegment {
-                segments[segments.count - 1] = last.lowerBound..<rms.count
-            } else {
-                segments.append(trail)
-            }
-        }
-        return segments
+        continue
+      }
+
+      // Окончание паузы: снова речь.
+      if let pauseStart = silenceStart {
+        silenceStart = nil
+        let sustained = (i - pauseStart) >= pauseWindows
+        guard sustained else { continue }
+        // Кромка паузы закрывает предыдущий сегмент; пауза — ничейная.
+        let boundary = pauseStart - 1
+        guard boundary >= segStart else { continue }
+        let duration = TimeInterval(boundary - segStart + 1) * windowDuration
+        guard duration >= config.minSegment else { continue }
+        segments.append(segStart ..< (boundary + 1))
+        segStart = i
+      }
     }
+    appendTrailingSegment(rms: rms, segStart: segStart, windowDuration: windowDuration, config: config, to: &segments)
+    return segments
+  }
 
-    // MARK: - Разбиение по сэмплам
-
-    /// Делит Int16 PCM-сэмплы (16 кГц) на сегменты с оверлэпом.
-    /// Сэмплы считаются непрерывными от начала записи.
-    public static func segments(
-        samples: [Int16],
-        sampleRate: Int = 16000,
-        config: AudioSegmenterConfig = .defaults
-    ) -> [AudioSegment] {
-        let windowSize = max(1, Int((defaultWindowDuration * Double(sampleRate)).rounded()))
-        var rms: [Float] = []
-        var cursor = 0
-        while cursor < samples.count {
-            let chunk = Array(samples[cursor..<min(cursor + windowSize, samples.count)])
-            rms.append(AudioMetrics.rms(samples: chunk))
-            cursor += windowSize
-        }
-        let ranges = splitRanges(rms: rms, windowDuration: defaultWindowDuration, config: config)
-        guard !ranges.isEmpty else { return [] }
-
-        let overlapCount = min(
-            max(0, Int((config.overlap * Double(sampleRate)).rounded())),
-            samples.count
-        )
-
-        var result: [AudioSegment] = []
-        for (index, range) in ranges.enumerated() {
-            let bodyStart = range.lowerBound * windowSize
-            let bodyEnd = min(range.upperBound * windowSize, samples.count)
-            let body = Array(samples[bodyStart..<bodyEnd])
-
-            var segSamples = body
-            var overlapSeconds: TimeInterval = 0
-            if index > 0 {
-                // Оверлэп берётся из ХВОСТА ТЕЛА предыдущего сегмента (речь),
-                // а не из region вблизи bodyStart (там может быть тишина паузы).
-                let prevEnd = min(ranges[index - 1].upperBound * windowSize, samples.count)
-                let overlapFrom = max(0, prevEnd - overlapCount)
-                segSamples = Array(samples[overlapFrom..<prevEnd]) + body
-                // Фактически приклеено min(overlapCount, prevEnd) сэмплов —
-                // короткое предыдущее тело каппит конфигурируемый оверлэп.
-                overlapSeconds = TimeInterval(prevEnd - overlapFrom) / Double(sampleRate)
-            }
-
-            result.append(AudioSegment(
-                start: TimeInterval(bodyStart) / Double(sampleRate),
-                end: TimeInterval(bodyEnd) / Double(sampleRate),
-                samples: segSamples,
-                overlapSeconds: overlapSeconds
-            ))
-        }
-        return result
+  /// Добавляет диапазон в сегменты, только если в нём есть речь (не тишина).
+  private static func appendSegmentIfHasSpeech(
+    rms: [Float],
+    range: Range<Int>,
+    threshold: Float,
+    to segments: inout [Range<Int>]
+  ) {
+    if (rms[range].max() ?? 0) >= threshold {
+      segments.append(range)
     }
+  }
+
+  /// Обрабатывает хвост записи после последней границы: полностью тихий хвост
+  /// (и вся запись без голоса) в сегменты не входит — иначе молчание порождало
+  /// бы «пустой» сегмент и лишний STT-запрос. Если хвост короче minSegment,
+  /// приклеиваем его к предыдущему сегменту, если суммарная длина не превысит
+  /// maxSegment.
+  private static func appendTrailingSegment(
+    rms: [Float],
+    segStart: Int,
+    windowDuration: TimeInterval,
+    config: AudioSegmenterConfig,
+    to segments: inout [Range<Int>]
+  ) {
+    guard segStart < rms.count, (rms[segStart ..< rms.count].max() ?? 0) >= config.silenceRMS else { return }
+    let trail = segStart ..< rms.count
+    let trailSeconds = TimeInterval(trail.count) * windowDuration
+    if trailSeconds < config.minSegment,
+       let last = segments.last, // swiftlint:disable:this indentation_width
+       TimeInterval(last.count) * windowDuration + trailSeconds <= config.maxSegment
+    { // swiftlint:disable:this opening_brace
+      segments[segments.count - 1] = last.lowerBound ..< rms.count
+    } else {
+      segments.append(trail)
+    }
+  }
+
+  // MARK: - Разбиение по сэмплам
+
+  /// Делит Int16 PCM-сэмплы (16 кГц) на сегменты с оверлэпом.
+  /// Сэмплы считаются непрерывными от начала записи.
+  public static func segments(
+    samples: [Int16],
+    sampleRate: Int = 16000,
+    config: AudioSegmenterConfig = .defaults
+  ) -> [AudioSegment] {
+    let windowSize = max(1, Int((defaultWindowDuration * Double(sampleRate)).rounded()))
+    var rms: [Float] = []
+    var cursor = 0
+    while cursor < samples.count {
+      let chunk = Array(samples[cursor ..< min(cursor + windowSize, samples.count)])
+      rms.append(AudioMetrics.rms(samples: chunk))
+      cursor += windowSize
+    }
+    let ranges = splitRanges(rms: rms, windowDuration: defaultWindowDuration, config: config)
+    guard !ranges.isEmpty else { return [] }
+
+    let overlapCount = min(
+      max(0, Int((config.overlap * Double(sampleRate)).rounded())),
+      samples.count
+    )
+
+    var result: [AudioSegment] = []
+    for (index, range) in ranges.enumerated() {
+      let bodyStart = range.lowerBound * windowSize
+      let bodyEnd = min(range.upperBound * windowSize, samples.count)
+      let body = Array(samples[bodyStart ..< bodyEnd])
+
+      var segSamples = body
+      var overlapSeconds: TimeInterval = 0
+      if index > 0 {
+        // Оверлэп берётся из ХВОСТА ТЕЛА предыдущего сегмента (речь),
+        // а не из region вблизи bodyStart (там может быть тишина паузы).
+        let prevEnd = min(ranges[index - 1].upperBound * windowSize, samples.count)
+        let overlapFrom = max(0, prevEnd - overlapCount)
+        segSamples = Array(samples[overlapFrom ..< prevEnd]) + body
+        // Фактически приклеено min(overlapCount, prevEnd) сэмплов —
+        // короткое предыдущее тело каппит конфигурируемый оверлэп.
+        overlapSeconds = TimeInterval(prevEnd - overlapFrom) / Double(sampleRate)
+      }
+
+      result.append(AudioSegment(
+        start: TimeInterval(bodyStart) / Double(sampleRate),
+        end: TimeInterval(bodyEnd) / Double(sampleRate),
+        samples: segSamples,
+        overlapSeconds: overlapSeconds
+      ))
+    }
+    return result
+  }
 }

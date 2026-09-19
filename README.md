@@ -53,6 +53,100 @@ Built as a Swift Package Manager package (`swift-tools-version:5.7`, macOS 12+).
   (`nanodictate retry <provider>`).
 - TOML configuration at `~/.config/nanodictate/config.toml`.
 
+## Installation
+
+Choose one of the three distribution paths. Homebrew and MacPorts are
+planned but not live yet (TODOs below); ready-to-run binaries for the latest
+release are always available from **GitHub Releases**.
+
+> **No Developer ID / no notarization (deliberate).** There is no paid Apple
+> Developer account behind this project, so release binaries are unsigned
+> (ad-hoc) and macOS may block *browser* downloads via Gatekeeper. See
+> [docs/packaging/homebrew.md](docs/packaging/homebrew.md) and
+> [docs/packaging/macports.md](docs/packaging/macports.md) for the details
+> and the `xattr` workaround below.
+
+### Homebrew (coming soon)
+
+The formula is a **binary formula**: `brew` downloads the prebuilt tarball
+from GitHub Releases and installs it as-is — no Xcode / Swift toolchain
+needed. TODO: the tap repository is not created yet, so the command below is
+pending.
+
+```sh
+brew install kodmial/nanodictate-homebrew/nanodictate
+```
+
+Requires **macOS 12+** only. Until the tap exists you can install the
+generated formula directly:
+`brew install /path/to/nanodictate/packaging/homebrew/nanodictate.rb`
+(also a binary download — nothing is compiled).
+
+### MacPorts (coming soon)
+
+The port is pending a PR to `macports-ports` (TODO: not accepted yet). It
+also builds from source:
+
+```sh
+sudo port install nanodictate
+```
+
+Requires **Xcode 14.3+** — the port sets `use_xcode yes` (there is no Swift
+port in MacPorts). Expect a long first build: SwiftPM compiles the whole
+package from source.
+
+### GitHub Releases (current)
+
+Prebuilt tarballs for both architectures are attached to every release —
+`nanodictate-0.1.0-macos-$(uname -m).tar.gz` resolves to
+`nanodictate-0.1.0-macos-arm64.tar.gz` on Apple Silicon and to
+`nanodictate-0.1.0-macos-x86_64.tar.gz` on Intel:
+
+```sh
+curl -L -O https://github.com/kodmial/nanodictate/releases/download/v0.1.0/nanodictate-0.1.0-macos-$(uname -m).tar.gz
+curl -L -O https://github.com/kodmial/nanodictate/releases/download/v0.1.0/SHA256SUMS.txt
+shasum -a 256 -c SHA256SUMS.txt        # optional: verifies the downloaded tarball
+```
+
+Extract into a directory and keep everything together — the CLI resolves the
+LaunchAgent plist template at `Resources/nanodictate-agent.plist.template`
+**next to the binary**:
+
+```sh
+mkdir -p ~/.local/bin
+tar xzf nanodictate-0.1.0-macos-$(uname -m).tar.gz
+cp NanoDictateAgent nanodictate ~/.local/bin/          # or /usr/local/bin with sudo
+cp -R Resources ~/.local/bin/                          # keep the plist template findable
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Then create the config, grant permissions and start the agent:
+
+```sh
+mkdir -p ~/.config/nanodictate
+cp config.example.toml ~/.config/nanodictate/config.toml   # then set STT providers / API keys
+nanodictate config init                                     # alternative: writes a default config
+nanodictate start                                           # bootstraps ~/Library/LaunchAgents/com.nanodictate.agent.plist
+```
+
+**Permissions (manual, required).** In **System Settings > Privacy &
+Security** add the `NanoDictateAgent` binary to **Microphone** and
+**Accessibility** (and **Input Monitoring** if the hotkey does not fire).
+macOS prompts on first use; grants are per-binary.
+
+**Browser downloads** (unlike `curl` and `brew`) get a `com.apple.quarantine`
+attribute, and Gatekeeper then refuses to run the unsigned ad-hoc binaries.
+Clear it once:
+
+```sh
+xattr -dr com.apple.quarantine ~/.local/bin/NanoDictateAgent ~/.local/bin/nanodictate
+```
+
+Requires **macOS 12+**. Xcode Command Line Tools are needed only for the
+MacPorts build-from-source path; the Homebrew formula and the GitHub Releases
+binaries run as-is. Once installed, see [Install & Run](#install--run) for the
+LaunchAgent, CLI and configuration details.
+
 ## Build & Test
 
 Requirements: macOS 12+, Swift toolchain, Node.js ≥ 22 (for the deploy MCP server).
