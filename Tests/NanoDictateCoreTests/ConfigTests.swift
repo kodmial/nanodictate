@@ -855,6 +855,16 @@ final class ConfigTests: XCTestCase {
         // применяется — база дефолты, иначе секции канона (6 шт.) и его
         // active_provider "airubiz" затёрли бы legacy-поля юзера (включая
         // api_key/api_key_file, которые resolveActiveProvider ставит в nil).
+        // Если в окружении задан NANODICTATE_API_KEY — снять (env имеет приоритет
+        // над файлом и перекрыл бы legacy api_key); паттерн — как в
+        // testLoadWithoutEnvKeepsFileKey, прежнее значение возвращается в defer.
+        let savedEnvKey = ProcessInfo.processInfo.environment["NANODICTATE_API_KEY"]
+        unsetenv("NANODICTATE_API_KEY")
+        defer {
+          if let savedEnvKey = savedEnvKey {
+            setenv("NANODICTATE_API_KEY", savedEnvKey, 1)
+          }
+        }
         let example = try exampleCanonContent()
         AppConfig.exampleContentOverride = example
         defer { AppConfig.exampleContentOverride = nil }

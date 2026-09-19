@@ -289,8 +289,14 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
     // (ровно прежнее поведение ветки «чистый legacy»); иначе секции канона
     // (6 шт.) и его active_provider "airubiz" затерли бы legacy-поля юзера
     // (включая apiKey/apiKeyFile, которые resolveActiveProvider ставит в nil).
+    // Маркеры ищутся по некомментарным строкам: закомментированные
+    // "# [providers.groq]" / "# active_provider = ..." legacy не ломают.
+    let nonCommentLines = content.split(separator: "\n").filter {
+      !$0.drop(while: { $0 == " " || $0 == "\t" }).hasPrefix("#")
+    }
     let isLegacyFlat =
-      !content.contains("[providers.") && !content.contains("active_provider")
+      !nonCommentLines.contains { $0.contains("[providers.") }
+        && !nonCommentLines.contains { $0.contains("active_provider") }
     let base: AppConfig
     if let example = exampleContent(), !isLegacyFlat {
       base = try parse(example)
