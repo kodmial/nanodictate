@@ -8,6 +8,9 @@ reviews:
   poem: false
   review_status: true
   collapse_walkthrough: false
+  # CodeRabbit caps at 100 files/run; this PR carries 134 — partition workaround (run A: everything except Tests/**).
+  path_filters:
+    - "!Tests/**"
   # Auto-review starts only after the review-ready label is applied; the label workflow (add-review-label.yml) applies it after CI passes.
   auto_review:
     enabled: false
@@ -24,9 +27,15 @@ reviews:
         This is a macOS dictation application (NanoDictate) written in Swift (Swift 5, swift-tools 5.7), no external packages.
         Accessibility and microphone TCC grants depend on the binary code signature staying stable (identity "NanoDictate Code Signing") — never suggest raw re-signing or entitlements changes casually.
         Never suggest embedding proxy routes, API keys, or secrets into code.
+    - path: Tests/**
+      instructions: |
+        Tests are a plain executable Swift package (no .xctest bundle): runner is Tests/NanoDictateCoreTests/main.swift executed via `swift run NanoDictateCoreTests`.
+        New behavior must be covered by tests in that suite.
   exclude_files:
     - CHANGELOG.md
     - Package.resolved
+    - Tests/**
+    - Tests
   tools:
     gitleaks:
       enabled: true

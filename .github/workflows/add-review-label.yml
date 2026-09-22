@@ -23,10 +23,10 @@ jobs:
               state: 'open',
               head: run.head_branch,
             });
-            // same-repo PRs only, matching the exact commit that was just tested
+            // 'workflow_run' runs triggered by pull_request carry the merge SHA, not the
+            // PR head SHA, so match by branch + same repo + open + non-draft only.
             const ours = prs.data.filter((pr) =>
               !pr.draft &&
-              pr.head.sha === run.head_sha &&
               pr.head.repo.full_name === context.repo.full_name
             );
             if (run.conclusion === 'success') {
