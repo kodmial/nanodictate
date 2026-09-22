@@ -1,0 +1,152 @@
+name: Bump version
+
+# Auto-bump the patch version after a PR is merged into main — this closes the
+# "merge -> bump -> release" chain: a merge whose PR did NOT bump
+# Sources/NanoDictateCore/Version.swift gets the version bumped X.Y.N -> X.Y.(N+1)
+# and the Release workflow is dispatched for the new version, so a release is
+# created without any human action.
+#
+# If the PR DID bump the version already (Version.swift is ahead of the latest
+# published release) this workflow is a green no-op — no double bump.
+#
+# No loop by construction: this workflow triggers ONLY on `pull_request` closed
+# (not on `push`), so the bump commit it pushes to main cannot re-trigger it.
+# The bump commit is pushed with the GITHUB_TOKEN, and GITHUB_TOKEN pushes do
+# NOT start new push-event workflow runs — the Release workflow is therefore
+# dispatched explicitly after the push (see the last step); that dispatch is
+# what makes "merge -> bump -> release" complete automatically.
+#
+# Hard stop: every series is capped at patch 100 (user policy, mirrored by
+# release.yml's version guard — currently 0.0.1..0.0.100 and 0.1.0..0.1.100).
+# Nothing is bumped past X.Y.100 within a series.
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions: {}
+
+jobs:
+  bump:
+    if: github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - name: Checkout main
+        # Same pinned actions/checkout as release.yml. Explicit main ref: the
+        # default ref for a pull_request event is the merge ref, which is gone
+        # once the PR is closed. fetch-depth: 0 + fetch-tags pull the full
+        # history INCLUDING the previous release tag (v$LATEST): the "real
+        # code changes" guard below diffs the merged HEAD against that tag.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Bump patch version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # Current version from the single source of truth (same extraction
+          # as release.yml's preflight step).
+          CURRENT=$(grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' Sources/NanoDictateCore/Version.swift)
+          echo "Version.swift: ${CURRENT:-<none>}"
+          if [[ -z "$CURRENT" ]]; then
+            echo "::error::Could not extract a version from Sources/NanoDictateCore/Version.swift"
+            exit 1
+          fi
+
+          # Latest published release (release tags are vX.Y.N; strip the v).
+          LATEST=$(gh release list --limit 1 --json tagName --jq '.[0].tagName // empty' | sed 's/^v//')
+          echo "Latest release: ${LATEST:-<none>}"
+          if [[ -z "$LATEST" ]]; then
+            echo "::warning::No published release yet — the first release of the series is created manually (tag push); nothing to bump."
+            exit 0
+          fi
+
+          # Parse major.minor.patch for both versions. Comparison must be
+          # series-aware (major/minor/patch): the patch-only comparison of the
+          # 0.0.x era would mis-order across series (0.1.0 must rank above 0.0.17).
+          IFS=. read -r C_MAJ C_MIN C_PAT <<< "$CURRENT"
+          IFS=. read -r L_MAJ L_MIN L_PAT <<< "$LATEST"
+
+          CMP=0
+          if (( C_MAJ != L_MAJ )); then
+            (( C_MAJ < L_MAJ )) && CMP=-1 || CMP=1
+          elif (( C_MIN != L_MIN )); then
+            (( C_MIN < L_MIN )) && CMP=-1 || CMP=1
+          elif (( C_PAT != L_PAT )); then
+            (( C_PAT < L_PAT )) && CMP=-1 || CMP=1
+          fi
+
+          if (( CMP > 0 )); then
+            echo "Version.swift ($CURRENT) is already ahead of the latest release ($LATEST) — the PR bumped it manually, nothing to do."
+            exit 0
+          fi
+          if (( CMP < 0 )); then
+            echo "::warning::Version.swift ($CURRENT) is BEHIND the latest release ($LATEST) — refusing to touch it; bump the version in the PR."
+            exit 0
+          fi
+
+          # Real-change guard: refuse to bump when the merged HEAD carries NO
+          # code change vs the previous release tag (v$LATEST) — a diff limited
+          # to Version.swift, CHANGELOG.md, README.md, SECURITY.md, LICENSE,
+          # docs/, .github/ (workflows, issue templates, PR template),
+          # .githooks/, the root meta-dotfiles (.gitignore, .swift-format,
+          # .swiftlint.yml, .coderabbit.yaml) and packaging files (formula /
+          # manifests / tpl / config) would publish an empty release. User
+          # policy: the pipeline must not self-release empty versions.
+          PREV_TAG="v$LATEST"
+          ALL_CHANGED=$(git diff --name-only "$PREV_TAG"..HEAD)
+          CODE_CHANGES=$(printf '%s\n' "$ALL_CHANGED" \
+            | grep -vE '^(Sources/NanoDictateCore/Version\.swift|CHANGELOG\.md|README\.md|\.github/.*|\.githooks/.*|docs/.*|packaging/.*|nanodictate\.rb|config\.example\.toml|SECURITY\.md|CODE_OF_CONDUCT\.md|CONTRIBUTING\.md|LICENSE|\.gitignore|\.swift-format|\.swiftlint\.yml|\.coderabbit\.yaml)$' \
+            | grep -v '^$' || true)
+          if [[ -z "${ALL_CHANGED:-}" ]]; then
+            echo "::error::no code changes — bump refused (nothing changed since $PREV_TAG)"
+            exit 1
+          fi
+          if [[ -z "$CODE_CHANGES" ]]; then
+            echo "::error::no code changes — bump refused (only Version.swift / CHANGELOG.md / README.md / SECURITY.md / LICENSE / docs / .github / .githooks / repo meta files / packaging files changed since $PREV_TAG)"
+            exit 1
+          fi
+          echo "Real changes since $PREV_TAG: $CODE_CHANGES"
+
+          # Equal: the merged PR did NOT bump the version — bump it now, unless
+          # the patch cap of the CURRENT series (100, user policy:
+          # 0.0.1..0.0.100 and 0.1.0..0.1.100, mirrored by release.yml's version
+          # guard) is already reached. release.yml rejects anything above the
+          # cap, so bumping past it would fail the release anyway.
+          if (( C_PAT >= 100 )); then
+            echo "::warning::Version $CURRENT is at the patch-100 hard cap of the $C_MAJ.$C_MIN.x series (user policy) — refusing to bump to $C_MAJ.$C_MIN.101. A future series (e.g. 0.2.x) requires a manual version change."
+            exit 0
+          fi
+          NEW="$C_MAJ.$C_MIN.$(( C_PAT + 1 ))"
+          sed -i.bak -E "s/(let string = \")[0-9]+\.[0-9]+\.[0-9]+(\")/\1$NEW\2/" Sources/NanoDictateCore/Version.swift
+          rm -f Sources/NanoDictateCore/Version.swift.bak
+          if ! grep -q "let string = \"$NEW\"" Sources/NanoDictateCore/Version.swift; then
+            echo "::error::Failed to rewrite Sources/NanoDictateCore/Version.swift to $NEW"
+            exit 1
+          fi
+          echo "Bumped Sources/NanoDictateCore/Version.swift: $CURRENT -> $NEW"
+
+          git config user.name "dima"
+          git config user.email "dima@users.noreply.github.com"
+          git add Sources/NanoDictateCore/Version.swift
+          git commit -m "chore(version): bump v$NEW"
+          git push origin main
+
+          # The push above is a GITHUB_TOKEN push and therefore does NOT
+          # trigger the push-main Release workflow run (GitHub's documented
+          # GITHUB_TOKEN event suppression). Dispatch the Release workflow
+          # explicitly so "merge -> bump -> release" completes without human
+          # action: the merged PR's own push already ran Release for the OLD
+          # version (a green no-op when it was already published); this
+          # dispatch is what releases the NEW version, which Release derives
+          # from Version.swift on the default branch.
+          gh workflow run release.yml
+          echo "Dispatched the Release workflow — it will publish v$NEW."

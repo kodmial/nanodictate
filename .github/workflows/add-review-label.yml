@@ -1,0 +1,54 @@
+name: mark-ready-for-coderabbit
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  add-label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const run = context.payload.workflow_run;
+            const prs = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              head: run.head_branch,
+            });
+            // 'workflow_run' runs triggered by pull_request carry the merge SHA, not the
+            // PR head SHA, so match by branch + same repo + open + non-draft only.
+            const ours = prs.data.filter((pr) =>
+              !pr.draft &&
+              pr.head.repo.full_name === context.repo.full_name
+            );
+            if (run.conclusion === 'success') {
+              for (const pr of ours) {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  labels: ['review-ready'],
+                });
+              }
+            } else {
+              for (const pr of ours) {
+                try {
+                  await github.rest.issues.removeLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: pr.number,
+                    name: 'review-ready',
+                  });
+                } catch (err) {
+                  // label absent, nothing to remove
+                }
+              }
+            }
