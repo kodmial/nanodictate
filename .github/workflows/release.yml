@@ -26,7 +26,7 @@ on:
     inputs:
       version:
         description: >-
-          Version to publish (e.g. 0.1.0 or v0.1.0). Leave empty to derive it
+          Version to publish (e.g. 0.0.2 or v0.0.2). Leave empty to derive it
           from Sources/NanoDictateCore/Version.swift.
         required: false
         type: string
@@ -103,11 +103,11 @@ jobs:
             echo "::error::Could not extract a semver from Sources/NanoDictateCore/Version.swift (and no tag/input version was provided)."
             exit 1
           fi
-          # User version policy: only 0.0.1..0.0.100 and 0.1.0..0.1.100 may be
-          # released. Any higher version, prerelease, or lower 0.0.x (0.0.0,
-          # 0.0.101+) fails.
-          if ! [[ "$VERSION" =~ ^0\.(0\.(0?[1-9]|[1-9][0-9]|100)|1\.(0|[1-9][0-9]?|100))$ ]]; then
-            echo "::error::Forbidden version $VERSION: only 0.0.1..0.0.100 and 0.1.0..0.1.100 are allowed (user policy)"
+          # User version policy: only the 0.0.x and 0.1.x series may be
+          # released — any other major/minor, a prerelease, or a leading zero
+          # (0.0.05) fails.
+          if ! [[ "$VERSION" =~ ^0\.(0|1)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Forbidden version $VERSION: only 0.0.x and 0.1.x (no leading zeros) are allowed (user policy)"
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -204,7 +204,7 @@ jobs:
               content="$(git show "origin/main:$f")"
               case "$f" in
                 *.rb)
-                  # Homebrew formula pins the version as `version "X.Y.N"`.
+                  # Homebrew formula pins the version as `version "0.0.N"`.
                   if ! grep -q "version \"$VERSION\"" <<<"$content"; then
                     echo "Committed $f does not pin version $VERSION — formula is stale."
                     MANIFESTS_OK=false

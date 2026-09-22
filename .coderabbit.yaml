@@ -34,8 +34,6 @@ reviews:
   exclude_files:
     - CHANGELOG.md
     - Package.resolved
-    - Tests/**
-    - Tests
   tools:
     gitleaks:
       enabled: true

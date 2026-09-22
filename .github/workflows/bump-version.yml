@@ -2,7 +2,7 @@ name: Bump version
 
 # Auto-bump the patch version after a PR is merged into main — this closes the
 # "merge -> bump -> release" chain: a merge whose PR did NOT bump
-# Sources/NanoDictateCore/Version.swift gets the version bumped X.Y.N -> X.Y.(N+1)
+# Sources/NanoDictateCore/Version.swift gets the version bumped 0.0.N -> 0.0.(N+1)
 # and the Release workflow is dispatched for the new version, so a release is
 # created without any human action.
 #
@@ -16,9 +16,8 @@ name: Bump version
 # dispatched explicitly after the push (see the last step); that dispatch is
 # what makes "merge -> bump -> release" complete automatically.
 #
-# Hard stop: every series is capped at patch 100 (user policy, mirrored by
-# release.yml's version guard — currently 0.0.1..0.0.100 and 0.1.0..0.1.100).
-# Nothing is bumped past X.Y.100 within a series.
+# Hard stop: the 0.0.x series is capped at 0.0.100 (user policy, mirrored by
+# release.yml's version guard). Nothing is bumped past 0.0.100.
 
 on:
   pull_request:
@@ -61,7 +60,7 @@ jobs:
             exit 1
           fi
 
-          # Latest published release (release tags are vX.Y.N; strip the v).
+          # Latest published release (release tags are v0.0.N; strip the v).
           LATEST=$(gh release list --limit 1 --json tagName --jq '.[0].tagName // empty' | sed 's/^v//')
           echo "Latest release: ${LATEST:-<none>}"
           if [[ -z "$LATEST" ]]; then
@@ -69,26 +68,36 @@ jobs:
             exit 0
           fi
 
-          # Parse major.minor.patch for both versions. Comparison must be
-          # series-aware (major/minor/patch): the patch-only comparison of the
-          # 0.0.x era would mis-order across series (0.1.0 must rank above 0.0.17).
-          IFS=. read -r C_MAJ C_MIN C_PAT <<< "$CURRENT"
-          IFS=. read -r L_MAJ L_MIN L_PAT <<< "$LATEST"
-
-          CMP=0
-          if (( C_MAJ != L_MAJ )); then
-            (( C_MAJ < L_MAJ )) && CMP=-1 || CMP=1
-          elif (( C_MIN != L_MIN )); then
-            (( C_MIN < L_MIN )) && CMP=-1 || CMP=1
-          elif (( C_PAT != L_PAT )); then
-            (( C_PAT < L_PAT )) && CMP=-1 || CMP=1
+          # Strict version shape guard: only 0.0.x / 0.1.x (no leading zeros)
+          # is accepted. Any other shape would either break the octal-prone
+          # arithmetic below (0.0.08) or be silently rewritten to the 0.0.x
+          # series by the patch bump.
+          if ! [[ "$CURRENT" =~ ^0\.(0|1)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Unexpected version in Version.swift: '$CURRENT' — expected 0.0.x or 0.1.x (no leading zeros)."
+            exit 1
+          fi
+          if ! [[ "$LATEST" =~ ^0\.(0|1)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Unexpected latest release tag: '$LATEST' — expected 0.0.x or 0.1.x (no leading zeros)."
+            exit 1
           fi
 
-          if (( CMP > 0 )); then
+          # 10# forces base-10: a leading zero would be read as octal (08/09
+          # are a hard bash error). Safe even though the guard above already
+          # rules leading zeros out — belt and braces. Only the patch part is
+          # needed here — the ordering comparison below runs on the FULL
+          # major.minor.patch, not on the patch alone.
+          N_CUR=$(( 10#${CURRENT##*.} ))
+
+          # Full semver order (sort -V): 0.1.0 ranks AHEAD of 0.0.99 even
+          # though its patch part (0) is smaller — patch-only compares would
+          # misrank across minor versions.
+          EARLIEST=$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | sort -V | head -n 1)
+
+          if [[ "$CURRENT" != "$LATEST" && "$EARLIEST" == "$LATEST" ]]; then
             echo "Version.swift ($CURRENT) is already ahead of the latest release ($LATEST) — the PR bumped it manually, nothing to do."
             exit 0
           fi
-          if (( CMP < 0 )); then
+          if [[ "$CURRENT" != "$LATEST" && "$EARLIEST" == "$CURRENT" ]]; then
             echo "::warning::Version.swift ($CURRENT) is BEHIND the latest release ($LATEST) — refusing to touch it; bump the version in the PR."
             exit 0
           fi
@@ -117,15 +126,19 @@ jobs:
           echo "Real changes since $PREV_TAG: $CODE_CHANGES"
 
           # Equal: the merged PR did NOT bump the version — bump it now, unless
-          # the patch cap of the CURRENT series (100, user policy:
-          # 0.0.1..0.0.100 and 0.1.0..0.1.100, mirrored by release.yml's version
-          # guard) is already reached. release.yml rejects anything above the
-          # cap, so bumping past it would fail the release anyway.
-          if (( C_PAT >= 100 )); then
-            echo "::warning::Version $CURRENT is at the patch-100 hard cap of the $C_MAJ.$C_MIN.x series (user policy) — refusing to bump to $C_MAJ.$C_MIN.101. A future series (e.g. 0.2.x) requires a manual version change."
+          # the 0.0.x series hard cap is already reached. The cap is a user
+          # policy: the 0.0.1..0.0.100 series must not exceed 0.0.100 (release.yml
+          # rejects anything above it, so bumping past it would fail the
+          # release anyway — and the user forbids leaving the series).
+          # The cap applies ONLY to the 0.0.x series: 0.1.x may grow past
+          # patch=100 (0.1.101 is fine), so it is gated on the "0.0." prefix.
+          if [[ "$CURRENT" == 0.0.* ]] && (( N_CUR >= 100 )); then
+            echo "::warning::Version $CURRENT is the 0.0.100 hard cap of the 0.0.x series (user policy) — refusing to bump to 0.0.101. A future series (e.g. 0.1.x) requires a manual version change."
             exit 0
           fi
-          NEW="$C_MAJ.$C_MIN.$(( C_PAT + 1 ))"
+          # Preserve the current major.minor prefix: 0.1.12 must bump to
+          # 0.1.13, never be rewritten into the 0.0.x series.
+          NEW="${CURRENT%.*}.$(( N_CUR + 1 ))"
           sed -i.bak -E "s/(let string = \")[0-9]+\.[0-9]+\.[0-9]+(\")/\1$NEW\2/" Sources/NanoDictateCore/Version.swift
           rm -f Sources/NanoDictateCore/Version.swift.bak
           if ! grep -q "let string = \"$NEW\"" Sources/NanoDictateCore/Version.swift; then

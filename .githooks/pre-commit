@@ -1,0 +1,109 @@
+#!/bin/zsh
+# Белый pre-commit hook для NanoDictate.
+#
+# Проверяет ТОЛЬКО staged .swift-файлы и блокирует коммит строго при ошибках
+# линтеров (error-уровень). Предупреждения (warnings) печатаются, но коммит
+# не останавливают. Незастейдженный/старый код не проверяется.
+#
+# Семантика выхода (без --strict, поэтому «белый»):
+#   swift-format lint — exit 0 при предупреждениях, exit 1 при ошибках
+#     (битый синтаксис / невалидный Swift);
+#   swiftlint lint    — exit 0 при предупреждениях и чистоте,
+#     ненулевой exit только при error/serious-нарушениях.
+# Отсюда правило: ненулевой exit = блокировать.
+
+# --- Защита: работаем только в git-репозитории с этим хуком --------------
+# git вызывает хук только для репозитория с core.hooksPath=.githooks
+# (см. README). Дополнительно проверяем, что корень репозитория содержит
+# наш .githooks/pre-commit: если хук скопировали в чужой проект — он молча
+# выйдет (exit 0) и ничего не заблокирует.
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+if [[ ! -f "$repo_root/.githooks/pre-commit" ]]; then
+    exit 0
+fi
+cd "$repo_root" || exit 0
+
+# --- Список staged .swift-файлов (A=added, C=copied, M=modified, R=renamed) -
+files=$(git diff --cached --name-only --diff-filter=ACMR | grep '\.swift$' || true)
+if [[ -z "$files" ]]; then
+    exit 0
+fi
+file_array=("${(@f)files}")
+
+blocked=0
+violated=()
+
+# --- Резолвинг инструментов: PATH, затем типичные brew/port-пути ------------
+# (Apple Silicon: /opt/homebrew/bin, MacPorts: /opt/local/bin, Intel brew:
+# /usr/local/bin). Не нашлось — переменная пустая, хуки капитулируют ниже.
+resolve() {
+    local name=$1 p
+    command -v "$name" 2>/dev/null && return 0
+    for p in /opt/homebrew/bin /opt/local/bin /usr/local/bin; do
+        if [[ -x "$p/$name" ]]; then
+            print -r -- "$p/$name"
+            return 0
+        fi
+    done
+    return 1
+}
+SWIFT_FORMAT=$(resolve swift-format)
+SWIFTLINT=$(resolve swiftlint)
+
+# --- Гейт: линчим ИНДЕКС, а не worktree --------------------------------------
+# (git add f.swift && rm f.swift && git commit) должен линтить застейдженный
+# контент: содержимое файла берём из staging area (`git show :./<path>`), а не
+# с диска. Added-файлы имеют индексный blob; удалённые (D) в список вообще не
+# попадают (diff-filter=ACMR). Файл без индексного содержимого пропускаем.
+staged=()
+for f in "${file_array[@]}"; do
+    if git show ":./$f" >/dev/null 2>&1; then
+        staged+=("$f")
+    else
+        echo "warning: $f отсутствует в индексе — пропуск" >&2
+    fi
+done
+if [[ ${#staged[@]} -eq 0 ]]; then
+    exit 0
+fi
+
+echo "pre-commit lint: проверяю staged Swift-файлов: ${#staged[@]}"
+
+# --- (а) swift-format: staged-контент по файлу, из индекса ------------------
+# Валидируем staging area, а не worktree: git show :./<path> -> stdin.
+# --assume-filename возвращает диагнозам реальное имя файла (lint без аргументов
+# читает источник из stdin).
+if [[ ! -x "$SWIFT_FORMAT" ]]; then
+    echo "warning: swift-format не найден (PATH, /opt/homebrew/bin, /opt/local/bin, /usr/local/bin) — пропущен, коммит не блокируется" >&2
+else
+    for f in "${staged[@]}"; do
+        if ! ( set -o pipefail; git show ":./$f" | "$SWIFT_FORMAT" lint --assume-filename "$f" 2>&1 ); then
+            blocked=1
+            violated+=("swift-format: $f")  # error-уровень (битый синтаксис и т.п.)
+        fi
+    done
+fi
+
+# --- (б) swiftlint: staged-контент через --use-stdin ------------------------
+# Тот же индекс, а не worktree: git show :./<path> -> stdin (--use-stdin —
+# «Lint standard input», актуально для 0.55).
+if [[ ! -x "$SWIFTLINT" ]]; then
+    echo "warning: swiftlint не найден (PATH, /opt/homebrew/bin, /opt/local/bin, /usr/local/bin) — пропущен, коммит не блокируется" >&2
+else
+    for f in "${staged[@]}"; do
+        if ! ( set -o pipefail; git show ":./$f" | "$SWIFTLINT" lint --use-stdin 2>&1 ); then
+            blocked=1
+            violated+=("swiftlint: $f")  # error/serious-нарушения
+        fi
+    done
+fi
+
+# --- Итог: предупреждения уже напечатаны выше, блокируем только ошибки -----
+if [[ $blocked -eq 1 ]]; then
+    echo "Commit blocked by lint:"
+    for v in "${violated[@]}"; do
+        echo "  $v"
+    done
+    exit 1
+fi
+exit 0

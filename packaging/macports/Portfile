@@ -1,8 +1,8 @@
 # -*- coding: utf-8; mode: tcl; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- vim:fenc=utf-8:ft=tcl:et:sw=4:ts=4:sts=4
 
 # NanoDictate — macOS dictation (double-Alt, bilingual EN/RU, 4 STT providers).
-# Template: __VERSION__, __SHA256_ARM64__, __SHA256_X86_64__, __MAINTAINERS__
-# (env MAINTAINERS), __REVISION__ (env REVISION, default 0) are filled by
+# Template: 0.0.16, 0a3611c376e88a2d8304bb291f946a19ea978456b69beb1283344d5fdc7935e6, 31489b8af3e5bdbddd877bdc2c00fd9cb0f9ea2fd6d00c7bd9a1e8ce8f04af43, @kodmial
+# (env MAINTAINERS), 0 (env REVISION, default 0) are filled by
 # scripts/release-prep.rb — do not hand-edit the output.
 
 PortSystem          1.0
@@ -11,32 +11,32 @@ PortGroup           github 1.0
 # Binary port (symmetry with the Homebrew formula): the prebuilt tarball
 # attached to the tag is installed as-is — NO Xcode / Swift toolchain needed
 # on the user's machine. Tarball name is arch-dependent
-# (nanodictate-__VERSION__-macos-<arm64|x86_64>.tar.gz, built by
+# (nanodictate-0.0.16-macos-<arm64|x86_64>.tar.gz, built by
 # .github/workflows/release.yml), so distfile + checksum are chosen by
-# ${os.arch}; the download URL is derived from the tag v__VERSION__.
+# ${os.arch}; the download URL is derived from the tag v0.0.16.
 # master_sites points at the GitHub release assets (needed to fetch the
 # arch-specific distfile itself, not just for livecheck); livecheck.type
 # github walks repo tags. The checksums are filled by scripts/release-prep.rb.
-github.setup        kodmial nanodictate __VERSION__ v
-revision            __REVISION__
+github.setup        kodmial nanodictate 0.0.16 v
+revision            0
 
-master_sites        https://github.com/kodmial/nanodictate/releases/download/v__VERSION__
+master_sites        https://github.com/kodmial/nanodictate/releases/download/v0.0.16
 
 # MacPorts os.arch is NOT the Apple arch string: it maps tcl_platform(machine)
 # to arm / i386 / powerpc (macports.tcl), so Apple Silicon is "arm", not
 # "arm64" — checking "arm64" would never match and Intel's tarball was picked.
 if {${os.arch} eq "arm"} {
-    distfiles       nanodictate-__VERSION__-macos-arm64.tar.gz
-    checksums       sha256  __SHA256_ARM64__
+    distfiles       nanodictate-0.0.16-macos-arm64.tar.gz
+    checksums       sha256  0a3611c376e88a2d8304bb291f946a19ea978456b69beb1283344d5fdc7935e6
 } else {
-    distfiles       nanodictate-__VERSION__-macos-x86_64.tar.gz
-    checksums       sha256  __SHA256_X86_64__
+    distfiles       nanodictate-0.0.16-macos-x86_64.tar.gz
+    checksums       sha256  31489b8af3e5bdbddd877bdc2c00fd9cb0f9ea2fd6d00c7bd9a1e8ce8f04af43
 }
 
 platforms           {darwin >= 21}
 categories          audio
 license             MIT
-maintainers         __MAINTAINERS__ \
+maintainers         @kodmial \
                     openmaintainer
 
 description         macOS dictation: double-Alt, bilingual EN/RU, 4 STT providers

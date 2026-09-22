@@ -1,0 +1,43 @@
+/.build/
+.DS_Store
+msw.rtf
+transcription_raw.json
+transcription_raw.json.claude/
+example/
+.claude/
+.playwright-mcp/
+.idea/
+
+# Agent logs
+agent.log
+
+# Local configs holding API keys (never commit secrets)
+config.local.toml
+*.local.toml
+
+# Copies of the LaunchAgent plist (original lives in Resources/)
+com.nanodictate.*.plist
+com.nanodictate.agent.plist
+Resources/nanodictate-agent.plist
+
+# Local secrets / temp credentials (never commit)
+*.keys
+.env
+*.env
+.token
+*.token
+/*.plist
+
+# Temporary files
+*.tmp
+*.log
+*.bak
+*~
+
+# Generated packaging outputs (filled by scripts/release-prep.rb — keep the .tpl sources only).
+# These files are tracked and the release workflow force-commits them (release.yml does
+# `git add -f` in the manifests job): the ignore rules only keep a local regeneration out
+# of `git status` — never hand-edit the committed copies.
+/packaging/homebrew/nanodictate.rb
+/packaging/homebrew/Casks/nanodictate.rb
+/packaging/macports/Portfile
