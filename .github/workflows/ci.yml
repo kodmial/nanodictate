@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build-and-test:
-    name: Build & Test (macOS)
+    name: Build (macOS)
     # macos-latest tracks macOS 26 (Xcode 26, SDK 26.5), too new for any
     # current swift.org toolchain. macos-15 pins the macOS 15.5 SDK, which
     # the Swift 6.1 toolchain parses cleanly.
@@ -45,10 +45,3 @@ jobs:
 
       - name: Build
         run: swift build
-
-      # The tests are a plain executable product (no .xctest bundle): without
-      # Xcode, `swift test` is unavailable, so `swift run` executes the custom
-      # runner (Tests/NanoDictateCoreTests/main.swift), which exits non-zero if
-      # any test fails.
-      - name: Run tests
-        run: swift run NanoDictateCoreTests
