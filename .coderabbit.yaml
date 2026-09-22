@@ -1,0 +1,69 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+early_access: false
+reviews:
+  profile: assertive
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+  # CodeRabbit caps at 100 files/run; this PR carries 134 — partition workaround (run A: everything except Tests/**).
+  path_filters:
+    - "!Tests/**"
+  # Auto-review starts only after the review-ready label is applied; the label workflow (add-review-label.yml) applies it after CI passes.
+  auto_review:
+    enabled: false
+    labels:
+      - review-ready
+    auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 0
+    drafts: false
+    base_branches:
+      - main
+  path_instructions:
+    - path: Sources/**
+      instructions: |
+        This is a macOS dictation application (NanoDictate) written in Swift (Swift 5, swift-tools 5.7), no external packages.
+        Accessibility and microphone TCC grants depend on the binary code signature staying stable (identity "NanoDictate Code Signing") — never suggest raw re-signing or entitlements changes casually.
+        Never suggest embedding proxy routes, API keys, or secrets into code.
+    - path: Tests/**
+      instructions: |
+        Tests are a plain executable Swift package (no .xctest bundle): runner is Tests/NanoDictateCoreTests/main.swift executed via `swift run NanoDictateCoreTests`.
+        New behavior must be covered by tests in that suite.
+  exclude_files:
+    - CHANGELOG.md
+    - Package.resolved
+    - Tests/**
+    - Tests
+  tools:
+    gitleaks:
+      enabled: true
+    shellcheck:
+      enabled: false
+    markdownlint:
+      enabled: false
+    eslint:
+      enabled: false
+    phpstan:
+      enabled: false
+    php_codesniffer:
+      enabled: false
+    rubocop:
+      enabled: false
+    stylelint:
+      enabled: false
+    checkov:
+      enabled: false
+    detekt:
+      enabled: false
+    hadolint:
+      enabled: false
+    staticcheck:
+      enabled: false
+    psalm:
+      enabled: false
+    reek:
+      enabled: false
+chat:
+  auto_reply: true
