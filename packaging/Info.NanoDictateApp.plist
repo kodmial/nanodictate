@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.nanodictate.agent</string>
+	<key>CFBundleName</key>
+	<string>NanoDictate</string>
+	<key>CFBundleDisplayName</key>
+	<string>NanoDictate</string>
+	<key>CFBundleExecutable</key>
+	<string>NanoDictateAgent</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<!-- Placeholder values; the release workflow injects the real release
+	     version with PlistBuddy before the bundle is code-signed (the
+	     signature seals the Info.plist, so the Set must run first). -->
+	<key>CFBundleVersion</key>
+	<string>0.0.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.0.0</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>12.0</string>
+	<!-- LSUIElement: background agent — no Dock icon, no menu bar. -->
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>NanoDictate использует микрофон для распознавания речи при диктовке (двойное нажатие Alt).</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>NanoDictate вставляет распознанный текст в приложение, с которым вы работаете.</string>
+</dict>
+</plist>
