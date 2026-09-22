@@ -1,5 +1,5 @@
 # Homebrew formula template for NanoDictate (binary install from GitHub Releases).
-# Placeholders __VERSION__, __SHA256_ARM64__, __SHA256_X86_64__ are filled by
+# Placeholders 0.0.1, abe238bcdda3b6c6d0864b046be91dc54089d4434f191ca76ccf10c799f1cc1c, 4fffd97cefb7fc268f44740423692075972ee2d50b5db98dbaf4e148bd9b76d9 are filled by
 # scripts/release-prep.rb — do not hand-edit the generated nanodictate.rb.
 # This is a binary formula: Homebrew downloads the prebuilt tarball attached
 # to the GitHub Release (built by .github/workflows/release.yml) and installs
@@ -9,21 +9,21 @@ class NanoDictate < Formula
   desc "macOS dictation via double-Alt: bilingual EN/RU, 4 STT providers"
   homepage "https://github.com/kodmial/nanodictate"
   # Explicit version: the tarball name carries the version but the arch suffix
-  # (nanodictate-__VERSION__-macos-<arch>.tar.gz) would confuse homebrew's
+  # (nanodictate-0.0.1-macos-<arch>.tar.gz) would confuse homebrew's
   # version-from-filename inference.
-  version "__VERSION__"
+  version "0.0.1"
   license "MIT"
 
   depends_on macos: :monterey
 
-  # Release tarballs are attached to the tag v__VERSION__ (the tag keeps the
+  # Release tarballs are attached to the tag v0.0.1 (the tag keeps the
   # "v" prefix; the archive filename does not — see .github/workflows/release.yml).
   if Hardware::CPU.arm?
-    url "https://github.com/kodmial/nanodictate/releases/download/v__VERSION__/nanodictate-__VERSION__-macos-arm64.tar.gz"
-    sha256 "__SHA256_ARM64__"
+    url "https://github.com/kodmial/nanodictate/releases/download/v0.0.1/nanodictate-0.0.1-macos-arm64.tar.gz"
+    sha256 "abe238bcdda3b6c6d0864b046be91dc54089d4434f191ca76ccf10c799f1cc1c"
   else
-    url "https://github.com/kodmial/nanodictate/releases/download/v__VERSION__/nanodictate-__VERSION__-macos-x86_64.tar.gz"
-    sha256 "__SHA256_X86_64__"
+    url "https://github.com/kodmial/nanodictate/releases/download/v0.0.1/nanodictate-0.0.1-macos-x86_64.tar.gz"
+    sha256 "4fffd97cefb7fc268f44740423692075972ee2d50b5db98dbaf4e148bd9b76d9"
   end
 
   def install

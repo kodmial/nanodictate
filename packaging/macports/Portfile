@@ -1,7 +1,7 @@
 # -*- coding: utf-8; mode: tcl; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- vim:fenc=utf-8:ft=tcl:et:sw=4:ts=4:sts=4
 
 # NanoDictate — macOS dictation (double-Alt, bilingual EN/RU, 4 STT providers).
-# Template: __VERSION__, __SHA256_ARM64__, __SHA256_X86_64__ are filled by
+# Template: 0.0.1, abe238bcdda3b6c6d0864b046be91dc54089d4434f191ca76ccf10c799f1cc1c, 4fffd97cefb7fc268f44740423692075972ee2d50b5db98dbaf4e148bd9b76d9 are filled by
 # scripts/release-prep.rb — do not hand-edit the output.
 
 PortSystem          1.0
@@ -10,29 +10,31 @@ PortGroup           github 1.0
 # Binary port (symmetry with the Homebrew formula): the prebuilt tarball
 # attached to the tag is installed as-is — NO Xcode / Swift toolchain needed
 # on the user's machine. Tarball name is arch-dependent
-# (nanodictate-__VERSION__-macos-<arm64|x86_64>.tar.gz, built by
+# (nanodictate-0.0.1-macos-<arm64|x86_64>.tar.gz, built by
 # .github/workflows/release.yml), so distfile + checksum are chosen by
-# ${os.arch}; the download URL is derived from the tag v__VERSION__.
+# ${os.arch}; the download URL is derived from the tag v0.0.1.
 # master_sites points at the GitHub release assets (needed to fetch the
 # arch-specific distfile itself, not just for livecheck); livecheck.type
 # github walks repo tags. The checksums are filled by scripts/release-prep.rb.
-github.setup        kodmial nanodictate __VERSION__ v
+github.setup        kodmial nanodictate 0.0.1 v
 revision            0
 
-master_sites        https://github.com/kodmial/nanodictate/releases/download/v__VERSION__
+master_sites        https://github.com/kodmial/nanodictate/releases/download/v0.0.1
 
 if {${os.arch} eq "arm64"} {
-    distfiles       nanodictate-__VERSION__-macos-arm64.tar.gz
-    checksums       sha256  __SHA256_ARM64__
+    distfiles       nanodictate-0.0.1-macos-arm64.tar.gz
+    checksums       sha256  abe238bcdda3b6c6d0864b046be91dc54089d4434f191ca76ccf10c799f1cc1c \
+                    rmd160  d56306ce9dc6586edbfc7e9c28511f5fc0568d19
 } else {
-    distfiles       nanodictate-__VERSION__-macos-x86_64.tar.gz
-    checksums       sha256  __SHA256_X86_64__
+    distfiles       nanodictate-0.0.1-macos-x86_64.tar.gz
+    checksums       sha256  4fffd97cefb7fc268f44740423692075972ee2d50b5db98dbaf4e148bd9b76d9 \
+                    rmd160  dd118bbddbcbe8b239591e40003aebde22faced3
 }
 
 platforms           {darwin >= 21}
 categories          audio
 license             MIT
-maintainers         __MAINTAINERS__ \
+maintainers         @kodmial \
                     openmaintainer
 
 description         macOS dictation: double-Alt, bilingual EN/RU, 4 STT providers
@@ -109,20 +111,20 @@ post-destroot {
   <string>com.nanodictate.agent</string>
   <key>ProgramArguments</key>
   <array>
-    <string>__AGENT_BIN__</string>
+    <string>AGENT_BIN</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>__LOG_PATH__</string>
+  <string>LOG_PATH</string>
   <key>StandardErrorPath</key>
-  <string>__LOG_PATH__</string>
+  <string>LOG_PATH</string>
 </dict>
 </plist>
 }
-            set content [string map [list __AGENT_BIN__ ${agent_bin} __LOG_PATH__ ${log_path}] ${plist_xml}]
+            set content [string map [list AGENT_BIN ${agent_bin} LOG_PATH ${log_path}] ${plist_xml}]
             if {[catch {
                 set fd [open ${plist_path} w 0600]
                 puts -nonewline ${fd} ${content}
