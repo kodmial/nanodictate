@@ -314,9 +314,14 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
     // undeclared-секции канона попали бы в failover.
     // Маркеры ищутся по некомментарным строкам: закомментированные
     // "# [providers.groq]" / "# active_provider = ..." legacy не ломают.
-    let nonCommentLines = content.split(separator: "\n").filter {
-      !$0.drop { $0 == " " || $0 == "\t" }.hasPrefix("#")
-    }
+    // Разбивка строк — через .newlines (не split по "\n"): CRLF-контент
+    // (\r\n) не должен оставлять \r в конце строк, иначе заголовок
+    // "[providers.X]\r" не проходит hasSuffix("]") в declaredProviderIDs(inLines:)
+    // и пост-фильтр пула не срабатывает. Для LF-файлов результат идентичен.
+    let nonCommentLines =
+      content.components(separatedBy: .newlines).map { Substring($0) }.filter {
+        !$0.drop { $0 == " " || $0 == "\t" }.hasPrefix("#")
+      }
     let hasProviderSections = nonCommentLines.contains { $0.contains("[providers.") }
     let hasActiveProvider = nonCommentLines.contains { $0.contains("active_provider") }
     let declaredProviderIDs = Self.declaredProviderIDs(inLines: nonCommentLines)

@@ -855,6 +855,52 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.baseURL, "https://api.groq.com/openai/v1/audio/transcriptions")
     }
 
+    @objc func testMergeActiveWithSections_CRLF_PoolKeepsDeclaredOnly() throws {
+        let example = try exampleCanonContent()
+        AppConfig.exampleContentOverride = example
+        defer { AppConfig.exampleContentOverride = nil }
+        // Юзер-конфиг с CRLF-разделителями (\r\n): секции groq и airubiz
+        // объявлены, openai/cloudflare — нет. Пост-фильтр пула должен отработать
+        // несмотря на \r в конце строк (иначе заголовок "[providers.X]\r" не
+        // проходит hasSuffix("]") в declaredProviderIDs — фильтр бы не сработал).
+        let configLines = [
+            "active_provider = \"groq\"",
+            "",
+            "[providers.groq]",
+            "name = \"Groq\"",
+            "base_url = \"https://api.groq.com/openai/v1/audio/transcriptions\"",
+            "model = \"whisper-large-v3\"",
+            "api_key = \"\"",
+            "[providers.airubiz]",
+            "base_url = \"https://api.airubiz.site/v1/audio/transcriptions\"",
+        ]
+        let crlfFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_merge_canon_crlf_\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: crlfFile) }
+        try configLines.joined(separator: "\r\n").data(using: .utf8)!.write(to: crlfFile)
+
+        let config = try AppConfig.load(from: crlfFile.path)
+        XCTAssertEqual(config.activeProvider, "groq", "юзер-конфиг перекрывает active_provider канона")
+        XCTAssertEqual(config.providers.map(\.id), ["groq", "airubiz"],
+                       "CRLF: пул содержит только задекларированные секции (openai/cloudflare отфильтрованы)")
+        XCTAssertFalse(config.providers.contains { $0.id == "openai" },
+                       "CRLF: undeclared-секция openai не протекает в пул")
+        XCTAssertFalse(config.providers.contains { $0.id == "cloudflare" },
+                       "CRLF: undeclared-секция cloudflare не протекает в пул")
+        XCTAssertEqual(config.failoverProviders(excluding: nil).map(\.id), ["groq", "airubiz"],
+                       "CRLF: auto_failover не содержит undeclared-секций канона")
+
+        // LF-контроль: контент с LF-разделителями даёт идентичный результат
+        // (отсутствие регрессии по LF-файлам).
+        let lfFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_merge_canon_lf_\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: lfFile) }
+        try configLines.joined(separator: "\n").data(using: .utf8)!.write(to: lfFile)
+        let lfConfig = try AppConfig.load(from: lfFile.path)
+        XCTAssertEqual(lfConfig.providers.map(\.id), ["groq", "airubiz"],
+                       "LF: поведение идентично CRLF")
+    }
+
     @objc func testMergeActiveCanonByName_KeepsCanonDefaults() throws {
         let example = try exampleCanonContent()
         AppConfig.exampleContentOverride = example

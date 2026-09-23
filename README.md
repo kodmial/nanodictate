@@ -159,10 +159,12 @@ swift run nanodictate --help
 The Command Line Tools' SwiftPM manifest API lacks
 `PackageDescription.swiftmodule`, so a bare `swift build` cannot parse
 `Package.swift` on such machines. Point SwiftPM at a full Swift toolchain
-instead:
+instead (replace `/path/to/full/swift-toolchain` with the path to your full
+Swift toolchain — required for SwiftPM; the Xcode command-line tools are not
+sufficient):
 
 ```sh
-export SWIFT_TOOLCHAIN=/Users/dima/.swift-toolchain
+export SWIFT_TOOLCHAIN=/path/to/full/swift-toolchain
 export SWIFT_EXEC_MANIFEST="$SWIFT_TOOLCHAIN/usr/bin/swiftc"
 export SWIFTPM_CUSTOM_LIBS_DIR="$SWIFT_TOOLCHAIN/usr/lib/swift/pm"
 swift build -c debug
