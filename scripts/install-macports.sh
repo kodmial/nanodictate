@@ -136,7 +136,7 @@ echo "==> проверяю канон-дерево на закреплённую
 # Чистота ДО git-мутаций от root: checkout/reset не удаляют untracked-файлы,
 # а любой модифицированный/untracked Portfile portindex (от root) обработал бы
 # как канон. Требуем пустой porcelain — ошибка при любой грязи.
-if [ -n "$(git -C "$P" status --porcelain)" ]; then
+if [ -n "$(git -C "$P" -c core.fsmonitor=false -c core.hooksPath=/dev/null status --porcelain)" ]; then
   echo "==> ОШИБКА: канон-дерево не чистое (есть модифицированные/untracked файлы)." >&2
   echo "    Их portindex обработал бы от root — прерываю. Восстанови $P (или удали) и запусти заново." >&2
   exit 1
@@ -164,7 +164,7 @@ fi
 # Финальный инвариант перед обработкой дерева от root: после chown дерево
 # заморожено (локальный аккаунт уже не может его менять), HEAD == PIN_REV
 # проверен выше — остаётся чистота. portindex увидит ровно канон.
-if [ -n "$(git -C "$P" status --porcelain)" ]; then
+if [ -n "$(git -C "$P" -c core.fsmonitor=false -c core.hooksPath=/dev/null status --porcelain)" ]; then
   echo "==> ОШИБКА: канон-дерево не чистое — portindex от root НЕ запускаю (модифицированные/untracked файлы в $P)." >&2
   exit 1
 fi
