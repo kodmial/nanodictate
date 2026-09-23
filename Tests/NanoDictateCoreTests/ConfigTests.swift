@@ -1086,20 +1086,23 @@ final class ConfigTests: XCTestCase {
                        "парсер читает вставленную строку как top-level")
     }
 
-    @objc func testWriteKeyValueAppendsToEndWhenNoSections() throws {
+    @objc func testWriteKeyValueAppendsToEndWhenNoSections() {
         // Без секций поведение прежнее: строка добавляется в конец файла.
         let file = FileManager.default.temporaryDirectory
             .appendingPathComponent("test_write_kv_append_\(UUID().uuidString).toml")
         defer { try? FileManager.default.removeItem(at: file) }
-        try "language = \"ru\"\n".data(using: .utf8)!.write(to: file)
-
-        try AppConfig.writeKeyValue(key: "active_provider", value: "\"groq\"", to: file.path)
-        let text = try String(contentsOf: file, encoding: .utf8)
-        XCTAssertEqual(
-            text, "language = \"ru\"\nactive_provider = \"groq\"\n",
-            "без секций — прежнее поведение: дописывается с переводом строки")
-        let parsed = try AppConfig.parse(text)
-        XCTAssertEqual(parsed.activeProvider, "groq")
+        do {
+            try "language = \"ru\"\n".data(using: .utf8)!.write(to: file)
+            try AppConfig.writeKeyValue(key: "active_provider", value: "\"groq\"", to: file.path)
+            let text = try String(contentsOf: file, encoding: .utf8)
+            XCTAssertEqual(
+                text, "language = \"ru\"\nactive_provider = \"groq\"\n",
+                "без секций — прежнее поведение: дописывается с переводом строки")
+            let parsed = try AppConfig.parse(text)
+            XCTAssertEqual(parsed.activeProvider, "groq")
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
     }
 
     // MARK: - writeProviderKeyValue (config set-key)
