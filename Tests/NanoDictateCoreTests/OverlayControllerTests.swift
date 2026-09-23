@@ -406,7 +406,7 @@ final class OverlayControllerTests: XCTestCase {
             return
         }
         let tail = source[blockStart.lowerBound...]
-        let end = tail.range(of: "\n  // MARK: ") ?? tail.endIndex
+        let end = tail.range(of: "\n  // MARK: ") ?? (tail.startIndex..<tail.endIndex)
         let block = String(tail[..<end.lowerBound])
 
         XCTAssertTrue(
