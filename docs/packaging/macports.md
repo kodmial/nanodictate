@@ -119,9 +119,14 @@ sudo port selfupdate && sudo port upgrade nanodictate
 ```
 
 `port selfupdate` also refreshes the default rsync tree
-(`rsync.macports.org`); if it is unreachable the run reports `numfailed` —
-re-running heals it, and the git tree's index is already fresh, so the
-upgrade still works.
+(`rsync.macports.org`); if the rsync source is unreachable, `selfupdate`
+exits with an error and the `&&` above stops before the upgrade. Re-running
+heals it — and the git tree's index is already fresh, so if the local git
+source is still indexed, run the upgrade alone:
+
+```sh
+sudo port upgrade nanodictate
+```
 
 **Full uninstall:** stop the user-managed agent and remove its plist first
 (the `rm` still runs if `nanodictate stop` fails), then uninstall the port:
@@ -216,7 +221,7 @@ the comparison table.
 On CI the release workflow already does steps 1, 3 and 5 automatically on
 every release — this section is the manual drill that the workflow runs.
 
-1. **Tag and push** — `git tag v0.0.3 && git push origin v0.0.3` (the
+1. **Tag and push** — `git tag v0.1.0 && git push origin v0.1.0` (the
    Release workflow attaches the prebuilt binary tarballs the port
    downloads).
 
@@ -230,7 +235,7 @@ every release — this section is the manual drill that the workflow runs.
 3. **Generate the Portfile** (needs network access to github.com):
 
    ```sh
-   MAINTAINERS=@kodmial ruby scripts/release-prep.rb v0.0.3
+   MAINTAINERS=@kodmial ruby scripts/release-prep.rb v0.1.0
    ```
 
    This writes `packaging/macports/Portfile` with the real version, the
@@ -242,7 +247,7 @@ every release — this section is the manual drill that the workflow runs.
    ```sh
    port lint                                    # in the ports checkout
    sudo port -v install nanodictate             # clean-machine test
-   nanodictate --version                        # must print "nanodictate 0.0.3"
+   nanodictate --version                        # must print "nanodictate 0.1.0"
    ```
 
 5. **Sync the generated Portfile into `kodmial/macports-nanodictate`** —

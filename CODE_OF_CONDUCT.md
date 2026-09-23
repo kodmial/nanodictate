@@ -34,7 +34,7 @@ This Code of Conduct applies within all community spaces (repository, issues, pu
 
 ## Enforcement
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the maintainers via GitHub Private Vulnerability Reporting or by contacting the repository owners through GitHub. All complaints will be reviewed and investigated promptly and fairly, with confidentiality respected.
+Instances of abusive, harassing, or otherwise unacceptable behavior may be reported privately by email to kodmial@gmail.com (subject prefix `[nanodictate-conduct]`). All complaints will be reviewed and investigated promptly and fairly, with confidentiality respected.
 
 Maintainers will respect the reporter's privacy and will decide on consequences — which may include warning, temporary or permanent ban — and communicate the decision. The enforcement decisions and their rationale may be communicated to involved parties where appropriate.
 

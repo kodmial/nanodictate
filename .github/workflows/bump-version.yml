@@ -115,6 +115,17 @@ jobs:
           CODE_CHANGES=$(printf '%s\n' "$ALL_CHANGED" \
             | grep -vE '^(Sources/NanoDictateCore/Version\.swift|CHANGELOG\.md|README\.md|\.github/.*|\.githooks/.*|docs/.*|packaging/.*|nanodictate\.rb|config\.example\.toml|SECURITY\.md|CODE_OF_CONDUCT\.md|CONTRIBUTING\.md|LICENSE|\.gitignore|\.swift-format|\.swiftlint\.yml|\.coderabbit\.yaml)$' \
             | grep -v '^$' || true)
+          # The release workflow pins the installer to the just-synced macports
+          # tree revision via a one-line PIN_REV edit to main after every tag.
+          # That generated line is not a user code change — drop the file when
+          # its only diff vs the tag is the PIN_REV line, so a docs-only merge
+          # still refuses to bump, while a real installer edit keeps counting.
+          NON_PINREV=$(git diff "$PREV_TAG"..HEAD -- scripts/install-macports.sh \
+            | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)|^[+-]PIN_REV=' || true)
+          if printf '%s\n' "$CODE_CHANGES" | grep -qx 'scripts/install-macports.sh' \
+            && [[ -z "$NON_PINREV" ]]; then
+            CODE_CHANGES=$(printf '%s\n' "$CODE_CHANGES" | grep -v '^scripts/install-macports.sh$')
+          fi
           if [[ -z "${ALL_CHANGED:-}" ]]; then
             echo "::error::no code changes — bump refused (nothing changed since $PREV_TAG)"
             exit 1

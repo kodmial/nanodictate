@@ -29,7 +29,7 @@
  *     real `swift build` succeeding, which is out of scope for unit tests.
  */
 
-import { afterEach, test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -986,15 +986,21 @@ test("certPublishMarkdown renders no material block when only paths are absent",
 // ── dictation_wipe / dictation_cert_* handlers (injected fakes) ─────────────
 
 /**
- * Unique temp home for the wipe/cert fakes. A shared hard-coded path would be
+ * Fake homes for the wipe/cert fakes. A shared hard-coded path would be
  * polluted by parallel runs and stale files could mask a "wrote no file"
  * regression; the cert export paths derive from this home (via the fake
- * spawns), so it must be unique per run. Removed after every test.
+ * spawns), so it must be unique per run. Each makeFakeDeps call gets a fresh
+ * home (code under test may create or remove paths under it); all of them are
+ * removed once, after the suite finishes.
  */
-const TOOLS_FAKE_HOME = mkdtempSync(join(tmpdir(), "nanodictate-tools-home-"));
-afterEach(() => rmSync(TOOLS_FAKE_HOME, { recursive: true, force: true }));
+const fakeHomes = new Set();
+after(() => {
+  for (const home of fakeHomes) rmSync(home, { recursive: true, force: true });
+});
 
 function makeFakeDeps(opts = {}) {
+  const home = mkdtempSync(join(tmpdir(), "nanodictate-tools-home-"));
+  fakeHomes.add(home);
   const calls = [];
   const state = opts.state ?? {};
   const runFn = async (cmd, args = []) => {
@@ -1054,7 +1060,7 @@ function makeFakeDeps(opts = {}) {
   };
   return {
     calls,
-    deps: { runFn, existsFn: () => false, home: TOOLS_FAKE_HOME, uid: "503" },
+    deps: { runFn, existsFn: () => false, home, uid: "503" },
   };
 }
 

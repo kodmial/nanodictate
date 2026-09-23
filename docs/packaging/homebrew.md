@@ -123,7 +123,9 @@ can verify the asset the formula downloads (or a manual `curl` download) with:
 
 ```sh
 curl -L -O https://github.com/kodmial/nanodictate/releases/download/v0.0.3/SHA256SUMS.txt
-shasum -a 256 -c SHA256SUMS.txt   # run in the directory with the tarball
+# run in the directory with the tarball; SHA256SUMS.txt lists both arch
+# tarballs, so check only the entry for the one you downloaded
+grep "nanodictate-0.0.3-macos-$(uname -m)\.tar\.gz$" SHA256SUMS.txt | shasum -a 256 -c -
 ```
 
 Homebrew performs its own sha256 check against the formula's
