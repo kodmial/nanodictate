@@ -17,6 +17,9 @@ import Foundation
 // OverlayLifecycleTests / LiveSegmentFailureTests). Empty STT result also
 // checked behaviorally in NanoDictateCore (ChunkedPipeline.recognizeSegment — public).
 
+// Файл структурных branch-тестов main.swift: класс намеренно крупный (секции
+// по проверяемым функциям), как Agent в Sources/NanoDictateAgent/main.swift.
+// swiftlint:disable:next type_body_length
 final class LiveOrchestrationBranchTests: XCTestCase {
 
     // MARK: - 1. single-segment-skip (finishLiveRun)
