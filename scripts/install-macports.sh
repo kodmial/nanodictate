@@ -103,7 +103,9 @@ PINDEX="$PREFIX_DIR/bin/portindex"
 
 # Доверенная закреплённая ревизия kodmial/macports-nanodictate — единственный
 # источник истины для дерева: наличие .git аутентичность НЕ доказывает, чекаут
-# обязан сидеть ровно на этой ревизии (обновляется при релизе).
+# обязан сидеть ровно на этой ревизии. Обновляется шагом «Sync MacPorts port
+# tree» в .github/workflows/release.yml — на только что синкнутый HEAD дерева
+# (сгенерированный релизный Portfile), сохраняя exact-revision чекаут.
 PIN_REV="4c4ced254593e3865d9f6a8f99ab6c7a3c59f807"
 
 if [ -d "$P/.git" ]; then
@@ -230,7 +232,10 @@ else
   if port installed | grep nanodictate; then
     echo "==> порт nanodictate виден в port installed"
   fi
-  if launchctl list 2>/dev/null | grep -q nanodictate; then
+  # Статус launchd — через GUI-домен запускающего пользователя $U и канонический
+  # label: `launchctl list` от root смотрит домен root и LaunchAgent в gui/<uid>
+  # не видит (ложный «не запущен»).
+  if launchctl print "gui/$(id -u "$U")/com.nanodictate.agent" >/dev/null 2>&1; then
     echo "==> служба запущена (com.nanodictate.agent в launchd)"
   else
     echo "==> служба зарегистрирована и стартует при следующем входе (RunAtLoad)"

@@ -947,6 +947,39 @@ jobs:
             git push origin main
           fi
 
+          # Pin the installer to the just-synced tree revision: PIN_REV in
+          # scripts/install-macports.sh is the installer's exact-revision
+          # checkout of this tree — if it stays on an older commit, fresh
+          # installs check out a stale Portfile (not the release-generated one
+          # synced above). Runs on both paths (tree changed or not): TREE_SHA is
+          # the tree's HEAD either way, and the installer commit is skipped when
+          # the pin is already current. Push mirrors the manifests step's
+          # non-fast-forward guard; the checkout's persisted GITHUB_TOKEN
+          # (contents: write) authenticates it — gh's TAP_PAT helper only ever
+          # serves the /tmp tree clone above, never this workspace push.
+          TREE_SHA="$(git -C /tmp/macports-nanodictate rev-parse HEAD)"
+          WS="$GITHUB_WORKSPACE"
+          sed -i "s/^PIN_REV=\"[^\"]*\"$/PIN_REV=\"$TREE_SHA\"/" "$WS/scripts/install-macports.sh"
+          if ! grep -qxF "PIN_REV=\"$TREE_SHA\"" "$WS/scripts/install-macports.sh"; then
+            echo "::error::PIN_REV in scripts/install-macports.sh was not updated to $TREE_SHA"
+            exit 1
+          fi
+          git -C "$WS" config user.name "dima"
+          git -C "$WS" config user.email "dima@users.noreply.github.com"
+          git -C "$WS" add scripts/install-macports.sh
+          if git -C "$WS" diff --cached --quiet; then
+            echo "install-macports.sh already pins the synced tree revision $TREE_SHA — nothing to commit."
+          else
+            git -C "$WS" commit -m "chore(release): pin install-macports.sh to macports tree $TREE_SHA"
+            git -C "$WS" fetch origin main
+            git -C "$WS" merge-base --is-ancestor origin/main HEAD || {
+              echo "::error::main has moved ahead of the tag — the PIN_REV commit would not fast-forward. Reset main to the current tip (or merge it) and re-run the workflow."
+              exit 1
+            }
+            git -C "$WS" push origin HEAD:main
+            echo "Pinned install-macports.sh PIN_REV to the synced tree revision $TREE_SHA"
+          fi
+
       # Sync the formula + cask into the kodmial/homebrew-nanodictate tap (optional,
       # needs the TAP_PAT repo secret — a Personal Access Token, classic
       # "repo" scope, owned by the tap owner). The secret is read through the
