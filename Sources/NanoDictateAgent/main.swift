@@ -97,6 +97,22 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     /// (segmentCount == 0) the final pass shows an explicit STT error message
     /// instead of the confusing "Empty result" (review #112).
     var lastErrorText: String?
+    /// Set on main at cancel time (Esc / device change / restart); read on
+    /// liveExecutor — stale queued segments skip their STT call.
+    private let cancelLock = NSLock()
+    private var cancelled = false
+    var isCancelled: Bool {
+      get {
+        cancelLock.lock()
+        defer { cancelLock.unlock() }
+        return cancelled
+      }
+      set {
+        cancelLock.lock()
+        cancelled = newValue
+        cancelLock.unlock()
+      }
+    }
 
     init(session: Int) {
       self.session = session
@@ -109,8 +125,20 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// DIFF counts already-inserted segment text, so it must be processed earlier.
   private final class SerialAsyncExecutor {
     private let queue = DispatchQueue(label: "nanodictate.live.serial", qos: .userInitiated)
+    private let pendingLock = NSLock()
+    private var pending = 0
+
+    /// Submitted but not finished tasks (queued + running).
+    var pendingCount: Int {
+      pendingLock.lock()
+      defer { pendingLock.unlock() }
+      return pending
+    }
 
     func submit(_ body: @escaping () async -> Void) {
+      pendingLock.lock()
+      pending += 1
+      pendingLock.unlock()
       queue.async {
         let sema = DispatchSemaphore(value: 0)
         Task {
@@ -118,6 +146,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
           sema.signal()
         }
         sema.wait()
+        self.pendingLock.lock()
+        self.pending -= 1
+        self.pendingLock.unlock()
       }
     }
   }
@@ -1186,8 +1217,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     guard state == .recording else { return }
     Logger.log("audio device changed: \(error.localizedDescription)", level: "warn")
     // Invalidate the live loop: a segment being recognized on liveExecutor
-    // right now will not insert (the liveSession guard in handleLiveSegment).
+    // right now will not insert (the liveSession guard in handleLiveSegment);
+    // queued stale segments skip STT (isCancelled guard).
     liveSession += 1
+    liveRunState?.isCancelled = true
     liveRunState = nil
     failTranscription(error.localizedDescription, isNetworkFailure: false)
   }
@@ -1201,6 +1234,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// handleLiveSegment drops them).
   private func subscribeLiveNanoDictate() {
     liveSession += 1
+    liveRunState?.isCancelled = true
     let runState = LiveRunState(session: liveSession)
     liveRunState = runState
     audio.onSpeechSegment = { [weak self] segment, isTail in
@@ -1223,6 +1257,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     isTail: Bool,
     runState: LiveRunState
   ) async {
+    // Stale loop (Esc / device change / restart): do not send its audio to
+    // STT — the queued segment would also hold the serial queue.
+    guard !runState.isCancelled else { return }
     let index = runState.segmentCount
 
     // Overlay: "Recognizing… (part N)" while the segment's STT runs; the
@@ -1332,9 +1369,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     Logger.log(
       String(format: "live finalize (\(samples.count) samples, %.2f s)", duration), level: "info")
 
-    // "Processing" phase watchdog: unfinished segments + tail + final pass —
-    // each request up to networkRequestTimeout (margin for all).
-    let requestCount = max(2, runState.segmentCount + 2)
+    // "Processing" phase watchdog: queued/running segments + tail (already
+    // submitted by stop()) + final pass — each request up to
+    // networkRequestTimeout (margin for all).
+    let requestCount = max(2, liveExecutor.pendingCount + 1)
     let liveMaxDuration = Double(requestCount) * Transcriber.networkRequestTimeout + 5
     processingSession += 1
     let session = processingSession
@@ -1370,7 +1408,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       String(format: "live limit finalize (\(samples.count) samples, %.2f s)", duration),
       level: "info")
 
-    let requestCount = max(2, runState.segmentCount + 2)
+    // Watchdog (same budget as liveFinalize): queued/running segments +
+    // tail + final pass.
+    let requestCount = max(2, liveExecutor.pendingCount + 1)
     let liveMaxDuration = Double(requestCount) * Transcriber.networkRequestTimeout + 5
     processingSession += 1
     let session = processingSession
@@ -1812,8 +1852,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       audio.cancel()
       // Invalidate the live loop: a segment being recognized on
       // liveExecutor right now will not insert (the liveSession guard in
-      // handleLiveSegment).
+      // handleLiveSegment); queued stale segments skip STT (isCancelled
+      // guard).
       liveSession += 1
+      liveRunState?.isCancelled = true
       liveRunState = nil
       Logger.log("record cancelled")
     case .transcribing:

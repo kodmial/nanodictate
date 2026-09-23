@@ -31,11 +31,11 @@ func runProcess(_ launchPath: String, _ args: [String]) -> (  // swiftlint:disab
 }
 
 /// User GUI domain for launchctl, e.g. "gui/501".
-let guiDomain = "gui/\(getuid())"
+let guiDomain = AgentService.guiDomain()
 
 /// LaunchAgent service name (plist Label, the target of
 /// launchctl print/bootstrap/bootout).
-let agentServiceName = "com.nanodictate.agent"
+let agentServiceName = AgentService.name
 
 /// Absolute (realpath) path to the agent binary for service registration:
 /// NANODICTATE_AGENT_BIN → NanoDictateAgent sibling of the realpath of the
