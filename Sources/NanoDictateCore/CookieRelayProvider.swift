@@ -329,11 +329,13 @@ public final class CookieRelayProvider {
     do {
       if let transport {
         let response = try await transport.send(request: request)
-        return (response.status, Self.strictUTF8(response.body))
+        guard let body = Self.strictUTF8(response.body) else { return nil }
+        return (response.status, body)
       }
       let (data, response) = try await URLSession.shared.data(for: request)
       guard let httpResponse = response as? HTTPURLResponse else { return nil }
-      return (httpResponse.statusCode, Self.strictUTF8(data))
+      guard let body = Self.strictUTF8(data) else { return nil }
+      return (httpResponse.statusCode, body)
     } catch {
       return nil
     }
