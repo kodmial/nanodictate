@@ -29,10 +29,10 @@ class Nanodictate < Formula
   def install
     # Каждая релизная тарболка содержит на верхнем уровне два бинаря и
     # config.example.toml (плюс Resources/ для справки — см. release.yml).
-    # Только бинарь + конфиг: службу формула регистрирует в post_install
-    # (Homebrew < 7) либо через service-блок `brew services start` (brew >= 7)
-    # — всегда тот же единственный Label com.nanodictate.agent, что и
-    # `nanodictate start`, без новых label, чтобы не плодить второй демон.
+    # Только бинарь + конфиг: службу активирует сам пользователь командой
+    # `brew services start nanodictate` (service-блок ниже) — тот же
+    # единственный Label com.nanodictate.agent, что и `nanodictate start`,
+    # без новых label, чтобы не плодить второй демон.
     bin.install "nanodictate", "NanoDictateAgent"
 
     # config.example.toml — копируемый источник, не живой конфиг: CLI всегда
@@ -45,10 +45,9 @@ class Nanodictate < Formula
     # Canonical single LaunchAgent label com.nanodictate.agent — the same
     # plist the CLI (`nanodictate start`) and the MacPorts port write, so there
     # is always exactly one daemon regardless of install method or order.
-    # `brew services start nanodictate` runs OUTSIDE the Homebrew sandbox and
-    # writes ~/Library/LaunchAgents/com.nanodictate.agent.plist + bootstraps
-    # gui/<uid> — the only way to get the service live on brew>=7, where the
-    # post_install sandbox blocks launchctl (EIO) and cardinal writes (EPERM).
+    # `brew services start nanodictate` runs as the user (no sandbox), writes
+    # ~/Library/LaunchAgents/com.nanodictate.agent.plist and bootstraps
+    # gui/<uid> — that explicit activation registers the service after install.
     name macos: "com.nanodictate.agent"
     run opt_bin/"NanoDictateAgent"
     keep_alive true
@@ -57,78 +56,9 @@ class Nanodictate < Formula
     error_log_path "#{Dir.home}/Library/Logs/NanoDictate/agent.log"
   end
 
-  def post_install
-    # homebrew >= 7 исполняет post_install в sandbox (HOME = временный /private/tmp,
-    # запись в реальный дом -> EPERM, launchctl -> EIO). Тогда авторегистрацию
-    # службы из post_install сделать нельзя: печатаем предупреждение с командой и
-    # выходим. На старых версиях brew HOME — реальный дом: гибрид A+B работает.
-    real_home = Etc.getpwuid(Process.uid).dir
-    if ENV.fetch("HOME") != real_home
-      opoo "Homebrew sandbox: LaunchAgent registration skipped. Run `brew services start nanodictate` to register the background agent — it writes the same canonical ~/Library/LaunchAgents/com.nanodictate.agent.plist and loads gui/<uid> outside the sandbox; `nanodictate start` is the equivalent, idempotent alternative."
-      return
-    end
-    # Гибрид A+B: упаковка сама создаёт канонический plist и РАЗОВО активирует
-    # службу — после чистой установки (без ручного первого запуска) демон уже
-    # зарегистрирован, RunAtLoad + KeepAlive: стартует при входе в систему и
-    # Alt+Alt работает сразу. Тот же канонический файл
-    # ~/Library/LaunchAgents/com.nanodictate.agent.plist и тот же единственный
-    # Label com.nanodictate.agent, что у `nanodictate start`, — второй менеджер
-    # подменяет, повторный запуск идемпотентен.
-    # post_install исполняется от пользователя (brew), HOME — реальный дом.
-    home = Pathname.new(real_home)
-    launch_agents = home + "Library" + "LaunchAgents"
-    launch_agents.mkpath
-    logs = home + "Library" + "Logs" + "NanoDictate"
-    logs.mkpath
-    plist = launch_agents + "com.nanodictate.agent.plist"
-
-    # Путь бинаря: $(brew --prefix)/bin/NanoDictateAgent — симлинк Homebrew на
-    # текущий Cellar (brew перенаправляет его при апгрейде), поэтому пути не
-    # протухают между релизами (launchd разрешает симлинк в момент старта).
-    agent = "#{HOMEBREW_PREFIX}/bin/NanoDictateAgent"
-    log_path = (logs + "agent.log").to_s
-    plist.write(<<~PLIST)
-      <?xml version="1.0" encoding="UTF-8"?>
-      <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-      <plist version="1.0">
-      <dict>
-        <key>Label</key>
-        <string>com.nanodictate.agent</string>
-        <key>ProgramArguments</key>
-        <array>
-          <string>#{agent}</string>
-        </array>
-        <key>RunAtLoad</key>
-        <true/>
-        <key>KeepAlive</key>
-        <true/>
-        <key>StandardOutPath</key>
-        <string>#{log_path}</string>
-        <key>StandardErrorPath</key>
-        <string>#{log_path}</string>
-      </dict>
-      </plist>
-    PLIST
-    plist.chmod(0o600)
-
-    # Takeover: выгрузить прежнего (терпимо — при первой установке службы
-    # ещё нет, bootout выходит с «Boot-out failed: No such process»), затем
-    # загрузить новый план. Kernel.system (многоаргументная форма, без шелла)
-    # возвращает false вместо throw — в отличие от Formula#system, который
-    # кидает BuildError на любом ненулевом exit и ронял бы `brew install` на
-    # чистой установке. Оба вызова терпимы: провал bootstrap (например,
-    # установка по SSH без GUI-сессии) не роняет установку — служба всё равно
-    # стартует при следующем входе в систему (RunAtLoad) либо её поднимет
-    # `nanodictate start`.
-    target = "gui/#{Process.uid}/com.nanodictate.agent"
-    Kernel.system "/bin/launchctl", "bootout", target
-    Kernel.system "/bin/launchctl", "bootstrap", "gui/#{Process.uid}", plist.to_s
-  end
-
   def caveats
-    # Регистрация службы — post_install (Homebrew < 7, HOME — реальный дом),
-    # service-блок `brew services start` (brew >= 7, вне sandbox) либо
-    # `nanodictate start` — все пути пишут тот же канонический
+    # Регистрация службы — service-блок `brew services start nanodictate`
+    # либо `nanodictate start` — оба пишут тот же канонический
     # ~/Library/LaunchAgents/com.nanodictate.agent.plist и грузят его через
     # launchctl, повторные запуски идемпотентны. Первый запуск бинаря лишь
     # перезаписывает тот же plist (realpath) при необходимости.
@@ -151,20 +81,17 @@ class Nanodictate < Formula
         nanodictate config set-key <provider>
 
       The tool runs as a background user LaunchAgent (auto-restarts at
-      login) under the canonical single label com.nanodictate.agent. The
-      Homebrew post_install sandbox (brew >= 7) cannot register the
-      LaunchAgent during `brew install` — start the background agent with:
+      login) under the canonical single label com.nanodictate.agent. `brew
+      install` does not register the LaunchAgent — activate it once with:
 
         brew services start nanodictate
 
       This writes ~/Library/LaunchAgents/com.nanodictate.agent.plist (single
-      canonical label com.nanodictate.agent) and loads it outside the
-      sandbox; `brew services stop nanodictate` stops it. The CLI
-      `nanodictate start` is the same registration — idempotent, never a
-      second daemon — and on Homebrew < 7 post_install already registered the
-      service, so it is a safe no-op. Run it anyway to re-register with the
-      symlink-resolved real path (e.g. after moving things around), or to
-      print the current state:
+      canonical label com.nanodictate.agent) and loads it into launchd;
+      `brew services stop nanodictate` stops it. The CLI `nanodictate start`
+      is the same registration — idempotent, never a second daemon. Run it
+      anyway to re-register with the symlink-resolved real path (e.g. after
+      moving things around), or to print the current state:
 
         nanodictate start
         nanodictate status
