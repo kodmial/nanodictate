@@ -364,4 +364,20 @@ final class HotkeyServiceTests: XCTestCase {
         let service = HotkeyService(doubleTapMaxInterval: 1.0)
         XCTAssertEqual(service.doubleTapMaxInterval, 1.0)
     }
+
+    // MARK: - deinit { stop() } (позиция CR12 №3)
+
+    /// Освобождение сервиса без активного тапа: deinit → stop() проходит
+    /// ветку «тапа нет» (guard eventTap == nil) и завершается no-op без
+    /// обращения к CGEvent. Живой тап в раннере недостижим: CGEvent.tapCreate
+    /// требует Accessibility-гранта, которого у тестового процесса нет, —
+    /// start() бросает eventTapCreationFailed, потому живой тап в тестах
+    /// никогда не создаётся. Spy via override невозможен: HotkeyService —
+    /// public final класс (override запрещён Swift'ом).
+    @objc func testDeinitWithoutActiveTap_SafeNoop() {
+        var service: HotkeyService? = HotkeyService()
+        XCTAssertNotNil(service)
+        service = nil // последняя strong-ссылка исчезла → deinit (stop в guard-ветке)
+        XCTAssertNil(service, "сервис освобождён, deinit прошёл без креша")
+    }
 }

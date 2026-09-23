@@ -43,6 +43,28 @@ final class AudioSegmenterTests: XCTestCase {
         XCTAssertEqual(ranges, [0..<5])
     }
 
+    @objc func testTrailingShortSpeechMerges_WhenCombinedWithinMax() {
+        // Pause splits [0..<5] (pause 2s, min 3s); trailing 1s of speech
+        // < minSegment merges back into the last segment because combined
+        // length (8s) <= maxSegment (9s).
+        let rms: [Float] = [speech, speech, speech, speech, speech, silence, silence, speech]
+        let ranges = AudioSegmenter.splitRanges(
+            rms: rms, windowDuration: 1.0, config: cfg(pause: 2.0, min: 3.0, max: 9.0)
+        )
+        XCTAssertEqual(ranges, [0..<8])
+    }
+
+    @objc func testTrailingShortSpeechNotMerged_WhenCombinedExceedsMax() {
+        // Hard-cap cut at 4s (max 4s); trailing 1s of speech < minSegment,
+        // but combined length (5s) > maxSegment (4s) — merge condition
+        // fails, trail stays its own segment.
+        let rms: [Float] = [speech, speech, speech, speech, speech]
+        let ranges = AudioSegmenter.splitRanges(
+            rms: rms, windowDuration: 1.0, config: cfg(min: 3.0, max: 4.0)
+        )
+        XCTAssertEqual(ranges, [0..<4, 4..<5])
+    }
+
     @objc func testHardMaxBoundary() {
         // 50 speech windows, maxSegment 10s → five segments.
         let rms = Array(repeating: speech, count: 50)

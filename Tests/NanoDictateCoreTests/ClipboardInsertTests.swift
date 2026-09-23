@@ -88,6 +88,53 @@ final class ClipboardInsertTests: XCTestCase {
         return (bridge, { writes })
     }
 
+    private struct DeferredRestoreHarness {
+        let bridge: ClipboardInsertBridge
+        let getClipboard: () -> String?
+        let restoreHistory: () -> [String]
+        let runRestores: () -> Void
+    }
+
+    /// Мост с ОТЛОЖЕННЫМ restore: scheduleRestore копит блоки вместо немедленного
+    /// запуска — так тест может устроить наложение двух вставок до того, как
+    /// первая успела восстановить буфер (синхронный mock такой сценарий
+    /// исключает: restore отрабатывает прямо внутри insertViaClipboard).
+    private func makeDeferredRestoreBridge(
+        initialClipboard: String? = nil
+    ) -> DeferredRestoreHarness {
+        var clipboard = initialClipboard.map { snapshot(containingText: $0) } ?? []
+        var writes: [ClipboardSnapshot] = []
+        var restores: [() -> Void] = []
+
+        let bridge = ClipboardInsertBridge(
+            readClipboard: { clipboard },
+            writeClipboard: { snapshot in
+                clipboard = snapshot
+                writes.append(snapshot)
+            },
+            sendPaste: {},
+            restoreDelay: 0,
+            scheduleRestore: { block, _ in restores.append(block) }
+        )
+        let getClipboard: () -> String? = {
+            guard !clipboard.isEmpty else { return "" }
+            return self.text(from: clipboard)
+        }
+        let restoreHistory: () -> [String] = {
+            writes.map { self.text(from: $0) ?? "" }
+        }
+        let runRestores: () -> Void = {
+            for restore in restores { restore() }
+            restores.removeAll()
+        }
+        return DeferredRestoreHarness(
+            bridge: bridge,
+            getClipboard: getClipboard,
+            restoreHistory: restoreHistory,
+            runRestores: runRestores
+        )
+    }
+
     // MARK: - Прямой вызов insertViaClipboard
 
     @objc func testClipboardInsertCallsSendPaste() {
@@ -104,7 +151,7 @@ final class ClipboardInsertTests: XCTestCase {
         Inserter.insertViaClipboard(text: "hello", bridge: bridge)
 
         // Buffer already restored (sync scheduleRestore in tests); assert write history instead.
-        let writes = restoreHistory()
+        let writes = harness.restoreHistory()
         XCTAssertEqual(writes.first, "hello")
         XCTAssertEqual(writes.count, 2, "запись текста + восстановление старого буфера")
     }
@@ -114,7 +161,7 @@ final class ClipboardInsertTests: XCTestCase {
 
         Inserter.insertViaClipboard(text: "new-text", bridge: bridge)
 
-        let writes = restoreHistory()
+        let writes = harness.restoreHistory()
         XCTAssertEqual(writes.count, 2)
         XCTAssertEqual(writes[0], "new-text")
         XCTAssertEqual(writes[1], "old-text")
@@ -126,7 +173,7 @@ final class ClipboardInsertTests: XCTestCase {
 
         Inserter.insertViaClipboard(text: "new", bridge: bridge)
 
-        let writes = restoreHistory()
+        let writes = harness.restoreHistory()
         XCTAssertEqual(writes.count, 2)
         XCTAssertEqual(writes[0], "new")
         XCTAssertEqual(writes[1], "")
@@ -178,6 +225,33 @@ final class ClipboardInsertTests: XCTestCase {
 
         Inserter.insert(text: "via-cgevent", method: .cgevent)
         XCTAssertEqual(receivedText, "via-cgevent")
+    }
+
+    // MARK: - Защита от наложения вставок (pendingOriginal / restoreGeneration)
+
+    @objc func testOverlappingInserts_RestoreOriginalOnce_LastGenerationWins() {
+        // Две вставки подряд без промежуточного restore: оригинал запоминается
+        // ОДИН раз (вторая вставка переиспользует pendingOriginal, а не читает
+        // свой же dictation-текст из буфера); отложенные restore запланированы
+        // с поколениями 1 и 2 — первое сдаётся, побеждает последнее, и буфер
+        // возвращается к ОРИГИНАЛУ ровно одним restore.
+        let harness = makeDeferredRestoreBridge(initialClipboard: "original")
+        let bridge = harness.bridge
+
+        Inserter.insertViaClipboard(text: "first", bridge: bridge)
+        Inserter.insertViaClipboard(text: "second", bridge: bridge)
+
+        // До срабатывания restore буфер держит dictation-текст второй вставки.
+        XCTAssertEqual(harness.restoreHistory(), ["first", "second"])
+        XCTAssertEqual(harness.getClipboard(), "second")
+
+        harness.runRestores() // в порядке планирования
+
+        let writes = harness.restoreHistory()
+        XCTAssertEqual(writes, ["first", "second", "original"],
+                       "восстановлен оригинал, а не текст первой вставки (общий pendingOriginal)")
+        XCTAssertEqual(harness.getClipboard(), "original")
+        XCTAssertEqual(writes.count, 3, "оригинал восстановлен ровно один раз")
     }
 
     // MARK: - Не-text контент при restore

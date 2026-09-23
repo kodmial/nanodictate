@@ -386,4 +386,71 @@ final class OverlayControllerTests: XCTestCase {
             "запас поверх таймаута должен быть хотя бы 1 с"
         )
     }
+
+    // MARK: - onChange(of: state.recordingStart): таймер жив только в фазе .recording (CR12 №4)
+
+    /// Структурный тест (как OverlayLifecycleTests): поведенчески ветки
+    /// onChange(of: state.recordingStart) из раннера недостижимы — колбэк
+    /// отрабатывает только в display-цикле реально показанного окна, а панель
+    /// в тестах на экран не выводится (док. класса выше). Поэтому контракт
+    /// фикса (часы заводятся ТОЛЬКО при newStart != nil И phase == .recording;
+    /// сброс/не-запись — stopClock) охраняется структурно: блок обработчика
+    /// обязан содержать gating-условие, оба пути и вызов ensureMeterLoopRunning.
+    @objc func testRecordingStartChange_ClockGatedOnPhase() {
+        guard let source = Self.overlayControllerSource() else {
+            XCTFail("Не удалось прочитать Sources/NanoDictateCore/OverlayController.swift")
+            return
+        }
+        guard let blockStart = source.range(of: ".onChange(of: state.recordingStart)") else {
+            XCTFail("onChange(of: state.recordingStart) не найден в OverlayController.swift")
+            return
+        }
+        let tail = source[blockStart.lowerBound...]
+        let end = tail.range(of: "\n  // MARK: ") ?? tail.endIndex
+        let block = String(tail[..<end.lowerBound])
+
+        XCTAssertTrue(
+            block.contains("if newStart != nil, state.phase == .recording"),
+            "часы заводятся только при newStart != nil И фазе .recording"
+        )
+        XCTAssertTrue(block.contains("} else {"), "вне .recording предусмотрен путь stopClock()")
+        XCTAssertTrue(block.contains("stopClock()"), "сброс времени — через stopClock()")
+
+        // startClock() обязан стоять ПОСЛЕ gating-условия, а не вызываться безусловно.
+        if let gateRange = block.range(of: "if newStart != nil, state.phase == .recording"),
+           let startRange = block.range(of: "startClock()") {
+            XCTAssertLessThan(
+                gateRange.lowerBound, startRange.lowerBound,
+                "startClock() вызывается только внутри gating-ветки"
+            )
+        }
+
+        XCTAssertTrue(
+            block.contains("ensureMeterLoopRunning()"),
+            "метр-луп обновляется в обоих путях обработчика"
+        )
+    }
+
+    /// Загрузка исходника OverlayController для структурных проверок вью-веток,
+    /// недостижимых из раннера (тот же приём, что agentMainSource() в
+    /// OverlayLifecycleTests / LiveOrchestrationBranchTests).
+    private static func overlayControllerSource() -> String? {
+        let fileDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let candidates = [
+            fileDir.deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/NanoDictateCore/OverlayController.swift"),
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("Sources/NanoDictateCore/OverlayController.swift"),
+        ]
+        guard let sourceURL = candidates.first(where: {
+            FileManager.default.fileExists(atPath: $0.path)
+        }) else {
+            return nil
+        }
+        guard let source = try? String(contentsOf: sourceURL, encoding: .utf8) else {
+            return nil
+        }
+        return source
+    }
 }
