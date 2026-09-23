@@ -292,14 +292,15 @@ public final class CookieRelayProvider {
   private func performRefresh() async -> String? {
     guard
       let page = await fetchText(origin),
-      let consts = Self.extractConstants(from: page),
+      let consts = Self.extractConstants(from: page.body),
       let value = Self.decrypt(a: consts.keyHex, b: consts.ivHex, c: consts.cipherHex)
     else {
       return nil
     }
     guard
       let probe = await fetchText(origin, cookie: value),
-      !Self.looksLikeChallenge(probe)
+      (200..<300).contains(probe.status),
+      !Self.looksLikeChallenge(probe.body)
     else {
       return nil
     }
@@ -314,9 +315,10 @@ public final class CookieRelayProvider {
     token = Token(value: value, createdAt: now())
   }
 
-  /// GET origin (optionally with cookie) — text body; nil on any error.
-  /// Timeout refreshTimeout (8 s) hard: calls run from STT loop too.
-  private func fetchText(_ urlString: String, cookie: String? = nil) async -> String? {
+  /// GET origin (optionally with cookie) — text body + HTTP status; nil on any
+  /// error. Timeout refreshTimeout (8 s) hard: calls run from STT loop too.
+  private func fetchText(_ urlString: String, cookie: String? = nil) async -> (status: Int, body: String)?
+  {
     guard let url = URL(string: urlString) else { return nil }
     var request = URLRequest(url: url)
     request.timeoutInterval = Self.refreshTimeout
@@ -327,11 +329,11 @@ public final class CookieRelayProvider {
     do {
       if let transport {
         let response = try await transport.send(request: request)
-        return Self.strictUTF8(response.body)
+        return (response.status, Self.strictUTF8(response.body))
       }
       let (data, response) = try await URLSession.shared.data(for: request)
-      guard response is HTTPURLResponse else { return nil }
-      return Self.strictUTF8(data)
+      guard let httpResponse = response as? HTTPURLResponse else { return nil }
+      return (httpResponse.statusCode, Self.strictUTF8(data))
     } catch {
       return nil
     }

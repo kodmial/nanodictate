@@ -546,14 +546,10 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
         guard headerLine.hasSuffix("]") else {
           throw AppConfigError.invalidLine(index + 1, rawLine)
         }
-        var header = String(headerLine.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
-        if header.hasPrefix("\""), header.hasSuffix("\"") {
-          header = String(header.dropFirst().dropLast())
-        }
+        var header = normalizedSectionName(String(headerLine.dropFirst().dropLast()))
         let providersPrefix = "providers."
         if header.hasPrefix(providersPrefix) {
-          let providerID = String(header.dropFirst(providersPrefix.count)).trimmingCharacters(
-            in: .whitespaces)
+          let providerID = String(header.dropFirst(providersPrefix.count))
           guard !providerID.isEmpty else {
             throw AppConfigError.invalidLine(index + 1, rawLine)
           }
@@ -760,6 +756,23 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
       try resolveActiveProvider(in: &config, legacySTTKeysSeen: legacySTTKeysSeen)
     }
     return config
+  }
+
+  /// Нормализованное имя секции: трим whitespace, снятие обрамляющих кавычек,
+  /// трим id провайдера после `providers.` — так `[ providers.groq ]` и
+  /// `[providers. groq]` оба именуют провайдера `groq`. Один нормализатор для
+  /// парсера и точечной записи (иначе write не находит заголовок и дописывает
+  /// дубль-секцию, а следующий parse падает с duplicateProvider).
+  private static func normalizedSectionName(_ raw: String) -> String {
+    var name = raw.trimmingCharacters(in: .whitespaces)
+    if name.count >= 2, name.hasPrefix("\""), name.hasSuffix("\"") {
+      name = String(name.dropFirst().dropLast())
+    }
+    let prefix = "providers."
+    if name.hasPrefix(prefix) {
+      return prefix + name.dropFirst(prefix.count).trimmingCharacters(in: .whitespaces)
+    }
+    return name
   }
 
   /// Правила выбора активного провайдера:
@@ -1090,7 +1103,8 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
         headerText = String(headerText[..<hashIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
       }
       if headerText.hasPrefix("["), headerText.hasSuffix("]") {
-        if headerText == sectionHeader {
+        let name = normalizedSectionName(String(headerText.dropFirst().dropLast()))
+        if name == normalizedSectionName(section) {
           inSection = true
           headerIndex = idx
           sectionEnd = idx + 1

@@ -130,41 +130,18 @@ public enum Inserter {
       return
     }
 
-    let source = CGEventSource(stateID: .hidSystemState)
     // Backspace erases one grapheme cluster per press; WordDiff yields `old` whole
     // along grapheme boundaries — count Characters, not UTF-16 units (else emoji
-    // would take twice as many presses).
-    let backspaceCount = old.count
-
-    // Backspace: key 51 (delete). Multiple presses — multiple times.
-    for _ in 0..<backspaceCount {
-      postKey(virtualKey: 51, source: source)
-    }
+    // would take twice as many presses). Goes through delete(count:), so the
+    // postHook / isTestRun gate and chunk pauses apply (same as insert path).
+    delete(count: old.count)
     typeText(new)
-  }
-
-  /// Single key press (keyDown+keyUp) via CGEvent.
-  private static func postKey(virtualKey: CGKeyCode, source: CGEventSource?) {
-    if let keyDown = CGEvent(
-      keyboardEventSource: source,
-      virtualKey: virtualKey,
-      keyDown: true
-    ) {
-      keyDown.post(tap: .cghidEventTap)
-    }
-    if let keyUp = CGEvent(
-      keyboardEventSource: source,
-      virtualKey: virtualKey,
-      keyDown: false
-    ) {
-      keyUp.post(tap: .cghidEventTap)
-    }
   }
 
   /// Synthetic Enter (Return, kVK 36): keyDown + keyUp into .cghidEventTap.
   /// Agent posts it AFTER text insertion when Enter-stop latch is armed (Enter stops
   /// recording → post exactly one Enter after recognition+insert). Goes through the
-  /// common post() — test postHook and isTestRun gate apply (unlike private postKey),
+  /// common post() — test postHook and isTestRun gate apply,
   /// so unit tests count events without typing into the active app.
   public static func postReturnKeyDownUp() {
     let source = CGEventSource(stateID: .hidSystemState)
@@ -371,11 +348,15 @@ public struct ClipboardInsertBridge {
   }
 
   public static func defaultScheduleRestore(_ restore: @escaping () -> Void, delay: TimeInterval) {
-    DispatchQueue.global().asyncAfter(deadline: .now() + delay, execute: restore)
+    DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: restore)
   }
 }
 
 extension Inserter {
+  /// Original user clipboard while a restore is pending (main thread only).
+  private static var pendingOriginal: ClipboardSnapshot?
+  private static var restoreGeneration = 0
+
   /// Insert via clipboard: save current buffer → write text → Cmd+V → restore
   /// old buffer after `restoreDelay` (~0.5 s).
   public static func insertViaClipboard(
@@ -383,9 +364,18 @@ extension Inserter {
     bridge: ClipboardInsertBridge = .default
   ) {
     guard !text.isEmpty else { return }
-    let old = bridge.readClipboard()
+    // Overlapping insertions reuse the original snapshot, not our own dictation text.
+    let original = pendingOriginal ?? bridge.readClipboard()
+    pendingOriginal = original
+    restoreGeneration += 1
+    let generation = restoreGeneration
     bridge.writeClipboard(ClipboardInsertBridge.snapshot(containingText: text))
     bridge.sendPaste()
-    bridge.scheduleRestore({ bridge.writeClipboard(old) }, bridge.restoreDelay)
+    bridge.scheduleRestore({
+      // Only the latest scheduled restore runs; earlier ones are superseded.
+      guard generation == restoreGeneration else { return }
+      pendingOriginal = nil
+      bridge.writeClipboard(original)
+    }, bridge.restoreDelay)
   }
 }

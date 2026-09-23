@@ -159,7 +159,7 @@ public enum AudioSegmenter {
     let trailSeconds = TimeInterval(trail.count) * windowDuration
     if trailSeconds < config.minSegment,
       let last = segments.last,
-      TimeInterval(last.count) * windowDuration + trailSeconds <= config.maxSegment
+      TimeInterval(rms.count - last.lowerBound) * windowDuration <= config.maxSegment
     {  // swiftlint:disable:this opening_brace
       segments[segments.count - 1] = last.lowerBound..<rms.count
     } else {

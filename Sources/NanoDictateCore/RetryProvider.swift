@@ -263,7 +263,7 @@ public final class RetryProvider {
       }
       var lastFailure: TranscribeError?
       var abortError: Error?
-      while let outcome = await group.next() {
+      drain: while let outcome = await group.next() {
         switch outcome {
         case .success(let hit):
           group.cancelAll()
@@ -274,8 +274,9 @@ public final class RetryProvider {
           } else {
             abortError = error
             group.cancelAll()
-            // Non-TranscribeError (mic etc.): abort, rest of group
-            // results unnecessary.
+            // Non-TranscribeError (mic etc.): keep the FIRST abort error and
+            // stop draining — cancelled siblings may throw CancellationError.
+            break drain
           }
         }
       }

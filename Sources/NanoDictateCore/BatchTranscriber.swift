@@ -85,11 +85,18 @@ public struct BatchHTTPResponse: Equatable {
     self.body = body
   }
 
+  /// Upper limit on the server-requested delay between retries.
+  public static let maxRetryAfter: TimeInterval = 60
+
   /// Значение заголовка Retry-After: целое число секунд. HTTP-дата не
-  /// разбирается (возвращается nil — фолбэк на backoff).
+  /// разбирается (возвращается nil — фолбэк на backoff). Не-finite или
+  /// отрицательные значения отвергаются, значение ограничено сверху.
   public var retryAfterSeconds: TimeInterval? {
-    guard let raw = headers["retry-after"], let value = Double(raw), value >= 0 else { return nil }
-    return value
+    guard
+      let raw = headers["retry-after"]?.trimmingCharacters(in: .whitespaces),
+      let value = Double(raw), value.isFinite, value >= 0
+    else { return nil }
+    return min(value, Self.maxRetryAfter)
   }
 }
 
@@ -585,7 +592,10 @@ public enum BatchTranscriber {
         for i in specs.indices {
           // resolvedRecord уже гарантирует index в пределах
           // totalSegments == slots.count — дополнительный guard не нужен.
-          if let resolved = checkpoint.resolvedRecord(index: i) {
+          if let resolved = checkpoint.resolvedRecord(index: i),
+            abs(resolved.bodyStart - specs[i].bodyStart) < 0.001,
+            abs(resolved.bodyEnd - specs[i].bodyEnd) < 0.001
+          {  // swiftlint:disable:this opening_brace
             slots[i] = resolved
           }
         }

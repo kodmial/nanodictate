@@ -185,9 +185,9 @@ public enum AgentScreen {
   public static func statusScreen(_ status: AgentStatusData) -> String {
     let agent =
       status.agentRunning
-      ? "running" + (status.agentPID.map { " (pid \($0))" } ?? "")
-      : "stopped"
-    let recording = status.recordingActive ? "active" : "idle"
+      ? L10n.tr("status.running") + (status.agentPID.map { " (pid \($0))" } ?? "")
+      : L10n.tr("status.stopped")
+    let recording = status.recordingActive ? L10n.tr("status.active") : L10n.tr("status.idle")
     let errorsText = status.logHasErrors ? L10n.tr("status.hasErrors") : L10n.tr("status.noErrors")
     let providerText = providerLine(
       providerName: status.providerName,

@@ -177,6 +177,16 @@ public enum Logger {
 
   private static let lock = NSLock()
 
+  /// Guarded by `lock`. Fixed POSIX locale + Gregorian calendar, so timestamps
+  /// do not depend on the user's locale/calendar settings.
+  private static let timestampFormatter: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.calendar = Calendar(identifier: .gregorian)
+    formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+    return formatter
+  }()
+
   /// Appends `yyyy-MM-dd HH:mm:ss [level] message` to agent.log. Creates
   /// dir/file as needed. Never throws.
   public static func log(_ message: String, level: String = "info") {
@@ -203,9 +213,7 @@ public enum Logger {
       }
     }
 
-    let formatter = DateFormatter()
-    formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
-    let line = "\(formatter.string(from: Date())) [\(level)] \(message)\n"
+    let line = "\(timestampFormatter.string(from: Date())) [\(level)] \(message)\n"
     guard let data = line.data(using: .utf8) else { return }
 
     let fileURL = URL(fileURLWithPath: expanded).appendingPathComponent("agent.log")
