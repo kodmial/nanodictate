@@ -29,11 +29,12 @@ brew install nanodictate
 brew services start nanodictate
 ```
 
-Installs the prebuilt binary and registers the background agent; on
-Homebrew ≥ 7 the sandboxed `post_install` cannot write
-`~/Library/LaunchAgents` or call launchctl, so the third line is the only way
-to register the service (see [After install](#after-install)). On Homebrew < 7
-the install already registered it and the third line is an idempotent no-op.
+Installs the prebuilt binary; the third line activates the background agent:
+`brew services start nanodictate` uses the formula's `service do` block to
+write the canonical `~/Library/LaunchAgents/com.nanodictate.agent.plist` and
+bootstrap it into launchd. `brew install` itself does not register the
+LaunchAgent — `nanodictate start` is the equivalent, idempotent alternative
+(see [After install](#after-install)).
 
 Prefer a proper app bundle? `brew install --cask nanodictate` installs
 **NanoDictate.app** — the same two release binaries inside a `.app` bundle,
@@ -138,17 +139,13 @@ canonical `~/Library/LaunchAgents/com.nanodictate.agent.plist` (label
 `com.nanodictate.agent`, ProgramArguments = the brew binary path, RunAtLoad +
 KeepAlive) and is bootstrapped into launchd — the same single label and file
 used by every registration path, never a second daemon (no `homebrew.mxcl.*`).
-On Homebrew < 7 the `post_install` step registers it **once** during `brew
-install`, so after a clean install the daemon is registered without a manual
-first run and starts at login. On Homebrew >= 7 the `post_install` step runs
-in a sandbox (HOME points at a temp dir) and cannot write into your real home
-or call launchctl (EPERM/EIO) — automatic registration is skipped there; run
-`brew services start nanodictate` once after the install: it runs outside the
-sandbox, writes the same canonical plist and loads gui/<uid> (`nanodictate
-start` is the equivalent, idempotent alternative). If the install runs
-without a GUI session (e.g. over SSH) the bootstrap is skipped; on
-Homebrew < 7 the plist is still written and RunAtLoad starts the daemon at
-the next login, and on Homebrew >= 7 `brew services start nanodictate` does it.
+Registration is explicit: `brew install` does not write the LaunchAgent;
+activate the service once with `brew services start nanodictate` — it runs as
+the user, writes the same canonical plist and loads gui/<uid> (`nanodictate
+start` is the equivalent, idempotent alternative). If the activation runs
+without a GUI session (e.g. over SSH) the bootstrap is skipped; the plist is
+still written (RunAtLoad starts the daemon at the next login) or re-run
+`brew services start nanodictate` in the GUI session.
 
 1. **TCC grants (required, manual).** In **System Settings → Privacy &
    Security** add the `NanoDictateAgent` binary to **Microphone** (recording)
@@ -166,17 +163,14 @@ the next login, and on Homebrew >= 7 `brew services start nanodictate` does it.
    nanodictate provider list
    ```
 
-3. **Start the service** — on Homebrew >= 7 the sandboxed `post_install`
-   cannot write the LaunchAgent or call launchctl (EPERM/EIO) during `brew
-   install`, so start the service once with `brew services start
-   nanodictate`: it runs outside the sandbox, writes the same canonical
+3. **Start the service.** `brew install` does not register the LaunchAgent —
+   start the service once with `brew services start nanodictate`: it uses the
+   formula's `service do` block, writes the same canonical
    `~/Library/LaunchAgents/com.nanodictate.agent.plist` (label
    `com.nanodictate.agent`) and bootstraps it into launchd — `nanodictate
-   start` is the equivalent, idempotent alternative. On Homebrew < 7 the
-   `post_install` step already registered the service, so both commands are
-   safe idempotent no-ops. Running one after an automatic registration just
-   re-registers with the symlink-resolved real path; a binary path change
-   prints a note that macOS may ask again for Microphone/Accessibility:
+   start` is the equivalent, idempotent alternative. Running one after the
+   other just re-registers with the symlink-resolved real path; a binary path
+   change prints a note that macOS may ask again for Microphone/Accessibility:
 
    ```sh
    nanodictate status   # or: launchctl print gui/$(id -u)/com.nanodictate.agent

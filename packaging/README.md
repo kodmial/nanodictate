@@ -100,15 +100,15 @@ generated files get concrete values.
   itself: `nanodictate start` writes the canonical
   `~/Library/LaunchAgents/com.nanodictate.agent.plist` (Label
   `com.nanodictate.agent`) with symlink-resolved binary/log paths and
-  bootstraps it via launchctl. In addition, the packages call the same
-  registration **once at install**: the Homebrew formula's `post_install`
-  (runs as the user) and the MacPorts port's `post-activate` (runs as root;
-  writes the global `/Library/LaunchAgents/com.nanodictate.agent.plist` and
-  bootstraps the console user) write the same canonical plist with the same
-  single label and `launchctl bootstrap` it, so
-  after a clean install the daemon is registered without a manual first run
-  (RunAtLoad starts it at login). No template lookup, no env vars, no
-  startupitem/service block and **no second label** anywhere (no
+  bootstraps it via launchctl. On Homebrew the formula ships a `service do`
+  block (canonical label `com.nanodictate.agent`) and the user activates the
+  service explicitly once after install with `brew services start
+  nanodictate` — it writes the same canonical plist and bootstraps gui/<uid>;
+  `brew install` itself does not register the LaunchAgent. The MacPorts port
+  still auto-registers at install (`post-activate` runs as root; writes the
+  global `/Library/LaunchAgents/com.nanodictate.agent.plist` and bootstraps
+  the console user). No template lookup, no env vars, no
+  startupitem block and **no second label** anywhere (no
   `homebrew.mxcl.*`) — one daemon regardless of install method or order, the
   second manager takes over. On binary path change (e.g. after an upgrade)
   the CLI prints a TCC re-grant hint.
