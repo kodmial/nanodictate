@@ -931,10 +931,13 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
 
   /// Точечная правка строки `key = value` в конфиг-файле.
   /// Не сериализует весь файл — иначе потеряются комментарии. Строка ищется
-  /// на верхнем уровне (вне секций), значение в кавычках заменяется точечно
-  /// (хвостовой комментарий сохраняется), без кавычек — заменяется всё после
-  /// `=`. Если ключа нет — добавляется в конец. После атомарной записи
-  /// возвращает права 0600 (atomic-запись сбрасывает их на umask).
+  /// только на верхнем уровне (вне секций): поиск останавливается на первом
+  /// заголовке секции, ключи внутри `[providers.*]` и других секций не
+  /// затрагиваются. Значение в кавычках заменяется точечно (хвостовой
+  /// комментарий сохраняется), без кавычек — заменяется всё после `=`. Если
+  /// ключа нет — строка вставляется перед первой секцией, а при полном
+  /// отсутствии секций добавляется в конец. После атомарной записи возвращает
+  /// права 0600 (atomic-запись сбрасывает их на umask).
   ///
   /// `value` — готовая литеральная форма значения: `"gigaam"` для строк,
   /// `true`/`false` для bool, `2` для чисел.
@@ -948,12 +951,29 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
     }
 
     var replaced = false
-    let lines = content.components(separatedBy: "\n").map { line -> String in
-      guard !replaced else { return line }
+    var lines = content.components(separatedBy: "\n")
+    // Индекс первого заголовка секции — место вставки, если ключ не найден.
+    var firstSectionIndex: Int?
+
+    for (idx, line) in lines.enumerated() {
+      guard !replaced else { break }
       let stripped = line.drop { $0 == " " || $0 == "\t" }
-      guard let eqIndex = stripped.firstIndex(of: "=") else { return line }
+      // Заголовок секции, как в парсере: тримим оба конца, допускаем хвостовой комментарий.
+      var headerText = String(stripped).trimmingCharacters(in: .whitespaces)
+      if let hashIndex = headerText.firstIndex(of: "#") {
+        headerText = String(headerText[..<hashIndex]).trimmingCharacters(in: .whitespaces)
+      }
+      if headerText.hasPrefix("["), headerText.hasSuffix("]") {
+        // Первый заголовок секции: внутри секций ключ не ищем — дальше строки
+        // секции. Индекс запоминаем для вставки при отсутствии ключа.
+        if firstSectionIndex == nil {
+          firstSectionIndex = idx
+        }
+        break
+      }
+      guard let eqIndex = stripped.firstIndex(of: "=") else { continue }
       let lineKey = stripped[stripped.startIndex..<eqIndex].trimmingCharacters(in: .whitespaces)
-      guard lineKey == key else { return line }
+      guard lineKey == key else { continue }
       let valueStart = stripped.index(after: eqIndex)
       let newLine: String
       if let open = line[valueStart...].firstIndex(of: "\""),
@@ -968,13 +988,19 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
         let leading = String(line[..<valueStart])
         newLine = leading.trimmingCharacters(in: .whitespaces) + " " + value
       }
+      lines[idx] = newLine
       replaced = true
-      return newLine
+    }
+
+    if !replaced, let firstSectionIndex {
+      // Ключа на верхнем уровне нет — вставляем непосредственно перед первым
+      // заголовком секции, чтобы парсер прочитал строку как top-level.
+      lines.insert("\(key) = \(value)", at: firstSectionIndex)
     }
 
     var result = lines.joined(separator: "\n")
-    if !replaced {
-      // Строка не найдена — добавляем в конец.
+    if !replaced, firstSectionIndex == nil {
+      // Ключа нет и секций в файле нет — добавляем в конец.
       if !result.isEmpty, !result.hasSuffix("\n") {
         result += "\n"
       }

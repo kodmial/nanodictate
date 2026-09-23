@@ -324,6 +324,16 @@ test("respond wraps text and structuredContent", () => {
   const r = respond("hello", { a: 1 });
   assert.deepEqual(r.content, [{ type: "text", text: "hello" }]);
   assert.deepEqual(r.structuredContent, { a: 1 });
+  assert.equal(r.isError, false, "no success flag ⇒ not an error");
+});
+
+test("respond flags isError only when the result carries success:false", () => {
+  const failed = respond("boom", { success: false, detail: "x" });
+  assert.equal(failed.isError, true);
+  assert.deepEqual(failed.structuredContent, { success: false, detail: "x" });
+  assert.equal(failed.content[0].text, "boom");
+  const ok = respond("fine", { success: true });
+  assert.equal(ok.isError, false, "success:true must not be flagged as an error");
 });
 
 test("render picks markdown or JSON by response_format", () => {
@@ -647,6 +657,7 @@ test("handleBuild fails fast without spawning when the toolchain is broken", asy
     assert.equal(res.structuredContent.success, false);
     assert.equal(res.structuredContent.exitCode, -1);
     assert.equal(res.structuredContent.configuration, "debug");
+    assert.equal(res.isError, true, "failed build must surface as an MCP error");
     assert.match(res.structuredContent.tail, /SWIFT_TOOLCHAIN/);
     // markdown requested → text is a string; here we requested JSON
     const parsed = JSON.parse(res.content[0].text);
@@ -696,6 +707,7 @@ test("handleDeploy gates on build failure (no sign/restart) when the toolchain i
     assert.equal(res.structuredContent.sign, null);
     assert.equal(res.structuredContent.restart, null);
     assert.equal(res.structuredContent.detail, "build failed");
+    assert.equal(res.isError, true, "failed deploy must surface as an MCP error");
     const parsed = JSON.parse(res.content[0].text);
     assert.equal(parsed.detail, "build failed");
     assert.deepEqual(res.structuredContent, parsed);
@@ -723,6 +735,7 @@ test("handleStatus returns a shaped result from read-only probes", async () => {
   assert.equal(sc.binaryPath === null || typeof sc.binaryPath === "string", true);
   assert.ok(sc.codeSignature === null || typeof sc.codeSignature === "object");
   assert.equal(typeof sc.signatureStable, "boolean");
+  assert.equal(res.isError, false, "status probes are informational, never errors");
   assert.match(res.content[0].text, /# NanoDictate agent status/);
 
   // JSON format path on the same handler
@@ -1077,6 +1090,7 @@ test("handleCertEnsure surfaces import failure as an error", async () => {
   const res = await handleCertEnsure({}, fake.deps);
   assert.equal(res.structuredContent.action, "error");
   assert.equal(res.structuredContent.success, false);
+  assert.equal(res.isError, true, "failed cert ensure must surface as an MCP error");
 });
 
 test("handleCertPublish with execute=true installs both secrets when absent is confirmed", async () => {
@@ -1089,7 +1103,11 @@ test("handleCertPublish with execute=true installs both secrets when absent is c
   assert.equal(sc.executed, true);
   assert.equal(sc.success, true);
   assert.equal(sc.secretsState, "absent");
-  assert.ok(sc.p12Base64);
+  // secrets are not echoed back after a successful install
+  assert.equal(sc.p12Base64, null);
+  assert.equal(sc.password, null);
+  assert.doesNotMatch(res.content[0].text, /## Material/);
+  assert.doesNotMatch(res.content[0].text, /p12 password/);
   const sets = fake.calls.filter((c) => c.cmd === "gh" && c.args[1] === "set");
   assert.equal(sets.length, 2);
   assert.equal(sets[0].args[2], "NANODICTATE_SIGNING_P12");

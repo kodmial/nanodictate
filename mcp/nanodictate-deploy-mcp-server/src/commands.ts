@@ -61,6 +61,12 @@ export interface RunOptions {
   timeoutMs?: number;
   /** Extra environment variables merged over the inherited environment. */
   env?: Record<string, string | undefined>;
+  /**
+   * Data written to the child's stdin. When set, stdin is piped and the data is
+   * written once the child spawns; when omitted stdin is /dev/null, so secrets
+   * never travel through the argv in commands that read from stdin.
+   */
+  input?: string;
 }
 
 /** Signature of the process runner — injectable so tests never spawn real commands. */
@@ -118,11 +124,19 @@ export function run(
   opts: RunOptions = {},
 ): Promise<RunResult> {
   return new Promise<RunResult>((resolve) => {
+    const pipeStdin = opts.input !== undefined;
     const child = spawn(cmd, args, {
       cwd: opts.cwd,
       env: opts.env ? { ...process.env, ...opts.env } : undefined,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [pipeStdin ? "pipe" : "ignore", "pipe", "pipe"],
     });
+
+    if (pipeStdin && child.stdin) {
+      // A child may close stdin early (exit, crash) before consuming all input.
+      // Swallow EPIPE-style write errors — the exit status is authoritative.
+      child.stdin.on("error", () => {});
+      child.stdin.end(opts.input);
+    }
 
     let stdout = "";
     let stderr = "";
@@ -134,10 +148,12 @@ export function run(
       child.kill("SIGKILL");
     }, timeoutMs);
 
-    child.stdout.on("data", (chunk: Buffer) => {
+    // stdout/stderr are always "pipe" in the stdio tuple above; the non-null
+    // assertions are safe because only index 0 (stdin) ever varies.
+    child.stdout!.on("data", (chunk: Buffer) => {
       stdout += chunk.toString();
     });
-    child.stderr.on("data", (chunk: Buffer) => {
+    child.stderr!.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
     });
     child.on("error", (err) => {
@@ -1511,6 +1527,7 @@ print("|".join(names))
 /** Probe GitHub for the CI signing secrets. Never throws. */
 async function probeGithubSecrets(deps: CommandDeps): Promise<GithubSecretsProbe> {
   const res = await deps.runFn("gh", ["secret", "list"], {
+    cwd: PROJECT_ROOT,
     timeoutMs: COMMAND_TIMEOUT_MS,
   });
   if (res.status !== 0) {
@@ -1623,9 +1640,18 @@ export async function ensureCiSigningIdentity(
     }
 
     // Without a partition list entry codesign cannot read the private key.
+    // `-l` restricts the update to the freshly imported CI identity so the
+    // partition list of unrelated keys in the keychain is left untouched.
     const partition = await deps.runFn(
       "security",
-      ["set-key-partition-list", "-S", "apple-tool:,apple:", keychain],
+      [
+        "set-key-partition-list",
+        "-S",
+        "apple-tool:,apple:",
+        "-l",
+        CI_SIGNING_IDENTITY,
+        keychain,
+      ],
       { timeoutMs: PARTITION_TIMEOUT_MS },
     );
     if (partition.status !== 0) {
@@ -1864,23 +1890,33 @@ export async function publishCiSigningToGithub(
     };
   }
 
-  const p12Result = await deps.runFn("gh", ["secret", "set", CI_P12_SECRET, "--body", p12Base64]);
-  const passwordResult = await deps.runFn("gh", [
-    "secret",
-    "set",
-    CI_P12_PASSWORD_SECRET,
-    "--body",
-    password,
-  ]);
+  // Secret values travel via stdin, never argv, so they don't leak into `ps`
+  // output or error traces. gh reads the value from stdin when --body is absent.
+  const p12Result = await deps.runFn("gh", ["secret", "set", CI_P12_SECRET], {
+    input: p12Base64,
+    cwd: PROJECT_ROOT,
+    timeoutMs: COMMAND_TIMEOUT_MS,
+  });
+  const passwordResult = await deps.runFn(
+    "gh",
+    ["secret", "set", CI_P12_PASSWORD_SECRET],
+    {
+      input: password,
+      cwd: PROJECT_ROOT,
+      timeoutMs: COMMAND_TIMEOUT_MS,
+    },
+  );
   const ok = p12Result.status === 0 && passwordResult.status === 0;
 
   return {
+    // On success the secrets are now owned by GitHub — do not echo them back
+    // into the tool result. Only a failed publish keeps them for diagnostics.
     success: ok,
     executed: true,
     secretsState: "absent",
     localCertPresent: true,
-    p12Base64,
-    password,
+    p12Base64: ok ? null : p12Base64,
+    password: ok ? null : password,
     instructions: [],
     detail: ok
       ? `Installed ${CI_P12_SECRET} and ${CI_P12_PASSWORD_SECRET} on GitHub.`

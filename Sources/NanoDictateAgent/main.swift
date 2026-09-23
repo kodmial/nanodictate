@@ -1135,8 +1135,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         + "finalChanged=\(outcome.finalChanged) (\(text.count) chars)",
       level: "info"
     )
-    // Marker for `nanodictate last` — the chunked session's final text.
-    Logger.log("LAST_TEXT: \(text.replacingOccurrences(of: "\n", with: " "))")
+    // Marker for `nanodictate last` — the chunked session's final text:
+    // persisted to the mode-0600 state file, NOT into agent.log (CWE-532).
+    persistLastText(text)
     // Final piece inserted and finalized — only now the synthetic
     // Enter (not mid-stream of pieces).
     postSyntheticReturnIfPending()
@@ -1540,9 +1541,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     hideAfter(0.8, reason: "insert done")
     state = .idle
     Logger.log("transcription inserted (\(text.count) chars)")
-    // Marker for `nanodictate last` (last recognized text); newlines are
-    // replaced so the marker stays a single log line.
-    Logger.log("LAST_TEXT: \(text.replacingOccurrences(of: "\n", with: " "))")
+    // Marker for `nanodictate last` (last recognized text) — persisted to
+    // the mode-0600 state file, NOT into agent.log (CWE-532).
+    persistLastText(text)
     // Enter-stop latch: exactly one synthetic Enter after the insertion.
     // state is already .idle — by posting time (~250 ms) the swallow
     // predicate returns false, the synthetic Return reaches the app.
@@ -1660,7 +1661,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   }
 
   /// Insertion of a manual retry result: the common completeInsertion path
-  /// (review gate, insertion method, LAST_TEXT marker), but outside the
+  /// (review gate, insertion method, last-text persistence), but outside the
   /// recording state machine — retry does not touch state and the
   /// processing session.
   private func retryInsertion(_ text: String) {
@@ -1695,8 +1696,35 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     overlay.setStatus(L10n.tr("overlay.retryInserted"))
     hideAfter(1.0, reason: "retry inserted")
     Logger.log("retry transcription inserted (\(text.count) chars)")
-    Logger.log("LAST_TEXT: \(text.replacingOccurrences(of: "\n", with: " "))")
+    persistLastText(text)
     postSyntheticReturnIfPending()
+  }
+
+  /// Persists the last transcribed text for `nanodictate last` into the
+  /// state file `~/Library/Application Support/NanoDictate/last_text.txt`
+  /// (mode 0600). The dictation text must NOT go into agent.log (CWE-532 —
+  /// the transcript would leak into the log); the CLI reads this file
+  /// instead. Overwritten on every successful insert (chunked/normal/retry);
+  /// a failed or cancelled loop does not touch it — `nanodictate last` keeps
+  /// returning the last COMPLETED insertion, exactly like the old LAST_TEXT
+  /// log marker. Newlines are replaced so the stored value stays one line.
+  private func persistLastText(_ text: String) {
+    let base =
+      FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+      ?? FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent("Library/Application Support")
+    let fileURL = base.appendingPathComponent("NanoDictate/last_text.txt", isDirectory: false)
+    let cleaned = text.replacingOccurrences(of: "\n", with: " ")
+    do {
+      try FileManager.default.createDirectory(
+        at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+      try cleaned.data(using: .utf8)?.write(to: fileURL, options: .atomic)
+      // .atomic renames a fresh temp file — explicitly enforce mode 0600 on
+      // the final file (the transcript is private, user-readable only).
+      try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+    } catch {
+      Logger.log("last text persist failed: \(error.localizedDescription)", level: "error")
+    }
   }
 
   /// "Empty" dictation: STT returned <2 words (or silence). The text is not

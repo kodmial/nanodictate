@@ -994,6 +994,114 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(paths[fixedStart + 2], "/opt/local/share/nanodictate/config.example.toml")
     }
 
+    // MARK: - writeKeyValue (top-level, вне секций)
+
+    @objc func testWriteKeyValueReplacesTopLevelOnly() throws {
+        // Одноимённый ключ внутри секции не должен затрагиваться (CodeRabbit).
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_write_kv_top_\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try """
+        api_key = "top-old"
+        [providers.groq]
+        api_key = "section-old"
+        """.data(using: .utf8)!.write(to: file)
+
+        try AppConfig.writeKeyValue(key: "api_key", value: "\"top-new\"", to: file.path)
+        let text = try String(contentsOf: file, encoding: .utf8)
+        XCTAssertTrue(text.contains("api_key = \"top-new\""))
+        XCTAssertFalse(text.contains("top-old"))
+        XCTAssertTrue(text.contains("api_key = \"section-old\""),
+                      "ключ внутри [providers.groq] не тронут")
+    }
+
+    @objc func testWriteKeyValueIgnoresSectionKeysAndInsertsBeforeFirstSection() throws {
+        // Ключа на верхнем уровне нет — искать в секции нельзя: вставляем
+        // строку перед первым заголовком секции, секционный ключ не трогаем.
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_write_kv_section_\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try """
+        [providers.groq]
+        api_key = "section-old"
+        """.data(using: .utf8)!.write(to: file)
+
+        try AppConfig.writeKeyValue(key: "api_key", value: "\"top-new\"", to: file.path)
+        let text = try String(contentsOf: file, encoding: .utf8)
+        XCTAssertTrue(text.contains("api_key = \"top-new\""))
+        XCTAssertTrue(text.contains("api_key = \"section-old\""),
+                      "секционный ключ остался на месте")
+        let inserted = text.range(of: "api_key = \"top-new\"")!
+        let header = text.range(of: "[providers.groq]")!
+        XCTAssertLessThan(inserted.lowerBound, header.lowerBound,
+                          "top-level строка вставлена ПЕРЕД первой секцией")
+        let config = try AppConfig.parse(text)
+        XCTAssertEqual(config.providers.first { $0.id == "groq" }?.apiKey, "section-old")
+    }
+
+    @objc func testWriteKeyValueIgnoresSectionWithTrailingSpaceInHeader() throws {
+        // Заголовок с хвостовыми пробелами `[providers.groq]  ` парсер читает
+        // как секцию — writeKeyValue должен так же, иначе заменит ключ внутри
+        // секции (воскрешение бага, починенного для обычных заголовков).
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_write_kv_trailing_sp_\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let content = "[providers.groq]  \napi_key = \"section-old\"\n"
+        try content.data(using: .utf8)!.write(to: file)
+
+        try AppConfig.writeKeyValue(key: "api_key", value: "\"top-new\"", to: file.path)
+        let text = try String(contentsOf: file, encoding: .utf8)
+        XCTAssertTrue(text.contains("api_key = \"top-new\""))
+        XCTAssertTrue(text.contains("api_key = \"section-old\""),
+                      "секционный ключ не тронут при хвостовых пробелах в заголовке")
+        let inserted = text.range(of: "api_key = \"top-new\"")!
+        let header = text.range(of: "[providers.groq]")!
+        XCTAssertLessThan(inserted.lowerBound, header.lowerBound,
+                          "top-level строка вставлена ПЕРЕД первой секцией")
+        let config = try AppConfig.parse(text)
+        XCTAssertEqual(config.providers.first { $0.id == "groq" }?.apiKey, "section-old")
+    }
+
+    @objc func testWriteKeyValueInsertsBeforeFirstSectionWhenNotFound() throws {
+        // Есть top-level строки и секции: отсутствующий ключ — перед секцией.
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_write_kv_insert_\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try """
+        language = "ru"
+
+        [providers.groq]
+        name = "Groq"
+        """.data(using: .utf8)!.write(to: file)
+
+        try AppConfig.writeKeyValue(key: "active_provider", value: "\"groq\"", to: file.path)
+        let text = try String(contentsOf: file, encoding: .utf8)
+        let inserted = text.range(of: "active_provider = \"groq\"")!
+        let header = text.range(of: "[providers.groq]")!
+        XCTAssertLessThan(inserted.lowerBound, header.lowerBound)
+        XCTAssertTrue(text.contains("language = \"ru\""),
+                      "существующие top-level строки не тронуты")
+        let config = try AppConfig.parse(text)
+        XCTAssertEqual(config.activeProvider, "groq",
+                       "парсер читает вставленную строку как top-level")
+    }
+
+    @objc func testWriteKeyValueAppendsToEndWhenNoSections() throws {
+        // Без секций поведение прежнее: строка добавляется в конец файла.
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_write_kv_append_\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try "language = \"ru\"\n".data(using: .utf8)!.write(to: file)
+
+        try AppConfig.writeKeyValue(key: "active_provider", value: "\"groq\"", to: file.path)
+        let text = try String(contentsOf: file, encoding: .utf8)
+        XCTAssertEqual(
+            text, "language = \"ru\"\nactive_provider = \"groq\"\n",
+            "без секций — прежнее поведение: дописывается с переводом строки")
+        let config = try AppConfig.parse(text)
+        XCTAssertEqual(config.activeProvider, "groq")
+    }
+
     // MARK: - writeProviderKeyValue (config set-key)
 
     @objc func testWriteProviderKeyValueReplacesInExistingSection() throws {

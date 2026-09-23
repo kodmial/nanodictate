@@ -203,9 +203,16 @@ export function respond<T>(text: string, structuredContent: T) {
   // The SDK types structuredContent as { [x: string]: unknown }; the cast at
   // this boundary is intentional — the data objects come from typed functions
   // in commands.ts.
+  const data = structuredContent as Record<string, unknown>;
+  // A result whose `success` flag is false must surface to the MCP client as an
+  // error (isError), otherwise a failed build/sign/restart/deploy/wipe/cert
+  // step is indistinguishable from a successful call. The deploy/status
+  // handlers build their structured objects with a top-level `success` too.
+  const isError = data.success === false;
   return {
+    isError,
     content: [{ type: "text" as const, text }] satisfies TextContent[],
-    structuredContent: structuredContent as unknown as Record<string, unknown>,
+    structuredContent: data,
   };
 }
 

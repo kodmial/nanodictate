@@ -7,7 +7,7 @@
  * exercised by the real-build verification, not by these tests.
  */
 
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -201,11 +201,16 @@ import {
   MACPORTS_PORT_BIN,
   NANODICTATE_TAP,
   NANODICTATE_TAP_CLONE_DIR,
+  PROJECT_ROOT,
   tapCloneDir,
   wipePaths,
 } from "../dist/constants.js";
 
-const HOME = "/tmp/nanodictate-test-home";
+// Unique per-run HOME (mkdtemp) so the wipe/cert fakes never collide with a
+// fixed "/tmp/nanodictate-test-home" left behind by an earlier run; removed
+// after the whole file's tests complete.
+const HOME = mkdtempSync(join(tmpdir(), "nanodictate-test-home-"));
+after(() => rmSync(HOME, { recursive: true, force: true }));
 const P = wipePaths(HOME);
 const TCC_CMD = TCC_GRANTS_DELETE_CMD;
 // the TCC block now carries BOTH a read-only check (SELECT) and the erase
@@ -744,7 +749,12 @@ test("ensureCiSigningIdentity creates + imports when absent", async () => {
   assert.ok(importCall, "security import ran");
   assert.ok(importCall.args.includes("-T"));
   assert.ok(importCall.args.includes("/usr/bin/codesign"));
-  assert.equal(fake.calls.some((c) => c.cmd === "security" && c.args[0] === "set-key-partition-list"), true);
+  const partitionCall = fake.calls.find((c) => c.cmd === "security" && c.args[0] === "set-key-partition-list");
+  assert.ok(partitionCall, "set-key-partition-list ran");
+  // label filter keeps the partition-list update scoped to the CI identity
+  const labelIdx = partitionCall.args.indexOf("-l");
+  assert.ok(labelIdx >= 0, "partition-list call is labeled with -l");
+  assert.equal(partitionCall.args[labelIdx + 1], CI_SIGNING_IDENTITY, "label selects the CI identity");
 });
 
 test("ensureCiSigningIdentity reports generator failure", async () => {
@@ -838,12 +848,24 @@ test("publish with execute=true runs gh secret set only when absence is confirme
   const res = await publishCiSigningToGithub({ execute: true, deps: fake.deps });
   assert.equal(res.success, true);
   assert.equal(res.executed, true);
+  // After a successful install the secrets are owned by GitHub — they must not
+  // be echoed back into the result.
+  assert.equal(res.p12Base64, null);
+  assert.equal(res.password, null);
   const sets = fake.calls.filter((c) => c.cmd === "gh" && c.args[1] === "set");
   assert.equal(sets.length, 2);
   assert.equal(sets[0].args[2], CI_P12_SECRET);
   assert.equal(sets[1].args[2], CI_P12_PASSWORD_SECRET);
-  assert.equal(sets[0].args[4], res.p12Base64);
-  assert.equal(sets[1].args[4], res.password);
+  // the values travel via stdin (RunOptions.input), never in argv — a --body
+  // argument would leak the secret into `ps` output and logs.
+  for (const set of sets) {
+    assert.equal(set.args.includes("--body"), false, "secret value must not appear in argv");
+    assert.equal(typeof set.opts?.input, "string", "secret value must be piped via stdin");
+    assert.equal(set.opts?.cwd, PROJECT_ROOT, "gh must run from the repo root");
+  }
+  // absence probe must also run from the repo root, not the caller's cwd
+  const list = fake.calls.find((c) => c.cmd === "gh" && c.args[1] === "list");
+  assert.equal(list?.opts?.cwd, PROJECT_ROOT);
 });
 
 test("publish reports gh secret set failure of one secret", async () => {

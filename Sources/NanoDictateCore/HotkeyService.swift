@@ -102,7 +102,7 @@ public final class HotkeyService {
     // swiftlint:disable:next closure_parameter_position
     _, type, event, userInfo -> Unmanaged<CGEvent>? in
     guard let userInfo else {
-      return Unmanaged.passRetained(event)
+      return Unmanaged.passUnretained(event)
     }
 
     let service = Unmanaged<HotkeyService>.fromOpaque(userInfo).takeUnretainedValue()
@@ -119,7 +119,7 @@ public final class HotkeyService {
       return nil
     }
 
-    return Unmanaged.passRetained(event)
+    return Unmanaged.passUnretained(event)
   }
 
   private func handleEvent(type: CGEventType, event: CGEvent) {

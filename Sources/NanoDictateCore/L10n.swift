@@ -131,7 +131,7 @@ extension L10n {
       + " placeholder on failure, checkpoint <out>.checkpoint.json (without --out — in temp dir) for --resume",
     "usage.retry": "Re-transcribe last recording with a different provider\n  (agent holds last WAV"
       + " in memory; insertion performed by the agent)",
-    "usage.last": "Show last transcribed text (LAST_TEXT marker)",
+    "usage.last": "Show last recognized text (saved on successful insert)",
     "usage.logs": "Last 50 lines of agent log",
     "usage.help": "Show this help",
     "cli.dir.error": "Failed to create directories: %@",
@@ -217,8 +217,7 @@ extension L10n {
     "progress.noresume": "WARNING: --resume but checkpoint %@ not found — starting from scratch",
     "progress.badcheckpoint":
       "WARNING: checkpoint %@ is from a different file ('%@') — ignored, starting from scratch",
-    "cli.last.notfound": "Agent log not found",
-    "cli.last.notext": "No transcribed text yet (LAST_TEXT marker not found in log)",
+    "cli.last.notext": "No recognized text saved yet.",
     "cli.retry.usage": "Usage: nanodictate retry NAME",
     "cli.retry.available": "Available providers: %@",
     "cli.retry.notrunning": "ERROR: agent not running — last WAV is held in agent memory. Start"
@@ -390,7 +389,7 @@ extension L10n {
       + " папке) для --resume",
     "usage.retry": "Повторить распознавание последней записи другим провайдером\n  (агент хранит"
       + " последний WAV в памяти; вставку выполняет сам агент)",
-    "usage.last": "Показать последний распознанный текст (маркер LAST_TEXT)",
+    "usage.last": "Показать последний распознанный текст (сохраняется при успешной вставке)",
     "usage.logs": "Последние 50 строк лога агента",
     "usage.help": "Показать эту справку",
     "cli.dir.error": "Не удалось создать директории: %@",
@@ -477,8 +476,7 @@ extension L10n {
     "progress.badcheckpoint":
       "ПРЕДУПРЕЖДЕНИЕ: чекпоинт %@ от другого файла ('%@') — он не используется,"
       + " начинаю с нуля",
-    "cli.last.notfound": "Лог агента не найден",
-    "cli.last.notext": "Пока нет распознанного текста (маркер LAST_TEXT не найден в логе)",
+    "cli.last.notext": "Пока нет сохранённого распознанного текста.",
     "cli.retry.usage": "Использование: nanodictate retry ИМЯ",
     "cli.retry.available": "Доступные провайдеры: %@",
     "cli.retry.notrunning": "ОШИБКА: агент не запущен — последний WAV хранится в памяти агента."

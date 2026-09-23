@@ -1241,26 +1241,25 @@ func cmdLogs() -> Int32 {
 
 // MARK: - Last text and retry with another provider
 
-/// `nanodictate last`: the last recognized text from the LAST_TEXT marker in
-/// the agent log (written on every successful insert, retry included).
+/// `nanodictate last`: the last recognized text from the agent's state file
+/// `~/Library/Application Support/NanoDictate/last_text.txt` (written by the
+/// agent on every successful insert, retry included; mode 0600). The text is
+/// deliberately NOT parsed from agent.log — the transcript never goes into
+/// the log (CWE-532).
 func cmdLast() -> Int32 {
-  let logURL = FileManager.default.homeDirectoryForCurrentUser
-    .appendingPathComponent("Library/Logs/NanoDictate/agent.log")
-  guard let content = try? String(contentsOf: logURL, encoding: .utf8) else {
-    print(L10n.tr("cli.last.notfound"))
-    return 1
-  }
-  let marker = "LAST_TEXT: "
-  let matches = content.components(separatedBy: .newlines)
-    .compactMap { line -> String? in
-      guard let range = line.range(of: marker) else { return nil }
-      return String(line[range.upperBound...])
-    }
-  guard let last = matches.last, !last.isEmpty else {
+  let base =
+    FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+    ?? FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent("Library/Application Support")
+  let stateURL = base.appendingPathComponent("NanoDictate/last_text.txt", isDirectory: false)
+  guard
+    let content = try? String(contentsOf: stateURL, encoding: .utf8),
+    !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  else {
     print(L10n.tr("cli.last.notext"))
     return 1
   }
-  print(last)
+  print(content.trimmingCharacters(in: .whitespacesAndNewlines))
   return 0
 }
 
