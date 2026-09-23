@@ -419,8 +419,8 @@ final class OverlayControllerTests: XCTestCase {
         // startClock() обязан стоять ПОСЛЕ gating-условия, а не вызываться безусловно.
         if let gateRange = block.range(of: "if newStart != nil, state.phase == .recording"),
            let startRange = block.range(of: "startClock()") {
-            XCTAssertLessThan(
-                gateRange.lowerBound, startRange.lowerBound,
+            XCTAssertTrue(
+                gateRange.lowerBound < startRange.lowerBound,
                 "startClock() вызывается только внутри gating-ветки"
             )
         }
