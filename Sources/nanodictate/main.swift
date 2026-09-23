@@ -875,7 +875,7 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
     eprint(String(format: L10n.tr("cli.transcribe.noprovider"), options.providerID, available))
     return 1
   }
-  guard !provider.baseURL.isEmpty else {
+  guard !ProviderRequestBuilder.resolveBaseURL(provider.baseURL, for: provider.id).isEmpty else {
     eprint(String(format: L10n.tr("cli.transcribe.nourl"), provider.id))
     return 1
   }

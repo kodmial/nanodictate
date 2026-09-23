@@ -132,19 +132,7 @@ public final class RetryProvider {
       return provider.apiKey
     }
     guard let file = provider.apiKeyFile else { return "" }
-    let expanded = (file as NSString).expandingTildeInPath
-    guard let content = try? String(contentsOfFile: expanded, encoding: .utf8) else { return "" }
-    for line in content.components(separatedBy: .newlines) {
-      let trimmed = line.trimmingCharacters(in: .whitespaces)
-      if trimmed.isEmpty || trimmed.hasPrefix("#") {
-        continue
-      }
-      if trimmed.count >= 2, trimmed.hasPrefix("\""), trimmed.hasSuffix("\"") {
-        return String(trimmed.dropFirst().dropLast())
-      }
-      return trimmed
-    }
-    return ""
+    return AppConfig.readAPIKeyFile(at: file)
   }
 
   // MARK: Последняя запись (в памяти, без диска)

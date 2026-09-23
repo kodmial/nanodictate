@@ -346,8 +346,7 @@ func runMenu() -> Int32 {
   // The menu needs a TTY for both output and input; otherwise — a quiet
   // exit to usage in main.swift.
   guard isTTY(), isatty(STDIN_FILENO) == 1 else { return 0 }
-  let uiLanguage = (try? AppConfig.load(from: nil))?.uiLanguage
-  L10n.language = uiLanguage == "ru" ? .ru : .en
+  // L10n.language is already set by main.swift (fileExists-guarded probe).
   installSignalHandlers()  // termios snapshot before raw mode + SIGINT/SIGTERM
   setRawMode(true)
   defer {

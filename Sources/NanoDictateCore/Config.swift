@@ -333,7 +333,7 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
     var config = try parse(content, base: base)
     // Resolve apiKey from apiKeyFile if apiKey is empty
     if config.apiKey.isEmpty, let keyFile = config.apiKeyFile {
-      config.apiKey = Self.readAPIKey(from: keyFile)
+      config.apiKey = Self.readAPIKeyFile(at: keyFile)
     }
     return applyEnvAPIKey(to: config)
   }
@@ -901,28 +901,32 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
 
   // MARK: Key file reader
 
-  private static func readAPIKey(from path: String) -> String {
+  /// Shared reader for `api_key_file`: returns the first non-empty line that
+  /// is not a `#` comment, stripping surrounding double quotes; "" — file
+  /// missing/unreadable or no key line. Used by the legacy config path
+  /// (readAPIKey callers) and by `RetryProvider.resolveAPIKey`.
+  public static func readAPIKeyFile(at path: String) -> String {
     // Раскрываем "~": api_key_file = "~/.config/nanodictate/keys/..."
     let expandedPath = (path as NSString).expandingTildeInPath
     guard let data = FileManager.default.contents(atPath: expandedPath) else {
       return ""
     }
     let content = String(decoding: data, as: UTF8.self)
-    let lines = content.components(separatedBy: .newlines)
-    for line in lines {
+    for line in content.components(separatedBy: .newlines) {
       let trimmed = line.trimmingCharacters(in: .whitespaces)
-      if !trimmed.isEmpty {
-        // Strip surrounding quotes if present
-        if trimmed.count >= 2,
-          trimmed.hasPrefix("\""),
-          trimmed.hasSuffix("\"")
-        {  // swiftlint:disable:this opening_brace
-          let inner = trimmed.index(trimmed.startIndex, offsetBy: 1)
-          let end = trimmed.index(trimmed.endIndex, offsetBy: -1)
-          return String(trimmed[inner..<end])
-        }
-        return trimmed
+      if trimmed.isEmpty || trimmed.hasPrefix("#") {
+        continue
       }
+      // Strip surrounding quotes if present
+      if trimmed.count >= 2,
+        trimmed.hasPrefix("\""),
+        trimmed.hasSuffix("\"")
+      {  // swiftlint:disable:this opening_brace
+        let inner = trimmed.index(trimmed.startIndex, offsetBy: 1)
+        let end = trimmed.index(trimmed.endIndex, offsetBy: -1)
+        return String(trimmed[inner..<end])
+      }
+      return trimmed
     }
     return ""
   }
@@ -978,9 +982,9 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
       guard !replaced else { break }
       let stripped = line.drop { $0 == " " || $0 == "\t" }
       // Заголовок секции, как в парсере: тримим оба конца, допускаем хвостовой комментарий.
-      var headerText = String(stripped).trimmingCharacters(in: .whitespaces)
+      var headerText = String(stripped).trimmingCharacters(in: .whitespacesAndNewlines)
       if let hashIndex = headerText.firstIndex(of: "#") {
-        headerText = String(headerText[..<hashIndex]).trimmingCharacters(in: .whitespaces)
+        headerText = String(headerText[..<hashIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
       }
       if headerText.hasPrefix("["), headerText.hasSuffix("]") {
         // Первый заголовок секции: внутри секций ключ не ищем — дальше строки
@@ -1081,9 +1085,9 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
     for (idx, line) in lines.enumerated() {
       let stripped = line.drop { $0 == " " || $0 == "\t" }
       // Заголовок секции, как в парсере: допускаем хвостовой комментарий.
-      var headerText = String(stripped)
+      var headerText = String(stripped).trimmingCharacters(in: .whitespacesAndNewlines)
       if let hashIndex = headerText.firstIndex(of: "#") {
-        headerText = String(headerText[..<hashIndex]).trimmingCharacters(in: .whitespaces)
+        headerText = String(headerText[..<hashIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
       }
       if headerText.hasPrefix("["), headerText.hasSuffix("]") {
         if headerText == sectionHeader {
