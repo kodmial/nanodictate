@@ -950,8 +950,27 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
       content = existing
     }
 
+    writeKeyValue(key, value: value, into: &content)
+
+    guard let data = content.data(using: .utf8) else {
+      throw AppConfigError.cannotWriteConfig(path, nil)
+    }
+    do {
+      try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+      try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+    } catch {
+      throw AppConfigError.cannotWriteConfig(path, error)
+    }
+  }
+
+  /// In-memory вариант `writeKeyValue(key:value:to:)` без файлового I/O:
+  /// точечная правка строки `key = value` в тексте конфига. Семантика та же —
+  /// ключ ищется только на верхнем уровне (вне секций), при отсутствии ключа
+  /// строка вставляется перед первой секцией, а при полном отсутствии секций
+  /// добавляется в конец. Не бросает исключений.
+  public static func writeKeyValue(_ key: String, value: String, into text: inout String) {
     var replaced = false
-    var lines = content.components(separatedBy: "\n")
+    var lines = text.components(separatedBy: "\n")
     // Индекс первого заголовка секции — место вставки, если ключ не найден.
     var firstSectionIndex: Int?
 
@@ -1006,16 +1025,7 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
       }
       result += "\(key) = \(value)\n"
     }
-
-    guard let data = result.data(using: .utf8) else {
-      throw AppConfigError.cannotWriteConfig(path, nil)
-    }
-    do {
-      try data.write(to: URL(fileURLWithPath: path), options: .atomic)
-      try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
-    } catch {
-      throw AppConfigError.cannotWriteConfig(path, error)
-    }
+    text = result
   }
 
   /// Точечная правка ключа ВНУТРИ секции `[providers.<id>]`, byte-preserving:

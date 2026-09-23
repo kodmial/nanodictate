@@ -1087,20 +1087,14 @@ final class ConfigTests: XCTestCase {
     }
 
     @objc func testWriteKeyValueAppendsToEndWhenNoSections() {
-        // Без секций поведение прежнее: строка добавляется в конец файла.
-        let file = FileManager.default.temporaryDirectory
-            .appendingPathComponent("test_write_kv_append_\(UUID().uuidString).toml")
-        defer { try? FileManager.default.removeItem(at: file) }
-        do {
-            try "language = \"ru\"\n".data(using: .utf8)!.write(to: file)
-            try AppConfig.writeKeyValue(key: "active_provider", value: "\"groq\"", to: file.path)
-            let text = try String(contentsOf: file, encoding: .utf8)
-            XCTAssertEqual(
-                text, "language = \"ru\"\nactive_provider = \"groq\"\n",
-                "без секций — прежнее поведение: дописывается с переводом строки")
-        } catch {
-            XCTFail("Unexpected error: \(error)")
-        }
+        // Без секций поведение прежнее: строка добавляется в конец. In-memory
+        // вариант (без файлового I/O и без throws) — шимм-раннер падает на
+        // @objc throws (perform не передаёт NSError**).
+        var text = "language = \"ru\"\n"
+        AppConfig.writeKeyValue("active_provider", value: "\"groq\"", into: &text)
+        XCTAssertEqual(
+            text, "language = \"ru\"\nactive_provider = \"groq\"\n",
+            "без секций — прежнее поведение: дописывается с переводом строки")
     }
 
     // MARK: - writeProviderKeyValue (config set-key)
