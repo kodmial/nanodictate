@@ -16,8 +16,8 @@ name: Bump version
 # dispatched explicitly after the push (see the last step); that dispatch is
 # what makes "merge -> bump -> release" complete automatically.
 #
-# Hard stop: the 0.0.x series is capped at 0.0.100 (user policy, mirrored by
-# release.yml's version guard). Nothing is bumped past 0.0.100.
+# Automatic bump limit: automatic bumps in the 0.0.x series stop at 0.0.100.
+# release.yml separately validates the selected version format and series.
 
 on:
   pull_request:
@@ -126,11 +126,9 @@ jobs:
           echo "Real changes since $PREV_TAG: $CODE_CHANGES"
 
           # Equal: the merged PR did NOT bump the version — bump it now, unless
-          # the 0.0.x series hard cap is already reached. The cap is a user
-          # policy: the 0.0.1..0.0.100 series must not exceed 0.0.100 (release.yml
-          # rejects anything above it, so bumping past it would fail the
-          # release anyway — and the user forbids leaving the series).
-          # The cap applies ONLY to the 0.0.x series: 0.1.x may grow past
+          # the automatic 0.0.x bump limit is already reached. Automatic bumps
+          # stop at 0.0.100.
+          # The limit applies ONLY to the 0.0.x series: 0.1.x may grow past
           # patch=100 (0.1.101 is fine), so it is gated on the "0.0." prefix.
           if [[ "$CURRENT" == 0.0.* ]] && (( N_CUR >= 100 )); then
             echo "::warning::Version $CURRENT is the 0.0.100 hard cap of the 0.0.x series (user policy) — refusing to bump to 0.0.101. A future series (e.g. 0.1.x) requires a manual version change."

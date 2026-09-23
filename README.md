@@ -63,7 +63,7 @@ if [ -f "$MC" ] && grep -Eq '"'"'^[[:space:]]*sources_conf([[:space:]]|$)'"'"' "
   if [ -n "$SC_VAL" ]; then
     case "$SC_VAL" in
       /*) C="$SC_VAL" ;;
-      '"'"'~/'"'"'*) C="$H/${SC_VAL#'"'"'~/"'"'"'}" ;;
+      '"'"'~/'"'"'*) C="$H/${SC_VAL#'"'"'~/'"'"'}" ;;
       *) C="$H/$SC_VAL" ;;
     esac
     [ "$C" = "/opt/local/etc/macports/sources.conf" ] || USER_CONF=1

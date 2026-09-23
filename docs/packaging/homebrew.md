@@ -24,6 +24,7 @@ layout, the generator and cross-package notes see
 
 ```sh
 brew tap kodmial/homebrew-nanodictate
+brew trust --tap kodmial/homebrew-nanodictate
 brew install nanodictate
 brew services start nanodictate
 ```

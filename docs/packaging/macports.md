@@ -52,7 +52,7 @@ if [ -f "$MC" ] && grep -Eq '"'"'^[[:space:]]*sources_conf([[:space:]]|$)'"'"' "
   if [ -n "$SC_VAL" ]; then
     case "$SC_VAL" in
       /*) C="$SC_VAL" ;;
-      '"'"'~/'"'"'*) C="$H/${SC_VAL#'"'"'~/"'"'"'}" ;;
+      '"'"'~/'"'"'*) C="$H/${SC_VAL#'"'"'~/'"'"'}" ;;
       *) C="$H/$SC_VAL" ;;
     esac
     [ "$C" = "/opt/local/etc/macports/sources.conf" ] || USER_CONF=1
@@ -121,11 +121,16 @@ upgrade still works.
 sudo port uninstall nanodictate
 ```
 
+Before uninstalling, stop the user-managed agent and remove its plist:
+
+`nanodictate stop && rm ~/Library/LaunchAgents/com.nanodictate.agent.plist`
+
 One command: `pre-deactivate` unloads the running agent
 (`launchctl bootout gui/$uid/com.nanodictate.agent`), deletes the global
 `/Library/LaunchAgents/com.nanodictate.agent.plist` and
 `/Library/Logs/NanoDictate`. Only user files (`~/.config/nanodictate`,
-`~/Library/Logs/NanoDictate`) survive.
+`~/Library/Logs/NanoDictate`) survive. The user LaunchAgent plist must also
+be removed by the command above.
 
 **Recovery after a MacPorts reinstall:**
 
@@ -147,8 +152,12 @@ writes the canonical plist into the **global** LaunchAgents
 bootstraps it into the console user's gui domain via
 `launchctl bootstrap gui/$uid`. So after a
 clean install the daemon is registered without a manual first run and starts
-at login. The same single label and file are used by `nanodictate start` —
-never a second daemon (no `startupitem`). If the install runs without a GUI
+at login. `nanodictate start` writes the user-level plist
+(`~/Library/LaunchAgents/com.nanodictate.agent.plist`) — the same label
+`com.nanodictate.agent` as the port's global
+`/Library/LaunchAgents/com.nanodictate.agent.plist`, but a different file;
+launchd permits only one registration per label in the GUI domain, so there
+is never a second daemon (no `startupitem`). If the install runs without a GUI
 session (SSH) the bootstrap is skipped tolerantly; the plist is still written
 and RunAtLoad starts the daemon at the next login.
 
