@@ -317,8 +317,8 @@ final class LiveOrchestrationBranchTests: XCTestCase {
             let body = Self.functionBody(named: name, in: source)
             let label = "\(name)"
             XCTAssertTrue(
-                body.contains("let requestCount = max(2, runState.segmentCount + 2)"),
-                "\(label): бюджет обязан учитывать незавершённые сегменты"
+                body.contains("let requestCount = max(2, liveExecutor.pendingCount + 1)"),
+                "\(label): бюджет обязан учитывать очередь незавершённых сегментов (pendingCount)"
             )
             XCTAssertTrue(
                 body.contains("let liveMaxDuration = Double(requestCount) * Transcriber.networkRequestTimeout + 5"),
