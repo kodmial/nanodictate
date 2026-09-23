@@ -668,7 +668,7 @@ export const CertPublishInputSchema = z
       .boolean()
       .default(false)
       .describe(
-        "false (default) only prepares the p12 material and password in 0600 files plus the exact `gh secret set ... < file` commands and writes nothing; true runs those commands, but only when the secrets are confirmed absent",
+        "false (default) exports the p12 material and password into local 0600 files (left on disk for the operator) and returns the exact `gh secret set ... < file` commands; nothing is written to GitHub. true runs those commands, but only when the secrets are confirmed absent, and removes the local files after a successful publish",
       ),
     response_format: FORMAT_PARAM,
   })

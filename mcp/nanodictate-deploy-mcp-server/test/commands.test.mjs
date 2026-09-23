@@ -241,6 +241,7 @@ function makeFakeDeps(opts = {}) {
     defaultsDeleteAbsent: false,
     identities: [],
     findIdentityBlank: false,
+    findIdentityFail: false,
     importFail: false,
     partitionFail: false,
     python3Fail: false,
@@ -342,6 +343,7 @@ function makeFakeDeps(opts = {}) {
       return state.python3Fail ? fail("ModuleNotFoundError: no module named 'cryptography'") : ok(state.verifyStdout);
     }
     if (cmd === "security" && args[0] === "find-identity") {
+      if (state.findIdentityFail) return fail("security: SecKeychainSearchCopyNext failed");
       const lines = state.findIdentityBlank
         ? ""
         : state.identities.map((n, i) => `${i + 1}) ${"AB".repeat(20)} "${n}"`).join("\n");
@@ -695,11 +697,10 @@ test("resolveTapCloneDir falls back to the Intel layout (with /Homebrew) when br
 // -- dictation_cert_status ---------------------------------------------------
 
 test("listCodeSigningIdentities returns [] on probe failure", async () => {
-  const fake = makeFakeDeps({ state: { ghStatus: 0 } });
-  fake.calls.length = 0;
-  // no handler override: route security find-identity to failure by blanking identities
+  const fake = makeFakeDeps({ state: { findIdentityFail: true } });
   const ids = await listCodeSigningIdentities(fake.deps);
   assert.deepEqual(ids, []);
+  assert.ok(fake.calls.some((c) => c.cmd === "security" && c.args[0] === "find-identity"));
 });
 
 test("getCertStatus reports local identities and GitHub secrets", async () => {
