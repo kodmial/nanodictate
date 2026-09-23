@@ -268,7 +268,7 @@ private func providerEntries(_ providers: [STTProvider]) -> [MenuEntry] {
 // MARK: - Status data collection
 
 func agentIsRunning() -> Bool {
-  runProcess("/bin/launchctl", ["print", "\(guiDomain)/com.nanodictate.agent"]).status == 0
+  runProcess("/bin/launchctl", ["print", "\(guiDomain)/\(agentServiceName)"]).status == 0
 }
 
 private func logFileURL() -> URL {
