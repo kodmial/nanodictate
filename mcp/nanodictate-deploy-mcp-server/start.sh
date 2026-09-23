@@ -19,12 +19,15 @@ LOG="$DIR/.start-build.log"
 # Rebuild not only when dist/index.js is missing, but also when the sources it
 # was compiled from are newer: a git pull can update src/ or the package files
 # while leaving an old dist/ index.js in place, and launching it would run a
-# stale bundle. The dependency install stays limited to the missing-dist case —
-# a stale bundle only needs `npm run build` again, never npm ci/install.
+# stale bundle. Dependency installation likewise runs when node_modules is
+# missing or the package manifests are newer than DIST — not only when DIST is
+# missing — and any such install is followed by a rebuild.
 NEEDS_BUILD=false
+NEEDS_INSTALL=false
 BUILD_REASON=""
 if [[ ! -f "$DIST" ]]; then
   NEEDS_BUILD=true
+  NEEDS_INSTALL=true
   BUILD_REASON="$DIST missing"
 elif find "$DIR/src" "$DIR/package.json" "$DIR/package-lock.json" \
     -newer "$DIST" -print -quit 2>/dev/null | grep -q .; then
@@ -32,10 +35,19 @@ elif find "$DIR/src" "$DIR/package.json" "$DIR/package-lock.json" \
   BUILD_REASON="$DIST older than src/ or package files (stale bundle)"
 fi
 
+if [[ ! -d "$DIR/node_modules" ]]; then
+  NEEDS_INSTALL=true
+  NEEDS_BUILD=true
+  [[ -n "$BUILD_REASON" ]] || BUILD_REASON="node_modules missing"
+elif [[ -f "$DIST" ]] && find "$DIR/package.json" "$DIR/package-lock.json" \
+    -newer "$DIST" -print -quit 2>/dev/null | grep -q .; then
+  NEEDS_INSTALL=true
+fi
+
 if [[ "$NEEDS_BUILD" == "true" ]]; then
   echo "start.sh: $BUILD_REASON — building" >&2
 
-  if [[ ! -f "$DIST" ]]; then
+  if [[ "$NEEDS_INSTALL" == "true" ]]; then
     if [[ -f "$DIR/package-lock.json" ]]; then
       if ! npm ci --prefix "$DIR" >"$LOG" 2>&1; then
         echo "start.sh: npm ci failed, falling back to npm install" >&2

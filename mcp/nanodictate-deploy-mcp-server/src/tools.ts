@@ -354,15 +354,17 @@ export function deployMarkdown(input: {
     input.sign
       ? `- ${input.sign.success ? "**OK**" : "**FAILED**"} — identity \`${input.sign.identity}\``
       : "- NOT RUN (build failed)",
+  ];
+  for (const b of input.sign?.binaries ?? []) {
+    lines.push(`  - ${b.name}: ${b.signed ? "signed" : "NOT signed"}${b.verified ? ", verified" : ""}`);
+  }
+  lines.push(
     "",
     "## Restart",
     input.restart
       ? `- ${input.restart.success ? "**OK**" : "**FAILED**"} via \`${input.restart.method}\``
       : "- NOT RUN (previous step failed)",
-  ];
-  for (const b of input.sign?.binaries ?? []) {
-    lines.push(`  - ${b.name}: ${b.signed ? "signed" : "NOT signed"}${b.verified ? ", verified" : ""}`);
-  }
+  );
   if (input.sign && !input.sign.success) {
     lines.push("", input.sign.detail);
   }
