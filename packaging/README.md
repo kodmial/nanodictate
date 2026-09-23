@@ -31,12 +31,12 @@ app-bundle zips attached to it, so it can only run after the release workflow
 finished):
 
 ```sh
-MAINTAINERS=@kodmial ruby scripts/release-prep.rb v0.0.3
+MAINTAINERS=@kodmial ruby scripts/release-prep.rb v0.1.0
 ```
 
 The script downloads the two release binary tarballs
-(`.../releases/download/v0.0.3/nanodictate-0.0.3-macos-{arm64,x86_64}.tar.gz`)
-and the two app-bundle zips (`...-0.0.3-macos-{arm64,x86_64}.zip`). It
+(`.../releases/download/v0.1.0/nanodictate-0.1.0-macos-{arm64,x86_64}.tar.gz`)
+and the two app-bundle zips (`...-0.1.0-macos-{arm64,x86_64}.zip`). It
 computes `sha256` for each and fills the `__VERSION__`, `__SHA256_ARM64__`,
 `__SHA256_X86_64__` placeholders in the formula + Portfile templates, the
 `__ZIP_SHA256_ARM64__` / `__ZIP_SHA256_X86_64__` placeholders in the cask
@@ -48,8 +48,8 @@ generated files get concrete values.
 
 ## Releasing a new version
 
-1. Tag and push: `git tag v0.0.3 && git push origin v0.0.3`
-2. Generate: `MAINTAINERS=@kodmial ruby scripts/release-prep.rb v0.0.3`
+1. Tag and push: `git tag v0.1.0 && git push origin v0.1.0`
+2. Generate: `MAINTAINERS=@kodmial ruby scripts/release-prep.rb v0.1.0`
 3. Publish:
    - **Homebrew**: the release workflow's `manifests` job copies
      `packaging/homebrew/nanodictate.rb` into the `kodmial/homebrew-nanodictate`
@@ -112,7 +112,7 @@ generated files get concrete values.
   `homebrew.mxcl.*`) — one daemon regardless of install method or order, the
   second manager takes over. On binary path change (e.g. after an upgrade)
   the CLI prints a TCC re-grant hint.
-- **Version flag.** `nanodictate --version` prints `nanodictate 0.0.2` and
+- **Version flag.** `nanodictate --version` prints `nanodictate 0.1.0` and
   lands together with the 0.0.2 release; the formula `test do` block depends
   on it.
 

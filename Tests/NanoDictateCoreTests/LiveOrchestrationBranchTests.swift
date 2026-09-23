@@ -276,7 +276,7 @@ final class LiveOrchestrationBranchTests: XCTestCase {
 
     /// Segments and tail (subscribeLiveNanoDictate) go to THE SAME serial
     /// liveExecutor queue as finishLiveRun — queue keeps delivery order
-    /// (tail → finalize), session guard at entry.
+    /// (tail → finalize), cancel-flag guard at entry.
     @objc func testSegmentsAndFinalize_ShareSerialExecutor() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -292,8 +292,8 @@ final class LiveOrchestrationBranchTests: XCTestCase {
             "обработчик сегмента вызывается на liveExecutor по очереди"
         )
         XCTAssertTrue(
-            subBody.contains("guard self.liveSession == runState.session else { return }"),
-            "сессиионный страж на входе отбрасывает сегменты отменённого цикла"
+            subBody.contains("guard !runState.isCancelled else { return }"),
+            "cancel-flag guard at entry (lock-protected) drops segments of a cancelled loop"
         )
         let finalizeBody = Self.functionBody(named: "liveFinalize", in: source)
         XCTAssertTrue(

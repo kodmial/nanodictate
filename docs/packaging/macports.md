@@ -191,7 +191,8 @@ and RunAtLoad starts the daemon at the next login.
    (never `${prefix}/etc`), so `config.example.toml` ships as a copy source:
 
    ```sh
-   cp "$(port prefix)/share/nanodictate/config.example.toml" ~/.config/nanodictate/config.toml
+   mkdir -p ~/.config/nanodictate
+   install -m 600 "$(port prefix)/share/nanodictate/config.example.toml" ~/.config/nanodictate/config.toml
    nanodictate config set-key <provider>   # or edit the file and set api_key
    nanodictate provider list
    ```

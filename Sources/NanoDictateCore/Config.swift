@@ -319,6 +319,7 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
     }
     let hasProviderSections = nonCommentLines.contains { $0.contains("[providers.") }
     let hasActiveProvider = nonCommentLines.contains { $0.contains("active_provider") }
+    let declaredProviderIDs = Self.declaredProviderIDs(inLines: nonCommentLines)
     let isLegacyFlat = !hasProviderSections && !hasActiveProvider
     var base: AppConfig
     if let example = exampleContent(), !isLegacyFlat {
@@ -331,11 +332,51 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
       base = defaults
     }
     var config = try parse(content, base: base)
+    // Post-filter of the provider pool: the user file declared ITS OWN
+    // [providers.X] sections — the pool keeps only those ids, plus the active
+    // provider (picked canon section by name without redeclaring stays). Undeclared
+    // canon sections (e.g. airubiz next to a user-declared groq) must NOT leak
+    // into auto_failover after the active provider fails. When the file declares
+    // no sections, current semantics stay: canon providers remain.
+    if !declaredProviderIDs.isEmpty {
+      var keep = declaredProviderIDs
+      if !config.activeProvider.isEmpty {
+        keep.insert(config.activeProvider)
+      }
+      config.providers = config.providers.filter { keep.contains($0.id) }
+    }
     // Resolve apiKey from apiKeyFile if apiKey is empty
     if config.apiKey.isEmpty, let keyFile = config.apiKeyFile {
       config.apiKey = Self.readAPIKeyFile(at: keyFile)
     }
     return applyEnvAPIKey(to: config)
+  }
+
+  /// ids of `[providers.X]` sections declared in a config text — mirrors the
+  /// `fileProviderIDs` set that `parseContent` registers. Header rules identical
+  /// to the parser (whitespace trim, trailing-comment cut, normalizedSectionName,
+  /// `providers.` prefix), so the pool post-filter in `load()` cannot drift from
+  /// parse. Input lines are pre-filtered non-comment lines (as in `load`).
+  private static func declaredProviderIDs(inLines lines: [Substring]) -> Set<String> {
+    var ids = Set<String>()
+    for rawLine in lines {
+      let line = rawLine.trimmingCharacters(in: .whitespaces)
+      guard line.hasPrefix("[") else { continue }
+      var headerLine = line
+      if let hashIndex = line.firstIndex(of: "#") {
+        headerLine = String(line[..<hashIndex]).trimmingCharacters(in: .whitespaces)
+      }
+      guard headerLine.hasSuffix("]") else { continue }
+      let header = normalizedSectionName(String(headerLine.dropFirst().dropLast()))
+      let providersPrefix = "providers."
+      if header.hasPrefix(providersPrefix) {
+        let providerID = String(header.dropFirst(providersPrefix.count))
+        if !providerID.isEmpty {
+          ids.insert(providerID)
+        }
+      }
+    }
+    return ids
   }
 
   /// Приоритет env-ключа NANODICTATE_API_KEY над ключом из файла. Применяется

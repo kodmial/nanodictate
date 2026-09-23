@@ -1229,9 +1229,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
 
   /// Subscribes to live speech segments. The "who answers for segments today"
   /// logic is fixed AT DELIVERY TIME: the callback is replaced on every start,
-  /// each captures its own session token, and a stale loop cannot service the
-  /// new loop's segments (liveSession changed, the guard in
-  /// handleLiveSegment drops them).
+  /// each captures its own run state, and a stale loop cannot service the new
+  /// loop's segments (its run is cancelled; the entry guard drops them, and
+  /// handleLiveSegment re-checks on the executor).
   private func subscribeLiveNanoDictate() {
     liveSession += 1
     liveRunState?.isCancelled = true
@@ -1239,9 +1239,12 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     liveRunState = runState
     audio.onSpeechSegment = { [weak self] segment, isTail in
       guard let self else { return }
-      // Session guard: loop cancelled by Esc / restarted (liveSession
-      // changed) — old-loop segment not processed.
-      guard self.liveSession == runState.session else { return }
+      // Cancel guard: loop cancelled by Esc / device change / restart sets the
+      // NSLock-protected isCancelled flag BEFORE the liveRunState reference is
+      // dropped (LiveRunState.isCancelled is safe to read from the audio-tap
+      // thread, unlike the main-only liveSession). Old-loop segments are
+      // dropped here instead of racing the main-only liveSession counter.
+      guard !runState.isCancelled else { return }
       self.liveExecutor.submit {
         await self.handleLiveSegment(segment, isTail: isTail, runState: runState)
       }

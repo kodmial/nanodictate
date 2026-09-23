@@ -821,14 +821,16 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.activeProvider, "airubiz")
     }
 
-    @objc func testMergeExampleUnderUserConfig() throws {
+    @objc func testMergeActiveWithSections_PoolKeepsDeclaredOnly() throws {
         let example = try exampleCanonContent()
         AppConfig.exampleContentOverride = example
         defer { AppConfig.exampleContentOverride = nil }
         let userFile = FileManager.default.temporaryDirectory
             .appendingPathComponent("test_merge_canon_\(UUID().uuidString).toml")
         defer { try? FileManager.default.removeItem(at: userFile) }
-        // Юзер-конфиг БЕЗ секции airubiz, со своим активным groq.
+        // Юзер-конфиг со СВОИМ активным groq и секцией [providers.groq]: секции
+        // канона, которые юзер НЕ объявил (openai/cloudflare/airubiz), в пул не
+        // попадают — иначе после отказа активного они вошли бы в auto_failover.
         let userConfig = """
         active_provider = "groq"
 
@@ -842,13 +844,48 @@ final class ConfigTests: XCTestCase {
 
         let config = try AppConfig.load(from: userFile.path)
         XCTAssertEqual(config.activeProvider, "groq", "юзер-конфиг перекрывает active_provider канона")
-        XCTAssertTrue(
-            config.providers.contains { $0.id == "airubiz" },
-            "секция airubiz из канона сохранена при мерже"
+        XCTAssertEqual(config.providers.map(\.id), ["groq"],
+                       "пул содержит только секции, задекларированные в юзер-файле")
+        XCTAssertFalse(config.providers.contains { $0.id == "airubiz" },
+                       "undeclared-секция канона airubiz не протекает в пул")
+        XCTAssertEqual(
+            config.failoverProviders(excluding: nil).map(\.id), ["groq"],
+            "auto_failover не содержит undeclared-секций канона"
         )
+        XCTAssertEqual(config.baseURL, "https://api.groq.com/openai/v1/audio/transcriptions")
+    }
+
+    @objc func testMergeActiveCanonByName_KeepsCanonDefaults() throws {
+        let example = try exampleCanonContent()
+        AppConfig.exampleContentOverride = example
+        defer { AppConfig.exampleContentOverride = nil }
+        let userFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_merge_canon_by_name_\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: userFile) }
+        // Активный выбран ИМЕНЕМ, секция airubiz в юзер-файле НЕ объявлена:
+        // канонова секция активного сохраняется целиком (поля канона), а
+        // undeclared-секции канона (openai/cloudflare) в пул не попадают.
+        let userConfig = """
+        active_provider = "airubiz"
+
+        [providers.groq]
+        name = "Groq"
+        base_url = "https://api.groq.com/openai/v1/audio/transcriptions"
+        model = "whisper-large-v3"
+        api_key = ""
+        """
+        try userConfig.data(using: .utf8)!.write(to: userFile)
+
+        let config = try AppConfig.load(from: userFile.path)
+        XCTAssertEqual(config.activeProvider, "airubiz", "активный — канонова секция, выбранная именем")
+        XCTAssertEqual(config.providers.map(\.id), ["groq", "airubiz"],
+                       "в пуле объявленная groq + активная airubiz, без openai/cloudflare")
         let airubiz = config.providers.first { $0.id == "airubiz" }
-        XCTAssertEqual(airubiz?.baseURL, "https://api.airubiz.site/v1/audio/transcriptions")
+        XCTAssertEqual(airubiz?.baseURL, "https://api.airubiz.site/v1/audio/transcriptions",
+                       "каноновы поля активной секции сохранены")
         XCTAssertEqual(airubiz?.model, "gigaam-v3-ctc-sherpa")
+        XCTAssertEqual(config.failoverProviders(excluding: nil).map(\.id), ["groq", "airubiz"],
+                       "auto_failover: объявленная + активная, без undeclared-секций канона")
     }
 
     @objc func testSectionsWithoutActiveProviderDoNotInheritCanonProviders() throws {

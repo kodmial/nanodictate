@@ -154,6 +154,20 @@ swift run NanoDictateCoreTests    # executable target — `swift test` does not 
 swift run nanodictate --help
 ```
 
+### SWIFT_TOOLCHAIN
+
+The Command Line Tools' SwiftPM manifest API lacks
+`PackageDescription.swiftmodule`, so a bare `swift build` cannot parse
+`Package.swift` on such machines. Point SwiftPM at a full Swift toolchain
+instead:
+
+```sh
+export SWIFT_TOOLCHAIN=/Users/dima/.swift-toolchain
+export SWIFT_EXEC_MANIFEST="$SWIFT_TOOLCHAIN/usr/bin/swiftc"
+export SWIFTPM_CUSTOM_LIBS_DIR="$SWIFT_TOOLCHAIN/usr/lib/swift/pm"
+swift build -c debug
+```
+
 A Node.js MCP server automates build + sign + restart of the agent with a
 stable signature (`mcp/nanodictate-deploy-mcp-server/`, see its
 [README](mcp/nanodictate-deploy-mcp-server/README.md)). Build locally with a
@@ -166,8 +180,13 @@ rebuild changes it, so re-grant the permissions once after such a build.
 **Homebrew** — `nanodictate stop` then `brew uninstall kodmial/nanodictate/nanodictate`
 (the plist and config stay behind — remove them by hand if you want them gone).
 **Cask** — `brew uninstall --cask kodmial/nanodictate/nanodictate` removes the app only.
-**MacPorts** — `sudo port uninstall nanodictate` boots out the agent and
-removes the global plist in one command; only your config and logs stay behind.
+**MacPorts** — `nanodictate stop; rm -f ~/Library/LaunchAgents/com.nanodictate.agent.plist`
+(`launchctl bootout gui/$(id -u)/com.nanodictate.agent` first if the stop did
+not unload it), then `sudo port uninstall nanodictate` — it boots out the agent
+and removes the global plist in one command. What stays behind: your config
+(`~/.config/nanodictate/`), your logs (`~/Library/Logs/NanoDictate/`), and —
+unless removed by the `rm` above — the user LaunchAgent plist, whose `KeepAlive`
+keeps relaunching the removed binary.
 
 ## License
 

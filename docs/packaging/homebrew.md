@@ -36,7 +36,7 @@ bootstrap it into launchd. `brew install` itself does not register the
 LaunchAgent — `nanodictate start` is the equivalent, idempotent alternative
 (see [After install](#after-install)).
 
-Prefer a proper app bundle? `brew install --cask nanodictate` installs
+Prefer a proper app bundle? `brew install --cask kodmial/nanodictate/nanodictate` installs
 **NanoDictate.app** — the same two release binaries inside a `.app` bundle,
 the same `com.nanodictate.agent` service (one daemon either way), and the
 cask's `postflight` strips the quarantine attribute automatically (see
@@ -67,7 +67,7 @@ file (the same file the tap serves, after `scripts/release-prep.rb`
 fills it in):
 
 ```sh
-MAINTAINERS=@kodmial ruby scripts/release-prep.rb v0.0.3     # fills checksums into the template
+MAINTAINERS=@kodmial ruby scripts/release-prep.rb v0.1.0     # fills checksums into the template
 brew install /path/to/nanodictate/packaging/homebrew/nanodictate.rb
 ```
 
@@ -81,7 +81,7 @@ placeholders are unfilled and the formula will fail.
 ### Install the app bundle via cask
 
 ```sh
-brew install --cask nanodictate
+brew install --cask kodmial/nanodictate/nanodictate
 ```
 
 Builds nothing: the cask downloads the **app-bundle zip**
@@ -122,10 +122,10 @@ The GitHub Release also carries a `SHA256SUMS.txt` covering both tarballs. You
 can verify the asset the formula downloads (or a manual `curl` download) with:
 
 ```sh
-curl -L -O https://github.com/kodmial/nanodictate/releases/download/v0.0.3/SHA256SUMS.txt
+curl -L -O https://github.com/kodmial/nanodictate/releases/download/v0.1.0/SHA256SUMS.txt
 # run in the directory with the tarball; SHA256SUMS.txt lists both arch
 # tarballs, so check only the entry for the one you downloaded
-grep "nanodictate-0.0.3-macos-$(uname -m)\.tar\.gz$" SHA256SUMS.txt | shasum -a 256 -c -
+grep "nanodictate-0.1.0-macos-$(uname -m)\.tar\.gz$" SHA256SUMS.txt | shasum -a 256 -c -
 ```
 
 Homebrew performs its own sha256 check against the formula's
@@ -209,7 +209,7 @@ Release drill for a new version (details in
    and attaches them to the Release automatically:
 
    ```sh
-   git tag v0.0.3 && git push origin v0.0.3
+   git tag v0.1.0 && git push origin v0.1.0
    ```
 
 2. **Generate the manifests** (needs network access to github.com **and** the
@@ -217,7 +217,7 @@ Release drill for a new version (details in
    two app-bundle zips):
 
    ```sh
-   MAINTAINERS=@kodmial ruby scripts/release-prep.rb v0.0.3
+   MAINTAINERS=@kodmial ruby scripts/release-prep.rb v0.1.0
    ```
 
    This writes `packaging/homebrew/nanodictate.rb` (version + tarball
@@ -242,9 +242,9 @@ Release drill for a new version (details in
    brew audit --strict --new nanodictate    # in the tap repo (formula)
    brew audit --cask --strict nanodictate   # in the tap repo (cask)
    brew style nanodictate                   # in the tap repo
-   brew install nanodictate                 # binary download, no build
-   brew install --cask nanodictate          # app bundle, no build
-   nanodictate --version                    # must print "nanodictate 0.0.3"
+   brew install kodmial/nanodictate/nanodictate # binary download, no build
+   brew install --cask kodmial/nanodictate/nanodictate # app bundle, no build
+   nanodictate --version                    # must print "nanodictate 0.1.0"
    ```
 
 The formula `test do` block asserts `nanodictate --version` matches the
