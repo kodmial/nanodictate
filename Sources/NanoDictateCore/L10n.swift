@@ -91,6 +91,10 @@ extension L10n {
     "status.hasErrors": "errors: yes",
     "status.noErrors": "errors: no",
     "status.logTail": "Log tail:",
+    "status.running": "running",
+    "status.stopped": "stopped",
+    "status.active": "active",
+    "status.idle": "idle",
     // review.*
     "review.prompt": "Text",
     "review.confirmInsert": "Insert [Enter] / Cancel [Esc]",
@@ -347,6 +351,10 @@ extension L10n {
     "status.hasErrors": "ошибки: есть",
     "status.noErrors": "ошибки: нет",
     "status.logTail": "Хвост лога:",
+    "status.running": "работает",
+    "status.stopped": "остановлен",
+    "status.active": "идет",
+    "status.idle": "нет",
     // review.*
     "review.prompt": "Текст",
     "review.confirmInsert": "Вставить [Enter] / Отменить [Esc]",
@@ -385,7 +393,7 @@ extension L10n {
     "usage.batch": "Пакетный режим для длинных файлов: те же флаги",
     "usage.batch.desc":
       "Один провайдер (по умолчанию gigaam), чанки max-segment с overlap, retry 3×,"
-      + " плейсхолдер [..] при провале, чекпоинт <--out>.checkpoint.json (без --out — во временной"
+      + " плейсхолдер [..] при провале, чекпоинт <out>.checkpoint.json (без --out — во временной"
       + " папке) для --resume",
     "usage.retry": "Повторить распознавание последней записи другим провайдером\n  (агент хранит"
       + " последний WAV в памяти; вставку выполняет сам агент)",

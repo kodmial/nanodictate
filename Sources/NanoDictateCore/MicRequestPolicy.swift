@@ -67,9 +67,14 @@ public struct MicRequestPolicy {
 
   // MARK: - Private
 
-  /// Timeouts still alive inside window (now - t < windowDuration).
+  /// Timeouts still alive inside window (0 <= now - t < windowDuration).
+  /// Negative age (system clock moved backward) is excluded — a future
+  /// timestamp must not keep blocking requests beyond the window.
   private func timeouts(inWindow now: Date) -> [Date] {
-    timeoutTimestamps.filter { now.timeIntervalSince($0) < Self.windowDuration }
+    timeoutTimestamps.filter {
+      let age = now.timeIntervalSince($0)
+      return age >= 0 && age < Self.windowDuration
+    }
   }
 
   /// Load state. Missing or corrupted file — fresh state (empty list):

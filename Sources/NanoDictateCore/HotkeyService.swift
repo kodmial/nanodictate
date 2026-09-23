@@ -48,6 +48,12 @@ public final class HotkeyService {
     optionDetector = DoubleAltDetector(maxInterval: doubleTapMaxInterval)
   }
 
+  deinit {
+    // Tap callback holds an unretained self; always tear the tap down so a
+    // released service does not leave a dangling pointer on the run loop.
+    stop()
+  }
+
   private var isDebug: Bool {
     logLevel.lowercased() == "debug"
   }

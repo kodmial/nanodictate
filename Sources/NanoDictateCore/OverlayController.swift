@@ -261,9 +261,15 @@ struct OverlayContentView: View {
       }
       ensureMeterLoopRunning()
     }
-    .onChange(of: state.recordingStart) { _ in
-      // Новый сеанс записи — таймер отсчитывается от свежего старта.
-      startClock()
+    .onChange(of: state.recordingStart) { newStart in
+      // Новый сеанс записи — таймер отсчитывается от свежего старта. Сброс
+      // (nil) приходит в том же update, что и фаза .idle; порядок обработчиков
+      // не гарантирован — не заводить часы вне фазы записи.
+      if newStart != nil, state.phase == .recording {
+        startClock()
+      } else {
+        stopClock()
+      }
       ensureMeterLoopRunning()
     }
   }
@@ -322,9 +328,9 @@ struct OverlayContentView: View {
       return
     }
     let newMeter = OverlayLevel.enveloped(current: meter, target: meterTarget, dt: meterTick)
-    if abs(newMeter - meter) > 0.0015 {
-      meter = newMeter
-    }
+    // Порог перерисовки на состоянии envelope замораживает спад у ~0.016 и
+    // держит луп баллистики живым вечно — присваиваем всегда.
+    meter = newMeter
     let newPeak = peakTracker.update(level: newMeter, dt: meterTick)
     if abs(newPeak - peak) > 0.0015 {
       peak = newPeak
@@ -807,6 +813,9 @@ public final class OverlayController: NSObject {
     guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
     let pid = app.processIdentifier
     let axApp = AXUIElementCreateApplication(pid)
+    // Ограничиваем AX IPC: дефолтный таймаут ~6 s на вызов, зависшее
+    // приложение блокирует main thread.
+    AXUIElementSetMessagingTimeout(axApp, 0.25)
 
     var focusedElement: AnyObject?
     let focusResult = AXUIElementCopyAttributeValue(
@@ -816,6 +825,7 @@ public final class OverlayController: NSObject {
 
     // swiftlint:disable:next force_cast
     let axElement = element as! AXUIElement
+    AXUIElementSetMessagingTimeout(axElement, 0.25)
 
     var positionValue: AnyObject?
     let posResult = AXUIElementCopyAttributeValue(

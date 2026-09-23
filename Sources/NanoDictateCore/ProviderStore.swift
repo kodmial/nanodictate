@@ -43,13 +43,16 @@ public enum ProviderStore {
   /// Load all providers from config.toml; set `activeProvider`.
   public static func loadProviders() throws -> [STTProvider] {
     let (activeID, providers) = try AppConfig.loadProvidersOnly(from: configPathOverride)
+    // Пустой active_provider — штатный сценарий: активен первый провайдер
+    // (та же конвенция, что в applyEnvAPIKey/агенте/CLI).
+    let effectiveID = activeID.isEmpty ? providers.first?.id : activeID
     let list = providers.map { provider -> STTProvider in
       STTProvider(
         id: provider.id,
         name: provider.name.isEmpty ? provider.id : provider.name,
         baseURL: provider.baseURL,
         model: provider.model,
-        isActive: provider.id == activeID
+        isActive: provider.id == effectiveID
       )
     }
     activeProvider = list.first { $0.isActive }
