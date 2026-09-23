@@ -464,8 +464,10 @@ public enum OverlayLayout {
   }
 
   /// Возвращает frame панели размером `panelSize` рядом с точкой `point`
-  /// внутри экрана `screen`. Панель встаёт НАД точкой (с отступом 12pt);
-  /// если над точкой нет места — ПОД точкой. В любом случае frame клампится
+  /// внутри экрана `screen`. Координаты AppKit растут ВВЕРХ (y=0 внизу),
+  /// поэтому «над точкой» — это больший y: панель пробуется НАД точкой
+  /// (с отступом 12pt); если она не влезает под верхний отступ экрана —
+  /// ПОД точкой с зажимом к нижнему отступу. По горизонтали frame клампится
   /// в границы экрана, так что панель никогда не пропадает за его край.
   public static func panelFrame(
     near point: CGPoint,
@@ -479,11 +481,15 @@ public enum OverlayLayout {
     let posXClamped = min(
       max(posX, screen.minX + minMargin), screen.maxX - panelSize.width - minMargin)
 
-    let aboveY = point.y - panelSize.height - gap
-    if aboveY >= screen.minY + minMargin {
+    // Над точкой (y растёт вверх): нижний край панели на gap выше точки,
+    // верхний обязан остаться внутри верхнего отступа экрана.
+    let aboveY = point.y + gap
+    if aboveY + panelSize.height <= screen.maxY - minMargin {
       return CGRect(x: posXClamped, y: aboveY, width: panelSize.width, height: panelSize.height)
     }
-    let belowY = point.y + gap
+    // Нет места сверху (точка у верхней кромки) — под точкой, но не ниже
+    // нижнего отступа экрана: зажим спасает на коротких экранах.
+    let belowY = max(point.y - gap - panelSize.height, screen.minY + minMargin)
     return CGRect(x: posXClamped, y: belowY, width: panelSize.width, height: panelSize.height)
   }
 

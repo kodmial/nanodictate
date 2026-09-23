@@ -26,14 +26,18 @@ final class OverlayControllerTests: XCTestCase {
     // MARK: - Позиционирование (чистая логика)
 
     @objc func testPanelFrameIsAboveCaret_WhenSpaceAvailable() {
+        // AppKit y растёт вверх: «над точкой» = больший y. Панель должна
+        // встать ВЫШЕ точки (нижний край на 12pt выше неё), если влезает
+        // под верхний отступ экрана.
         let screen = CGRect(x: 0, y: 0, width: 1440, height: 900)
         let caret = CGPoint(x: 700, y: 500)
         let frame = OverlayLayout.panelFrame(near: caret, inside: screen, panelSize: CGSize(width: 260, height: 120))
 
-        // Panel above caret: top edge no higher than caret, bottom 12pt above.
-        XCTAssertEqual(frame.maxY, 500 - 12, accuracy: 0.001)
+        // Panel above caret: bottom edge 12pt above caret, top edge within
+        // screen's top margin.
+        XCTAssertEqual(frame.minY, 500 + 12, accuracy: 0.001)
         XCTAssertFalse(frame.contains(caret))
-        XCTAssertLessThanOrEqual(frame.maxY, caret.y)
+        XCTAssertGreaterThanOrEqual(frame.minY, caret.y)
         // Horizontally centered on caret.
         XCTAssertEqual(frame.midX, caret.x, accuracy: 0.001)
         // Does not leave screen.
@@ -44,15 +48,29 @@ final class OverlayControllerTests: XCTestCase {
     }
 
     @objc func testPanelFrameMovesBelowCaret_WhenNoRoomAbove() {
-        // Caret at screen bottom edge — no room above. Panel must go BELOW
-        // caret and not sink off screen.
+        // Caret near the screen TOP — nothing fits above (top margin would
+        // be crossed). Panel must go BELOW the caret with a 12pt gap.
         let screen = CGRect(x: 0, y: 0, width: 1440, height: 900)
-        let caret = CGPoint(x: 700, y: 30) // panel above needs y >= 8; 30-120-12 < 8
+        let caret = CGPoint(x: 700, y: 880) // above needs y >= 900-8-120-12
         let frame = OverlayLayout.panelFrame(near: caret, inside: screen, panelSize: CGSize(width: 260, height: 120))
 
-        XCTAssertEqual(frame.minY, 30 + 12, accuracy: 0.001)
+        XCTAssertEqual(frame.maxY, 880 - 12, accuracy: 0.001)
+        XCTAssertFalse(frame.contains(caret))
+        XCTAssertLessThanOrEqual(frame.maxY, caret.y)
         XCTAssertGreaterThanOrEqual(frame.minY, screen.minY + 8)
         XCTAssertLessThanOrEqual(frame.maxY, screen.maxY)
+    }
+
+    @objc func testPanelFrameClampsToBottomMargin_WhenBelowCrossesEdge() {
+        // Short screen AND caret low enough that "below" placement would
+        // sink under the bottom margin — the frame is clamped to it.
+        let screen = CGRect(x: 0, y: 0, width: 1440, height: 200)
+        let caret = CGPoint(x: 700, y: 100) // above: 112+120 > 192; below raw: -32
+        let frame = OverlayLayout.panelFrame(near: caret, inside: screen, panelSize: CGSize(width: 260, height: 120))
+
+        XCTAssertEqual(frame.minY, screen.minY + 8, accuracy: 0.001)
+        XCTAssertGreaterThanOrEqual(frame.minY, screen.minY + 8)
+        XCTAssertLessThanOrEqual(frame.maxX, screen.maxX)
     }
 
     @objc func testPanelFrameClampedToScreenEdges_Horizontal() {
@@ -135,10 +153,10 @@ final class OverlayControllerTests: XCTestCase {
         XCTAssertNotNil(controller.testPanel, "Панель должна создаваться при show()")
         XCTAssertNotNil(controller.testPanelFrame)
 
-        // Frame really near the show point.
+        // Frame really near the show point: panel stands ABOVE it (AppKit y up).
         if let frame = controller.testPanelFrame {
             XCTAssertEqual(frame.midX, 700, accuracy: 2)
-            XCTAssertLessThanOrEqual(frame.maxY, 500)
+            XCTAssertGreaterThanOrEqual(frame.minY, 500)
         }
 
         // Panel NOT on screen: test runs don't flash overlay at user.
