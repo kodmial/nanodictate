@@ -33,9 +33,10 @@ template layout, the generator and cross-package notes see
 ### Install today (git port tree)
 
 The port is not in the official tree, so install through a git port source —
-**two idempotent commands** — the first registers `kodmial/macports-nanodictate`
-(the git repo that mirrors the generated Portfile at every release) as a git
-port source, the second installs the same prebuilt binary as Homebrew:
+**two commands** — the first registers `kodmial/macports-nanodictate` (the git
+repo that mirrors the generated Portfile at every release) as a git port source
+and refuses to run if its clone path already exists, the second installs the
+same prebuilt binary as Homebrew:
 
 ```sh
 sudo bash -c '
@@ -59,8 +60,12 @@ if [ -f "$MC" ] && grep -Eq '"'"'^[[:space:]]*sources_conf([[:space:]]|$)'"'"' "
   fi
 fi
 S="file://$P"
-[ -d "$P/.git" ] || git clone https://github.com/kodmial/macports-nanodictate "$P"
-[ "$(stat -f %u "$P")" = 0 ] || chown -R root:admin "$P"
+if [ -e "$P" ] || [ -L "$P" ]; then
+  echo "error: $P already exists; refusing to reuse an existing path" >&2
+  exit 1
+fi
+git clone https://github.com/kodmial/macports-nanodictate "$P"
+chown -R root:admin "$P"
 grep -qxF "$S" "$C" || { grep -qF "[default]" "$C" && sed -i "" "/\[default\]/i\\
 $S
 " "$C" || echo "$S" >> "$C"; }
@@ -79,11 +84,14 @@ What it does (MacPorts has no `git://` scheme in `sources.conf` —
 cloned by hand once and exposed through a `file://` source):
 
 - **clone** — `kodmial/macports-nanodictate` into
-  `/Users/Shared/macports-nanodictate`, skipped when already present. The
+  `/Users/Shared/macports-nanodictate` — only into a fresh path: if the path
+  already exists (even as a symlink) the command fails instead of reusing it.
+  The
   first clone is always manual: `port selfupdate` only
   `git pull --rebase --autostash`es existing trees.
-- **chown** — hands the tree to root:admin: `port selfupdate` pulls as root
-  and git ≥ 2.35.2 refuses an owner-mismatched repo ("dubious ownership").
+- **chown** — (unconditional) hands the tree to root:admin: `port selfupdate`
+  pulls as root and git ≥ 2.35.2 refuses an owner-mismatched repo ("dubious
+  ownership").
 - **sources.conf** — the `file://` line is inserted **before** `[default]`:
   the first match wins, so our tree shadows the rsync tree, and the file is
   hand-edited (no `port repo add`). Do **not** add `[nosync]` — only a
@@ -133,10 +141,18 @@ only by the manual step above.
 
 **Recovery after a MacPorts reinstall:**
 
-Run the same first command again — it is idempotent: the clone is skipped
-(`/Users/Shared/macports-nanodictate` survives), the `file://` line is
-re-inserted into the recreated `sources.conf`, and `port selfupdate`
-re-syncs and indexes the tree.
+The tree in `/Users/Shared` survives while `sources.conf` is recreated —
+remove the stale tree and run the first command again to re-clone it and
+re-register the source:
+
+```sh
+sudo rm -rf /Users/Shared/macports-nanodictate
+```
+
+(the first command refuses an existing path, so the stale tree must be gone
+first); then repeat the first install command — it clones into the fresh
+path, re-inserts the `file://` line into the recreated `sources.conf`, and
+the following `port selfupdate` re-syncs and indexes the tree.
 
 ### After install
 
