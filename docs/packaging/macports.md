@@ -115,22 +115,21 @@ sudo port selfupdate && sudo port upgrade nanodictate
 re-running heals it, and the git tree's index is already fresh, so the
 upgrade still works.
 
-**Full uninstall:**
+**Full uninstall:** stop the user-managed agent and remove its plist first
+(the `rm` still runs if `nanodictate stop` fails), then uninstall the port:
 
 ```sh
+nanodictate stop; rm -f ~/Library/LaunchAgents/com.nanodictate.agent.plist
 sudo port uninstall nanodictate
 ```
 
-Before uninstalling, stop the user-managed agent and remove its plist:
-
-`nanodictate stop && rm ~/Library/LaunchAgents/com.nanodictate.agent.plist`
-
-One command: `pre-deactivate` unloads the running agent
+That two-line cleanup is manual — `port uninstall` itself is one command: its
+`pre-deactivate` step unloads the running agent
 (`launchctl bootout gui/$uid/com.nanodictate.agent`), deletes the global
 `/Library/LaunchAgents/com.nanodictate.agent.plist` and
 `/Library/Logs/NanoDictate`. Only user files (`~/.config/nanodictate`,
-`~/Library/Logs/NanoDictate`) survive. The user LaunchAgent plist must also
-be removed by the command above.
+`~/Library/Logs/NanoDictate`) survive; the user LaunchAgent plist is removed
+only by the manual step above.
 
 **Recovery after a MacPorts reinstall:**
 

@@ -87,9 +87,9 @@ brew install --cask nanodictate
 Builds nothing: the cask downloads the **app-bundle zip**
 (`nanodictate-<VER>-macos-<arch>.zip` — a second, distinct release asset; the
 formula pins the tarball sha256s, the cask pins the zip sha256s) and moves
-**NanoDictate.app** into `/Applications`. `Contents/MacOS/` holds the same
-`NanoDictateAgent` and `nanodictate` binaries plus `config.example.toml`;
-`Contents/Resources/` ships the entitlements for reference. `LSUIElement` is
+**NanoDictate.app** into `/Applications`. `Contents/MacOS/` holds only the
+same `NanoDictateAgent` and `nanodictate` binaries; `Contents/Resources/`
+ships `config.example.toml` and the entitlements for reference. `LSUIElement` is
 set, so the app runs as a background agent — no Dock icon, no menu bar.
 
 Same canonical service, never a second daemon: the app registers the same

@@ -12,10 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - README: установка через MacPorts — две команды
-  (`port selfupdate` + `sudo port selfupdate && sudo port install nanodictate`)
+  (блок `sudo bash -c '...'`, регистрирующий локальный `file://`-порт, затем
+  `sudo port selfupdate && sudo port install nanodictate`)
   вместо однострочного curl-скрипта. Поддерживается override
-  `sources.conf` (локальный `file://` источник без `[nosync]`), установка
-  идемпотентна. Блоки документации в README (установка и «теневая»
+  `sources.conf` (локальный `file://` источник без `[nosync]`), первая
+  команда отказывается работать с уже существующим путём дерева.
+  Блоки документации в README (установка и «теневая»
   копия источника) приведены к единому описанию.
 
 ## [0.0.16] - 2026-09-22

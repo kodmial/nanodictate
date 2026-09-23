@@ -127,8 +127,11 @@ therefore calls the exact mechanism `nanodictate` itself uses internally
 - Executes **mutating** commands (`codesign --force`, `launchctl kickstart -k`)
   — the tools are annotated `destructiveHint: true`, and clients should prompt
   before invoking `dictation_sign` / `dictation_deploy` / `dictation_restart`.
-- `dictation_restart` cannot fail silently: a failed build never reaches sign,
+- `dictation_deploy` cannot fail silently: a failed build never reaches sign,
   and a failed sign never reaches restart.
+- `dictation_restart` neither builds nor signs: it runs `launchctl kickstart -k`,
+  falls back to `nanodictate start`, and reports failure (with the kickstart
+  error) when both attempts fail.
 - `codesign --options runtime` enables the hardened runtime; the agent does not
   depend on disabled-by-default dyld environment variables.
 
