@@ -29,7 +29,7 @@ brew install nanodictate
 brew services start nanodictate
 ```
 
-Installs the prebuilt binary; the third line activates the background agent:
+Installs the prebuilt binary; the final command activates the background agent:
 `brew services start nanodictate` uses the formula's `service do` block to
 write the canonical `~/Library/LaunchAgents/com.nanodictate.agent.plist` and
 bootstrap it into launchd. `brew install` itself does not register the
