@@ -1435,8 +1435,10 @@ export interface CertPublishResult {
   executed: boolean;
   secretsState: "present" | "absent" | "unreachable";
   localCertPresent: boolean;
-  p12Base64: string | null;
-  password: string | null;
+  /** 0600 file holding the base64 p12 — the material itself never leaves it. */
+  materialPath: string | null;
+  /** 0600 file holding the p12 password — the value itself never leaves it. */
+  passwordPath: string | null;
   instructions: string[];
   detail: string;
 }
@@ -1696,6 +1698,29 @@ interface P12Export {
   error?: string;
 }
 
+/**
+ * Persist the exported p12 material to 0600 files so the secrets never travel
+ * through a tool result or a renderer — only the paths are returned.
+ *
+ * The directory is a fresh `mktemp`-style dir under the OS tmpdir, created
+ * with 0700 by mkdtempSync. It deliberately OUTLIVES this call: the operator
+ * must be able to run the `gh secret set ... < file` commands afterwards, so
+ * nothing here removes it. Only a successful automated publish deletes the
+ * directory (see publishCiSigningToGithub); a prepared/unreachable/failed
+ * publish leaves the files in place for the manual path.
+ */
+function writePublishMaterial(
+  p12Base64: string,
+  password: string,
+): { dir: string; materialPath: string; passwordPath: string } {
+  const dir = mkdtempSync(join(tmpdir(), "nanodictate-cert-publish-"));
+  const materialPath = join(dir, "nanodictate-signing.p12.b64");
+  const passwordPath = join(dir, "nanodictate-signing-password.txt");
+  writeFileSync(materialPath, p12Base64, { mode: 0o600 });
+  writeFileSync(passwordPath, password, { mode: 0o600 });
+  return { dir, materialPath, passwordPath };
+}
+
 /** Verify a p12 contains only the CI identity; returns an error when foreign. */
 async function verifyExportedP12(
   deps: CommandDeps,
@@ -1794,7 +1819,8 @@ export interface CertPublishOptions {
  * Publish the local CI identity into the GitHub secrets the release workflow
  * reads. Never overwrites: if the secrets exist, or their state cannot be
  * confirmed, nothing is written. With execute=false this only prepares the
- * base64 p12 + password + the exact `gh secret set` commands.
+ * p12 material (0600 files) + the exact `gh secret set ... < file` commands.
+ * The material itself never appears in the returned result — only the paths.
  */
 export async function publishCiSigningToGithub(
   opts: CertPublishOptions = {},
@@ -1810,8 +1836,8 @@ export async function publishCiSigningToGithub(
       executed: false,
       secretsState: "unreachable",
       localCertPresent: false,
-      p12Base64: null,
-      password: null,
+      materialPath: null,
+      passwordPath: null,
       instructions: ["Run dictation_cert_ensure first to create the local CI identity."],
       detail: `No "${CI_SIGNING_IDENTITY}" identity in the local keychain — nothing to publish.`,
     };
@@ -1825,8 +1851,8 @@ export async function publishCiSigningToGithub(
       executed: false,
       secretsState: "present",
       localCertPresent: true,
-      p12Base64: null,
-      password: null,
+      materialPath: null,
+      passwordPath: null,
       instructions: [],
       detail: `${CI_P12_SECRET} / ${CI_P12_PASSWORD_SECRET} already exist on GitHub (${gh.detail}) — refusing to overwrite them. Run \`gh secret list\` yourself if you really need to rotate.`,
     };
@@ -1839,15 +1865,18 @@ export async function publishCiSigningToGithub(
       executed: false,
       secretsState: gh.status,
       localCertPresent: true,
-      p12Base64: null,
-      password: null,
+      materialPath: null,
+      passwordPath: null,
       instructions: [],
       detail: exported.error ?? "p12 export failed",
     };
   }
 
-  const p12Base64 = exported.p12Base64!;
-  const password = exported.password!;
+  // The material and password now live only in 0600 files under a 0700 temp
+  // dir that OUTLIVES this call — the operator needs them to run the
+  // `gh secret set ... < file` commands. Nothing below ever embeds the values
+  // in a result, detail, instruction or renderer.
+  const material = writePublishMaterial(exported.p12Base64!, exported.password!);
 
   if (gh.status === "unreachable") {
     return {
@@ -1855,22 +1884,22 @@ export async function publishCiSigningToGithub(
       executed: false,
       secretsState: "unreachable",
       localCertPresent: true,
-      p12Base64,
-      password,
+      materialPath: material.materialPath,
+      passwordPath: material.passwordPath,
       instructions: [
         `gh secret list is unreachable (${gh.detail}) — absence of the secrets could not be confirmed, so nothing was written.`,
         `Check by hand: gh secret list --repo <owner>/<repo>`,
-        `If ${CI_P12_SECRET} is absent, set it:`,
-        `gh secret set ${CI_P12_SECRET} --body "<p12Base64>"`,
-        `gh secret set ${CI_P12_PASSWORD_SECRET} --body "${password}"`,
+        `If ${CI_P12_SECRET} is absent, set it from the prepared files:`,
+        `gh secret set ${CI_P12_SECRET} < ${material.materialPath}`,
+        `gh secret set ${CI_P12_PASSWORD_SECRET} < ${material.passwordPath}`,
       ],
-      detail: "GitHub unreachable — the p12 above is local only; review the instructions before writing anything.",
+      detail: `GitHub unreachable — the p12 material is local only (0600 files under ${material.dir}); review the instructions before writing anything.`,
     };
   }
 
   const setCommands = [
-    `gh secret set ${CI_P12_SECRET} --body "<p12Base64 from the p12Base64 field>"`,
-    `gh secret set ${CI_P12_PASSWORD_SECRET} --body "${password}"`,
+    `gh secret set ${CI_P12_SECRET} < ${material.materialPath}`,
+    `gh secret set ${CI_P12_PASSWORD_SECRET} < ${material.passwordPath}`,
   ];
 
   if (!execute) {
@@ -1879,21 +1908,22 @@ export async function publishCiSigningToGithub(
       executed: false,
       secretsState: "absent",
       localCertPresent: true,
-      p12Base64,
-      password,
+      materialPath: material.materialPath,
+      passwordPath: material.passwordPath,
       instructions: [
         `Secrets are absent on GitHub (${gh.detail}) — nothing was written (execute=false).`,
         "To install them yourself:",
         ...setCommands,
       ],
-      detail: "Prepared only — pass execute=true to write the two secrets, or run the commands above.",
+      detail: `Prepared only — the p12 material is in ${material.dir} (0600 files). Pass execute=true to write the two secrets, or run the commands above.`,
     };
   }
 
   // Secret values travel via stdin, never argv, so they don't leak into `ps`
-  // output or error traces. gh reads the value from stdin when --body is absent.
+  // output or error traces. gh reads the value from stdin when --body is
+  // absent; the file content is read just before each write.
   const p12Result = await deps.runFn("gh", ["secret", "set", CI_P12_SECRET], {
-    input: p12Base64,
+    input: readFileSync(material.materialPath, "utf8"),
     cwd: PROJECT_ROOT,
     timeoutMs: COMMAND_TIMEOUT_MS,
   });
@@ -1901,26 +1931,32 @@ export async function publishCiSigningToGithub(
     "gh",
     ["secret", "set", CI_P12_PASSWORD_SECRET],
     {
-      input: password,
+      input: readFileSync(material.passwordPath, "utf8"),
       cwd: PROJECT_ROOT,
       timeoutMs: COMMAND_TIMEOUT_MS,
     },
   );
   const ok = p12Result.status === 0 && passwordResult.status === 0;
 
+  // On success the secrets are now owned by GitHub — drop the local 0600 files
+  // and return null paths. Only a failed publish keeps the material in place
+  // (the paths are returned) so the operator can run the documented commands.
+  if (ok) {
+    rmSync(material.dir, { recursive: true, force: true });
+  }
+
   return {
-    // On success the secrets are now owned by GitHub — do not echo them back
-    // into the tool result. Only a failed publish keeps them for diagnostics.
     success: ok,
     executed: true,
     secretsState: "absent",
     localCertPresent: true,
-    p12Base64: ok ? null : p12Base64,
-    password: ok ? null : password,
-    instructions: [],
+    materialPath: ok ? null : material.materialPath,
+    passwordPath: ok ? null : material.passwordPath,
+    instructions: ok ? [] : setCommands,
     detail: ok
-      ? `Installed ${CI_P12_SECRET} and ${CI_P12_PASSWORD_SECRET} on GitHub.`
+      ? `Installed ${CI_P12_SECRET} and ${CI_P12_PASSWORD_SECRET} on GitHub; local 0600 material removed.`
       : `gh secret set failed: ${CI_P12_SECRET} exit ${p12Result.status} (${tail(p12Result.stderr, 2)}); ` +
-        `${CI_P12_PASSWORD_SECRET} exit ${passwordResult.status} (${tail(passwordResult.stderr, 2)})`,
+        `${CI_P12_PASSWORD_SECRET} exit ${passwordResult.status} (${tail(passwordResult.stderr, 2)}) — ` +
+        `the prepared 0600 files are still at ${material.materialPath} / ${material.passwordPath}; run the documented commands to finish.`,
   };
 }

@@ -16,21 +16,39 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 DIST="$DIR/dist/index.js"
 LOG="$DIR/.start-build.log"
 
+# Rebuild not only when dist/index.js is missing, but also when the sources it
+# was compiled from are newer: a git pull can update src/ or the package files
+# while leaving an old dist/ index.js in place, and launching it would run a
+# stale bundle. The dependency install stays limited to the missing-dist case —
+# a stale bundle only needs `npm run build` again, never npm ci/install.
+NEEDS_BUILD=false
+BUILD_REASON=""
 if [[ ! -f "$DIST" ]]; then
-  echo "start.sh: $DIST missing — installing dependencies and building" >&2
+  NEEDS_BUILD=true
+  BUILD_REASON="$DIST missing"
+elif find "$DIR/src" "$DIR/package.json" "$DIR/package-lock.json" \
+    -newer "$DIST" -print -quit 2>/dev/null | grep -q .; then
+  NEEDS_BUILD=true
+  BUILD_REASON="$DIST older than src/ or package files (stale bundle)"
+fi
 
-  if [[ -f "$DIR/package-lock.json" ]]; then
-    if ! npm ci --prefix "$DIR" >"$LOG" 2>&1; then
-      echo "start.sh: npm ci failed, falling back to npm install" >&2
+if [[ "$NEEDS_BUILD" == "true" ]]; then
+  echo "start.sh: $BUILD_REASON — building" >&2
+
+  if [[ ! -f "$DIST" ]]; then
+    if [[ -f "$DIR/package-lock.json" ]]; then
+      if ! npm ci --prefix "$DIR" >"$LOG" 2>&1; then
+        echo "start.sh: npm ci failed, falling back to npm install" >&2
+        if ! npm install --prefix "$DIR" >"$LOG" 2>&1; then
+          echo "start.sh: npm install failed — cannot build the MCP server (log: $LOG)" >&2
+          exit 1
+        fi
+      fi
+    else
       if ! npm install --prefix "$DIR" >"$LOG" 2>&1; then
         echo "start.sh: npm install failed — cannot build the MCP server (log: $LOG)" >&2
         exit 1
       fi
-    fi
-  else
-    if ! npm install --prefix "$DIR" >"$LOG" 2>&1; then
-      echo "start.sh: npm install failed — cannot build the MCP server (log: $LOG)" >&2
-      exit 1
     fi
   fi
 

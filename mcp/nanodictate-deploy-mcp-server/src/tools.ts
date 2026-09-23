@@ -189,8 +189,13 @@ export const CertPublishOutputSchema = z.object({
   executed: z.boolean(),
   secretsState: z.enum(["present", "absent", "unreachable"]),
   localCertPresent: z.boolean(),
-  p12Base64: z.union([z.string(), z.null()]),
-  password: z.union([z.string(), z.null()]),
+  // The p12 material and its password never travel through the tool result:
+  // they live in 0600 files, and only the paths are returned. Every branch
+  // (prepared-only, unreachable, failed publish) keeps the files so the
+  // operator can run the `gh secret set ... < file` commands; a successful
+  // publish removes them and returns null paths.
+  materialPath: z.union([z.string(), z.null()]),
+  passwordPath: z.union([z.string(), z.null()]),
   instructions: z.array(z.string()),
   detail: z.string(),
 });
@@ -199,7 +204,11 @@ export const CertPublishOutputSchema = z.object({
 
 type TextContent = { type: "text"; text: string };
 
-export function respond<T>(text: string, structuredContent: T) {
+export function respond<T>(
+  text: string,
+  structuredContent: T,
+  isErrorOverride?: boolean,
+) {
   // The SDK types structuredContent as { [x: string]: unknown }; the cast at
   // this boundary is intentional — the data objects come from typed functions
   // in commands.ts.
@@ -208,7 +217,9 @@ export function respond<T>(text: string, structuredContent: T) {
   // error (isError), otherwise a failed build/sign/restart/deploy/wipe/cert
   // step is indistinguishable from a successful call. The deploy/status
   // handlers build their structured objects with a top-level `success` too.
-  const isError = data.success === false;
+  // `isErrorOverride` allows a handler to exempt a result whose `success:false`
+  // is not a failure — e.g. a wipe dry run that probes and reports a plan.
+  const isError = isErrorOverride ?? data.success === false;
   return {
     isError,
     content: [{ type: "text" as const, text }] satisfies TextContent[],
@@ -452,17 +463,13 @@ export function certPublishMarkdown(r: CertPublishResult): string {
     "",
     r.detail,
   ];
-  if (r.p12Base64) {
+  if (r.materialPath && r.passwordPath) {
     lines.push(
       "",
-      "## Material (handle as a secret — this is the certificate private key)",
+      "## Material (handle as a secret — these are the certificate private key files)",
       "",
-      `- p12 password: \`${r.password}\``,
-      "- p12 (base64):",
-      "",
-      "```",
-      r.p12Base64,
-      "```",
+      `- p12 material written to \`${r.materialPath}\` (mode 0600); not echoed here`,
+      `- p12 password written to \`${r.passwordPath}\` (mode 0600); not echoed here`,
     );
   }
   if (r.instructions.length > 0) {
@@ -618,6 +625,10 @@ export async function handleWipe(params: WipeInput, depsIn?: Partial<CommandDeps
   return respond(
     render(params.response_format, wipeMarkdown(result), result),
     result,
+    // A dry run reports success:false when traces are found, but that is the
+    // dry run doing its job (probe + plan) — never surface it as an MCP error,
+    // or a client may retry or drop the plan.
+    result.dryRun ? false : undefined,
   );
 }
 
@@ -657,7 +668,7 @@ export const CertPublishInputSchema = z
       .boolean()
       .default(false)
       .describe(
-        "false (default) only prepares the base64 p12 + password + the exact `gh secret set` commands and writes nothing; true runs those commands, but only when the secrets are confirmed absent",
+        "false (default) only prepares the p12 material and password in 0600 files plus the exact `gh secret set ... < file` commands and writes nothing; true runs those commands, but only when the secrets are confirmed absent",
       ),
     response_format: FORMAT_PARAM,
   })

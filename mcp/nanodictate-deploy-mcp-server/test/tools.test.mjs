@@ -31,9 +31,9 @@
 
 import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   BuildOutputSchema,
   BuildInputSchema,
@@ -334,6 +334,17 @@ test("respond flags isError only when the result carries success:false", () => {
   assert.equal(failed.content[0].text, "boom");
   const ok = respond("fine", { success: true });
   assert.equal(ok.isError, false, "success:true must not be flagged as an error");
+});
+
+test("respond accepts an isError override (dry-run exempt) and preserves success-based default", () => {
+  // override=false wins over success:false — a dry run reporting traces is not a failure
+  const dry = respond("plan", { success: false, dryRun: true }, false);
+  assert.equal(dry.isError, false, "explicit false override must not be an error");
+  // no override keeps the success-based behaviour
+  const noOverride = respond("plan", { success: false, dryRun: true });
+  assert.equal(noOverride.isError, true, "without an override success:false still errors");
+  const dryOk = respond("plan", { success: true, dryRun: true }, false);
+  assert.equal(dryOk.isError, false);
 });
 
 test("render picks markdown or JSON by response_format", () => {
@@ -840,18 +851,28 @@ test("new output schemas parse the wipe/cert contracts and reject bad enums", ()
     executed: false,
     secretsState: "absent",
     localCertPresent: true,
-    p12Base64: "ZmFrZS1wMTI=",
-    password: "x",
-    instructions: ["gh secret set ..."],
+    materialPath: "/tmp/nanodictate-cert-publish-x/nanodictate-signing.p12.b64",
+    passwordPath: "/tmp/nanodictate-cert-publish-x/nanodictate-signing-password.txt",
+    instructions: ["gh secret set NANODICTATE_SIGNING_P12 < <materialPath>"],
     detail: "prepared only",
   };
   assert.deepEqual(CertPublishOutputSchema.parse(publish), publish);
-  const publishNull = CertPublishOutputSchema.parse({ ...publish, p12Base64: null, password: null });
-  assert.equal(publishNull.p12Base64, null);
+  const publishNull = CertPublishOutputSchema.parse({ ...publish, materialPath: null, passwordPath: null });
+  assert.equal(publishNull.materialPath, null);
+  assert.equal(publishNull.passwordPath, null);
   assert.equal(
     CertPublishOutputSchema.safeParse({ ...publish, secretsState: "partial" }).success,
     false,
   );
+  // the contract has no p12Base64/password fields — even if a producer were to
+  // slip the values in, the parsed schema output drops them
+  const parsed = CertPublishOutputSchema.parse({
+    ...publish,
+    p12Base64: "ZmFrZS1wMTI=",
+    password: "x",
+  });
+  assert.ok(!("p12Base64" in parsed), "schema output must not carry p12Base64");
+  assert.ok(!("password" in parsed), "schema output must not carry password");
 });
 
 // ── dictation_wipe / dictation_cert_* renderers ─────────────────────────────
@@ -921,24 +942,41 @@ test("certEnsureMarkdown renders action, warnings and identity list", () => {
   assert.match(md, /set-key-partition-list did not complete/);
 });
 
-test("certPublishMarkdown renders material and instructions", () => {
+test("certPublishMarkdown renders material paths and instructions without echoing the secret", () => {
   const md = certPublishMarkdown({
     success: true,
     executed: false,
     secretsState: "absent",
     localCertPresent: true,
-    p12Base64: "ZmFrZS1wMTI=",
-    password: "pw",
-    instructions: ["gh secret set NANODICTATE_SIGNING_P12 --body \"<p12Base64>\""],
+    materialPath: "/tmp/nanodictate-cert-publish-x/nanodictate-signing.p12.b64",
+    passwordPath: "/tmp/nanodictate-cert-publish-x/nanodictate-signing-password.txt",
+    instructions: ["gh secret set NANODICTATE_SIGNING_P12 < /tmp/nanodictate-cert-publish-x/nanodictate-signing.p12.b64"],
     detail: "Prepared only",
   });
   assert.match(md, /# NanoDictate CI certificate → GitHub/);
   assert.match(md, /executed: no/);
   assert.match(md, /GitHub secrets state: `absent`/);
-  assert.match(md, /## Material/);
-  assert.match(md, /p12 password: `pw`/);
-  assert.match(md, /ZmFrZS1wMTI=/);
+  assert.match(md, /## Material \(handle as a secret/);
+  assert.match(md, /p12 material written to `\/tmp\/nanodictate-cert-publish-x\/nanodictate-signing\.p12\.b64` \(mode 0600\); not echoed here/);
+  assert.match(md, /p12 password written to `\/tmp\/nanodictate-cert-publish-x\/nanodictate-signing-password\.txt` \(mode 0600\); not echoed here/);
   assert.match(md, /## Instructions/);
+  // neither the base64 material nor the raw password may reach the renderer
+  assert.doesNotMatch(md, /ZmFrZS1wMTI=/);
+  assert.doesNotMatch(md, /p12 password: ``/);
+});
+
+test("certPublishMarkdown renders no material block when only paths are absent", () => {
+  const md = certPublishMarkdown({
+    success: false,
+    executed: false,
+    secretsState: "present",
+    localCertPresent: true,
+    materialPath: null,
+    passwordPath: null,
+    instructions: [],
+    detail: "already present",
+  });
+  assert.doesNotMatch(md, /## Material/);
 });
 
 // ── dictation_wipe / dictation_cert_* handlers (injected fakes) ─────────────
@@ -969,6 +1007,11 @@ function makeFakeDeps(opts = {}) {
       return state.brewListed
         ? { status: 0, stdout: "nanodictate 0.0.12\n", stderr: "" }
         : { status: 1, stdout: "", stderr: "no" };
+    }
+    if (cmd === "brew" && args[0] === "uninstall") {
+      if (state.brewUninstallFail) return { status: 1, stdout: "", stderr: "Error: uninstall failed" };
+      state.brewListed = false;
+      return { status: 0, stdout: "", stderr: "" };
     }
     if (cmd === "brew" && args[0] === "--repository") {
       return state.brewRepository == null
@@ -1103,11 +1146,15 @@ test("handleCertPublish with execute=true installs both secrets when absent is c
   assert.equal(sc.executed, true);
   assert.equal(sc.success, true);
   assert.equal(sc.secretsState, "absent");
-  // secrets are not echoed back after a successful install
-  assert.equal(sc.p12Base64, null);
-  assert.equal(sc.password, null);
+  // after a successful install the local 0600 files are removed and the result
+  // carries neither paths nor the material itself
+  assert.equal(sc.materialPath, null);
+  assert.equal(sc.passwordPath, null);
+  assert.ok(!("p12Base64" in sc), "structuredContent must not carry p12Base64");
+  assert.ok(!("password" in sc), "structuredContent must not carry password");
   assert.doesNotMatch(res.content[0].text, /## Material/);
   assert.doesNotMatch(res.content[0].text, /p12 password/);
+  assert.doesNotMatch(res.content[0].text, /ZmFrZS1wMTI=/);
   const sets = fake.calls.filter((c) => c.cmd === "gh" && c.args[1] === "set");
   assert.equal(sets.length, 2);
   assert.equal(sets[0].args[2], "NANODICTATE_SIGNING_P12");
@@ -1143,8 +1190,38 @@ test("handleCertPublish with execute=false prepares material but sends nothing",
     state: { identities: [CI_SIGNING_IDENTITY], ghStatus: 0, ghStdout: "" },
   });
   const res = await handleCertPublish({ execute: false }, fake.deps);
-  assert.equal(res.structuredContent.executed, false);
-  assert.equal(res.structuredContent.success, true);
-  assert.ok(res.structuredContent.p12Base64);
+  const sc = res.structuredContent;
+  assert.equal(sc.executed, false);
+  assert.equal(sc.success, true);
+  assert.ok(sc.materialPath, "p12 material written to a 0600 file");
+  assert.ok(sc.passwordPath, "password written to a 0600 file");
+  // the material lives on disk, never in the result or the rendered text
+  assert.ok(!("p12Base64" in sc), "structuredContent must not carry p12Base64");
+  assert.ok(!("password" in sc), "structuredContent must not carry password");
+  assert.equal(readFileSync(sc.materialPath, "utf8"), Buffer.from("fake-p12").toString("base64"));
+  assert.equal((statSync(sc.materialPath).mode & 0o777), 0o600, "material file is 0600");
+  assert.equal((statSync(sc.passwordPath).mode & 0o777), 0o600, "password file is 0600");
+  assert.ok(sc.passwordPath && readFileSync(sc.passwordPath, "utf8").length > 0);
+  assert.doesNotMatch(res.content[0].text, /ZmFrZS1wMTI=/);
+  assert.doesNotMatch(res.content[0].text, /p12 password: /);
+  assert.match(res.content[0].text, /mode 0600/);
   assert.equal(fake.calls.some((c) => c.cmd === "gh" && c.args[1] === "set"), false);
+  // prepared files must outlive the call so the operator can run the commands;
+  // the test removes them after asserting (production only removes on success)
+  rmSync(dirname(sc.materialPath), { recursive: true, force: true });
+});
+
+test("handleWipe dry run reporting traces is not an MCP error", async () => {
+  const fake = makeFakeDeps({ state: { brewListed: true } });
+  const res = await handleWipe({}, fake.deps);
+  assert.equal(res.structuredContent.success, false, "dirty machine in dry run");
+  assert.equal(res.isError, false, "dry run output is a plan, not a failed call");
+});
+
+test("handleWipe real run finding traces surfaces as an MCP error", async () => {
+  // the brew uninstall fails, so the real wipe cannot clean the machine
+  const fake = makeFakeDeps({ state: { brewListed: true, brewUninstallFail: true } });
+  const res = await handleWipe({ dry_run: false }, fake.deps);
+  assert.equal(res.structuredContent.success, false, "real wipe could not clean everything");
+  assert.equal(res.isError, true, "an incomplete real wipe must surface as an error");
 });

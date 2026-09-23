@@ -9,7 +9,7 @@
 
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
@@ -797,7 +797,8 @@ test("publish refuses when there is no local CI identity", async () => {
   assert.equal(res.success, false);
   assert.equal(res.executed, false);
   assert.equal(res.localCertPresent, false);
-  assert.equal(res.p12Base64, null);
+  assert.equal(res.materialPath, null, "no material written without a local identity");
+  assert.equal(res.passwordPath, null);
   assert.match(res.instructions[0], /dictation_cert_ensure/);
   assert.equal(fake.calls.some((c) => c.cmd === "gh"), false);
 });
@@ -815,6 +816,8 @@ test("publish refuses to overwrite existing secrets", async () => {
   assert.equal(res.executed, false);
   assert.equal(res.secretsState, "present");
   assert.match(res.detail, /refusing to overwrite/);
+  assert.equal(res.materialPath, null, "no material written when secrets already exist");
+  assert.equal(res.passwordPath, null);
   assert.equal(fake.calls.some((c) => c.cmd === "security" && c.args[0] === "export"), false);
   assert.equal(fake.calls.some((c) => c.cmd === "gh" && c.args[1] === "set"), false);
 });
@@ -825,10 +828,20 @@ test("publish prepares p12 but writes nothing when GitHub is unreachable", async
   assert.equal(res.success, false);
   assert.equal(res.executed, false);
   assert.equal(res.secretsState, "unreachable");
-  assert.ok(res.p12Base64, "p12 material still prepared");
-  assert.ok(res.password);
+  assert.ok(res.materialPath, "p12 material still prepared");
+  assert.ok(res.passwordPath);
+  // the secret lives on disk only — the result must never carry the values
+  assert.ok(!("p12Base64" in res), "result must not embed p12Base64");
+  assert.ok(!("password" in res), "result must not embed the password");
+  assert.equal(readFileSync(res.materialPath, "utf8"), Buffer.from("fake-p12-bytes").toString("base64"));
+  assert.equal((statSync(res.materialPath).mode & 0o777), 0o600, "material file is 0600");
+  assert.equal((statSync(res.passwordPath).mode & 0o777), 0o600, "password file is 0600");
+  assert.ok(res.passwordPath && readFileSync(res.passwordPath, "utf8").length > 0);
   assert.ok(res.instructions.some((l) => l.includes("gh secret list is unreachable")));
+  assert.ok(res.instructions.some((l) => l.includes(`gh secret set ${CI_P12_SECRET} < `)));
   assert.equal(fake.calls.some((c) => c.cmd === "gh" && c.args[1] === "set"), false);
+  // prepared files outlive the call for the operator; the test cleans up
+  rmSync(dirname(res.materialPath), { recursive: true, force: true });
 });
 
 test("publish with execute=false only prepares instructions", async () => {
@@ -837,10 +850,16 @@ test("publish with execute=false only prepares instructions", async () => {
   assert.equal(res.success, true);
   assert.equal(res.executed, false);
   assert.equal(res.secretsState, "absent");
-  assert.ok(res.p12Base64);
-  assert.ok(res.instructions.some((l) => l.includes(`gh secret set ${CI_P12_SECRET}`)));
-  assert.ok(res.instructions.some((l) => l.includes(`gh secret set ${CI_P12_PASSWORD_SECRET}`)));
+  assert.ok(res.materialPath);
+  assert.ok(res.passwordPath);
+  assert.ok(!("p12Base64" in res), "result must not embed p12Base64");
+  assert.ok(!("password" in res), "result must not embed the password");
+  assert.equal(readFileSync(res.materialPath, "utf8"), Buffer.from("fake-p12-bytes").toString("base64"));
+  assert.equal((statSync(res.materialPath).mode & 0o777), 0o600, "material file is 0600");
+  assert.ok(res.instructions.some((l) => l.includes(`gh secret set ${CI_P12_SECRET} < ${res.materialPath}`)));
+  assert.ok(res.instructions.some((l) => l.includes(`gh secret set ${CI_P12_PASSWORD_SECRET} < ${res.passwordPath}`)));
   assert.equal(fake.calls.some((c) => c.cmd === "gh" && c.args[1] === "set"), false);
+  rmSync(dirname(res.materialPath), { recursive: true, force: true });
 });
 
 test("publish with execute=true runs gh secret set only when absence is confirmed", async () => {
@@ -849,9 +868,11 @@ test("publish with execute=true runs gh secret set only when absence is confirme
   assert.equal(res.success, true);
   assert.equal(res.executed, true);
   // After a successful install the secrets are owned by GitHub — they must not
-  // be echoed back into the result.
-  assert.equal(res.p12Base64, null);
-  assert.equal(res.password, null);
+  // be echoed back into the result (neither values nor file paths).
+  assert.equal(res.materialPath, null);
+  assert.equal(res.passwordPath, null);
+  assert.ok(!("p12Base64" in res), "result must not carry p12Base64");
+  assert.ok(!("password" in res), "result must not carry the password");
   const sets = fake.calls.filter((c) => c.cmd === "gh" && c.args[1] === "set");
   assert.equal(sets.length, 2);
   assert.equal(sets[0].args[2], CI_P12_SECRET);
@@ -876,6 +897,15 @@ test("publish reports gh secret set failure of one secret", async () => {
   assert.equal(res.success, false);
   assert.equal(res.executed, true);
   assert.match(res.detail, /gh secret set failed/);
+  // a failed publish keeps the 0600 material for the operator and names it
+  assert.ok(res.materialPath, "failed publish keeps the prepared material");
+  assert.ok(res.passwordPath);
+  assert.ok(!("p12Base64" in res), "result must not embed p12Base64");
+  assert.ok(!("password" in res), "result must not embed the password");
+  assert.ok(res.instructions.some((l) => l.includes(`gh secret set ${CI_P12_SECRET} < ${res.materialPath}`)));
+  assert.equal(readFileSync(res.materialPath, "utf8"), Buffer.from("fake-p12-bytes").toString("base64"));
+  assert.equal((statSync(res.materialPath).mode & 0o777), 0o600, "material file is 0600");
+  rmSync(dirname(res.materialPath), { recursive: true, force: true });
 });
 
 test("publish refuses a p12 that contains a foreign certificate", async () => {
@@ -943,7 +973,8 @@ test("publish refuses when the p12 verification script fails", async () => {
   const res = await publishCiSigningToGithub({ execute: true, deps: fake.deps });
   assert.equal(res.success, false);
   assert.equal(res.executed, false);
-  assert.equal(res.p12Base64, null);
+  assert.equal(res.materialPath, null, "verification failure happens before any material is written");
+  assert.equal(res.passwordPath, null);
   assert.match(res.detail, /p12 verification failed/);
   assert.equal(fake.calls.some((c) => c.cmd === "gh" && c.args[1] === "set"), false);
 });
@@ -976,7 +1007,8 @@ test("publish refuses when security export succeeds but writes no file", async (
   const res = await publishCiSigningToGithub({ execute: true, deps: fake.deps });
   assert.equal(res.success, false);
   assert.equal(res.executed, false);
-  assert.equal(res.p12Base64, null);
+  assert.equal(res.materialPath, null, "no p12 on disk means no material paths");
+  assert.equal(res.passwordPath, null);
   assert.match(res.detail, /wrote no file/);
   assert.equal(fake.calls.some((c) => c.cmd === "gh" && c.args[1] === "set"), false);
 });
