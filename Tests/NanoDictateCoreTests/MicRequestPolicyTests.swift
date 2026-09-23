@@ -60,6 +60,25 @@ final class MicRequestPolicyTests: XCTestCase {
         XCTAssertTrue(policy.allowRequest(now: onBoundary))
     }
 
+    /// Timeout в будущем (часы назад): age < 0 — вне окна, не блокирует,
+    /// пока now не догонит отметки; после догонания снова считаются, а по
+    /// истечении окна (age >= windowDuration) фильтруются и запрос разрешён.
+    @objc func testFutureTimeoutOutsideWindowDoesNotBlock() {
+        var policy = MicRequestPolicy(fileURL: tempStateURL())
+        let future = t0.addingTimeInterval(600)
+        for i in 0..<3 {
+            policy.recordTimeout(now: future.addingTimeInterval(Double(i)))
+        }
+        // now раньше всех отметок: отрицательный age отсекается — не блокируем.
+        XCTAssertTrue(policy.allowRequest(now: t0))
+        // Часы догнали все три отметки (возраст 2, 1, 0) — блокировка восстановлена.
+        XCTAssertFalse(policy.allowRequest(now: future.addingTimeInterval(2)))
+        // Возраст всех трёх >= windowDuration — снова вне окна.
+        XCTAssertTrue(
+            policy.allowRequest(
+                now: future.addingTimeInterval(2 + MicRequestPolicy.windowDuration)))
+    }
+
     /// Corrupt state file treated as fresh; guard survives garbage.
     @objc func testCorruptStateFileIsFresh() throws {
         let url = tempStateURL()

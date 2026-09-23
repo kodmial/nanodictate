@@ -1394,4 +1394,55 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.routing.segmentProvider, "")
         XCTAssertEqual(config.segmentProviderID(), "groq", "очищенная роль — фолбэк на активного")
     }
+
+    // MARK: - normalizedSectionName (трим / кавычки / префикс providers.)
+
+    @objc func testParseNormalizesSectionHeaderNames() throws {
+        // Ветки normalizedSectionName на parse: трим пробелов, снятие
+        // обрамляющих кавычек, трим id после providers. — три разные формы
+        // заголовка именуют три разные секции.
+        let content = """
+        [ providers.groq ]
+        api_key = "a"
+
+        ["providers.gigaam"]
+        api_key = "b"
+
+        [providers.  cloudflare]
+        api_key = "c"
+        """
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.providerNames, ["groq", "gigaam", "cloudflare"])
+        XCTAssertEqual(config.providers.first { $0.id == "groq" }?.apiKey, "a")
+        XCTAssertEqual(config.providers.first { $0.id == "gigaam" }?.apiKey, "b")
+        XCTAssertEqual(config.providers.first { $0.id == "cloudflare" }?.apiKey, "c")
+    }
+
+    @objc func testWriteProviderKeyValueRecognizesSectionWithInnerSpaces() {
+        // Заголовок `[ providers.groq ]` (пробелы внутри скобок):
+        // writeSectionKeyValue через normalizedSectionName находит секцию,
+        // меняет значение in-place и НЕ дописывает канонический дубль
+        // `[providers.groq]` (без нормализации следующий parse упал бы на
+        // duplicateProvider).
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_set_key_spaces_\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: file) }
+        do {
+            try "[ providers.groq ]\napi_key = \"old\"\n".data(using: .utf8)!.write(to: file)
+
+            try AppConfig.writeProviderKeyValue(
+                providerID: "groq", key: "api_key", value: "\"new\"", to: file.path)
+            let content = try String(contentsOf: file, encoding: .utf8)
+            XCTAssertTrue(content.contains("api_key = \"new\""))
+            XCTAssertFalse(content.contains("old"))
+            XCTAssertFalse(
+                content.contains("[providers.groq]"),
+                "канонический дубль-заголовок не создан: секция найдена по нормализации")
+            let config = try AppConfig.parse(content)
+            XCTAssertEqual(config.providers.count, 1, "дубль-секции нет — один провайдер")
+            XCTAssertEqual(config.providers.first?.apiKey, "new")
+        } catch {
+            XCTFail("Неожиданная ошибка: \(error)")
+        }
+    }
 }

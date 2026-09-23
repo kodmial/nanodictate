@@ -334,4 +334,24 @@ final class ProviderTests: XCTestCase {
         XCTAssertEqual(providers.count, 1)
         XCTAssertNil(ProviderStore.activeProvider) // stale matches no provider
     }
+
+    /// Empty active_provider — штатный сценарий: effectiveID падает на
+    /// providers.first?.id (та же конвенция, что в агенте/CLI).
+    @objc func testProviderStoreEmptyActiveActivatesFirstProvider() throws {
+        let url = try tmpFile("store_no_active", """
+        [providers.groq]
+        base_url = "https://groq.test/v1"
+        [providers.ya]
+        base_url = "https://ya.test/v1"
+        """)
+        ProviderStore.configPathOverride = url.path
+        defer { ProviderStore.configPathOverride = nil }
+
+        let providers = try ProviderStore.loadProviders()
+
+        XCTAssertEqual(providers.count, 2)
+        XCTAssertTrue(providers[0].isActive, "первый провайдер активен при пустом active_provider")
+        XCTAssertFalse(providers[1].isActive)
+        XCTAssertEqual(ProviderStore.activeProvider?.id, "groq")
+    }
 }
