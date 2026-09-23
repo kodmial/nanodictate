@@ -522,6 +522,8 @@ test("deployMarkdown renders success, binary lines, and gated failures", () => {
   assert.match(ok, /\*\*OK\*\* \(exit 0\), binary `\/p\/NanoDictateAgent`, symlink created/);
   assert.match(ok, /NanoDictateAgent: signed, verified/);
   assert.match(ok, /nanodictate: signed/);
+  assert.ok(ok.indexOf("## Sign") < ok.indexOf("NanoDictateAgent: signed, verified"));
+  assert.ok(ok.indexOf("NanoDictateAgent: signed, verified") < ok.indexOf("## Restart"));
   assert.match(ok, /\*\*OK\*\* via `launchctl kickstart -k`/);
 
   const failed = deployMarkdown({
@@ -559,6 +561,8 @@ test("deployMarkdown renders success, binary lines, and gated failures", () => {
   });
   assert.match(signFailed, /- \*\*FAILED\*\* — identity `NanoDictate Code Signing`/);
   assert.match(signFailed, /NanoDictateAgent: NOT signed/);
+  assert.ok(signFailed.indexOf("## Sign") < signFailed.indexOf("NanoDictateAgent: NOT signed"));
+  assert.ok(signFailed.indexOf("NanoDictateAgent: NOT signed") < signFailed.indexOf("## Restart"));
   assert.match(signFailed, /codesign failed \(exit 1\)/);
   assert.match(signFailed, /- NOT RUN \(previous step failed\)/);
 });
