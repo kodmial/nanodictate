@@ -1022,6 +1022,7 @@ final class ConfigTests: XCTestCase {
             .appendingPathComponent("test_write_kv_section_\(UUID().uuidString).toml")
         defer { try? FileManager.default.removeItem(at: file) }
         try """
+        active_provider = "groq"
         [providers.groq]
         api_key = "section-old"
         """.data(using: .utf8)!.write(to: file)
@@ -1046,7 +1047,7 @@ final class ConfigTests: XCTestCase {
         let file = FileManager.default.temporaryDirectory
             .appendingPathComponent("test_write_kv_trailing_sp_\(UUID().uuidString).toml")
         defer { try? FileManager.default.removeItem(at: file) }
-        let content = "[providers.groq]  \napi_key = \"section-old\"\n"
+        let content = "active_provider = \"groq\"\n[providers.groq]  \napi_key = \"section-old\"\n"
         try content.data(using: .utf8)!.write(to: file)
 
         try AppConfig.writeKeyValue(key: "api_key", value: "\"top-new\"", to: file.path)
