@@ -774,12 +774,15 @@ jobs:
           # The generated formula must parse (Ruby syntax check).
           ruby -c packaging/homebrew/nanodictate.rb
           # Homebrew requires the class name to be the CamelCase of the file
-          # stem ("nanodictate.rb" -> Nanodictate) and the Release tarball
-          # convention demands a post_install that registers the LaunchAgent
-          # (hybrid A+B packaging — homebrew & macports write the same
-          # canonical ~/Library/LaunchAgents/com.nanodictate.agent.plist).
+          # stem ("nanodictate.rb" -> Nanodictate) and the filled tarball
+          # url + sha256 stanzas: release-prep.rb replaces the __VERSION__ /
+          # __SHA256_*__ tokens, so a formula that lost them (or a template
+          # that was not regenerated) is caught here. Service registration is
+          # explicit — `brew services start nanodictate` — and the canonical
+          # label is checked by the service-block greps below.
           grep -q '^class Nanodictate < Formula$' packaging/homebrew/nanodictate.rb
-          grep -q 'def post_install' packaging/homebrew/nanodictate.rb
+          grep -q '^    url "https://github.com/kodmial/nanodictate/releases/download/' packaging/homebrew/nanodictate.rb
+          grep -q '^    sha256 "' packaging/homebrew/nanodictate.rb
           # Service block with the canonical label: a lost label would let brew invent homebrew.mxcl.nanodictate — a second daemon.
           grep -q '^  service do$' packaging/homebrew/nanodictate.rb
           grep -q 'name macos: "com.nanodictate.agent"' packaging/homebrew/nanodictate.rb
