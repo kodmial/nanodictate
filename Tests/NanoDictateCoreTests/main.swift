@@ -8,6 +8,14 @@ setenv("NANODICTATE_TESTS", "1", 1)
 // Suites explicit (objc_copyClassList clumsy in Swift); any failure → non-zero exit + names.
 // Run: `swift run NanoDictateCoreTests`.
 
+// Swift-методы `@objc func testX() throws` выставляются рантайму как селектор
+// `<testX>AndReturnError:` с сигнатурой `(BOOL)AndReturnError:(NSError **)err`.
+// Голый perform(selector) не передаёт NSError**, и метод на выходе пишет ошибку
+// через мусорный указатель → SIGBUS (KERN_PROTECTION_FAILURE, CI run 35815418862).
+// Поэтому throws-тесты вызываем напрямую через IMP с настоящим holder'ом ошибки.
+typealias NoArgFn = @convention(c) (AnyObject, Selector) -> Void
+typealias WithErrorFn = @convention(c) (AnyObject, Selector, AutoreleasingUnsafeMutablePointer<NSError?>?) -> Bool
+
 let suites: [XCTestCase.Type] = [
     HotkeyServiceTests.self,
     InputGainTests.self,
@@ -90,7 +98,24 @@ for cls in suites {
         fflush(stdout)
 
         _ = instance.perform(Selector(("setUp")))
-        _ = instance.perform(selector)
+        if String(cString: sel_getName(selector)).hasSuffix("AndReturnError:") {
+            // @objc throws: вызываем IMP с валидным NSError* holder'ом.
+            guard let imp = class_getMethodImplementation(cls, selector) else { continue }
+            let fn = unsafeBitCast(imp, to: WithErrorFn.self)
+            var err: NSError?
+            withUnsafeMutablePointer(to: &err) { ptr in
+                let holder = AutoreleasingUnsafeMutablePointer<NSError?>(ptr)
+                _ = fn(instance, selector, holder)
+            }
+            if let err {
+                XCTestCase.currentFailures.append("test threw: \(String(reflecting: err))")
+            }
+        } else {
+            // Non-throwing: вызов без out-param, как раньше.
+            guard let imp = class_getMethodImplementation(cls, selector) else { continue }
+            let fn = unsafeBitCast(imp, to: NoArgFn.self)
+            fn(instance, selector)
+        }
         _ = instance.perform(Selector(("tearDown")))
 
         let failures = XCTestCase.currentFailures
