@@ -1033,8 +1033,8 @@ final class ConfigTests: XCTestCase {
                       "секционный ключ остался на месте")
         let inserted = text.range(of: "api_key = \"top-new\"")!
         let header = text.range(of: "[providers.groq]")!
-        XCTAssertLessThan(inserted.lowerBound, header.lowerBound,
-                          "top-level строка вставлена ПЕРЕД первой секцией")
+        XCTAssertTrue(inserted.lowerBound < header.lowerBound,
+                      "top-level строка вставлена ПЕРЕД первой секцией")
         let config = try AppConfig.parse(text)
         XCTAssertEqual(config.providers.first { $0.id == "groq" }?.apiKey, "section-old")
     }
@@ -1056,8 +1056,8 @@ final class ConfigTests: XCTestCase {
                       "секционный ключ не тронут при хвостовых пробелах в заголовке")
         let inserted = text.range(of: "api_key = \"top-new\"")!
         let header = text.range(of: "[providers.groq]")!
-        XCTAssertLessThan(inserted.lowerBound, header.lowerBound,
-                          "top-level строка вставлена ПЕРЕД первой секцией")
+        XCTAssertTrue(inserted.lowerBound < header.lowerBound,
+                      "top-level строка вставлена ПЕРЕД первой секцией")
         let config = try AppConfig.parse(text)
         XCTAssertEqual(config.providers.first { $0.id == "groq" }?.apiKey, "section-old")
     }
@@ -1078,7 +1078,7 @@ final class ConfigTests: XCTestCase {
         let text = try String(contentsOf: file, encoding: .utf8)
         let inserted = text.range(of: "active_provider = \"groq\"")!
         let header = text.range(of: "[providers.groq]")!
-        XCTAssertLessThan(inserted.lowerBound, header.lowerBound)
+        XCTAssertTrue(inserted.lowerBound < header.lowerBound)
         XCTAssertTrue(text.contains("language = \"ru\""),
                       "существующие top-level строки не тронуты")
         let config = try AppConfig.parse(text)
