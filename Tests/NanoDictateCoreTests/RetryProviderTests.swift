@@ -375,6 +375,33 @@ final class RetryProviderTests: XCTestCase {
         }
     }
 
+    /// (d) CR12 fix: after abort wins, `break drain` stops draining — a
+    /// cancelled sibling throwing CancellationError (non-TranscribeError)
+    /// must NOT overwrite the first abort error.
+    @objc func testParallelFailoverAbortSurvivesCancelledSibling() {
+        runAsync("testParallelFailoverAbortSurvivesCancelledSibling") {
+            do {
+                _ = try await RetryProvider.parallelFailover(
+                    candidates: ["a", "b", "c"]
+                ) { candidate in
+                    if candidate == "a" {
+                        throw NonTranscribeError()
+                    }
+                    // Siblings start sleeping; abort returns instantly and
+                    // cancelAll cancels them — Task.sleep throws
+                    // CancellationError, which is not a TranscribeError and
+                    // must not replace the abort.
+                    try await Task.sleep(nanoseconds: 200_000_000)
+                    return (self.makeResult("unexpected-\(candidate)"), candidate)
+                }
+                XCTFail("Ожидалась ошибка")
+            } catch let error {
+                XCTAssertTrue(error is NonTranscribeError,
+                              "abort-победа не затирается CancellationError отменённого sibling: получен \(error)")
+            }
+        }
+    }
+
     // MARK: - resolveAPIKey: env активному > собственный api_key > api_key_file
 
     @objc func testResolveAPIKeyEnvWinsOverInlineAndFile() {

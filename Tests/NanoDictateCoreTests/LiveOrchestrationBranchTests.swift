@@ -505,6 +505,113 @@ final class LiveOrchestrationBranchTests: XCTestCase {
         }
     }
 
+    // MARK: - 6. Cancel-флаг LiveRunState + SerialAsyncExecutor (review B4 / CR12)
+
+    /// CR12: LiveRunState carries an explicit isCancelled flag (not just the
+    /// liveSession token). Every terminal path that drops the runState — Esc
+    /// (handleCancel) and mid-recording device change (handleDeviceChange) —
+    /// sets isCancelled BEFORE releasing the reference, and handleLiveSegment
+    /// reads it first thing, so a stale segment already queued on
+    /// liveExecutor skips its STT call instead of holding the serial queue.
+    @objc func testLiveRunState_CancelPathsSetFlagBeforeDropStructurally() {
+        guard let source = Self.agentMainSource() else {
+            XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
+            return
+        }
+        let cancelBody = Self.functionBody(named: "handleCancel", in: source)
+        XCTAssertTrue(
+            cancelBody.contains("liveRunState?.isCancelled = true"),
+            "Esc (handleCancel) обязан ставить isCancelled на накопленном runState"
+        )
+        let deviceBody = Self.functionBody(named: "handleDeviceChange", in: source)
+        XCTAssertTrue(
+            deviceBody.contains("liveRunState?.isCancelled = true"),
+            "смена устройства обязана ставить isCancelled на накопленном runState"
+        )
+        let segmentBody = Self.functionBody(named: "handleLiveSegment", in: source)
+        let head = Self.substring(
+            from: "func handleLiveSegment(",
+            to: "let index = runState.segmentCount",
+            in: segmentBody
+        )
+        XCTAssertTrue(
+            head.contains("guard !runState.isCancelled else { return }"),
+            "handleLiveSegment обязан первым делом отбрасывать сегменты отменённого runState"
+        )
+    }
+
+    // MARK: - 7. SerialAsyncExecutor.pendingCount (CR12)
+
+    /// CR12: pendingCount feeds the "processing" watchdog budget — it must
+    /// really count submitted-but-unfinished tasks. Structurally: submit()
+    /// increments pending (under pendingLock) BEFORE dispatching to the queue;
+    /// the completion half (after sema.wait()) decrements it back.
+    @objc func testSerialExecutor_PendingCountLifecycleStructurally() {
+        guard let source = Self.agentMainSource() else {
+            XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
+            return
+        }
+        let executor = Self.substring(
+            from: "private final class SerialAsyncExecutor {",
+            to: "private var state: NanoDictateState = .idle",
+            in: source
+        )
+        XCTAssertFalse(executor.isEmpty, "SerialAsyncExecutor обязан существовать в main.swift")
+        XCTAssertTrue(
+            executor.contains("var pendingCount: Int {"),
+            "executor обязан экспонировать pendingCount для watchdog-бюджета"
+        )
+        let submitBlock = Self.substring(
+            from: "func submit(",
+            to: "queue.async {",
+            in: executor
+        )
+        XCTAssertTrue(
+            submitBlock.contains("pending += 1"),
+            "submit обязан инкрементировать pending под блокировкой ДО постановки в очередь"
+        )
+        let completionBlock = Self.substring(
+            from: "sema.wait()",
+            to: "self.pendingLock.unlock()",
+            in: executor
+        )
+        XCTAssertTrue(
+            completionBlock.contains("self.pending -= 1"),
+            "после завершения задачи (после sema.wait()) pending обязан декрементироваться"
+        )
+    }
+
+    // MARK: - 8. Watchdog-бюджет против serial-очереди (CR12)
+
+    /// CR12: the "processing" watchdog budget accounts for the serial queue —
+    /// requestCount = max(2, pendingCount + 1), i.e. queued/running segments +
+    /// the final pass, each up to networkRequestTimeout, plus 5 s margin. The
+    /// same formula guards BOTH finalize paths: forced stop (liveFinalize) and
+    /// duration limit (liveFinalizeFromSamples).
+    @objc func testProcessingWatchdog_BudgetAccountsPendingCountStructurally() {
+        guard let source = Self.agentMainSource() else {
+            XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
+            return
+        }
+        let expected = "max(2, liveExecutor.pendingCount + 1)"
+        for name in ["liveFinalize", "liveFinalizeFromSamples"] {
+            let body = Self.functionBody(named: name, in: source)
+            let watchdog = Self.substring(
+                from: "let requestCount",
+                to: "let liveMaxDuration",
+                in: body
+            )
+            XCTAssertFalse(
+                watchdog.isEmpty,
+                "\(name): блок let requestCount должен существовать"
+            )
+            XCTAssertTrue(
+                watchdog.contains(expected),
+                "\(name): бюджет обязан учитывать pendingCount (\(expected))"
+            )
+        }
+    }
+
     // MARK: - Helpers (зеркало OverlayLifecycleTests / LiveSegmentFailureTests)
 
     /// single-segment-skip branch from finishLiveRun (from skip condition to

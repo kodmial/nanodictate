@@ -300,6 +300,46 @@ final class CookieRelayProviderTests: XCTestCase {
         }
     }
 
+    // MARK: - Верифицирующий probe: не-2xx статус и challenge-тело
+
+    @objc func testProbeNon2xxStatusRejectsToken() {
+        final class Non2xxProbeTransport: HTTPTransport, @unchecked Sendable {
+            let challengeBody: String
+            init(challengeBody: String) { self.challengeBody = challengeBody }
+            func send(request: URLRequest) async throws -> (status: Int, body: Data, headers: [String: String]) {
+                // Запрос с Cookie — это probe; челлендж-GET куки не несёт.
+                if request.value(forHTTPHeaderField: "Cookie") != nil {
+                    return (503, Data(#"{"error":"upstream down"}"#.utf8), [:])
+                }
+                return (200, Data(challengeBody.utf8), [:])
+            }
+        }
+        let provider = CookieRelayProvider(
+            origin: "https://proxy.example.com",
+            transport: Non2xxProbeTransport(challengeBody: challengeHTML)
+        )
+
+        runAsync("testProbeNon2xx") {
+            let cookie = await provider.refreshBlocking()
+            XCTAssertNil(cookie, "probe GET вернул 503 (не-2xx) — токен не сохраняется")
+            XCTAssertNil(provider.currentCookie(), "не сохраняется и в памяти")
+        }
+    }
+
+    @objc func testProbeChallengeBodyRejectsToken() {
+        // honorCookie=false: верифицирующий probe получает 200 с challenge-телом
+        // — cookie вычислилась, но сервер её не принял.
+        let transport = CookieRelayMockTransport(challengeBody: challengeHTML, honorCookie: false)
+        let provider = makeProvider(transport: transport)
+
+        runAsync("testProbeChallengeBody") {
+            let cookie = await provider.refreshBlocking()
+            XCTAssertNil(cookie, "probe вернул 200 с challenge-телом — токен не сохраняется")
+            XCTAssertEqual(transport.requestCount, 2, "челлендж GET + probe GET с кукой")
+            XCTAssertNil(provider.currentCookie())
+        }
+    }
+
     @objc func testMakeForCookieRelayFromBaseURL() {
         let transport = CookieRelayMockTransport(challengeBody: challengeHTML)
         let provider = CookieRelayProvider.makeForCookieRelay(

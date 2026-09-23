@@ -139,7 +139,7 @@ final class AgentStatusTests: XCTestCase {
     @objc func testL10nPlaceholderParity() {
         let en = L10n.table(.en)
         let ru = L10n.table(.ru)
-        let placeholders = ["{n}", "{message}", "{path}", "{error}"]
+        let placeholders = ["{n}", "{message}", "{path}", "{error}", "<out>"]
         for key in en.keys {
             for ph in placeholders where en[key]!.contains(ph) {
                 XCTAssertTrue(ru[key]!.contains(ph), "RU: у ключа \(key) нет плейсхолдера \(ph)")

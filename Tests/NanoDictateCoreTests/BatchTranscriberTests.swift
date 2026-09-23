@@ -37,6 +37,12 @@ final class BatchTranscriberTests: XCTestCase {
             .appendingPathComponent("dct-test-\(name)-\(UUID().uuidString).checkpoint.json").path
     }
 
+    private func retryAfterResponse(_ value: String?) -> BatchHTTPResponse {
+        var headers: [String: String] = [:]
+        if let value = value { headers["retry-after"] = value }
+        return BatchHTTPResponse(status: 503, headers: headers, body: Data())
+    }
+
     // MARK: transcribeChunk — ретраи
 
     @objc func testChunkRetriesThenSucceeds() throws {
@@ -140,6 +146,60 @@ final class BatchTranscriberTests: XCTestCase {
         }
         XCTAssertEqual(text, "ok")
         XCTAssertEqual(attempts, 2)
+    }
+
+    // MARK: retryAfterSeconds — отсев non-finite/отрицательных, cap 60
+
+    @objc func testRetryAfterSecondsCapAtMax() throws {
+        // Header > 60 → capped to maxRetryAfter (60); boundary/value below kept.
+        XCTAssertEqual(retryAfterResponse("120").retryAfterSeconds, 60,
+                       "Retry-After 120 > maxRetryAfter 60 → cap 60")
+        XCTAssertEqual(retryAfterResponse("60").retryAfterSeconds, 60, "граница 60 не режется")
+        XCTAssertEqual(retryAfterResponse("42").retryAfterSeconds, 42,
+                       "значение ниже cap проходит без изменений (кейс 42с)")
+    }
+
+    @objc func testRetryAfterSecondsRejectsNonFinite() throws {
+        XCTAssertNil(retryAfterResponse("inf").retryAfterSeconds, "inf → nil (фолбэк на backoff)")
+        XCTAssertNil(retryAfterResponse("nan").retryAfterSeconds, "nan → nil")
+        XCTAssertNil(retryAfterResponse("-inf").retryAfterSeconds, "-inf → nil (не-finite)")
+    }
+
+    @objc func testRetryAfterSecondsRejectsNegative() throws {
+        XCTAssertNil(retryAfterResponse("-5").retryAfterSeconds,
+                     "отрицательное значение → nil (по коду: value >= 0)")
+        XCTAssertEqual(retryAfterResponse("0").retryAfterSeconds, 0, "0 допустим (без ожидания)")
+    }
+
+    @objc func testRetryAfterSecondsMissingOrWhitespace() throws {
+        XCTAssertNil(retryAfterResponse(nil).retryAfterSeconds, "нет заголовка → nil")
+        XCTAssertNil(retryAfterResponse("   ").retryAfterSeconds,
+                     "пусто после трима → Double не парсится → nil")
+        XCTAssertEqual(retryAfterResponse(" 42 ").retryAfterSeconds, 42, "пробелы тримятся")
+    }
+
+    @objc func testChunkCappedRetryAfterFromResponseFeedsDelay() throws {
+        // Integration: prod caps via response.retryAfterSeconds before building
+        // the BatchHTTPError (nanodictate/main.swift) — the wait reflects the
+        // capped 60, not the raw 120.
+        let response = retryAfterResponse("120")
+        var waits: [TimeInterval] = []
+        let text = try runAsync {
+            try await BatchTranscriber.transcribeChunk(
+                send: { attempt in
+                    if attempt == 0 {
+                        throw BatchHTTPError.http(503, message: "busy",
+                                                  retryAfter: response.retryAfterSeconds)
+                    }
+                    return "ok"
+                },
+                retries: 3,
+                backoff: [2, 4, 8],
+                delay: { waits.append($0); try await self.instantDelay($0) }
+            )
+        }
+        XCTAssertEqual(text, "ok")
+        XCTAssertEqual(waits, [60], "Retry-After 120 → cap 60 → пауза 60 с, не 120")
     }
 
     // MARK: run — основной прогон
