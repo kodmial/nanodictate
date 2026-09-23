@@ -833,8 +833,11 @@ final class BatchTranscriberTests: XCTestCase {
         let path = tempCheckpointPath("par-resume-partial")
         defer { try? FileManager.default.removeItem(atPath: path) }
 
+        // Спеки tone(8, 1000) при maxSegment 2: (0,2),(2,4),(4,6),(6,8).
+        // Седы должны попадать РОВНО в спеки — guard сверяет bodyStart/bodyEnd
+        // записи со спекой (порог 0.001) и не применит чужое тело.
         let seeded: [BatchSegmentRecord] = (0..<3).map {
-            BatchSegmentRecord(index: $0, bodyStart: Double($0), bodyEnd: Double($0) + 1,
+            BatchSegmentRecord(index: $0, bodyStart: Double($0) * 2, bodyEnd: Double($0) * 2 + 2,
                                status: BatchSegmentRecord.statusOK, text: "p \($0)")
         }
         let partial = BatchCheckpoint(
@@ -868,6 +871,53 @@ final class BatchTranscriberTests: XCTestCase {
         let full = try BatchTranscriber.loadCheckpoint(from: path)
         XCTAssertEqual(full?.segments.count, 4, "чекпоинт дописан до полного префикса")
         XCTAssertEqual(full?.segments.map { $0.index }, [0, 1, 2, 3])
+    }
+
+    @objc func testRunParallelResumeRejectsBodyMismatchedSeeds() throws {
+        // Reject-ветка guard'а в execute(): запись чекпоинта применяется только
+        // при совпадении тела (bodyStart/bodyEnd) со спекой нарезки (порог 0.001).
+        // Седы со сдвигом +0.5 от спеки (0,2),(2,4),(4,6),(6,8) не должны
+        // считаться разрешёнными — все 4 чанка распознаются заново, stale-текст
+        // чекпоинта в итог и в переписанный чекпоинт не попадает.
+        let path = tempCheckpointPath("par-resume-reject")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let seeded: [BatchSegmentRecord] = (0..<4).map {
+            BatchSegmentRecord(index: $0, bodyStart: Double($0) * 2 + 0.5,
+                               bodyEnd: Double($0) * 2 + 2.5,
+                               status: BatchSegmentRecord.statusOK, text: "stale \($0)")
+        }
+        let stale = BatchCheckpoint(
+            version: BatchCheckpoint.currentVersion,
+            providerID: "gigaam", sourceFile: "x.wav",
+            totalSegments: 4, segments: seeded
+        )
+        try BatchTranscriber.saveCheckpoint(stale, to: path)
+
+        let samples = tone(8, sampleRate: 1000)
+        var resumedCalls: [Int] = []
+        let lock = NSLock()
+        let outcome = try runAsync {
+            try await BatchTranscriber.run(
+                samples: samples, sampleRate: 1000, maxSegment: 2, overlap: 0.5,
+                providerID: "gigaam", sourceFile: "x.wav",
+                checkpointPath: path, resume: true,
+                sendOne: { _, _, index, _ in
+                    lock.lock(); resumedCalls.append(index); lock.unlock()
+                    return "p \(index)"
+                },
+                delay: { _ in try await self.instantDelay(0) }, maxConcurrent: 2
+            )
+        }
+        XCTAssertEqual(outcome.okCount, 4)
+        XCTAssertEqual(resumedCalls.sorted(), [0, 1, 2, 3],
+                       "седы с чужим телом отклоняются — все 4 чанка распознаются заново")
+        XCTAssertEqual(outcome.text, "p 0 p 1 p 2 p 3", "в итог идёт свежий текст, не stale")
+
+        // Чекпоинт переписан свежими записями (тело по спеке), stale-текста нет.
+        let full = try BatchTranscriber.loadCheckpoint(from: path)
+        XCTAssertEqual(full?.segments.map { $0.text }, ["p 0", "p 1", "p 2", "p 3"],
+                       "stale-текст не должен уцелеть в чекпоинте")
     }
 
     @objc func testCheckpointWriterGuardsStalePrefix() throws {

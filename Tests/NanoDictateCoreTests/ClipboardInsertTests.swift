@@ -151,7 +151,7 @@ final class ClipboardInsertTests: XCTestCase {
         Inserter.insertViaClipboard(text: "hello", bridge: bridge)
 
         // Buffer already restored (sync scheduleRestore in tests); assert write history instead.
-        let writes = harness.restoreHistory()
+        let writes = restoreHistory()
         XCTAssertEqual(writes.first, "hello")
         XCTAssertEqual(writes.count, 2, "запись текста + восстановление старого буфера")
     }
@@ -161,7 +161,7 @@ final class ClipboardInsertTests: XCTestCase {
 
         Inserter.insertViaClipboard(text: "new-text", bridge: bridge)
 
-        let writes = harness.restoreHistory()
+        let writes = restoreHistory()
         XCTAssertEqual(writes.count, 2)
         XCTAssertEqual(writes[0], "new-text")
         XCTAssertEqual(writes[1], "old-text")
@@ -173,7 +173,7 @@ final class ClipboardInsertTests: XCTestCase {
 
         Inserter.insertViaClipboard(text: "new", bridge: bridge)
 
-        let writes = harness.restoreHistory()
+        let writes = restoreHistory()
         XCTAssertEqual(writes.count, 2)
         XCTAssertEqual(writes[0], "new")
         XCTAssertEqual(writes[1], "")
