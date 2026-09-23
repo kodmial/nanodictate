@@ -748,11 +748,13 @@ struct BatchTranscribeOptions {
 }
 
 // swiftlint:disable indentation_width
-let usageTranscribeBatch = """
+var usageTranscribeBatch: String {
+  """
     \(L10n.tr("usage.transcribe"))
     \(L10n.tr("usage.batch"))
       \(L10n.tr("usage.batch.desc"))
   """
+}
 // swiftlint:enable indentation_width
 
 func formatClock(_ seconds: TimeInterval) -> String {
@@ -1039,7 +1041,6 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
   let progressBar = BatchProgressBar(enabled: options.showProgress)
 
   Task {
-    defer { progressBar.finish() }  // newline on any outcome
     do {
       let outcome = try await BatchTranscriber.run(
         fileURL: batchWavURL,
@@ -1062,6 +1063,7 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
           progressBar.update(completed: completedChunks, total: totalChunks, elapsed: elapsed)
         }
       )
+      progressBar.finish()  // newline before the summary/errors (no defer: exit never returns)
 
       // 5. Text: to --out (atomically) or to stdout. To a file — with a
       // trailing newline (empty text — empty file, no bare \n).
@@ -1117,6 +1119,7 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
       }
       exit(0)
     } catch {
+      progressBar.finish()  // newline before the error (no defer: exit never returns)
       eprint(String(format: L10n.tr("cli.error.generic"), "\(error)"))
       exit(1)
     }
@@ -1307,7 +1310,8 @@ func providerNamesText() -> String {
 
 // MARK: - Usage
 
-let usage = """
+var usage: String {
+  """
   \(L10n.tr("usage.title"))
 
   \(L10n.tr("usage.cmds"))
@@ -1343,6 +1347,7 @@ let usage = """
     help                             \(L10n.tr("usage.help"))
     --version, -v                    print version and exit
   """
+}
 
 // MARK: - Main
 

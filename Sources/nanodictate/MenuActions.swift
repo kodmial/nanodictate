@@ -117,12 +117,18 @@ func applySimpleAction(_ action: MenuAction, _ view: inout MenuView) {
     view.notice = runSelfCommand("last")
   case .toggleLanguage:
     let newLang = L10n.language == .en ? "ru" : "en"
-    // Строки пишутся в литеральной форме (с кавычками), ср. writeActiveProvider.
-    try? AppConfig.writeKeyValue(key: "ui_language", value: "\"\(newLang)\"", to: AppConfig.defaultPath())
-    L10n.language = newLang == "ru" ? .ru : .en
-    view.notice =
-      L10n.tr("menu.language") + ": "
-      + (L10n.language == .en ? L10n.tr("menu.languageEn") : L10n.tr("menu.languageRu"))
+    // Materialize the canon first (auto-copy), then patch one key.
+    _ = try? AppConfig.load(from: nil)
+    do {
+      try AppConfig.writeKeyValue(
+        key: "ui_language", value: "\"\(newLang)\"", to: AppConfig.defaultPath())
+      L10n.language = newLang == "ru" ? .ru : .en
+      view.notice =
+        L10n.tr("menu.language") + ": "
+        + (L10n.language == .en ? L10n.tr("menu.languageEn") : L10n.tr("menu.languageRu"))
+    } catch {
+      view.notice = String(format: L10n.tr("menu.review.configerror"), "\(error)")
+    }
   default:
     break
   }
