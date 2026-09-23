@@ -235,6 +235,7 @@ else
   # Статус launchd — через GUI-домен запускающего пользователя $U и канонический
   # label: `launchctl list` от root смотрит домен root и LaunchAgent в gui/<uid>
   # не видит (ложный «не запущен»).
+  U="${U:-$USER}"
   if launchctl print "gui/$(id -u "$U")/com.nanodictate.agent" >/dev/null 2>&1; then
     echo "==> служба запущена (com.nanodictate.agent в launchd)"
   else
