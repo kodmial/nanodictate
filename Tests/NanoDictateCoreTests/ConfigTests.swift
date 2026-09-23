@@ -1098,7 +1098,7 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(
             text, "language = \"ru\"\nactive_provider = \"groq\"\n",
             "без секций — прежнее поведение: дописывается с переводом строки")
-        let parsed = try AppConfig.parseProvidersOnly(text)
+        let parsed = try AppConfig.parse(text)
         XCTAssertEqual(parsed.activeProvider, "groq")
     }
 
