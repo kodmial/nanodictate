@@ -81,9 +81,9 @@ destroot {
 # Service registration lives in post-activate, not post-destroot: post-destroot
 # runs BEFORE activation, so on a fresh install ${prefix}/bin/NanoDictateAgent
 # is not on disk yet; post-activate runs after the new files are in place.
-# Port phases run as root and are NOT sandboxed (unlike the Homebrew
-# post_install, which brew>=7 silently skips in its sandbox), so we write a
-# GLOBAL LaunchAgent and bootstrap the console user directly.
+# Port phases run as root and are NOT sandboxed (Homebrew's equivalent runs
+# as the user), so we write a GLOBAL LaunchAgent and bootstrap the console
+# user directly.
 post-activate {
     # Register the LaunchAgent so NanoDictateAgent is alive right after
     # `sudo port install` — no manual `nanodictate start` needed.

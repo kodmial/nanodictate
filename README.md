@@ -26,9 +26,8 @@ The first two commands install the prebuilt binary (nothing is compiled — no
 Xcode needed). The explicitly named tap is the repository that serves the
 formula — `brew install nanodictate` with no tap line auto-taps it anyway.
 The last command registers the background agent and starts it now and at
-every login: the formula's sandboxed `post_install` (Homebrew ≥ 7) cannot
-write `~/Library/LaunchAgents`, so the explicit start is mandatory; on older
-Homebrew it is an idempotent no-op. `brew services stop nanodictate` stops it.
+every login — it is the explicit activation step, since install alone does
+not register the service. `brew services stop nanodictate` stops it.
 
 Prefer an app bundle?
 

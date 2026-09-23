@@ -14,8 +14,8 @@
 # binaries plus config.example.toml, the bundled config source). Either way
 # there is exactly ONE daemon behind one canonical LaunchAgent plist with the
 # single label com.nanodictate.agent — the same ~/Library/LaunchAgents/
-# com.nanodictate.agent.plist that `nanodictate start`, the formula's
-# post_install and the MacPorts port's post-activate write. Installing the
+# com.nanodictate.agent.plist that `nanodictate start`, `brew services start`
+# and the MacPorts port's post-activate write. Installing the
 # cask over the formula is safe (idempotent re-registration, never a second
 # daemon); the last installer simply re-writes the same canonical file.
 #
