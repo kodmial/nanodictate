@@ -220,13 +220,21 @@ final class MicAccessRequesterTests: XCTestCase {
         XCTAssertTrue(requester.isInFlight, "колбэк ещё ждёт ответа — гвард на месте")
 
         // Retry while the system request is unresolved: no second system
-        // request (this used to pile dialogs up), no outcome.
-        var retryFired = false
-        requester.requestIfNeeded { _ in retryFired = true }
-        // Give the storm a chance to misbehave: a second request WOULD have
-        // produced a second outcome before this deadline.
-        _ = eventually(timeout: 0.3) { retryFired }
-        XCTAssertFalse(retryFired, "ретрай при висящем системном запросе исхода не даёт")
+        // request (this used to pile dialogs up); the retry instead resolves
+        // SYNCHRONOUSLY with exactly one terminal outcome —
+        // .suppressedByPolicy (the watchdog already reported .timedOut for
+        // the still-pending dialog).
+        var retryOutcomes: [MicAccessRequester.Outcome] = []
+        requester.requestIfNeeded { retryOutcomes.append($0) }
+        // Give the storm a chance to misbehave: a piled second request WOULD
+        // have produced an extra outcome (or a second system request) before
+        // this deadline — none may appear.
+        _ = eventually(timeout: 0.3) { retryOutcomes.count >= 2 }
+        XCTAssertEqual(
+            retryOutcomes,
+            [.suppressedByPolicy],
+            "ретрай при висящем системном запросе даёт ровно один исход — .suppressedByPolicy"
+        )
         XCTAssertEqual(stub.callCount, 1, "ретрай не открывает второй системный запрос")
 
         // Pending callback finally resolves (late, dropped by the token):

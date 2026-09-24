@@ -1019,6 +1019,22 @@ jobs:
             echo "::error::could not resolve the macports-nanodictate tree HEAD (${TREE_SHA:-<empty>}) — cannot pin install-macports.sh"
             exit 1
           fi
+          # Stale-pin guard: the revision about to be pinned is only good if
+          # remote main still matches it. When the tree-sync step ran in this
+          # run, the /tmp clone reports the HEAD this run pushed — a concurrent
+          # release that advanced the tree after that push keeps the clone on the
+          # older HEAD, and pinning it would hand fresh installs a stale
+          # Portfile. Compare the live remote main against TREE_SHA before
+          # committing; any drift fails the step for a retry.
+          REMOTE_MAIN="$(git ls-remote https://github.com/kodmial/macports-nanodictate refs/heads/main | awk '{print $1}')"
+          if ! [[ "$REMOTE_MAIN" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::could not resolve the macports-nanodictate remote main revision (${REMOTE_MAIN:-<empty>}) — cannot verify the pin target; re-run the workflow"
+            exit 1
+          fi
+          if [[ "$REMOTE_MAIN" != "$TREE_SHA" ]]; then
+            echo "::error::macports-nanodictate remote main ($REMOTE_MAIN) no longer matches the revision this run synced ($TREE_SHA) — a concurrent release advanced the tree after the sync step. Do not pin a stale tree; re-run the workflow to pin the current tip."
+            exit 1
+          fi
           # The pin is prepared in a temporary linked worktree at origin/main so
           # the main workspace ($GITHUB_WORKSPACE) keeps its working tree — the
           # packaging/homebrew manifests generated earlier in this job — intact
@@ -1035,6 +1051,10 @@ jobs:
           git -C "$WS" config user.email "dima@users.noreply.github.com"
           git -C "$WS" add scripts/install-macports.sh
           if git -C "$WS" diff --cached --quiet; then
+            # Reached only when the stale-pin guard above passed (remote main
+            # still == TREE_SHA): a drifted remote would have failed the step
+            # even though the pin already matches — no silent no-op on a stale
+            # tree, and nothing to push here.
             echo "install-macports.sh already pins the synced tree revision $TREE_SHA — nothing to commit."
           else
             git -C "$WS" commit -m "chore(release): pin install-macports.sh to macports tree $TREE_SHA"

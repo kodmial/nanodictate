@@ -54,6 +54,8 @@ public final class MicAccessRequester {
   /// watchdog keeps `inFlight` up, so a retry cannot open a second system
   /// request on top of an unresolved one (dialog storm).
   private var systemRequestPending = false
+  /// The watchdog already reported `.timedOut` for the still-pending system request.
+  private var pendingTimedOut = false
 
   public init(
     status: @escaping StatusProvider,
@@ -84,7 +86,10 @@ public final class MicAccessRequester {
     case .denied, .restricted:
       completion(.denied)
     case .notDetermined:
-      guard !inFlight else { return }
+      guard !inFlight else {
+        if pendingTimedOut { completion(.suppressedByPolicy) }
+        return
+      }
       guard policy.allowRequest(now: Date()) else {
         completion(.suppressedByPolicy)
         return
@@ -118,6 +123,7 @@ public final class MicAccessRequester {
         // sees mismatch and is dropped — recording won't start under a
         // shown error.
         self.session += 1
+        self.pendingTimedOut = true
         // Timeout → storm counter (6h window), see MicRequestPolicy.
         self.policy.recordTimeout(now: Date())
         completion(.timedOut)
@@ -131,6 +137,7 @@ public final class MicAccessRequester {
           // resolved regardless of our token bookkeeping, and the watchdog
           // kept inFlight up precisely until here.
           self.systemRequestPending = false
+          self.pendingTimedOut = false
           guard self.session == requestSession else {
             // Stale: watchdog already timed out (or a newer cycle won the
             // token). No outcome — late granted can't start recording under

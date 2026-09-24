@@ -1819,11 +1819,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       // running while the user decides. The retry stays "in flight" until the
       // completion processes the decision in finishRetryInsertion; a new loop
       // started meanwhile makes the re-validating guard drop the stale text.
-      awaitingReviewDecision = true
       ReviewGate.confirmAsync(text: text) { [weak self] decision in
         guard let self else { return }
-        // The decision arrived — a physical Return may be swallowed again.
-        self.awaitingReviewDecision = false
         // Re-validate the entry guard: a new nanodictate cycle may have
         // started while the user typed the decision.
         guard self.state == .idle else {
@@ -1968,9 +1965,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// this is not an error), exactly one hide. Every terminal point schedules
   /// hide exactly once.
   private func handleCancel() {
-    // Esc ends a pending review wait: the flag must clear before ANY branch
-    // — the retry wait holds state == .idle, whose early return below would
-    // otherwise leave the flag set.
+    // Esc ends a pending review wait: the flag is set only in the review
+    // paths (state == .transcribing) and must clear before ANY branch — after
+    // Esc the pending review completion's state guard fails (state → .idle)
+    // and would never clear it, so without this reset a stale flag would
+    // linger into the next cycle.
     awaitingReviewDecision = false
     // Esc cancels an ALREADY SCHEDULED synthetic Enter: the latch was
     // consumed at insertion time, the post hangs in the OS queue — cancel
