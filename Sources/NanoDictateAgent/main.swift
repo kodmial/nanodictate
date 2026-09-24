@@ -740,6 +740,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     // readable message).
     guard !micAccessRequester.isInFlight else {
       Logger.log("mic permission request already in flight — ignoring Alt+Alt", level: "info")
+      // The system request can stay unresolved forever (watchdog `.timedOut`
+      // leaves isInFlight true): show the instruction instead of silent drops —
+      // MicErrorCooldown limits it to one message per 3 s.
+      showMicrophoneError(L10n.tr("error.micPermissionUnhandled"))
       return
     }
     micAccessRequester.requestIfNeeded { [weak self] outcome in

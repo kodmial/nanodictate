@@ -235,6 +235,10 @@ func cmdConfigSetKey(path: String, args: [String]) -> Int32 {
   }
 
   do {
+    // Materialize the canon first (auto-copy), then patch the key: a fresh
+    // config would otherwise contain only [providers.X] api_key and the canon
+    // auto-copy would never run (cf. MenuActions.toggleLanguage).
+    _ = try? AppConfig.load(from: nil)
     // writeProviderKeyValue expects a value in config-string format (with
     // quotes), like writeKeyValue for strings (cf. writeActiveProvider).
     try AppConfig.writeProviderKeyValue(
@@ -571,6 +575,10 @@ func routingUnset(role: String, args: [String]) -> Int32 {
     return 1
   }
   do {
+    // Materialize the canon first (auto-copy), then patch the key: a fresh
+    // config would otherwise contain only [routing] and the canon auto-copy
+    // would never run (cf. MenuActions.toggleLanguage).
+    _ = try? AppConfig.load(from: nil)
     try AppConfig.writeRoutingKeyValue(key: key, value: "\"\"", to: AppConfig.defaultPath())
   } catch {
     eprint(String(format: L10n.tr("cli.flag.configload"), "\(error)"))

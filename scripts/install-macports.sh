@@ -110,6 +110,18 @@ PINDEX="$PREFIX_DIR/bin/portindex"
 # запуске без синка — сохраняя exact-revision чекаут.
 PIN_REV="4c4ced254593e3865d9f6a8f99ab6c7a3c59f807"
 
+# CWE-829: существующее дерево перед первой git-командой от root обязано быть
+# целиком root-овым. git под sudo доверяет дереву владельца SUDO_UID — оно могло
+# бы протащить конфиг/attributes (credential.helper, core.sshCommand,
+# smudge-filter) или ignored Portfile, а chown+portindex сделали бы его каноном.
+# Отклоняем любые файлы не-root владельца сразу, ДО git: chown-блок ниже
+# становится ненужным. При запуске не от root (EUID != 0, например владелец
+# дерева сам гоняет установщик) гейт пропускается — границы привилегий нет.
+if [ -d "$P" ] && [ "$EUID" -eq 0 ] && [ -n "$(find "$P" ! -user 0 -print -quit)" ]; then
+  echo "==> ОШИБКА: в $P есть файлы не-root владельца — удали $P и запусти заново" >&2
+  exit 1
+fi
+
 if [ -d "$P/.git" ]; then
   echo "==> канон-дерево уже есть: $P"
 else
@@ -137,9 +149,26 @@ fi
 echo "==> проверяю канон-дерево на закреплённую ревизию $PIN_REV ..."
 # Чистота ДО git-мутаций от root: checkout/reset не удаляют untracked-файлы,
 # а любой модифицированный/untracked Portfile portindex (от root) обработал бы
-# как канон. Требуем пустой porcelain — ошибка при любой грязи.
-if [ -n "$(git -C "$P" -c core.fsmonitor=false -c core.hooksPath=/dev/null status --porcelain)" ]; then
-  echo "==> ОШИБКА: канон-дерево не чистое (есть модифицированные/untracked файлы)." >&2
+# как канон. --ignored ловит и содержимое, спрятанное через .git/info/exclude
+# (CWE-829). Требуем пустой porcelain — ошибка при любой грязи.
+#
+# Allowlist машино-генерируемых строк: portindex (шаг 6, выполняется и при
+# NANODICTATE_SKIP_INSTALL=1) создаёт PortIndex / PortIndex.quick / PortIndex_*
+# в дереве, а tracked .gitignore их как раз игнорирует — на повторном запуске
+# --ignored показывает `!! PortIndex` и ломает документированную
+# идемпотентность (свежий клон проходит, «уже есть» — нет). Эти строки
+# отфильтровываем; всё остальное — грязь. Allowlist не ослабляет защиту от
+# инъекции через .git/info/exclude: гейт владельца (выше) требует, чтобы все
+# файлы дерева были root-овыми, а ignored-файлы в root-овом дереве создаёт
+# только root-процесс (portindex / port sync) — чужая не-root инъекция
+# отсекается до git, поэтому `--ignored` здесь ловит только root-генерацию.
+tree_violations() {
+  git -C "$P" -c core.fsmonitor=false -c core.hooksPath=/dev/null \
+    status --porcelain --ignored \
+    | grep -Ev '^!! PortIndex$|^!! PortIndex\.quick$|^!! PortIndex_' || true
+}
+if [ -n "$(tree_violations)" ]; then
+  echo "==> ОШИБКА: канон-дерево не чистое (есть модифицированные/untracked/ignored файлы)." >&2
   echo "    Их portindex обработал бы от root — прерываю. Восстанови $P (или удали) и запусти заново." >&2
   exit 1
 fi
@@ -156,18 +185,13 @@ if [ "$HEAD_REV" != "$PIN_REV" ]; then
 fi
 echo "==> канон-дерево на закреплённой ревизии $PIN_REV"
 
-if [ "$(stat -f %u "$P")" = 0 ]; then
-  echo "==> владелец дерева root — ок"
-else
-  echo "==> отдаю дерево root:admin (для git pull от имени root)"
-  chown -R root:admin "$P"
-fi
-
-# Финальный инвариант перед обработкой дерева от root: после chown дерево
-# заморожено (локальный аккаунт уже не может его менять), HEAD == PIN_REV
-# проверен выше — остаётся чистота. portindex увидит ровно канон.
-if [ -n "$(git -C "$P" -c core.fsmonitor=false -c core.hooksPath=/dev/null status --porcelain)" ]; then
-  echo "==> ОШИБКА: канон-дерево не чистое — portindex от root НЕ запускаю (модифицированные/untracked файлы в $P)." >&2
+# Финальный инвариант перед обработкой дерева от root: дерево root-овое с
+# самого начала — свежий clone делает root-овое, существующее прошло гейт
+# владельца выше — поэтому прежний chown-блок не нужен и убран. Локальный
+# аккаунт перезаписать root-овое дерево не может, HEAD == PIN_REV проверен
+# выше — остаётся чистота. portindex увидит ровно канон.
+if [ -n "$(tree_violations)" ]; then
+  echo "==> ОШИБКА: канон-дерево не чистое — portindex от root НЕ запускаю (модифицированные/untracked/ignored файлы в $P)." >&2
   exit 1
 fi
 

@@ -38,7 +38,12 @@ repo that mirrors the generated Portfile at every release) as a git port source
 and installs the same prebuilt binary as Homebrew:
 
 ```sh
-bash <(curl -fsSL https://raw.githubusercontent.com/kodmial/nanodictate/main/scripts/install-macports.sh)
+( tmp="$(mktemp)" \
+  && curl -fsSL https://raw.githubusercontent.com/kodmial/nanodictate/main/scripts/install-macports.sh -o "$tmp" \
+  && bash "$tmp"
+rc=$?
+rm -f "$tmp"
+exit "$rc" )
 ```
 
 If `~/.macports` exists and its `macports.conf` sets `sources_conf`,
