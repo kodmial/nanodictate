@@ -101,6 +101,10 @@ final class ReviewGateTests: XCTestCase {
         // on the background queue.
         let readStarted = DispatchSemaphore(value: 0)
         let releaseRead = DispatchSemaphore(value: 0)
+        // Safety net: if any assertion below fails, release the background
+        // read anyway — a stuck read would block the shared serial
+        // confirmQueue (used by every confirmAsync test) and hang the suite.
+        defer { releaseRead.signal() }
         var readOnMain = true
         ReviewGate.readLineFunction = {
             readOnMain = Thread.isMainThread
