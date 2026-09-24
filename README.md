@@ -50,7 +50,12 @@ is **one command** — the script registers this repo as a git port source and
 installs the same prebuilt binary:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/kodmial/nanodictate/main/scripts/install-macports.sh)
+( tmp="$(mktemp)" \
+  && curl -fsSL https://raw.githubusercontent.com/kodmial/nanodictate/main/scripts/install-macports.sh -o "$tmp" \
+  && bash "$tmp"
+rc=$?
+rm -f "$tmp"
+exit "$rc" )
 ```
 
 The script re-runs itself under `sudo`, clones the canon tree
@@ -119,6 +124,17 @@ EN/RU language toggle).
 swift build -c debug              # or -c release
 swift run NanoDictateCoreTests    # executable target — `swift test` does not run it
 swift run nanodictate --help
+```
+
+### Git hooks
+
+Staged Swift files are linted by the repo's pre-commit hook
+([`.githooks/pre-commit`](.githooks/pre-commit)) — lint errors block the
+commit, warnings only print. Git does not run hooks from `.githooks/` by
+default; activate once per clone:
+
+```sh
+git config core.hooksPath .githooks
 ```
 
 ### SWIFT_TOOLCHAIN

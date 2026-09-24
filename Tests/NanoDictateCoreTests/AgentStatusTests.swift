@@ -77,6 +77,21 @@ final class AgentStatusTests: XCTestCase {
         ))
     }
 
+    @objc func testRecordingInactiveAfterLiveAndWatchdogMarkers() {
+        // Paths without an end marker (CodeRabbit #): live dictation stop
+        // (Alt+Alt / limit) and watchdog/Esc aborts must flip recording to idle.
+        let terminal = [
+            "live finalize (20480 samples, 1.28 s)",
+            "live limit finalize (960000 samples, 60.00 s)",
+            "record start timed out after 10 s",
+            "recognition cancelled by Esc",
+        ]
+        for line in terminal {
+            XCTAssertFalse(AgentScreen.isRecordingActive(logLines: ["record start", line]),
+                           "трейлинг-маркер должен завершать запись: \(line)")
+        }
+    }
+
     @objc func testRecordingStartRequiresSuffixNotSubstring() {
         XCTAssertFalse(AgentScreen.isRecordingActive(logLines: ["mic permission: authorized (record start)"]))
         XCTAssertFalse(AgentScreen.isRecordingActive(logLines: ["record start ignored: already starting"]))

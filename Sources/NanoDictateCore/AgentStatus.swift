@@ -128,19 +128,24 @@ public enum AgentScreen {
   /// Log events marking recording end (recording NOT active).
   private static let recordingEndMarkers = [
     "transcribe submit",  // recording stopped, sent to STT
+    "live finalize",  // live dictation end (Alt+Alt) — no transcribe submit
+    "live limit finalize",  // live dictation stopped at duration limit
     "record cancelled",
     "record limit reached",  // hard limit — recording finalized
+    "record start timed out",  // watchdog: engine start failed — recording aborted
     "transcription inserted",
     "transcription failed",
     "microphone unavailable",
     "empty transcription result",
     "transcription cancelled by review gate",
     "chunked transcription cancelled by review gate",
+    "recognition cancelled by Esc",
   ]
 
   /// Recording active if after last "record start" no terminal event followed.
   /// Exact suffix match: "record start timed out/ignored/recovery" and the
-  /// mic-permission line "(record start)" are NOT recording starts.
+  /// mic-permission line "(record start)" are NOT recording starts (the
+  /// watchdog timeout line doubles as a recording end — recordingEndMarkers).
   public static func isRecordingActive(logLines: [String]) -> Bool {
     var lastStart = -1
     var lastEnd = -1

@@ -990,10 +990,13 @@ jobs:
       # skip_manifests like the rest of the job, runs exactly then. Runs on
       # both paths (tree changed or not): TREE_SHA is the tree HEAD either way,
       # and the installer commit is skipped when the pin is already current.
-      # The commit is based on freshly fetched origin/main (a re-run's checked
-      # out release ref predates the previously pushed manifests and would fail
-      # the non-fast-forward guard below). Push mirrors the manifests step's
-      # non-fast-forward guard; the checkout's persisted GITHUB_TOKEN
+      # The pin commit is based on freshly fetched origin/main, prepared in a
+      # separate temporary worktree: a re-run's checked-out release ref predates
+      # the previously pushed manifests and would fail the non-fast-forward guard
+      # below, and a detached checkout of origin/main in the main workspace would
+      # hand the following "Update tap repo" step origin/main's manifest bytes
+      # instead of the ones this job generated. Push mirrors the manifests
+      # step's non-fast-forward guard; the checkout's persisted GITHUB_TOKEN
       # (contents: write) authenticates it — gh's TAP_PAT helper only ever
       # serves the /tmp tree clone above, never this workspace push.
       - name: Pin install-macports.sh to synced macports tree revision
@@ -1013,9 +1016,13 @@ jobs:
             echo "::error::could not resolve the macports-nanodictate tree HEAD (${TREE_SHA:-<empty>}) — cannot pin install-macports.sh"
             exit 1
           fi
-          WS="$GITHUB_WORKSPACE"
-          git -C "$WS" fetch origin main
-          git -C "$WS" checkout --detach origin/main
+          # The pin is prepared in a temporary linked worktree at origin/main so
+          # the main workspace ($GITHUB_WORKSPACE) keeps its working tree — the
+          # packaging/homebrew manifests generated earlier in this job — intact
+          # for the "Update tap repo" step that copies them from there.
+          git -C "$GITHUB_WORKSPACE" fetch origin main
+          WS="$(mktemp -d)/pin"
+          git -C "$GITHUB_WORKSPACE" worktree add --detach "$WS" origin/main
           sed -i "s/^PIN_REV=\"[^\"]*\"$/PIN_REV=\"$TREE_SHA\"/" "$WS/scripts/install-macports.sh"
           if ! grep -qxF "PIN_REV=\"$TREE_SHA\"" "$WS/scripts/install-macports.sh"; then
             echo "::error::PIN_REV in scripts/install-macports.sh was not updated to $TREE_SHA"
@@ -1039,6 +1046,10 @@ jobs:
             git -C "$WS" push origin HEAD:main
             echo "Pinned install-macports.sh PIN_REV to the synced tree revision $TREE_SHA"
           fi
+          # The pin revision is only consumed inside this step — drop the
+          # temporary worktree. The main workspace is left untouched, so the
+          # "Update tap repo" step still copies THIS job's generated manifests.
+          git -C "$GITHUB_WORKSPACE" worktree remove --force "$WS"
 
       # Sync the formula + cask into the kodmial/homebrew-nanodictate tap (optional,
       # needs the TAP_PAT repo secret — a Personal Access Token, classic
