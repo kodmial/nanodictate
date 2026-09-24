@@ -904,10 +904,10 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
   private static func stripTrailingComment(_ raw: String) -> String {
     var insideQuotes = false
     for i in raw.indices {
-      let c = raw[i]
-      if c == "\"" {
+      let char = raw[i]
+      if char == "\"" {
         insideQuotes.toggle()
-      } else if c == "#", !insideQuotes {
+      } else if char == "#", !insideQuotes {
         return String(raw[..<i]).trimmingCharacters(in: .whitespaces)
       }
     }
