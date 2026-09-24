@@ -33,50 +33,16 @@ template layout, the generator and cross-package notes see
 ### Install today (git port tree)
 
 The port is not in the official tree, so install through a git port source —
-**two commands** — the first registers `kodmial/macports-nanodictate` (the git
+**one command** — the script registers `kodmial/macports-nanodictate` (the git
 repo that mirrors the generated Portfile at every release) as a git port source
-and refuses to run if its clone path already exists, the second installs the
-same prebuilt binary as Homebrew:
+and installs the same prebuilt binary as Homebrew:
 
 ```sh
-sudo bash -c '
-set -e
-P=/Users/Shared/macports-nanodictate
-C=/opt/local/etc/macports/sources.conf
-U="${SUDO_USER:-$USER}"
-H="$(dscl . -read "/Users/$U" NFSHomeDirectory 2>/dev/null | awk -F'"'"': '"'"' '"'"'{print $2}'"'"')"
-[ -n "$H" ] || H="$(eval echo "~${U}")"
-MC="$H/.macports/macports.conf"
-USER_CONF=0
-if [ -f "$MC" ] && grep -Eq '"'"'^[[:space:]]*sources_conf([[:space:]]|$)'"'"' "$MC"; then
-  SC_VAL="$(grep -E '"'"'^[[:space:]]*sources_conf([[:space:]]|$)'"'"' "$MC" | head -n 1 | awk '"'"'{print $2}'"'"')"
-  if [ -n "$SC_VAL" ]; then
-    case "$SC_VAL" in
-      /*) C="$SC_VAL" ;;
-      '"'"'~/'"'"'*) C="$H/${SC_VAL#'"'"'~/'"'"'}" ;;
-      *) C="$H/$SC_VAL" ;;
-    esac
-    [ "$C" = "/opt/local/etc/macports/sources.conf" ] || USER_CONF=1
-  fi
-fi
-S="file://$P"
-if [ -e "$P" ] || [ -L "$P" ]; then
-  echo "error: $P already exists; refusing to reuse an existing path" >&2
-  exit 1
-fi
-git clone https://github.com/kodmial/macports-nanodictate "$P"
-chown -R root:admin "$P"
-grep -qxF "$S" "$C" || { grep -qE '^[^#].*\[default\]' "$C" && sed -i "" "/^[^#].*\[default\]/i\\
-$S
-" "$C" || echo "$S" >> "$C"; }
-if [ "$USER_CONF" = 1 ]; then chown "$U" "$C"; fi
-'
-
-sudo port selfupdate && sudo port install nanodictate
+bash <(curl -fsSL https://raw.githubusercontent.com/kodmial/nanodictate/main/scripts/install-macports.sh)
 ```
 
 If `~/.macports` exists and its `macports.conf` sets `sources_conf`,
-the command targets that user file — it takes precedence over
+the script targets that user file — it takes precedence over
 `/opt/local/etc/macports/sources.conf`.
 
 What it does (MacPorts has no `git://` scheme in `sources.conf` —
@@ -84,8 +50,9 @@ What it does (MacPorts has no `git://` scheme in `sources.conf` —
 cloned by hand once and exposed through a `file://` source):
 
 - **clone** — `kodmial/macports-nanodictate` into
-  `/Users/Shared/macports-nanodictate` — only into a fresh path: if the path
-  already exists (even as a symlink) the command fails instead of reusing it.
+  `/Users/Shared/macports-nanodictate` — into a fresh path (an already-present
+  tree is reused only when it is the canon repo: origin URL and pinned
+  revision are verified before it is touched).
   The
   first clone is always manual: `port selfupdate` only
   `git pull --rebase --autostash`es existing trees.
@@ -97,7 +64,7 @@ cloned by hand once and exposed through a `file://` source):
   hand-edited (no `port repo add`). Do **not** add `[nosync]` — only a
   synced source is refreshed by `port selfupdate`; an unsynced one needs a
   manual `git pull` + `portindex`.
-- **install** — `port selfupdate` re-syncs the tree and indexes it, then
+- **install** — the script runs `portindex` on the clone, then
   `port install` fetches the release tarball.
 
 Any path works for the file source; the
@@ -147,17 +114,17 @@ only by the manual step above.
 **Recovery after a MacPorts reinstall:**
 
 The tree in `/Users/Shared` survives while `sources.conf` is recreated —
-remove the stale tree and run the first command again to re-clone it and
+remove the stale tree and run the install command again to re-clone it and
 re-register the source:
 
 ```sh
 sudo rm -rf /Users/Shared/macports-nanodictate
 ```
 
-(the first command refuses an existing path, so the stale tree must be gone
-first); then repeat the first install command — it clones into the fresh
-path, re-inserts the `file://` line into the recreated `sources.conf`, and
-the following `port selfupdate` re-syncs and indexes the tree.
+(the install command clones only into a fresh path, so the stale tree must be
+gone first); then repeat the install command — it clones into the fresh path,
+re-inserts the `file://` line into the recreated `sources.conf`, indexes it
+(`portindex`) and installs the port.
 
 ### After install
 

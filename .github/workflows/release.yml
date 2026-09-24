@@ -135,7 +135,12 @@ jobs:
         #                    norm, not a failure), the MacPorts Portfile
         #                    (github.setup) AND the sha256 of the published
         #                    release's SHA256SUMS.txt (union across formula
-        #                    tarball hashes + cask zip hashes).
+        #                    tarball hashes + cask zip hashes). AND the
+        #                    installer pin: PIN_REV in
+        #                    scripts/install-macports.sh must equal the
+        #                    macports-nanodictate tree HEAD — a committed
+        #                    manifest set whose pin push failed must not be
+        #                    skipped forever (the re-run repairs the pin).
         #                    A re-run whose committed formula is stale (wrong
         #                    version, or sha256 absent from the release) leaves
         #                    skip_manifests FALSE and REGENERATES — a stale
@@ -275,6 +280,29 @@ jobs:
             else
               echo "Could not download SHA256SUMS.txt from release v$VERSION — cannot prove the committed sha256 matches; regenerate."
               MANIFESTS_OK=false
+            fi
+            # Installer-pin check: the manifests job syncs the MacPorts tree
+            # to the just-published Portfile and pins
+            # scripts/install-macports.sh PIN_REV to the tree revision it
+            # pushed. If that pin push fails after the manifests commit
+            # succeeded, the committed manifests match while the installer
+            # still points at a stale revision — and a re-run's
+            # skip_manifests would otherwise skip the pin repair. So the skip
+            # decision now includes the synced tree revision: only when the
+            # committed pin already equals the tree's current HEAD is the
+            # skip kept. A failed HEAD resolution forces regeneration (same
+            # "cannot prove, so do not skip" direction as the sha256 check);
+            # regenerating identical manifests is harmless and deterministic.
+            if [[ "$MANIFESTS_OK" == "true" ]]; then
+              TREE_HEAD="$(git ls-remote https://github.com/kodmial/macports-nanodictate refs/heads/main 2>/dev/null | awk '{print $1}' || true)"
+              PIN_COMMITTED="$(git show "origin/main:scripts/install-macports.sh" 2>/dev/null | sed -n 's/^PIN_REV="\([0-9a-f]*\)"$/\1/p')"
+              if [ -n "$TREE_HEAD" ] && [ "$PIN_COMMITTED" != "$TREE_HEAD" ]; then
+                echo "Committed scripts/install-macports.sh pins PIN_REV ${PIN_COMMITTED:-<none>}, but the macports-nanodictate tree HEAD is $TREE_HEAD — the installer pin is stale; regenerate."
+                MANIFESTS_OK=false
+              elif [ -z "$TREE_HEAD" ]; then
+                echo "Could not resolve the macports-nanodictate tree HEAD — cannot verify the installer pin; regenerate."
+                MANIFESTS_OK=false
+              fi
             fi
             if [[ "$MANIFESTS_OK" == "true" ]]; then
               echo "Committed manifests already match v$VERSION — manifest regeneration is skipped."
@@ -787,26 +815,29 @@ jobs:
           grep -q '^  service do$' packaging/homebrew/nanodictate.rb
           grep -q 'name macos: "com.nanodictate.agent"' packaging/homebrew/nanodictate.rb
           # The generated cask must parse (Ruby syntax check) and carry the .app
-          # stanza plus the quarantine-clearing postflight_steps — a cask that lost
+          # stanza plus the quarantine-clearing postflight — a cask that lost
           # either would install an app Gatekeeper refuses on first launch
-          # (self-signed, no notarization; the zip's quarantine bit is what the
-          # postflight_steps strips via the {{staged_path}} token). `depends_on :macos`
-          # must also survive: without it brew rejects the cask at tap time with
+          # (self-signed, no notarization; a downloaded zip's quarantine bit is
+          # what the postflight strips from the installed bundle at
+          # #{appdir}/NanoDictate.app). `depends_on :macos` must also survive:
+          # without it brew rejects the cask at tap time with
           # "Invalid cask (Linux ...)" — "Missing Linux stanzas ...".
           ruby -c packaging/homebrew/Casks/nanodictate.rb
           grep -q '^cask "nanodictate" do$' packaging/homebrew/Casks/nanodictate.rb
           grep -q '^  app "NanoDictate.app"$' packaging/homebrew/Casks/nanodictate.rb
           grep -q '^  depends_on :macos$' packaging/homebrew/Casks/nanodictate.rb
-          grep -q '^  postflight_steps do$' packaging/homebrew/Casks/nanodictate.rb
-          # The postflight_steps body MUST use the new InstallSteps DSL — `run` with a
-          # `{{staged_path}}` template token — not the deprecated `system_command`
-          # / `staged_path.join` form. CaskLoader instance_evals the body on
-          # Homebrew::InstallSteps::DSL (which has no system_command/staged_path), so
-          # the old body dies with NameError — the exact failure `brew tap` would hit.
-          grep -q 'run "/usr/bin/xattr"' packaging/homebrew/Casks/nanodictate.rb
-          grep -q '{{staged_path}}/NanoDictate.app' packaging/homebrew/Casks/nanodictate.rb
+          grep -q '^  postflight do$' packaging/homebrew/Casks/nanodictate.rb
+          # The postflight body MUST clear the quarantine attribute from the
+          # INSTALLED bundle at #{appdir}/NanoDictate.app — Homebrew's `app` stanza
+          # symlinks the bundle into /Applications while keeping it in the staged
+          # location, so the block clears the attribute on the symlink target (the
+          # staged bundle, which still exists when postflight runs).
+          # `xattr -dr` exits 0 even when nothing is quarantined (verified on
+          # macOS), so the step is a safe no-op on a clean brew-cached download.
+          grep -q '^    system_command "/usr/bin/xattr", args: \["-dr", "com.apple.quarantine", "#{appdir}/NanoDictate.app"\]$' packaging/homebrew/Casks/nanodictate.rb
+          grep -q '#{appdir}/NanoDictate.app' packaging/homebrew/Casks/nanodictate.rb
           # Then load the cask FOR REAL through CaskLoader — the same path brew uses
-          # on tap/install. This catches the postflight_steps NameError above (a cask
+          # on tap/install. This catches any postflight load error above (a cask
           # that parses yet fails to load) and any `depends_on :macos` loss (which
           # would otherwise load as a Linux cask on this ubuntu runner). Homebrew on
           # ubuntu-latest is NOT in PATH (preinstalled at /home/linuxbrew/.linuxbrew),

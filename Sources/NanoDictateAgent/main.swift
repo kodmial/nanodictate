@@ -1705,7 +1705,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         throw error
       }
       Logger.log(
-        "primary provider failed (\(transcribeError)) — trying failover providers",
+        "primary provider failed (\(Transcriber.describe(transcribeError))) — trying failover providers",
         level: "info"
       )
       retryProvider.lastFailedProviderID = activeProviderID
@@ -1752,7 +1752,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         }
       } catch {
         let networkText = OverlayErrorText.text(for: error)
-        Logger.log("retry with provider '\(display)' failed: \(error)", level: "error")
+        let described = (error as? TranscribeError).map(Transcriber.describe) ?? error.localizedDescription
+        Logger.log("retry with provider '\(display)' failed: \(described)", level: "error")
         DispatchQueue.main.async {
           // Show the error ONLY if the dictation loop is not active:
           // otherwise the live loop's overlay ("Recording…"/"Recognizing…")
@@ -2013,7 +2014,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     case .network(let message):
       return message
     case let .http(code, body):
-      return "HTTP \(code): \(body)"
+      return Transcriber.describe(.http(code, body))
     case .invalidResponse(let message):
       return message
     }

@@ -1120,6 +1120,9 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
       exit(0)
     } catch {
       progressBar.finish()  // newline before the error (no defer: exit never returns)
+      if let tempWav = tempWavForCleanup {
+        try? FileManager.default.removeItem(at: tempWav)
+      }  // converted temp WAV no longer needed: --resume re-converts from the source
       eprint(String(format: L10n.tr("cli.error.generic"), "\(error)"))
       exit(1)
     }

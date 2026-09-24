@@ -758,7 +758,7 @@ extension Transcriber {
   /// `DebugDump.maskedResponseBody` (secrets wiped over the FULL body),
   /// then truncated to ~120 characters so provider api_key/proxy_key never
   /// land in the log.
-  static func describe(_ error: TranscribeError) -> String {
+  public static func describe(_ error: TranscribeError) -> String {
     switch error {
     case .network(let message):
       return "network: \(message)"

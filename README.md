@@ -46,53 +46,20 @@ agent only (no Dock icon). Same single daemon as the formula: one
 
 The port is not in the official MacPorts tree yet, so a bare
 `sudo port install nanodictate` does not work on a clean machine. First install
-is **two commands** — the first registers this repo as a git port source (it
-refuses to run if its clone path already exists), the second installs the same
-prebuilt binary and keeps itself updated:
+is **one command** — the script registers this repo as a git port source and
+installs the same prebuilt binary:
 
 ```bash
-sudo bash -c '
-set -e
-P=/Users/Shared/macports-nanodictate
-C=/opt/local/etc/macports/sources.conf
-U="${SUDO_USER:-$USER}"
-H="$(dscl . -read "/Users/$U" NFSHomeDirectory 2>/dev/null | awk -F'"'"': '"'"' '"'"'{print $2}'"'"')"
-[ -n "$H" ] || H="$(eval echo "~${U}")"
-MC="$H/.macports/macports.conf"
-USER_CONF=0
-if [ -f "$MC" ] && grep -Eq '"'"'^[[:space:]]*sources_conf([[:space:]]|$)'"'"' "$MC"; then
-  SC_VAL="$(grep -E '"'"'^[[:space:]]*sources_conf([[:space:]]|$)'"'"' "$MC" | head -n 1 | awk '"'"'{print $2}'"'"')"
-  if [ -n "$SC_VAL" ]; then
-    case "$SC_VAL" in
-      /*) C="$SC_VAL" ;;
-      '"'"'~/'"'"'*) C="$H/${SC_VAL#'"'"'~/'"'"'}" ;;
-      *) C="$H/$SC_VAL" ;;
-    esac
-    [ "$C" = "/opt/local/etc/macports/sources.conf" ] || USER_CONF=1
-  fi
-fi
-S="file://$P"
-if [ -e "$P" ] || [ -L "$P" ]; then
-  echo "error: $P already exists; refusing to reuse an existing path" >&2
-  exit 1
-fi
-git clone https://github.com/kodmial/macports-nanodictate "$P"
-chown -R root:admin "$P"
-grep -qxF "$S" "$C" || { grep -qE '^[^#].*\[default\]' "$C" && sed -i "" "/^[^#].*\[default\]/i\\
-$S
-" "$C" || echo "$S" >> "$C"; }
-if [ "$USER_CONF" = 1 ]; then chown "$U" "$C"; fi
-'
-
-sudo port selfupdate && sudo port install nanodictate
+bash <(curl -fsSL https://raw.githubusercontent.com/kodmial/nanodictate/main/scripts/install-macports.sh)
 ```
 
-The first command clones the canon tree `kodmial/macports-nanodictate` into
-`/Users/Shared/macports-nanodictate` — only into a fresh path: if that path
-already exists (even as a symlink) the command fails instead of reusing it, so
-remove it or clone elsewhere first. It then inserts its `file://` source into
-`sources.conf` (before `[default]` — first match wins); the second
-installs the port. The port's `post-activate` registers the
+The script re-runs itself under `sudo`, clones the canon tree
+`kodmial/macports-nanodictate` into `/Users/Shared/macports-nanodictate` —
+into a fresh path (an already-present tree is reused only when it is the canon
+repo at the pinned revision — origin and revision are verified before the tree
+is touched). It then inserts its `file://` source into `sources.conf` (before
+`[default]` — first match wins) and installs the port. The port's
+`post-activate` registers the
 global LaunchAgent and bootstraps it — **the service is alive right after
 install**, no `nanodictate start` needed, and it comes back after every reboot
 (RunAtLoad + KeepAlive).
@@ -100,7 +67,7 @@ install**, no `nanodictate start` needed, and it comes back after every reboot
 Same prebuilt tarball as Homebrew, nothing compiled. After a MacPorts
 reinstall the tree in `/Users/Shared` survives while `sources.conf` is
 recreated — remove the stale tree (`sudo rm -rf
-/Users/Shared/macports-nanodictate`) and run the first command again to
+/Users/Shared/macports-nanodictate`) and run the install command again to
 re-clone it and re-register the source.
 Every future release is picked up by:
 

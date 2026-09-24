@@ -20,19 +20,19 @@
 # the second installer fails on the existing symlink. Uninstall one before
 # installing the other.
 #
-# postflight_steps + quarantine: the release binaries are self-signed with the
+# postflight + quarantine: the release binaries are self-signed with the
 # NanoDictate CI Signing identity — no Developer ID, no notarization. A .app
 # carrying the com.apple.quarantine attribute is refused by Gatekeeper
 # ("damaged"/"unidentified developer"). Homebrew's own curl does not set the
 # attribute, but a browser-downloaded zip (or a brew that stamps it) would
-# break first launch, so the postflight_steps strips it from the installed bundle.
-# Homebrew expands the `{{staged_path}}` template token (install_steps.rb) to the
-# staged source: after the `app` artifact moved the bundle into /Applications, it
-# is a symlink to it (FileUtils.ln_sf); xattr follows the link and clears the
-# attribute on the REAL installed app. `xattr -dr` exits 0 even when nothing is
-# quarantined (verified on macOS), so the step is a safe no-op on a clean
-# brew-cached download. `postflight_steps` is the current brew DSL stanza; the
-# deprecated `postflight` alias warns on every tap.
+# break first launch, so the postflight block strips it from the installed
+# bundle. Homebrew's `app` stanza symlinks the bundle into /Applications while
+# keeping it in the staged location, so the block clears the quarantine
+# attribute through the #{appdir}/NanoDictate.app symlink (legacy `postflight`
+# still works for third-party taps; structured `postflight_steps` is required
+# for official taps only). `xattr -dr` exits 0 even when nothing is quarantined
+# (verified on macOS), so the step is a safe no-op on a clean brew-cached
+# download.
 
 cask "nanodictate" do
   version "__VERSION__"
@@ -61,13 +61,12 @@ cask "nanodictate" do
   app "NanoDictate.app"
   binary "NanoDictate.app/Contents/MacOS/nanodictate"
 
-  postflight_steps do
-    # The {{staged_path}} token is dereferenced by Homebrew at install time to
-    # the staged source — after the `app` artifact moved the bundle into
-    # /Applications, it is a symlink to it (FileUtils.ln_sf), so xattr follows
-    # the link and clears the attribute on the REAL installed app. Exit 0 on a
-    # clean tree, so this never fails a cask install.
-    run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{staged_path}}/NanoDictate.app"]
+  postflight do
+    # Homebrew's `app` stanza symlinks the bundle into /Applications while
+    # keeping it in the staged location — clear the quarantine attribute on
+    # the symlink target (the staged bundle) so Gatekeeper lets it open.
+    # Exit 0 on a clean tree, so this never fails a cask install.
+    system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{appdir}/NanoDictate.app"]
   end
 
   caveats <<~EOS

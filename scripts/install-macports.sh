@@ -185,6 +185,23 @@ if [ -f "$MC" ] && grep -Eq '^[[:space:]]*sources_conf([[:space:]]|$)' "$MC"; th
     # sources_conf указывает на системный дефолт (копию дефолтного
     # macports.conf) — правится системный файл, chown не нужен.
     if [ "$C" != "$PREFIX_DIR/etc/macports/sources.conf" ]; then
+      # CWE-732: от root правим и chown'им $C — принимаем только обычный
+      # (regular) несимлинковый файл, чей разрешённый (resolve) родитель
+      # лежит под $H. Иначе злоумышленник мог бы указать sources_conf на
+      # root-файл и получить его владение: chown следует за симлинками.
+      # $H тоже сравниваем в разрешённом виде: на Apple Silicon домашний
+      # каталог лежит за firmlink (/Users/x → /System/Volumes/Data/Users/x),
+      # литеральный $H не совпал бы с физическим путём родителя $C.
+      if [ -L "$C" ] || { [ -e "$C" ] && [ ! -f "$C" ]; }; then
+        echo "==> ОШИБКА: sources_conf ($C) — не обычный файл; от root его не правлю и не chown'ю" >&2
+        exit 1
+      fi
+      H_RESOLVED="$(cd "$H" 2>/dev/null && pwd -P)" || H_RESOLVED="$H"
+      [ -n "$H_RESOLVED" ] || { echo "==> ОШИБКА: не удалось разрешить каталог $H" >&2; exit 1; }
+      case "$(cd "$(dirname "$C")" 2>/dev/null && pwd -P)/" in
+        "$H_RESOLVED"/*) ;;
+        *) echo "==> ОШИБКА: sources_conf ($C) вне $H — от root не правлю и не chown'ю" >&2; exit 1 ;;
+      esac
       USER_CONF=1
     fi
   fi
