@@ -127,7 +127,7 @@ test("TCC commands resolve the DB path via UDIR (console user), never via $HOME"
   }
 });
 
-test("TCC commands cover Accessibility and Microphone — SELECT queries both dbs, DELETE resets current ids via tccutil and sweeps the per-user db", () => {
+test("TCC commands cover Accessibility and Microphone — SELECT queries both dbs, DELETE resets current ids via the tccutil $svc loop and sweeps per-user + system dbs", () => {
   // the read-only CHECK still queries BOTH dbs — system (Accessibility) and
   // per-user (Microphone) — so neither grant can be silently missed
   assert.ok(
@@ -138,42 +138,48 @@ test("TCC commands cover Accessibility and Microphone — SELECT queries both db
     TCC_GRANTS_SELECT_CMD.includes("$UDIR/Library/Application Support/com.apple.TCC/TCC.db"),
     "SELECT targets the per-user db via $UDIR",
   );
-  // the ERASE resets the CURRENT bundle ids for BOTH services via tccutil
-  // (the official tool, which walks the SIP-protected system db itself)…
+  // the ERASE resets the CURRENT bundle ids via tccutil for BOTH services
+  // (the official tool, which walks the SIP-protected system db itself),
+  // cycling the service with the $svc loop variable…
   assert.ok(
     TCC_GRANTS_DELETE_CMD.includes(`for id in ${AGENT_BUNDLE_ID} ${NANODICTATE_BUNDLE_ID}`),
     "DELETE resets the current bundle ids via tccutil",
   );
   assert.ok(
-    TCC_GRANTS_DELETE_CMD.includes('tccutil reset Accessibility "$id"'),
-    "DELETE resets the Accessibility service",
+    TCC_GRANTS_DELETE_CMD.includes("for svc in Accessibility Microphone"),
+    "the tccutil loop cycles both services via $svc",
   );
   assert.ok(
-    TCC_GRANTS_DELETE_CMD.includes('tccutil reset Microphone "$id"'),
-    "DELETE resets the Microphone service",
+    TCC_GRANTS_DELETE_CMD.includes('tccutil reset "$svc" "$id" 2>&1'),
+    "tccutil is invoked with the $svc / $id variables",
   );
   // …and sweeps the per-user db with sqlite3 for the legacy names.
   assert.ok(
     TCC_GRANTS_DELETE_CMD.includes("$UDIR/Library/Application Support/com.apple.TCC/TCC.db"),
     "DELETE sweeps the per-user db via $UDIR",
   );
-  // the DELETE must NOT open the system db with sqlite3: sudo alone is not
-  // enough there (authorization denied without Full Disk Access), and a
-  // rejected system delete used to be masked by the successful per-user one.
-  assert.equal(
-    TCC_GRANTS_DELETE_CMD.includes('sqlite3 "/Library'),
-    false,
-    "DELETE keeps the system db out of sqlite3",
+  // …and, LAST, the system db with sqlite3 for the path-based Accessibility
+  // records (client_type = 1): sudo alone is not enough there (authorization
+  // denied without Full Disk Access), and a rejected system delete used to be
+  // masked by the successful per-user one — the system step runs last so its
+  // failure cannot be masked.
+  assert.ok(
+    TCC_GRANTS_DELETE_CMD.includes(
+      `sudo sqlite3 "${TCC_SYSTEM_DB}" "DELETE FROM access WHERE service='kTCCServiceAccessibility' AND client_type=1`,
+    ),
+    "DELETE's last sqlite3 targets the system db and only the path-based (client_type=1) Accessibility records",
   );
   assert.equal(TCC_SYSTEM_DB, "/Library/Application Support/com.apple.TCC/TCC.db");
-  // the CHECK notes in its output that the system db needs Full Disk Access
+  // the commands note in their output that the system db needs Full Disk Access
   assert.match(TCC_GRANTS_SELECT_CMD, /Full Disk Access/);
+  assert.match(TCC_GRANTS_DELETE_CMD, /system db, needs Full Disk Access/);
 });
 
 test("TCC SQL clients are the hard-coded literals — no dynamic interpolation", () => {
   // the four fixed LIKE patterns; SELECT runs them against BOTH dbs → 8, the
-  // DELETE's single sqlite3 statement (per-user db) → 4. Anything dynamic (a
-  // client path, `"`, `$`, backtick) would shift the count and fail this lock.
+  // DELETE now carries TWO sqlite3 statements (per-user db + system db), each
+  // with the same four-clause WHERE → 8. Anything dynamic (a client path, `"`,
+  // `$`, backtick) would shift the count and fail this lock.
   assert.equal(
     (TCC_GRANTS_SELECT_CMD.match(/LIKE '/g) ?? []).length,
     8,
@@ -181,8 +187,8 @@ test("TCC SQL clients are the hard-coded literals — no dynamic interpolation",
   );
   assert.equal(
     (TCC_GRANTS_DELETE_CMD.match(/LIKE '/g) ?? []).length,
-    4,
-    `four hard-coded LIKE literals in the DELETE's single per-user sqlite3 in: ${TCC_GRANTS_DELETE_CMD.slice(0, 60)}…`,
+    8,
+    `four hard-coded LIKE literals per sqlite3 × two sqlite3 statements (per-user + system db) in: ${TCC_GRANTS_DELETE_CMD.slice(0, 60)}…`,
   );
 });
 
@@ -203,16 +209,26 @@ test("TCC_GRANTS_DELETE_CMD erases only nanodictate-related client records", () 
   assert.match(TCC_GRANTS_DELETE_CMD, /\( rc=0; for id in /, "rc accumulator starts at 0");
   assert.match(
     TCC_GRANTS_DELETE_CMD,
-    /tccutil reset Microphone "\$id" \|\| rc=1/,
-    "every tccutil reset marks rc on failure",
+    /out=\$\(tccutil reset "\$svc" "\$id" 2>&1\) \|\| \{ code=\$\?; if printf '%s' "\$out" \| grep -qiE 'not registered\|no such bundle identifier'/,
+    "a tccutil failure is captured and classified via grep on its output",
+  );
+  assert.match(
+    TCC_GRANTS_DELETE_CMD,
+    /echo "# \$id \(\$svc\): not registered - no TCC record to reset"; else echo "# \$id \(\$svc\): tccutil reset failed \(exit \$code\): \$out"; rc=1;/,
+    "an unknown identifier reports 'not registered' without touching rc; a real failure marks rc=1",
   );
   assert.match(
     TCC_GRANTS_DELETE_CMD,
     /sudo sqlite3 "\$UDIR\/Library\/Application Support\/com\.apple\.TCC\/TCC\.db" "DELETE FROM access WHERE [^"]*" \|\| rc=1/,
-    "the legacy sweep runs last and its failure also marks rc",
+    "the per-user legacy sweep also marks rc on failure",
+  );
+  assert.match(
+    TCC_GRANTS_DELETE_CMD,
+    /echo "# path-based Accessibility records \(system db, needs Full Disk Access\)"; sudo sqlite3 "\/Library\/Application Support\/com\.apple\.TCC\/TCC\.db" "DELETE FROM access WHERE service='kTCCServiceAccessibility' AND client_type=1 AND \([^"]*\);" \|\| rc=1/,
+    "the system db path-based sweep runs last (after the per-user one) and also marks rc on failure",
   );
   assert.match(TCC_GRANTS_DELETE_CMD, /exit \$rc/, "subshell exits with rc");
-  assert.match(TCC_GRANTS_DELETE_CMD, /done; echo "# legacy records \(per-user db, needs Full Disk Access\)"/);
+  assert.match(TCC_GRANTS_DELETE_CMD, /done; done; echo "# legacy records \(per-user db, needs Full Disk Access\)"/);
 });
 
 test("TCC_GRANTS_SELECT_CMD is the read-only check (SELECT … FROM access)", () => {

@@ -153,32 +153,6 @@ func cmdStatus() -> Int32 {
   return running ? 0 : 1
 }
 
-/// Masks secrets in a raw config-file text: api_key / proxy_key / proxy_password —
-/// values in quotes are replaced with maskSecret (first 4 + "***" + last 4).
-/// Empty values stay empty.
-func maskFileSecrets(in content: String) -> String {
-  var lines: [String] = []
-  for line in content.components(separatedBy: .newlines) {
-    let key =
-      line.split(separator: "=", maxSplits: 1).first
-      .map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
-    if key == "api_key" || key == "proxy_key" || key == "proxy_password",
-      let eqIndex = line.firstIndex(of: "="),
-      let open = line[line.index(after: eqIndex)...].firstIndex(of: "\""),
-      let close = line[line.index(after: open)...].firstIndex(of: "\"")
-    {  // swiftlint:disable:this opening_brace
-      let prefix = String(line[..<open])
-      let value = String(line[line.index(after: open)..<close])
-      let suffix = String(line[close...])
-      let masked = value.isEmpty ? "" : AppConfig.maskSecret(value)
-      lines.append("\(prefix)\"\(masked)\"\(suffix)")
-    } else {
-      lines.append(line)
-    }
-  }
-  return lines.joined(separator: "\n")
-}
-
 /// "(empty)" for empty secrets, otherwise — first 4 + "***" + last 4 chars.
 func secretDisplay(_ secret: String) -> String {
   secret.isEmpty ? L10n.tr("cli.placeholder.empty") : AppConfig.maskSecret(secret)
@@ -320,7 +294,7 @@ func cmdConfig(_ args: [String]) -> Int32 {
           eprint(String(format: L10n.tr("cli.config.noread"), path))
           return 1
         }
-        print(maskFileSecrets(in: content))
+        print(AppConfig.maskFileSecrets(in: content))
       } else {
         print(String(format: L10n.tr("cli.config.missing"), path))
       }

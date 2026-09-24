@@ -289,31 +289,55 @@ export const TCC_GRANTS_SELECT_CMD =
  * NANODICTATE_BUNDLE_ID) for BOTH services (Accessibility + Microphone) in
  * both databases; the per-user sqlite3 DELETE then sweeps the LEGACY names
  * (com.dictation.agent / DictatorAgent) that tccutil's exact-id matching
- * cannot see. The whole body runs in a subshell that aggregates failures into
- * an `rc` accumulator — deliberately NO `set -e`: a rejected tccutil reset must
- * not abort the loop and skip the remaining bundle ids, nor the legacy sqlite3
- * sweep (the main goal). Every step still runs; the subshell exits 1 if ANY
- * step failed, 0 otherwise (no false "cleared" success), and never changes the
- * caller shell's options. The system db is never opened with sqlite3 here
- * — sudo alone is not enough, sqlite3 fails "authorization denied" without
- * Full Disk Access (the CR22 bug the subshell fixes: a plain `;`-joined
- * sequence kept the exit status of the LAST command, so a rejected system-db
- * delete was masked by a successful per-user one); the user-db statement
- * keeps `sudo` for uniformity with the SELECT. The agent cannot open these
- * databases (SIP + interactive sudo) — dictation_wipe only PRINTS this
- * command and never attempts to delete TCC records itself (a no-op when no
- * matching records exist).
+ * cannot see; a second sqlite3 DELETE sweeps the PATH-BASED ACCESSIBILITY
+ * records (client_type = 1: the `client` column holds a machine path, not a
+ * bundle id) from the SYSTEM db — the leftovers of plain `.build/*` binaries
+ * signed with `codesign --identifier` but no embedded Info.plist, which tccd
+ * registered by path and tccutil therefore cannot address by bundle id. A
+ * tccutil reset that fails precisely because the identifier is NOT registered
+ * (recorded by path only — the exact case the system sweep cleans) is
+ * reported distinctly as "# <id> (<svc>): not registered - no TCC record to
+ * reset" and is NOT a failure: `rc` is untouched, because nothing was there to
+ * reset and the path-based record is swept by the sqlite3 steps. The failure
+ * classifier greps the captured tccutil output (case-insensitive) for the
+ * quoted strings "not registered" OR "no such bundle identifier":
+ * "no such bundle identifier" is the verified phrasing on macOS 12.7.6
+ * (Monterey, build 21H1320) — an unregistered id makes tccutil exit 64 and
+ * print `tccutil: No such bundle identifier "<id>": The operation couldn't be
+ * completed. (OSStatus error -10814.)`, verified 2026-09-24 on this machine
+ * with `tccutil reset Accessibility com.example.nonexistent-bundle-12345`;
+ * "not registered" is kept as the fallback phrasing claimed on newer macOS
+ * (unverified here — on any other version an unrecognized phrasing falls
+ * through to the generic "tccutil reset failed" branch, which is correct for
+ * a genuine failure). stderr may be empty on the SUCCESS path, but the `||`
+ * branch only runs on a non-zero exit, so an empty capture can only mean a
+ * genuine failure and is reported via the generic branch. The whole body
+ * runs in a subshell that aggregates failures into an `rc` accumulator —
+ * deliberately NO `set -e`: a rejected tccutil reset must not abort the loop
+ * and skip the remaining bundle ids, nor the legacy per-user / path-based
+ * system sqlite3 sweeps (the main goals). Every step still runs; the subshell
+ * exits 1 if ANY step failed, 0 otherwise (no false "cleared" success), and
+ * never changes the caller shell's options. The system db is only ever opened
+ * by the LAST statement — sudo alone is not enough, sqlite3 fails
+ * "authorization denied" without Full Disk Access (the CR22 bug the subshell
+ * fixes: a plain `;`-joined sequence kept the exit status of the LAST command,
+ * so a rejected system-db delete was masked by a successful per-user one);
+ * both sqlite3 statements keep `sudo` for uniformity with the SELECT. The
+ * agent cannot open these databases (SIP + interactive sudo) — dictation_wipe
+ * only PRINTS this command and never attempts to delete TCC records itself (a
+ * no-op when no matching records exist).
  *
  * Shares the TCC_UDIR_PREFIX + "$UDIR/…" path canon with TCC_GRANTS_SELECT_CMD
  * (see the trap documented there: $HOME under sudo is /var/root — the cause
  * of "unable to open database file"; the user db lives under the console
- * user's home, never under $HOME). Residual by design: legacy-named records
- * in the SYSTEM db are not erased (tccutil matches the current bundle ids
- * only, and the sqlite3 DELETE is confined to the per-user db) — they are
- * orphaned grants of removed old binaries and do not affect the current ids.
+ * user's home, never under $HOME). Residual by design: legacy-NAMED bundle-id
+ * records (client_type 0) in the SYSTEM db are not erased (tccutil matches
+ * the current bundle ids only, and the system sqlite3 DELETE targets
+ * client_type 1) — they are orphaned grants of removed old binaries and do
+ * not affect the current ids.
  */
 export const TCC_GRANTS_DELETE_CMD =
-  `${TCC_UDIR_PREFIX}; ( rc=0; for id in ${AGENT_BUNDLE_ID} ${NANODICTATE_BUNDLE_ID}; do tccutil reset Accessibility "$id" || rc=1; tccutil reset Microphone "$id" || rc=1; done; echo "# legacy records (per-user db, needs Full Disk Access)"; sudo sqlite3 "${TCC_USER_DB_PATH}" "DELETE FROM access WHERE ${TCC_CLIENTS_WHERE};" || rc=1; exit $rc );`;
+  `${TCC_UDIR_PREFIX}; ( rc=0; for id in ${AGENT_BUNDLE_ID} ${NANODICTATE_BUNDLE_ID}; do for svc in Accessibility Microphone; do out=$(tccutil reset "$svc" "$id" 2>&1) || { code=$?; if printf '%s' "$out" | grep -qiE 'not registered|no such bundle identifier'; then echo "# $id ($svc): not registered - no TCC record to reset"; else echo "# $id ($svc): tccutil reset failed (exit $code): $out"; rc=1; fi; }; done; done; echo "# legacy records (per-user db, needs Full Disk Access)"; sudo sqlite3 "${TCC_USER_DB_PATH}" "DELETE FROM access WHERE ${TCC_CLIENTS_WHERE};" || rc=1; echo "# path-based Accessibility records (system db, needs Full Disk Access)"; sudo sqlite3 "${TCC_SYSTEM_DB}" "DELETE FROM access WHERE service='kTCCServiceAccessibility' AND client_type=1 AND (${TCC_CLIENTS_WHERE});" || rc=1; exit $rc );`;
 
 export interface WipePaths {
   tapClone: string;

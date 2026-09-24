@@ -355,4 +355,39 @@ final class CookieRelayProviderTests: XCTestCase {
             XCTAssertEqual(transport.requestCount, 2)
         }
     }
+
+    // MARK: - Отменённый caller refreshBlocking
+
+    @objc func testRefreshBlockingCancelledCallerReturnsNilButKeepsSharedRefresh() {
+        let transport = CookieRelayMockTransport(challengeBody: challengeHTML)
+        let provider = makeProvider(transport: transport)
+
+        runAsync("testCancelledCaller") {
+            // Отменённый caller: refreshBlocking() возвращает nil мгновенно
+            // (не блокирует группу на shared-пересчёте), НО refresh, который
+            // он стартовал, НЕ отменяется — другие caller'ы дожидаются его
+            // результата.
+            let cancelledCaller = Task { () -> String? in
+                // Детерминированно: ждём, пока cancel() применится к задаче,
+                // затем вызываем refreshBlocking уже в отменённом контексте.
+                for _ in 0..<10_000 {
+                    if Task.isCancelled { break }
+                    await Task.yield()
+                }
+                return await provider.refreshBlocking()
+            }
+            cancelledCaller.cancel()
+            let first = await cancelledCaller.value
+            XCTAssertNil(first, "отменённый caller → nil, а не ожидание сети")
+
+            // Shared refresh жив: обычный caller получает результат ТОГО ЖЕ
+            // пересчёта (суммарно 2 запроса — дубль не запускался, task не был
+            // отменён).
+            let second = await provider.refreshBlocking()
+            XCTAssertEqual(second, "__test=" + self.expectedCookie)
+            XCTAssertEqual(transport.requestCount, 2,
+                           "один общий пересчёт выжил после отмены первого caller'а")
+            XCTAssertEqual(provider.currentCookie(), "__test=" + self.expectedCookie)
+        }
+    }
 }

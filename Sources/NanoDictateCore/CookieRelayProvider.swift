@@ -128,6 +128,11 @@ public final class CookieRelayProvider {
   /// POST on a dead cookie.
   public func refreshBlocking() async -> String? {
     let task = startRefresh()
+    // Caller-cancellation aware (parallel failover cancels losing children):
+    // return promptly instead of blocking the group on the shared refresh
+    // (up to two 8 s GETs). The refresh task itself is NOT cancelled — it
+    // is shared, other callers still await its result.
+    if Task.isCancelled { return nil }
     guard let value = await task.value else { return nil }
     return "\(Self.cookieName)=\(value)"
   }

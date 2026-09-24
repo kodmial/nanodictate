@@ -1259,4 +1259,32 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
     let tail = trimmed.suffix(4)
     return "\(head)***\(tail)"
   }
+
+  /// Маскирует секреты в сыром тексте конфиг-файла: значения api_key /
+  /// proxy_key / proxy_password в кавычках заменяются маской из
+  /// `maskSecret` (первые 4 + "***" + последние 4). Пустые значения
+  /// остаются пустыми. Переехало из CLI (main.swift) — чистая функция,
+  /// покрыта тестами.
+  public static func maskFileSecrets(in content: String) -> String {
+    var lines: [String] = []
+    for line in content.components(separatedBy: .newlines) {
+      let key =
+        line.split(separator: "=", maxSplits: 1).first
+        .map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+      if key == "api_key" || key == "proxy_key" || key == "proxy_password",
+        let eqIndex = line.firstIndex(of: "="),
+        let open = line[line.index(after: eqIndex)...].firstIndex(of: "\""),
+        let close = line[line.index(after: open)...].firstIndex(of: "\"")
+      {  // swiftlint:disable:this opening_brace
+        let prefix = String(line[..<open])
+        let value = String(line[line.index(after: open)..<close])
+        let suffix = String(line[line.index(after: close)...])
+        let masked = value.isEmpty ? "" : AppConfig.maskSecret(value)
+        lines.append("\(prefix)\"\(masked)\"\(suffix)")
+      } else {
+        lines.append(line)
+      }
+    }
+    return lines.joined(separator: "\n")
+  }
 }  // swiftlint:disable:this file_length
