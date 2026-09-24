@@ -1234,11 +1234,11 @@ func cmdTranscribeLegacy(_ file: String, json: Bool) -> Int32 {
 func cmdLogs() -> Int32 {
   let logURL = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Logs/NanoDictate/agent.log")
-  guard let content = try? String(contentsOf: logURL, encoding: .utf8) else {
+  guard FileManager.default.fileExists(atPath: logURL.path) else {
     print(L10n.tr("cli.logs.notfound"))
     return 1
   }
-  let body = content.components(separatedBy: .newlines).suffix(50).joined(separator: "\n")
+  let body = readLogFile(maxLines: 50).joined(separator: "\n")
   if !body.isEmpty {
     print(body)
   }

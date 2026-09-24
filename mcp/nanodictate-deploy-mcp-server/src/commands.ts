@@ -1316,8 +1316,10 @@ export async function wipeProject(opts: WipeOptions = {}): Promise<WipeResult> {
   // handed to the user instead, labelled so they stand out from the root-file
   // commands. Two commands are emitted — a read-only CHECK (SELECT, first: see
   // what is recorded before erasing) and the ERASE (DELETE, second), each
-  // behind its own label so the block stays copy-pasteable; both commands run
-  // against BOTH databases. Presence cannot be checked, hence the item is
+  // behind its own label so the block stays copy-pasteable; the CHECK queries
+  // both databases, the ERASE resets the current bundle ids in both via
+  // tccutil and sweeps the per-user db with sqlite3 for the legacy names.
+  // Presence cannot be checked, hence the item is
   // reported unconditionally and is excluded from readiness.
   items.push({
     id: TCC_RECORDS_STEP_ID,

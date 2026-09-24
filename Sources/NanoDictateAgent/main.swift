@@ -184,6 +184,14 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// new loop (processSamples).
   private var cancelRecognition = false
 
+  /// While ReviewGate.confirmAsync waits for the terminal decision, a
+  /// physical Return MUST pass through the event tap — the terminal's
+  /// readLine needs it (ReviewGate reads stdin on a background queue). Set
+  /// true right before each confirmAsync, cleared when the decision arrives
+  /// (the completion, delivered to the main queue) and on Esc (handleCancel).
+  /// Main-thread only — the tap and the completions run on the same run loop.
+  private var awaitingReviewDecision = false
+
   /// Synthetic-Enter latch after Enter-stop of recording: Enter during
   /// .recording stops recording, starts recognition, sets the latch; after a
   /// successful insert EXACTLY ONE synthetic Enter is posted. Read at insert
@@ -568,14 +576,16 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   }
 
   /// Synchronous swallowing predicate for a physical Return: outside .idle
-  /// (recording or recognizing) — swallow. Our own synthetic Return is NOT
-  /// excluded here: posting marks the event with SyntheticReturnMarker, and
-  /// HotkeyService does not swallow it by the event field — a synchronous flag
-  /// would be gone by the tap's next visit (event reaches .cgSessionEventTap
-  /// on the next run-loop iteration). Called from the event tap on the main
-  /// run loop — no state races.
+  /// (recording or recognizing) — swallow. Exception: while the review gate
+  /// waits for the terminal decision (awaitingReviewDecision) the physical
+  /// Return must pass through — the terminal's readLine needs it. Our own
+  /// synthetic Return is NOT excluded here: posting marks the event with
+  /// SyntheticReturnMarker, and HotkeyService does not swallow it by the
+  /// event field — a synchronous flag would be gone by the tap's next visit
+  /// (event reaches .cgSessionEventTap on the next run-loop iteration).
+  /// Called from the event tap on the main run loop — no state races.
   func shouldSwallowReturnKeyEvent() -> Bool {
-    state != .idle
+    state != .idle && !awaitingReviewDecision
   }
 
   // MARK: - AudioLevelDelegate
@@ -1141,12 +1151,15 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       // completion re-validates against the advanced token.
       processingSession += 1
       let session = processingSession
+      awaitingReviewDecision = true
       ReviewGate.confirmAsync(text: text) { [weak self] decision in
         guard
           let self,
           self.processingSession == session,
           self.state == .transcribing
         else { return }
+        // The decision arrived — a physical Return may be swallowed again.
+        self.awaitingReviewDecision = false
         // Re-validated above: Esc may have cancelled THIS loop (state → .idle)
         // while the user typed the decision — the chunked text must not be
         // finalized/cancelled then.
@@ -1640,6 +1653,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       // re-validates against the advanced token.
       processingSession += 1
       let session = processingSession
+      awaitingReviewDecision = true
       ReviewGate.confirmAsync(text: text) { [weak self] decision in
         // Re-validate the caller's delivery guard: Esc (then possibly a new
         // loop) may have ended THIS loop while the user typed the decision —
@@ -1651,6 +1665,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             sessionActive: self.processingSession == session && self.state == .transcribing
           )
         else { return }
+        // The decision arrived — a physical Return may be swallowed again.
+        self.awaitingReviewDecision = false
         finish(decision)
       }
       return
@@ -1794,8 +1810,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       // running while the user decides. The retry stays "in flight" until the
       // completion processes the decision in finishRetryInsertion; a new loop
       // started meanwhile makes the re-validating guard drop the stale text.
+      awaitingReviewDecision = true
       ReviewGate.confirmAsync(text: text) { [weak self] decision in
         guard let self else { return }
+        // The decision arrived — a physical Return may be swallowed again.
+        self.awaitingReviewDecision = false
         // Re-validate the entry guard: a new nanodictate cycle may have
         // started while the user typed the decision.
         guard self.state == .idle else {
@@ -1940,6 +1959,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// this is not an error), exactly one hide. Every terminal point schedules
   /// hide exactly once.
   private func handleCancel() {
+    // Esc ends a pending review wait: the flag must clear before ANY branch
+    // — the retry wait holds state == .idle, whose early return below would
+    // otherwise leave the flag set.
+    awaitingReviewDecision = false
     // Esc cancels an ALREADY SCHEDULED synthetic Enter: the latch was
     // consumed at insertion time, the post hangs in the OS queue — cancel
     // it before any branch (including .idle, where an early return would

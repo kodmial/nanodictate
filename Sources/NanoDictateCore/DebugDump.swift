@@ -202,8 +202,8 @@ public enum DebugDump {
 
     if let handle = try? FileHandle(forWritingTo: fileURL) {
       defer { try? handle.close() }
-      handle.seekToEndOfFile()
-      handle.write(data)
+      _ = try? handle.seekToEnd()
+      try? handle.write(contentsOf: data)
     } else if !fileManager.fileExists(atPath: fileURL.path) {
       try? data.write(to: fileURL)
     }

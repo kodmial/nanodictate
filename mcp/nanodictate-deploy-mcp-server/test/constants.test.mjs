@@ -13,6 +13,8 @@ import { join } from "node:path";
 import {
   PROJECT_ROOT,
   SERVER_ROOT,
+  AGENT_BUNDLE_ID,
+  NANODICTATE_BUNDLE_ID,
   TCC_GRANTS_DELETE_CMD,
   TCC_GRANTS_SELECT_CMD,
   TCC_SYSTEM_DB,
@@ -125,34 +127,63 @@ test("TCC commands resolve the DB path via UDIR (console user), never via $HOME"
   }
 });
 
-test("TCC commands target BOTH dbs — system (Accessibility) and per-user (Microphone)", () => {
-  for (const cmd of [TCC_GRANTS_SELECT_CMD, TCC_GRANTS_DELETE_CMD]) {
-    assert.ok(
-      cmd.includes("/Library/Application Support/com.apple.TCC/TCC.db"),
-      "system db literal is targeted",
-    );
-    assert.ok(
-      cmd.includes("$UDIR/Library/Application Support/com.apple.TCC/TCC.db"),
-      "per-user db via $UDIR is targeted",
-    );
-  }
+test("TCC commands cover Accessibility and Microphone — SELECT queries both dbs, DELETE resets current ids via tccutil and sweeps the per-user db", () => {
+  // the read-only CHECK still queries BOTH dbs — system (Accessibility) and
+  // per-user (Microphone) — so neither grant can be silently missed
+  assert.ok(
+    TCC_GRANTS_SELECT_CMD.includes("/Library/Application Support/com.apple.TCC/TCC.db"),
+    "SELECT targets the system db literal",
+  );
+  assert.ok(
+    TCC_GRANTS_SELECT_CMD.includes("$UDIR/Library/Application Support/com.apple.TCC/TCC.db"),
+    "SELECT targets the per-user db via $UDIR",
+  );
+  // the ERASE resets the CURRENT bundle ids for BOTH services via tccutil
+  // (the official tool, which walks the SIP-protected system db itself)…
+  assert.ok(
+    TCC_GRANTS_DELETE_CMD.includes(`for id in ${AGENT_BUNDLE_ID} ${NANODICTATE_BUNDLE_ID}`),
+    "DELETE resets the current bundle ids via tccutil",
+  );
+  assert.ok(
+    TCC_GRANTS_DELETE_CMD.includes('tccutil reset Accessibility "$id"'),
+    "DELETE resets the Accessibility service",
+  );
+  assert.ok(
+    TCC_GRANTS_DELETE_CMD.includes('tccutil reset Microphone "$id"'),
+    "DELETE resets the Microphone service",
+  );
+  // …and sweeps the per-user db with sqlite3 for the legacy names.
+  assert.ok(
+    TCC_GRANTS_DELETE_CMD.includes("$UDIR/Library/Application Support/com.apple.TCC/TCC.db"),
+    "DELETE sweeps the per-user db via $UDIR",
+  );
+  // the DELETE must NOT open the system db with sqlite3: sudo alone is not
+  // enough there (authorization denied without Full Disk Access), and a
+  // rejected system delete used to be masked by the successful per-user one.
+  assert.equal(
+    TCC_GRANTS_DELETE_CMD.includes('sqlite3 "/Library'),
+    false,
+    "DELETE keeps the system db out of sqlite3",
+  );
   assert.equal(TCC_SYSTEM_DB, "/Library/Application Support/com.apple.TCC/TCC.db");
   // the CHECK notes in its output that the system db needs Full Disk Access
   assert.match(TCC_GRANTS_SELECT_CMD, /Full Disk Access/);
 });
 
 test("TCC SQL clients are the hard-coded literals — no dynamic interpolation", () => {
-  for (const cmd of [TCC_GRANTS_SELECT_CMD, TCC_GRANTS_DELETE_CMD]) {
-    // the four fixed LIKE patterns appear once per database, and each command
-    // runs against BOTH dbs (system + per-user) → 8 occurrences total. Anything
-    // dynamic (a client path, `"`, `$`, backtick) would shift the count and
-    // fail this lock.
-    assert.equal(
-      (cmd.match(/LIKE '/g) ?? []).length,
-      8,
-      `four hard-coded LIKE literals per db × both dbs in: ${cmd.slice(0, 60)}…`,
-    );
-  }
+  // the four fixed LIKE patterns; SELECT runs them against BOTH dbs → 8, the
+  // DELETE's single sqlite3 statement (per-user db) → 4. Anything dynamic (a
+  // client path, `"`, `$`, backtick) would shift the count and fail this lock.
+  assert.equal(
+    (TCC_GRANTS_SELECT_CMD.match(/LIKE '/g) ?? []).length,
+    8,
+    `four hard-coded LIKE literals per db × both dbs in: ${TCC_GRANTS_SELECT_CMD.slice(0, 60)}…`,
+  );
+  assert.equal(
+    (TCC_GRANTS_DELETE_CMD.match(/LIKE '/g) ?? []).length,
+    4,
+    `four hard-coded LIKE literals in the DELETE's single per-user sqlite3 in: ${TCC_GRANTS_DELETE_CMD.slice(0, 60)}…`,
+  );
 });
 
 test("TCC_GRANTS_DELETE_CMD erases only nanodictate-related client records", () => {
@@ -160,6 +191,9 @@ test("TCC_GRANTS_DELETE_CMD erases only nanodictate-related client records", () 
   assert.match(TCC_GRANTS_DELETE_CMD, /client LIKE '%nanodictate%'/);
   assert.match(TCC_GRANTS_DELETE_CMD, /client LIKE '%com\.dictation\.agent%'/);
   assert.match(TCC_GRANTS_DELETE_CMD, /client LIKE '%DictatorAgent%'/);
+  // the tccutil resets cover BOTH service grants for the current ids
+  assert.match(TCC_GRANTS_DELETE_CMD, /set -e/);
+  assert.match(TCC_GRANTS_DELETE_CMD, /done; echo "# legacy records \(per-user db, needs Full Disk Access\)"/);
 });
 
 test("TCC_GRANTS_SELECT_CMD is the read-only check (SELECT … FROM access)", () => {

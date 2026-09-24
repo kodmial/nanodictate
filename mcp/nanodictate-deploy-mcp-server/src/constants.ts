@@ -284,30 +284,33 @@ export const TCC_GRANTS_SELECT_CMD =
 
 /**
  * Exact command the USER must run in Terminal to erase nanodictate's TCC
- * grants — Accessibility from the SYSTEM db (TCC_SYSTEM_DB) and Microphone
- * from the per-user db (TCC_USER_DB_PATH). BOTH databases are targeted:
- * erasing only one would leave the other grant in place while the wipe output
- * claims both are gone. The system db requires Full Disk Access (sudo alone is
- * not enough — without it sqlite3 fails "authorization denied"), which is why
- * even this DELETE is always delegated to the user. The agent cannot open
- * these databases (SIP + interactive sudo) — dictation_wipe only PRINTS this
+ * grants. `tccutil reset` — the official tool, which walks the SIP-protected
+ * system db itself — clears the CURRENT bundle ids (AGENT_BUNDLE_ID /
+ * NANODICTATE_BUNDLE_ID) for BOTH services (Accessibility + Microphone) in
+ * both databases; the per-user sqlite3 DELETE then sweeps the LEGACY names
+ * (com.dictation.agent / DictatorAgent) that tccutil's exact-id matching
+ * cannot see. The whole body runs in a subshell with `set -e` so a failure of
+ * any step aborts the command (no false "cleared" success) without changing
+ * the caller shell's options. The system db is never opened with sqlite3 here
+ * — sudo alone is not enough, sqlite3 fails "authorization denied" without
+ * Full Disk Access (the CR22 bug the subshell fixes: a plain `;`-joined
+ * sequence kept the exit status of the LAST command, so a rejected system-db
+ * delete was masked by a successful per-user one); the user-db statement
+ * keeps `sudo` for uniformity with the SELECT. The agent cannot open these
+ * databases (SIP + interactive sudo) — dictation_wipe only PRINTS this
  * command and never attempts to delete TCC records itself (a no-op when no
  * matching records exist).
  *
- * The supported FDA-free alternative, `tccutil reset Accessibility|Microphone
- * <bundle-id>`, was evaluated and rejected here: tccutil matches EXACT bundle
- * ids only, so the legacy names com.dictation.agent / DictatorAgent covered by
- * the LIKE patterns below would be left behind. Shares the TCC_UDIR_PREFIX +
- * "$UDIR/…" path canon with TCC_GRANTS_SELECT_CMD (see the trap documented
- * there: $HOME under sudo is /var/root — the cause of "unable to open
- * database file"; the user db lives under the console user's home, never
- * under $HOME). Matches both the current bundle ids (com.nanodictate.agent /
- * com.nanodictate.ctl, covered by the lowercase `%nanodictate%`) and the
- * former names com.dictation.agent / DictatorAgent so leftovers from older
- * installs are caught too.
+ * Shares the TCC_UDIR_PREFIX + "$UDIR/…" path canon with TCC_GRANTS_SELECT_CMD
+ * (see the trap documented there: $HOME under sudo is /var/root — the cause
+ * of "unable to open database file"; the user db lives under the console
+ * user's home, never under $HOME). Residual by design: legacy-named records
+ * in the SYSTEM db are not erased (tccutil matches the current bundle ids
+ * only, and the sqlite3 DELETE is confined to the per-user db) — they are
+ * orphaned grants of removed old binaries and do not affect the current ids.
  */
 export const TCC_GRANTS_DELETE_CMD =
-  `${TCC_UDIR_PREFIX}; echo "# erase grant records from BOTH dbs — system (Accessibility) + user (Microphone); system db needs Full Disk Access"; sudo sqlite3 "${TCC_SYSTEM_DB}" "DELETE FROM access WHERE ${TCC_CLIENTS_WHERE};"; sudo sqlite3 "${TCC_USER_DB_PATH}" "DELETE FROM access WHERE ${TCC_CLIENTS_WHERE};";`;
+  `${TCC_UDIR_PREFIX}; ( set -e; for id in ${AGENT_BUNDLE_ID} ${NANODICTATE_BUNDLE_ID}; do tccutil reset Accessibility "$id"; tccutil reset Microphone "$id"; done; echo "# legacy records (per-user db, needs Full Disk Access)"; sudo sqlite3 "${TCC_USER_DB_PATH}" "DELETE FROM access WHERE ${TCC_CLIENTS_WHERE};" );`;
 
 export interface WipePaths {
   tapClone: string;
