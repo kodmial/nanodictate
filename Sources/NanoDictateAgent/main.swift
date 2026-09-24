@@ -1638,7 +1638,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// Insertion continuation of completeInsertion: review decision (.insert) or
   /// immediate run when the gate is skipped — text insertion by the chosen
   /// method, undo bookkeeping, final UI+sound, last-text marker, Enter latch.
-  private func finishCompleteInsertion(_ text: String, decision: ReviewGate.Decision) {
+  private func finishCompleteInsertion(text: String, decision: ReviewGate.Decision) {
     switch decision {
     case .insert:
       break
@@ -1831,7 +1831,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
 
   /// Insertion continuation of retryInsertion: review decision (.insert) or
   /// immediate run when the gate is skipped.
-  private func finishRetryInsertion(_ text: String, decision: ReviewGate.Decision) {
+  private func finishRetryInsertion(text: String, decision: ReviewGate.Decision) {
     switch decision {
     case .insert:
       break
