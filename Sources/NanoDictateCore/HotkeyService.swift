@@ -382,7 +382,7 @@ public enum HotkeyServiceError: LocalizedError {
       return """
         Failed to create CGEvent tap. \
         Ensure the app has Accessibility permission in \
-        System Preferences > Security & Privacy > Privacy > Accessibility.
+        System Settings > Privacy & Security > Accessibility.
         """
     }
   }

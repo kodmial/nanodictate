@@ -184,6 +184,13 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// new loop (processSamples).
   private var cancelRecognition = false
 
+  /// Chunked review in flight: the pipeline already typed the text, the review
+  /// gate waits for the terminal answer. Esc during the wait must erase the
+  /// typed text (same semantics as the gate's "cancel" decision) — set in
+  /// completeChunkedInsertion before confirmAsync, cleared on every terminal
+  /// point of the chunked review (handleCancel / finishChunkedInsertion).
+  private var pendingReviewDeletion: String?
+
   /// Synthetic-Enter latch after Enter-stop of recording: Enter during
   /// .recording stops recording, starts recognition, sets the latch; after a
   /// successful insert EXACTLY ONE synthetic Enter is posted. Read at insert
@@ -1131,24 +1138,68 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     // works as a final confirmation — on cancel the typed text is deleted
     // entirely (one delete action), no undo window then.
     if reviewBeforeInsert, hasInteractiveStdin {
-      switch ReviewGate.confirm(text: text) {
-      case .insert:
-        break
-      case .cancel:
-        // Typed text erased, no insert — clear the synthetic-Enter latch
-        // (see completeInsertion review-cancel).
-        enterSendLatch.cancel()
-        Inserter.delete(characters: text)
-        overlay.resetPhase()
-        overlay.setStatus(L10n.tr("overlay.cancelled"))
-        hideAfter(0.8, reason: "chunked review cancelled")
-        state = .idle
-        Logger.log("chunked transcription cancelled by review gate")
-        return
+      // CR16: confirmAsync reads stdin on a background serial queue and
+      // delivers the Decision to the main queue — the hotkey event tap keeps
+      // running while the user decides. State stays .transcribing (non-idle)
+      // until the completion processes the decision in finishChunkedInsertion.
+      // The token is advanced here: the STT work is done, so THIS loop's
+      // processing watchdog must not cut the user's decision time (the sync
+      // confirm parked it the same way by blocking the main run loop). The
+      // completion re-validates against the advanced token.
+      processingSession += 1
+      let session = processingSession
+      // CR16: the pipeline already typed the text incrementally — while the
+      // gate waits for the terminal answer, a physical Esc (handleCancel)
+      // must erase it (the completion's state guard then drops the decision).
+      // Cleared on every terminal point of the review.
+      pendingReviewDeletion = text
+      ReviewGate.confirmAsync(text: text) { [weak self] decision in
+        guard
+          let self,
+          self.processingSession == session,
+          self.state == .transcribing
+        else { return }
+        // Re-validated above: Esc may have cancelled THIS loop (state → .idle)
+        // while the user typed the decision — the chunked text must not be
+        // finalized/cancelled then.
+        self.finishChunkedInsertion(outcome: outcome, decision: decision)
       }
+      return
     } else if reviewBeforeInsert {
       Logger.log(
         "review_before_insert включён, но stdin не терминал — ревью чанка пропущено", level: "info")
+    }
+    finishChunkedInsertion(outcome: outcome, decision: .insert)
+  }
+
+  /// Insertion continuation of completeChunkedInsertion, run after the review
+  /// decision (or immediately when the gate is skipped): on cancel the typed
+  /// text is deleted entirely (one delete action); on insert — the final UX
+  /// decisions (undo bookkeeping gets the session's final text, final status,
+  /// last-text marker, synthetic Enter).
+  private func finishChunkedInsertion(
+    outcome: ChunkedPipeline.Outcome,
+    decision: ReviewGate.Decision
+  ) {
+    let text = outcome.insertedText
+    // Terminal point of the chunked review — a pending Esc-deletion flag
+    // must not leak into the next loop (here the gate's decision resolved
+    // it; Esc's own path cleared it before reaching this point).
+    pendingReviewDeletion = nil
+    switch decision {
+    case .insert:
+      break
+    case .cancel:
+      // Typed text erased, no insert — clear the synthetic-Enter latch
+      // (see completeInsertion review-cancel).
+      enterSendLatch.cancel()
+      Inserter.delete(characters: text)
+      overlay.resetPhase()
+      overlay.setStatus(L10n.tr("overlay.cancelled"))
+      hideAfter(0.8, reason: "chunked review cancelled")
+      state = .idle
+      Logger.log("chunked transcription cancelled by review gate")
+      return
     }
 
     // Undo bookkeeping: a second Alt within undoMaxInterval erases the
@@ -1551,24 +1602,56 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     // nil → silent cancel of ALL insertions — the gate is skipped (the text
     // inserts as usual).
     if reviewBeforeInsert, hasInteractiveStdin {
-      switch ReviewGate.confirm(text: text) {
-      case .insert:
-        break
-      case .cancel:
-        // No insertion happened — extinguish the synthetic-Enter latch
-        // (Enter-stop): a fresh Enter-stop must not hang waiting.
-        enterSendLatch.cancel()
-        overlay.resetPhase()
-        overlay.setStatus(L10n.tr("overlay.cancelled"))
-        hideAfter(0.8, reason: "review cancelled")
-        state = .idle
-        Logger.log("transcription cancelled by review gate")
-        return
+      // CR16: confirmAsync reads stdin on a background serial queue and
+      // delivers the Decision to the main queue — the hotkey event tap
+      // keeps running while the user decides. State stays .transcribing
+      // (non-idle) until the completion processes the decision in
+      // finishCompleteInsertion. The token is advanced here: the STT work
+      // is done, so THIS loop's processing watchdog must not cut the
+      // user's decision time (the sync confirm parked it by blocking the
+      // main run loop). The completion re-validates against the advanced
+      // token.
+      processingSession += 1
+      let session = processingSession
+      ReviewGate.confirmAsync(text: text) { [weak self] decision in
+        // Re-validate the caller's delivery guard: Esc (then possibly a new
+        // loop) may have ended THIS loop while the user typed the decision —
+        // the stale text must not be inserted.
+        guard
+          let self,
+          NanoDictateFlow.shouldDeliverResult(
+            isCancelled: self.cancelRecognition,
+            sessionActive: self.processingSession == session && self.state == .transcribing
+          )
+        else { return }
+        self.finishCompleteInsertion(text: text, decision: decision)
       }
+      return
     } else if reviewBeforeInsert {
       Logger.log(
         "review_before_insert включён, но stdin не терминал (launchd?) — ревью пропущено",
         level: "info")
+    }
+    finishCompleteInsertion(text: text, decision: .insert)
+  }
+
+  /// Insertion continuation of completeInsertion: review decision (.insert) or
+  /// immediate run when the gate is skipped — text insertion by the chosen
+  /// method, undo bookkeeping, final UI+sound, last-text marker, Enter latch.
+  private func finishCompleteInsertion(_ text: String, decision: ReviewGate.Decision) {
+    switch decision {
+    case .insert:
+      break
+    case .cancel:
+      // No insertion happened — extinguish the synthetic-Enter latch
+      // (Enter-stop): a fresh Enter-stop must not hang waiting.
+      enterSendLatch.cancel()
+      overlay.resetPhase()
+      overlay.setStatus(L10n.tr("overlay.cancelled"))
+      hideAfter(0.8, reason: "review cancelled")
+      state = .idle
+      Logger.log("transcription cancelled by review gate")
+      return
     }
 
     // Text insertion by the chosen method (cgevent / clipboard) — the only
@@ -1719,20 +1802,45 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       return
     }
     if reviewBeforeInsert, hasInteractiveStdin {
-      switch ReviewGate.confirm(text: text) {
-      case .insert:
-        break
-      case .cancel:
-        enterSendLatch.cancel()
-        overlay.setStatus(L10n.tr("overlay.retryCancelled"))
-        hideAfter(0.8, reason: "retry review cancelled")
-        Logger.log("retry cancelled by review gate")
-        return
+      // CR16: confirmAsync reads stdin on a background serial queue and
+      // delivers the Decision to the main queue — the hotkey event tap keeps
+      // running while the user decides. The retry stays "in flight" until the
+      // completion processes the decision in finishRetryInsertion; a new loop
+      // started meanwhile makes the re-validating guard drop the stale text.
+      ReviewGate.confirmAsync(text: text) { [weak self] decision in
+        guard let self else { return }
+        // Re-validate the entry guard: a new nanodictate cycle may have
+        // started while the user typed the decision.
+        guard self.state == .idle else {
+          Logger.log(
+            "retry result dropped: nanodictate cycle active (state=\(String(describing: self.state)))",
+            level: "info"
+          )
+          return
+        }
+        self.finishRetryInsertion(text: text, decision: decision)
       }
+      return
     } else if reviewBeforeInsert {
       Logger.log(
         "review_before_insert включён, но stdin не терминал — ревью ретрая пропущено", level: "info"
       )
+    }
+    finishRetryInsertion(text: text, decision: .insert)
+  }
+
+  /// Insertion continuation of retryInsertion: review decision (.insert) or
+  /// immediate run when the gate is skipped.
+  private func finishRetryInsertion(_ text: String, decision: ReviewGate.Decision) {
+    switch decision {
+    case .insert:
+      break
+    case .cancel:
+      enterSendLatch.cancel()
+      overlay.setStatus(L10n.tr("overlay.retryCancelled"))
+      hideAfter(0.8, reason: "retry review cancelled")
+      Logger.log("retry cancelled by review gate")
+      return
     }
     Inserter.insert(text: text, method: insertMethod)
     overlay.resetPhase()
@@ -1863,6 +1971,14 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       Logger.log("record cancelled")
     case .transcribing:
       cancelRecognition = true
+      // CR16: Esc during the chunked review wait erases the already-typed
+      // text (the completion's state guard then drops the decision without
+      // calling finishChunkedInsertion) — same semantics as the terminal
+      // "cancel" answer.
+      if let pending = pendingReviewDeletion {
+        pendingReviewDeletion = nil
+        Inserter.delete(characters: pending)
+      }
       Logger.log("recognition cancelled by Esc")
     case .idle:
       return

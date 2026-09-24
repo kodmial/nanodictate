@@ -40,14 +40,13 @@ func restartAgentNow() -> String {
   if let writeError = result.writeError {
     return String(format: L10n.tr("cli.plist.writeerror"), writeError)
   }
-  if result.binaryPathChanged {
-    return L10n.tr("menu.agent.tccRehint")
-  }
+  let hint = result.binaryPathChanged ? " " + L10n.tr("menu.agent.tccRehint") : ""
   if result.registered {
-    return L10n.tr("cli.provider.restart")
+    return L10n.tr("cli.provider.restart") + hint
   }
   let msg = result.kickError.isEmpty ? result.bootstrapError : result.kickError
   return String(format: L10n.tr("cli.provider.kickfail"), msg.isEmpty ? result.loadError : msg)
+    + hint
 }
 
 /// Confirmation + switching the active provider + agent restart
