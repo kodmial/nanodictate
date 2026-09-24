@@ -20,20 +20,17 @@
 # the second installer fails on the existing symlink. Uninstall one before
 # installing the other.
 #
-# postflight + quarantine: the release binaries are self-signed with the
-# NanoDictate CI Signing identity — no Developer ID, no notarization. A .app
-# carrying the com.apple.quarantine attribute is refused by Gatekeeper
+# quarantine: the release binaries are self-signed with the NanoDictate CI
+# Signing identity — no Developer ID, no notarization. A .app carrying the
+# com.apple.quarantine attribute is refused by Gatekeeper on first launch
 # ("damaged"/"unidentified developer"). Homebrew's own curl does not set the
-# attribute, but a browser-downloaded zip (or a brew that stamps it) would
-# break first launch, so the postflight block strips it from the installed
-# bundle. Homebrew's `app` stanza MOVES the bundle into appdir
-# (Artifact::App < Artifact::Moved: no staged symlink is kept), so by the time
-# the postflight block runs, the bundle exists only at #{appdir}/NanoDictate.app
-# and the block clears the quarantine attribute on that installed bundle
-# (legacy `postflight` still works for third-party taps; structured
-# `postflight_steps` is required for official taps only). `xattr -dr` exits 0
-# even when nothing is quarantined (verified on macOS), so the step is a safe
-# no-op on a clean brew-cached download.
+# attribute, and this cask has NO postflight step that would clear it — a
+# plain `brew install --cask` keeps the bundle openable as-is. If the zip
+# arrived quarantined some other way (e.g. a browser download) and Gatekeeper
+# blocks first launch, approve the app via Right-click → Open / System
+# Settings → Privacy & Security, or run `xattr -dr com.apple.quarantine
+# /Applications/NanoDictate.app` by hand (see the "Signing and quarantine"
+# section in docs/packaging/homebrew.md for the rationale).
 
 cask "nanodictate" do
   version "__VERSION__"
@@ -65,14 +62,6 @@ cask "nanodictate" do
   # source must resolve to the installed location — a staged-relative path
   # would no longer exist when the binary's symlink is created.
   binary "#{appdir}/NanoDictate.app/Contents/MacOS/nanodictate"
-
-  postflight do
-    # The `app` stanza moved the bundle into appdir — clear the quarantine
-    # attribute on the installed bundle at #{appdir}/NanoDictate.app so
-    # Gatekeeper lets it open. Exit 0 on a clean tree, so this never fails a
-    # cask install.
-    system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{appdir}/NanoDictate.app"]
-  end
 
   caveats <<~EOS
     NanoDictate needs manual macOS privacy grants (System Settings → Privacy & Security):

@@ -11,9 +11,11 @@
 #
 # Шаги:
 #   1. перевызывает себя под sudo (обычный запрос пароля; при NOPASSWD — без);
-#   2. клонирует канон-дерево kodmial/macports-nanodictate в
-#      /Users/Shared/macports-nanodictate (если его ещё нет) и отдаёт root:admin
-#      (git >= 2.35.2 отказывается тянуть дерево с чужим владельцем);
+#   2. clones the canon tree kodmial/macports-nanodictate into
+#      /Users/Shared/macports-nanodictate (if it is not there yet). An existing
+#      tree must be FULLY root-owned: a tree containing entries with any other
+#      owner is REJECTED and must be deleted first — the fresh clone is
+#      root-owned;
 #   3. прописывает строку "file://..." в эффективный sources.conf — по
 #      умолчанию /opt/local/etc/macports/sources.conf. Если в
 #      ~/.macports/macports.conf задан sources_conf, правится пользовательский
@@ -110,17 +112,21 @@ PINDEX="$PREFIX_DIR/bin/portindex"
 # запуске без синка — сохраняя exact-revision чекаут.
 PIN_REV="4c4ced254593e3865d9f6a8f99ab6c7a3c59f807"
 
-# CWE-829: существующее дерево перед первой git-командой от root обязано быть
-# целиком root-овым. git под sudo доверяет дереву владельца SUDO_UID — оно могло
-# бы протащить конфиг/attributes (credential.helper, core.sshCommand,
-# smudge-filter) или ignored Portfile, а chown+portindex сделали бы его каноном.
-# Отклоняем любые файлы не-root владельца сразу, ДО git: chown-блок ниже
-# становится ненужным. При запуске не от root (EUID != 0, например владелец
-# дерева сам гоняет установщик) гейт пропускается — границы привилегий нет.
-if [ -d "$P" ] && [ "$EUID" -eq 0 ] && [ -n "$(find "$P" ! -user 0 -print -quit)" ]; then
-  echo "==> ОШИБКА: в $P есть файлы не-root владельца — удали $P и запусти заново" >&2
-  exit 1
-fi
+# owner_gate (CWE-829): before ANY root git command on the tree, the tree must
+# be fully root-owned. git under sudo trusts the tree of the SUDO_UID owner — it
+# could smuggle config/attributes (credential.helper, core.sshCommand,
+# smudge-filter) or an ignored Portfile, and portindex would make it the canon.
+# Any non-root-owned entry rejects the tree immediately, BEFORE git; the old
+# chown block is no longer needed. When not run as root (EUID != 0, e.g. the
+# tree owner runs the installer themselves) the gate is skipped — there is no
+# privilege boundary to protect.
+owner_gate() {
+  if [ -d "$P" ] && [ "$EUID" -eq 0 ] && [ -n "$(find "$P" ! -user 0 -print -quit)" ]; then
+    echo "==> ОШИБКА: в $P есть файлы не-root владельца — удали $P и запусти заново" >&2
+    exit 1
+  fi
+}
+owner_gate
 
 if [ -d "$P/.git" ]; then
   echo "==> канон-дерево уже есть: $P"
@@ -131,6 +137,11 @@ else
   # не выполняем (CWE-829).
   git -c core.hooksPath=/dev/null clone https://github.com/kodmial/macports-nanodictate "$P"
 fi
+
+# Re-check owner right after the clone/exists branch: a non-root-owned tree
+# could have appeared under $P while it did not exist (TOCTOU), so the tree must
+# be root-owned again before any further root git command touches it.
+owner_gate
 
 # Аутентичность (CWE-829): локальный аккаунт может создать $P до запуска
 # админом. origin обязан указывать на канон kodmial/macports-nanodictate
@@ -165,7 +176,7 @@ echo "==> проверяю канон-дерево на закреплённую
 tree_violations() {
   git -C "$P" -c core.fsmonitor=false -c core.hooksPath=/dev/null \
     status --porcelain --ignored \
-    | grep -Ev '^!! PortIndex$|^!! PortIndex\.quick$|^!! PortIndex_' || true
+    | grep -Ev '^!! PortIndex$|^!! PortIndex\.quick$|^!! PortIndex_[^/]+$' || true
 }
 if [ -n "$(tree_violations)" ]; then
   echo "==> ОШИБКА: канон-дерево не чистое (есть модифицированные/untracked/ignored файлы)." >&2
@@ -280,6 +291,9 @@ fi
 
 # 6) Индекс канон-дерева -------------------------------------------------------
 echo "==> обновляю индекс канон-дерева (portindex) ..."
+# Final ownership re-check immediately before root processes the tree, so it
+# cannot have been swapped for a non-root-owned tree during the steps above.
+owner_gate
 cd "$P"
 "$PINDEX"
 

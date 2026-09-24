@@ -815,29 +815,26 @@ jobs:
           grep -q '^  service do$' packaging/homebrew/nanodictate.rb
           grep -q 'name macos: "com.nanodictate.agent"' packaging/homebrew/nanodictate.rb
           # The generated cask must parse (Ruby syntax check) and carry the .app
-          # stanza plus the quarantine-clearing postflight — a cask that lost
-          # either would install an app Gatekeeper refuses on first launch
-          # (self-signed, no notarization; a downloaded zip's quarantine bit is
-          # what the postflight strips from the installed bundle at
-          # #{appdir}/NanoDictate.app). `depends_on :macos` must also survive:
+          # stanza — self-signed and not notarized, the bundle relies on the
+          # user's approval when Gatekeeper refuses it, so the cask deliberately
+          # has NO quarantine-clearing postflight (consistent with
+          # docs/packaging/homebrew.md). `depends_on :macos` must also survive:
           # without it brew rejects the cask at tap time with
           # "Invalid cask (Linux ...)" — "Missing Linux stanzas ...".
           ruby -c packaging/homebrew/Casks/nanodictate.rb
           grep -q '^cask "nanodictate" do$' packaging/homebrew/Casks/nanodictate.rb
           grep -q '^  app "NanoDictate.app"$' packaging/homebrew/Casks/nanodictate.rb
           grep -q '^  depends_on :macos$' packaging/homebrew/Casks/nanodictate.rb
-          grep -q '^  postflight do$' packaging/homebrew/Casks/nanodictate.rb
-          # The postflight body MUST clear the quarantine attribute from the
-          # INSTALLED bundle at #{appdir}/NanoDictate.app — Homebrew's `app` stanza
-          # symlinks the bundle into /Applications while keeping it in the staged
-          # location, so the block clears the attribute on the symlink target (the
-          # staged bundle, which still exists when postflight runs).
-          # `xattr -dr` exits 0 even when nothing is quarantined (verified on
-          # macOS), so the step is a safe no-op on a clean brew-cached download.
-          grep -q '^    system_command "/usr/bin/xattr", args: \["-dr", "com.apple.quarantine", "#{appdir}/NanoDictate.app"\]$' packaging/homebrew/Casks/nanodictate.rb
+          # The cask must still reference the installed bundle path: the `app`
+          # stanza MOVES the bundle into appdir and the `binary` stanza resolves
+          # the executable from the installed location at #{appdir}/NanoDictate.app.
           grep -q '#{appdir}/NanoDictate.app' packaging/homebrew/Casks/nanodictate.rb
+          # The cask must never clear quarantine (Gatekeeper stays until the
+          # user approves); negative guard — a regression here would silently
+          # re-enable the xattr -dr postflight.
+          ! grep -q '^  postflight do' packaging/homebrew/Casks/nanodictate.rb
           # Then load the cask FOR REAL through CaskLoader — the same path brew uses
-          # on tap/install. This catches any postflight load error above (a cask
+          # on tap/install. This catches any cask load error (a cask
           # that parses yet fails to load) and any `depends_on :macos` loss (which
           # would otherwise load as a Linux cask on this ubuntu runner). Homebrew on
           # ubuntu-latest is NOT in PATH (preinstalled at /home/linuxbrew/.linuxbrew),

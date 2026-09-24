@@ -61,9 +61,14 @@ cloned by hand once and exposed through a `file://` source):
   The
   first clone is always manual: `port selfupdate` only
   `git pull --rebase --autostash`es existing trees.
-- **chown** — (unconditional) hands the tree to root:admin: `port selfupdate`
-  pulls as root and git ≥ 2.35.2 refuses an owner-mismatched repo ("dubious
-  ownership").
+- **ownership check** — an existing tree is reused only when it is **fully
+  root-owned**: a tree containing entries with any other owner (e.g. left behind
+  by a local account) is rejected. Recover by deleting it and running the
+  install again — the fresh clone is root-owned:
+
+  ```sh
+  sudo rm -rf /Users/Shared/macports-nanodictate
+  ```
 - **sources.conf** — the `file://` line is inserted **before** `[default]`:
   the first match wins, so our tree shadows the rsync tree, and the file is
   hand-edited (no `port repo add`). Do **not** add `[nosync]` — only a

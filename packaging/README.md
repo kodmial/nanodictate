@@ -88,10 +88,13 @@ generated files get concrete values.
   version injected into `Contents/Info.plist` before the signature seals the
   bundle). `Contents/MacOS/` holds the SAME two binaries as the tarball — one
   daemon, one canonical `com.nanodictate.agent` label whether the user
-  installed the formula, the cask or the port. The cask's `postflight` runs
-  `xattr -dr com.apple.quarantine` on the installed bundle (self-signed app,
-  no notarization — a quarantine bit would make Gatekeeper refuse it); the
-  step exits 0 on a clean bundle, so it never fails an install.
+  installed the formula, the cask or the port. The cask has NO postflight
+  step that would clear the bundle's quarantine attribute: Homebrew's own
+  curl does not stamp one on a plain `brew install --cask`, so the app opens
+  as-is. If the zip arrived quarantined some other way (e.g. a browser
+  download) and Gatekeeper blocks first launch, approve the app via
+  Right-click → Open / System Settings → Privacy & Security, or run
+  `xattr -dr com.apple.quarantine /Applications/NanoDictate.app` by hand.
 - **TCC grants.** Microphone + Accessibility are granted manually per binary
   in System Settings (prompted on first use). Both paths install the same
   release binaries — no rebuild per install — so grants only need re-applying

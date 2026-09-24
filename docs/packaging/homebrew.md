@@ -24,10 +24,17 @@ layout, the generator and cross-package notes see
 
 ```sh
 brew tap kodmial/homebrew-nanodictate
-brew trust --tap kodmial/homebrew-nanodictate
+brew trust --formula kodmial/nanodictate/nanodictate
 brew install nanodictate
 brew services start nanodictate
 ```
+
+> **`brew trust`:** requires **Homebrew 6.0.0+** (macOS) and marks just the
+> `kodmial/nanodictate/nanodictate` formula as trusted — not the whole tap —
+> so the install below needs no extra confirmation. On an older Homebrew
+> without `brew trust`, skip that line and install by the fully qualified
+> name instead: `brew install kodmial/nanodictate/nanodictate` taps the
+> repository automatically; brew may ask you to confirm the new tap once.
 
 Installs the prebuilt binary; the final command activates the background agent:
 `brew services start nanodictate` uses the formula's `service do` block to
@@ -39,7 +46,7 @@ LaunchAgent — `nanodictate start` is the equivalent, idempotent alternative
 Prefer a proper app bundle? `brew install --cask kodmial/nanodictate/nanodictate` installs
 **NanoDictate.app** — the same two release binaries inside a `.app` bundle,
 the same `com.nanodictate.agent` service (one daemon either way), and the
-cask's `postflight` strips the quarantine attribute automatically (see
+quarantine attribute is kept until you approve the app (see
 [Install the app bundle via cask](#install-the-app-bundle-via-cask)).
 
 ### Install via the tap
@@ -68,10 +75,12 @@ fills it in):
 
 ```sh
 MAINTAINERS=@kodmial ruby scripts/release-prep.rb v0.1.0     # fills checksums into the template
-brew install /path/to/nanodictate/packaging/homebrew/nanodictate.rb
+HOMEBREW_DEVELOPER=1 brew install /path/to/nanodictate/packaging/homebrew/nanodictate.rb
 ```
 
-This is still a **binary** install — the formula downloads the release tarball
+`HOMEBREW_DEVELOPER=1` is scoped to this call so Homebrew accepts a formula
+installed from a local file path rather than a tap or the formula API. This
+is still a **binary** install — the formula downloads the release tarball
 for the machine's architecture, it does not build from source.
 
 Use the **generated** `packaging/homebrew/nanodictate.rb`, never the
@@ -99,11 +108,12 @@ cask — **not both**: both link the `nanodictate` binary into
 `$(brew --prefix)/bin`, so the second install fails on the conflicting file.
 Uninstall one before installing the other.
 
-**Quarantine:** the cask's `postflight` runs
-`xattr -dr com.apple.quarantine` on the installed bundle, so the self-signed
-app is not refused by Gatekeeper on first launch. A plain `brew` download
-carries no quarantine attribute to begin with; stripping a clean bundle exits
-0 — the step is a safe no-op either way.
+**Quarantine stays until you approve the app.** Nothing in this guide clears
+the `com.apple.quarantine` attribute for you, and the self-signed bundle is
+not notarized — so Gatekeeper may refuse it on first launch until you approve
+it deliberately (Right-click → Open, or System Settings → Privacy & Security).
+To run it unattended, clear the attribute by hand — a Gatekeeper workaround:
+`xattr -dr com.apple.quarantine /Applications/NanoDictate.app`.
 
 **Uninstall:** `brew uninstall --cask nanodictate` removes the app only — not
 the LaunchAgent, not your config. Stop the service first:
@@ -191,7 +201,7 @@ first launch depends on how the binaries arrived:
 | Install path | Quarantine attribute | Gatekeeper |
 | --- | --- | --- |
 | Homebrew formula (downloads the release tarball) | none — Homebrew's curl does not set it | no prompt, runs as-is |
-| Homebrew cask (downloads the app-bundle zip) | stripped by the cask `postflight` (`xattr -dr` on the installed bundle) | no prompt, runs as-is |
+| Homebrew cask (downloads the app-bundle zip) | kept until you approve the app (approve via Right-click → Open, or clear it manually — a Gatekeeper workaround) | prompts on first launch; approve once |
 | `curl` download from GitHub Releases | none | no prompt, runs as-is |
 | Browser download from GitHub Releases | `com.apple.quarantine` set | **blocked** — "developer cannot be verified" |
 

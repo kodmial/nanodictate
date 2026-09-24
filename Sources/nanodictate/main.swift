@@ -357,6 +357,10 @@ func providerList() -> Int32 {
 
 func providerUse(_ name: String, _ args: [String]) -> Int32 {
   do {
+    // Materialize the canon first (auto-copy), then set the active provider:
+    // a fresh config would otherwise contain only active_provider and the
+    // canon auto-copy would never run (cf. MenuActions.toggleLanguage).
+    _ = try? AppConfig.load(from: nil)
     try ProviderStore.setActive(providerID: name)
   } catch let ProviderStoreError.unknownProvider(providerID: id, available: available) {
     eprint(String(format: L10n.tr("cli.provider.notfound"), id, available.joined(separator: ", ")))
@@ -547,6 +551,10 @@ func routingSet(role: String, providerID: String, args: [String]) -> Int32 {
     return 1
   }
   do {
+    // Materialize the canon first (auto-copy), then validate the route id:
+    // a fresh config would otherwise contain only [routing] and the canon
+    // auto-copy would never run (cf. MenuActions.toggleLanguage).
+    _ = try? AppConfig.load(from: nil)
     let (_, providers) = try AppConfig.loadProvidersOnly(from: nil)
     guard providers.contains(where: { $0.id == providerID }) else {
       let available = providers.map(\.id)

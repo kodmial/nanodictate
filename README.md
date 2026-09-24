@@ -166,7 +166,13 @@ rebuild changes it, so re-grant the permissions once after such a build.
 `brew uninstall kodmial/nanodictate/nanodictate` (the stop unloads the
 LaunchAgent and removes its plist; your config stays behind — remove it by
 hand if you want it gone).
-**Cask** — `brew uninstall --cask kodmial/nanodictate/nanodictate` removes the app only.
+**Cask** — stop the service first, then uninstall: `nanodictate stop` (or
+`brew services stop kodmial/nanodictate/nanodictate`), then `brew uninstall
+--cask kodmial/nanodictate/nanodictate` removes the app only — it does **not**
+remove the user LaunchAgent (`~/Library/LaunchAgents/com.nanodictate.agent.plist`).
+If the agent was not stopped beforehand, unload it and remove the plist by
+hand: `launchctl bootout gui/$(id -u)/com.nanodictate.agent` + `rm
+~/Library/LaunchAgents/com.nanodictate.agent.plist`.
 **MacPorts** — `nanodictate stop; rm -f ~/Library/LaunchAgents/com.nanodictate.agent.plist`
 (`launchctl bootout gui/$(id -u)/com.nanodictate.agent` first if the stop did
 not unload it), then `sudo port uninstall nanodictate` — it boots out the agent
