@@ -23,14 +23,17 @@
 # quarantine: the release binaries are self-signed with the NanoDictate CI
 # Signing identity — no Developer ID, no notarization. A .app carrying the
 # com.apple.quarantine attribute is refused by Gatekeeper on first launch
-# ("damaged"/"unidentified developer"). Homebrew's own curl does not set the
-# attribute, and this cask has NO postflight step that would clear it — a
-# plain `brew install --cask` keeps the bundle openable as-is. If the zip
-# arrived quarantined some other way (e.g. a browser download) and Gatekeeper
-# blocks first launch, approve the app via Right-click → Open / System
-# Settings → Privacy & Security, or run `xattr -dr com.apple.quarantine
-# /Applications/NanoDictate.app` by hand (see the "Signing and quarantine"
-# section in docs/packaging/homebrew.md for the rationale).
+# ("damaged"/"unidentified developer"). Homebrew Cask stamps the quarantine
+# attribute on the downloaded container by default (Cask::Installer →
+# Quarantine.propagate copies it from the downloaded zip into the staged
+# path), so a plain `brew install --cask` puts the bundle on disk WITH the
+# attribute — and this cask has NO postflight step that would clear it.
+# Gatekeeper may therefore refuse the first launch of the self-signed,
+# non-notarized bundle; the user must approve the app themselves via
+# Right-click → Open / System Settings → Privacy & Security, or run
+# `xattr -dr com.apple.quarantine /Applications/NanoDictate.app` by hand
+# (see the "Signing and quarantine" section in docs/packaging/homebrew.md
+# for the rationale).
 
 cask "nanodictate" do
   version "__VERSION__"
@@ -69,6 +72,13 @@ cask "nanodictate" do
       - Accessibility:  enable NanoDictateAgent (the agent inserts recognized text)
     macOS prompts on first use; grants are per-binary, so an upgrade that
     replaces the app may require re-granting.
+
+    Gatekeeper approval: Homebrew Cask keeps the com.apple.quarantine
+    attribute on the downloaded bundle, and the app is self-signed and not
+    notarized — so macOS may refuse the first launch. Approve it once via
+    Right-click → Open (or System Settings → Privacy & Security), or clear
+    the attribute by hand with `xattr -dr com.apple.quarantine
+    /Applications/NanoDictate.app`.
 
     The running binary registers the background agent itself — `nanodictate start`
     writes the canonical ~/Library/LaunchAgents/com.nanodictate.agent.plist and

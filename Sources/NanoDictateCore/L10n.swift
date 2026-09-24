@@ -131,7 +131,7 @@ extension L10n {
       + " raw response saved to transcription_raw.json next to FILE)",
     "usage.batch": "Batch mode for long files: same flags",
     "usage.batch.desc":
-      "One provider (default gigaam), max-segment chunks with overlap, 3× retry, [..]"
+      "One provider (default gigaam), max-segment chunks with overlap, 3× retry, […]"
       + " placeholder on failure, checkpoint <out>.checkpoint.json (without --out — in temp dir) for --resume",
     "usage.retry": "Re-transcribe last recording with a different provider\n  (agent holds last WAV"
       + " in memory; insertion performed by the agent)",
@@ -393,7 +393,7 @@ extension L10n {
     "usage.batch": "Пакетный режим для длинных файлов: те же флаги",
     "usage.batch.desc":
       "Один провайдер (по умолчанию gigaam), чанки max-segment с overlap, retry 3×,"
-      + " плейсхолдер [..] при провале, чекпоинт <out>.checkpoint.json (без --out — во временной"
+      + " плейсхолдер […] при провале, чекпоинт <out>.checkpoint.json (без --out — во временной"
       + " папке) для --resume",
     "usage.retry": "Повторить распознавание последней записи другим провайдером\n  (агент хранит"
       + " последний WAV в памяти; вставку выполняет сам агент)",

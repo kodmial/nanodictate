@@ -1490,6 +1490,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// word-diff → replace one range.
   // swiftlint:disable:next cyclomatic_complexity function_body_length
   private func finishLiveRun(samples: [Int16], session: Int, runState: LiveRunState) async {
+    // A cancelled run (Esc / device change / new recording started) must not
+    // send its audio to STT: the final pass would hold the serial liveExecutor
+    // while a new recording's segments wait behind it. handleLiveSegment's
+    // isCancelled guard blocks segment inserts the same way.
+    guard !runState.isCancelled else { return }
     // Empty recording — no extra STT request (reachable only in a contrived
     // process, but symmetric to offline chunking).
     if runState.segmentCount == 0 {
@@ -1985,6 +1990,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       Logger.log("record cancelled")
     case .transcribing:
       cancelRecognition = true
+      // Esc during transcription stops the queued work immediately, not only
+      // at the next segment: the isCancelled guard in finishLiveRun drops the
+      // final pass, so a cancelled run never sends audio to STT.
+      liveRunState?.isCancelled = true
       // Exit note: Esc during the chunked review wait cancels the loop
       // (state → .idle) and the completion's state guard drops the decision;
       // the already printed text is NOT removed here — cancel only blocks

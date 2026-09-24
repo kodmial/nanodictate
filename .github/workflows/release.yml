@@ -832,7 +832,10 @@ jobs:
           # The cask must never clear quarantine (Gatekeeper stays until the
           # user approves); negative guard — a regression here would silently
           # re-enable the xattr -dr postflight.
-          ! grep -q '^  postflight do' packaging/homebrew/Casks/nanodictate.rb
+          if grep -q '^  postflight do' packaging/homebrew/Casks/nanodictate.rb; then
+            echo "ERROR: cask must never clear quarantine (postflight found)" >&2
+            exit 1
+          fi
           # Then load the cask FOR REAL through CaskLoader — the same path brew uses
           # on tap/install. This catches any cask load error (a cask
           # that parses yet fails to load) and any `depends_on :macos` loss (which
@@ -856,8 +859,11 @@ jobs:
           # No unfilled __PLACEHOLDER__ may remain in the generated files
           # (formula + cask + port; the cask's zip tokens are distinct from the
           # formula's tarball tokens by design, see release-prep.rb).
-          ! grep -E '__VERSION__|__SHA256_(ARM64|X86_64)__|__ZIP_SHA256_(ARM64|X86_64)__|__MAINTAINERS__|__REVISION__' \
-            packaging/homebrew/nanodictate.rb packaging/homebrew/Casks/nanodictate.rb packaging/macports/Portfile
+          if grep -qE '__VERSION__|__SHA256_(ARM64|X86_64)__|__ZIP_SHA256_(ARM64|X86_64)__|__MAINTAINERS__|__REVISION__' \
+            packaging/homebrew/nanodictate.rb packaging/homebrew/Casks/nanodictate.rb packaging/macports/Portfile; then
+            echo "ERROR: unfilled placeholders remain in generated manifests" >&2
+            exit 1
+          fi
           # Structural Portfile sanity (a macOS-only `port lint` is impossible
           # on the ubuntu runner, so grep the generated file instead): a
           # numeric revision, an empty build phase, no configure step, a real

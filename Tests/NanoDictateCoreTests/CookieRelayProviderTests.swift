@@ -69,6 +69,98 @@ final class CookieRelayMockTransport: HTTPTransport, @unchecked Sendable {
     }
 }
 
+// MARK: - GatedChallengeTransport
+// Транспорт-челлендж, чей ПЕРВЫЙ send паркуется на гейте: refresh держится в
+// полёте (незавершённым), пока тест не вызовет open(). Остальные send'ы
+// отвечают как CookieRelayMockTransport (челлендж без куки, ok-тело с кукой).
+// Запись запроса происходит ДО гейта, поэтому requestCount == 1 означает,
+// что первый send уже вошёл и refresh вот-вот запаркуется.
+
+/// Разовый гейт: `waitForOpen()` приостанавливает вызывающего (refresh в
+/// полёте), пока тест не вызовет `open()`. Continuation-based — поток
+/// cooperative pool не блокируется. Даёт детерминированную mid-wait отмену
+/// без тайминговых гонок.
+private final class OpenGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var opened = false
+
+    var isOpen: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return opened
+    }
+
+    /// Паркует вызывающего (первый send refresh'а) до open().
+    func waitForOpen() async {
+        lock.lock()
+        let alreadyOpen = opened
+        lock.unlock()
+        if alreadyOpen { return }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            var resumeNow = false
+            lock.lock()
+            if opened {
+                resumeNow = true
+            } else {
+                continuation = cont
+            }
+            lock.unlock()
+            if resumeNow {
+                cont.resume()
+            }
+        }
+    }
+
+    /// Отпускает запаркованный refresh.
+    func open() {
+        let toResume: CheckedContinuation<Void, Never>? = {
+            lock.lock()
+            defer { lock.unlock() }
+            if opened { return nil }
+            opened = true
+            let c = continuation
+            continuation = nil
+            return c
+        }()
+        toResume?.resume()
+    }
+}
+
+private final class GatedChallengeTransport: HTTPTransport, @unchecked Sendable {
+    let challengeBody: String
+    let gate = OpenGate()
+
+    private let lock = NSLock()
+    private var firstSendConsumed = false
+    private(set) var requests: [URLRequest] = []
+
+    init(challengeBody: String) {
+        self.challengeBody = challengeBody
+    }
+
+    func send(request: URLRequest) async throws -> (status: Int, body: Data, headers: [String: String]) {
+        lock.lock()
+        requests.append(request)
+        let isFirst = !firstSendConsumed
+        firstSendConsumed = true
+        lock.unlock()
+
+        if isFirst {
+            await gate.waitForOpen()
+        }
+
+        if request.value(forHTTPHeaderField: "Cookie") != nil {
+            return (200, Data(#"{"text":"ok"}"#.utf8), [:])
+        }
+        return (200, Data(challengeBody.utf8), [:])
+    }
+
+    var requestCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return requests.count
+    }
+}
+
 // MARK: - CookieRelayProviderTests
 
 /// Real challenge fixture (captured from https://proxy.example.com); reference
@@ -388,6 +480,62 @@ final class CookieRelayProviderTests: XCTestCase {
             XCTAssertEqual(transport.requestCount, 2,
                            "один общий пересчёт выжил после отмены первого caller'а")
             XCTAssertEqual(provider.currentCookie(), "__test=" + self.expectedCookie)
+        }
+    }
+
+    @objc func testRefreshBlockingCancelledMidWaitReturnsNilButSharedRefreshCompletes() {
+        let transport = GatedChallengeTransport(challengeBody: challengeHTML)
+        let provider = CookieRelayProvider(
+            origin: "https://proxy.example.com",
+            transport: transport,
+            now: { Date() }
+        )
+
+        runAsync("testCancelledMidWait") {
+            // Safety net: даже при падении ассерта отпустить refresh — никакой
+            // запаркованный таск не должен пережить тест (паттерн ReviewGate).
+            defer { transport.gate.open() }
+
+            // Caller входит в refreshBlocking БЕЗ отмены (пре-чек
+            // `if Task.isCancelled` не срабатывает) и застревает ВНУТРИ
+            // waitAbandoningOnCancellation: refresh в полёте (первый send
+            // запаркован на гейте), continuation уже прикреплён.
+            let caller = Task { () -> String? in
+                await provider.refreshBlocking()
+            }
+
+            // Детерминированно: ждём первый запрос (refresh реально вошёл в
+            // сеть и вот-вот запаркуется), даём caller'у прикрепить
+            // continuation и уснуть — затем отменяем mid-wait.
+            let entered = CFAbsoluteTimeGetCurrent() + 3
+            while transport.requestCount < 1 && CFAbsoluteTimeGetCurrent() < entered {
+                await Task.yield()
+            }
+            try await Task.sleep(nanoseconds: 100_000_000)
+
+            caller.cancel()
+            let first = await caller.value
+            XCTAssertNil(first, "mid-wait отменённый caller → nil, а не ожидание сети")
+            XCTAssertFalse(transport.gate.isOpen,
+                           "nil получен от ABANDON'а (гейт ещё закрыт), а не от завершения refresh'а")
+
+            // Shared refresh жив: отпускаем гейт — таск, который стартовал
+            // отменённый caller, НЕ был отменён и доводит цикл до конца.
+            transport.gate.open()
+            let done = CFAbsoluteTimeGetCurrent() + 3
+            while transport.requestCount < 2 && CFAbsoluteTimeGetCurrent() < done {
+                await Task.yield()
+            }
+            XCTAssertEqual(transport.requestCount, 2,
+                           "общий пересчёт доведён до конца (челлендж GET + probe GET)")
+            XCTAssertEqual(provider.currentCookie(), "__test=" + self.expectedCookie,
+                           "shared refresh не отменён — токен в итоге сохранён")
+
+            // Обычный caller теперь получает готовый токен без сетевого
+            // пересчёта: токен свежий (TTL не вышел) → ensureFresh() мгновенен.
+            let second = await provider.ensureFresh()
+            XCTAssertEqual(second, "__test=" + self.expectedCookie)
+            XCTAssertEqual(transport.requestCount, 2, "повторного пересчёта не было")
         }
     }
 }

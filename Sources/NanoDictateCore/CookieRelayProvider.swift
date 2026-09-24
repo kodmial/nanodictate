@@ -133,8 +133,42 @@ public final class CookieRelayProvider {
     // (up to two 8 s GETs). The refresh task itself is NOT cancelled — it
     // is shared, other callers still await its result.
     if Task.isCancelled { return nil }
-    guard let value = await task.value else { return nil }
+    guard let value = await waitAbandoningOnCancellation(task) else { return nil }
     return "\(Self.cookieName)=\(value)"
+  }
+
+  /// Awaits the shared refresh task, but abandons the wait (nil) the moment
+  /// the CURRENT caller is cancelled. The shared refresh task is never
+  /// cancelled here — other callers (parallel failover children in one
+  /// withTaskGroup) still await its result.
+  ///
+  /// Why a continuation bridge instead of `await task.value`: in Swift 5.7 a
+  /// task parked in `swift_task_future_wait` is resumed ONLY by the future's
+  /// completion — the caller's cancellation does not wake it. A structural
+  /// task-group race would stall too: the future-wait child is not woken by
+  /// cancelAll() and the group scope exit waits for that child. So the wait
+  /// goes through a checked continuation: the shared refresh resumes it with
+  /// the value, the caller's cancellation handler resumes it with nil. The
+  /// handler may fire before the continuation attaches (registrations race
+  /// with the already-cancelled caller) — RefreshWaitBridge closes that
+  /// ordering, and resuming a continuation needs no suspension, so a cancelled
+  /// caller returns at once while the observer task falls out of scope.
+  private func waitAbandoningOnCancellation(_ task: Task<String?, Never>) async -> String? {
+    let bridge = RefreshWaitBridge()
+    return await withTaskCancellationHandler(
+      operation: {
+        await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
+          bridge.attach(continuation)
+          // Unstructured observer: NOT a child of the caller's task group —
+          // nothing waits for it at scope exit, and it is not cancelled with
+          // the caller, so the shared refresh keeps serving other waiters.
+          _ = Task { bridge.finish(await task.value) }
+        }
+      },
+      onCancel: {
+        bridge.abandon()
+      }
+    )
   }
 
   // MARK: - Статика: разбор челленджа и AES-128-CBC
@@ -344,5 +378,58 @@ public final class CookieRelayProvider {
     } catch {
       return nil
     }
+  }
+}
+
+// MARK: - RefreshWaitBridge
+
+/// Single-waiter channel between the shared refresh task and one
+/// `refreshBlocking()` caller. Exactly-once continuation resume even when the
+/// shared refresh completes at the same moment as the caller's cancellation:
+/// attach/finish/abandon are closed under a lock (attach resumes nil itself
+/// when an already-fired abandon set `decided`; finish/abandon capture the
+/// attached continuation before clearing it). NSLock makes it safe to resume
+/// from any thread — the runtime invokes cancellation handlers on the
+/// cancelling thread.
+private final class RefreshWaitBridge: @unchecked Sendable {
+  private let lock = NSLock()
+  private var continuation: CheckedContinuation<String?, Never>?
+  private var decided = false
+
+  /// Caller's continuation attached; if an abandon already won the race,
+  /// resumed with nil immediately.
+  func attach(_ continuation: CheckedContinuation<String?, Never>) {
+    lock.lock()
+    if decided {
+      lock.unlock()
+      continuation.resume(returning: nil)
+      return
+    }
+    self.continuation = continuation
+    lock.unlock()
+  }
+
+  /// Shared refresh completed — resume the waiter with its value (or nil on
+  /// refresh failure).
+  func finish(_ value: String?) {
+    resume(returning: value)
+  }
+
+  /// Caller cancelled — abandon the wait.
+  func abandon() {
+    resume(returning: nil)
+  }
+
+  private func resume(returning value: String?) {
+    lock.lock()
+    if decided {
+      lock.unlock()
+      return
+    }
+    decided = true
+    let continuation = self.continuation
+    self.continuation = nil
+    lock.unlock()
+    continuation?.resume(returning: value)
   }
 }
