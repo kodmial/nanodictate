@@ -528,6 +528,12 @@ final class CookieRelayProviderTests: XCTestCase {
             }
             XCTAssertEqual(transport.requestCount, 2,
                            "общий пересчёт доведён до конца (челлендж GET + probe GET)")
+            // requestCount инкрементится в верху send ДО storeToken — токен
+            // появляется на микросекунды позже окончания последнего send.
+            // Полизация фактического состояния (тот же паттерн, что выше).
+            while provider.currentCookie() == nil && CFAbsoluteTimeGetCurrent() < done {
+                await Task.yield()
+            }
             XCTAssertEqual(provider.currentCookie(), "__test=" + self.expectedCookie,
                            "shared refresh не отменён — токен в итоге сохранён")
 
