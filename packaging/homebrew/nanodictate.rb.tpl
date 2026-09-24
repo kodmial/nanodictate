@@ -88,7 +88,15 @@ class Nanodictate < Formula
 
       This writes ~/Library/LaunchAgents/com.nanodictate.agent.plist (single
       canonical label com.nanodictate.agent) and loads it into launchd;
-      `brew services stop nanodictate` stops it. The CLI `nanodictate start`
+      `brew services stop nanodictate` stops it.
+
+      Homebrew 5.1.15 or newer is required for the `brew services start
+      nanodictate` workflow: older versions do not create parent directories
+      for explicit service log paths, so on a fresh account the service can
+      fail to start because ~/Library/Logs/NanoDictate is absent (cmdStart()
+      creates it only for `nanodictate start`).
+
+      The CLI `nanodictate start`
       is the same registration — idempotent, never a second daemon. Run it
       anyway to re-register with the symlink-resolved real path (e.g. after
       moving things around), or to print the current state:

@@ -14,9 +14,9 @@ kodmial@gmail.com
 ```
 
 Use the subject prefix `[nanodictate-security]`. If email is unavailable, open
-a regular issue instead, but keep it sanitized — no live keys, no personal data
-(issues on a public repository are fully visible): describe the vulnerability,
-its impact, and a minimal repro.
+a regular issue to request a private contact, without posting technical details
+(issues on a public repository are fully visible): do not describe the
+vulnerability, its impact, or a minimal repro.
 
 In the report, please include:
 

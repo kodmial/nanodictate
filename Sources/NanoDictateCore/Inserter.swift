@@ -359,11 +359,19 @@ extension Inserter {
 
   /// Insert via clipboard: save current buffer → write text → Cmd+V → restore
   /// old buffer after `restoreDelay` (~0.5 s).
+  ///
+  /// Main-thread invariant: must run on the main queue — the restore closure
+  /// executes there too (defaultScheduleRestore → DispatchQueue.main.asyncAfter),
+  /// so pendingOriginal / restoreGeneration are only ever touched from the main
+  /// thread and cannot race. All prod callers hop to main explicitly
+  /// (DispatchQueue.main.async in Agent). An off-main call would trip the
+  /// precondition below instead of silently corrupting the user's clipboard.
   public static func insertViaClipboard(
     text: String,
     bridge: ClipboardInsertBridge = .default
   ) {
     guard !text.isEmpty else { return }
+    dispatchPrecondition(condition: .onQueue(.main))
     // Overlapping insertions reuse the original snapshot, not our own dictation text.
     let original = pendingOriginal ?? bridge.readClipboard()
     pendingOriginal = original

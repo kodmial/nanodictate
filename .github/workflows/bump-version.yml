@@ -124,7 +124,7 @@ jobs:
             | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)|^[+-]PIN_REV=' || true)
           if printf '%s\n' "$CODE_CHANGES" | grep -qx 'scripts/install-macports.sh' \
             && [[ -z "$NON_PINREV" ]]; then
-            CODE_CHANGES=$(printf '%s\n' "$CODE_CHANGES" | grep -v '^scripts/install-macports.sh$')
+            CODE_CHANGES=$(printf '%s\n' "$CODE_CHANGES" | grep -v '^scripts/install-macports.sh$' || true)
           fi
           if [[ -z "${ALL_CHANGED:-}" ]]; then
             echo "::error::no code changes — bump refused (nothing changed since $PREV_TAG)"
