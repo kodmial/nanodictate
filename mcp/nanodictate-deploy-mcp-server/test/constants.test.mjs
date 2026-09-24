@@ -191,8 +191,27 @@ test("TCC_GRANTS_DELETE_CMD erases only nanodictate-related client records", () 
   assert.match(TCC_GRANTS_DELETE_CMD, /client LIKE '%nanodictate%'/);
   assert.match(TCC_GRANTS_DELETE_CMD, /client LIKE '%com\.dictation\.agent%'/);
   assert.match(TCC_GRANTS_DELETE_CMD, /client LIKE '%DictatorAgent%'/);
-  // the tccutil resets cover BOTH service grants for the current ids
-  assert.match(TCC_GRANTS_DELETE_CMD, /set -e/);
+  // failures are AGGREGATED, never aborting: no `set -e`, an `rc` accumulator
+  // keeps every step running (a rejected tccutil reset must not skip the
+  // remaining ids or the legacy sweep — the main goal), the sqlite3 sweep
+  // still runs LAST, and the subshell exits 1 if ANY step failed, else 0
+  assert.equal(
+    TCC_GRANTS_DELETE_CMD.includes("set -e"),
+    false,
+    "no set -e — a failed step must not abort the rest",
+  );
+  assert.match(TCC_GRANTS_DELETE_CMD, /\( rc=0; for id in /, "rc accumulator starts at 0");
+  assert.match(
+    TCC_GRANTS_DELETE_CMD,
+    /tccutil reset Microphone "\$id" \|\| rc=1/,
+    "every tccutil reset marks rc on failure",
+  );
+  assert.match(
+    TCC_GRANTS_DELETE_CMD,
+    /sudo sqlite3 "\$UDIR\/Library\/Application Support\/com\.apple\.TCC\/TCC\.db" "DELETE FROM access WHERE [^"]*" \|\| rc=1/,
+    "the legacy sweep runs last and its failure also marks rc",
+  );
+  assert.match(TCC_GRANTS_DELETE_CMD, /exit \$rc/, "subshell exits with rc");
   assert.match(TCC_GRANTS_DELETE_CMD, /done; echo "# legacy records \(per-user db, needs Full Disk Access\)"/);
 });
 

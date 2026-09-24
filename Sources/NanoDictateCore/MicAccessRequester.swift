@@ -6,7 +6,10 @@ import Foundation
 /// Microphone access request, guarded against ask → dialog → hang loop:
 /// 1) no second request while a dialog is up (isInFlight) — no duplicated dialog;
 /// 2) timeout watchdog: bundle-less background agent's TCC window may never
-///    show and callback may never come — terminal outcome instead of infinite wait;
+///    show and callback may never come — terminal outcome instead of infinite
+///    wait; the guard stays up until the system request resolves (only its
+///    callback releases it), so a retry cannot pile a second dialog onto an
+///    unresolved one;
 /// 3) MicRequestPolicy anti-storm: N timeouts in 6h stop new requests (dialog
 ///    storm jams tccd, freezes system); client shows instructions instead.
 /// Session token (session) invalidates stale callbacks: watchdog bumps it
@@ -46,6 +49,11 @@ public final class MicAccessRequester {
   private var session = 0
   /// System dialog already up: repeat call opens no second.
   private var inFlight = false
+  /// System `requestAccess` outstanding, its callback unprocessed. Cleared
+  /// ONLY in that callback (stale callbacks included). While set, the
+  /// watchdog keeps `inFlight` up, so a retry cannot open a second system
+  /// request on top of an unresolved one (dialog storm).
+  private var systemRequestPending = false
 
   public init(
     status: @escaping StatusProvider,
@@ -82,6 +90,9 @@ public final class MicAccessRequester {
         return
       }
       inFlight = true
+      // System request is about to be issued: mark it pending. Only the
+      // requestAccess callback may clear this (and, with it, inFlight).
+      systemRequestPending = true
       session += 1
       let requestSession = session
 
@@ -96,7 +107,13 @@ public final class MicAccessRequester {
           self.inFlight
         else { return }
         // swiftformat:enable indent
-        self.inFlight = false
+        // Watchdog firing implies the system callback is still pending (only
+        // a callback resolves this cycle — an answer has cleared the flags
+        // and bumped the token). So `inFlight` is NOT reset while the system
+        // request is unresolved: resetting it here would let a retry call
+        // requestAccess again on top of the pending dialog — a dialog storm.
+        // The pending callback releases the coordinator (clears both flags,
+        // drops its stale outcome) when the system finally answers.
         // Bump token here: late granted (dialog answered after timeout)
         // sees mismatch and is dropped — recording won't start under a
         // shown error.
@@ -108,7 +125,20 @@ public final class MicAccessRequester {
 
       requestAccess { [weak self] granted in
         DispatchQueue.main.async {
-          guard let self, self.session == requestSession else { return }
+          guard let self else { return }
+          // The system answered — this is the ONLY place systemRequestPending
+          // is cleared, stale callbacks included: the system request is
+          // resolved regardless of our token bookkeeping, and the watchdog
+          // kept inFlight up precisely until here.
+          self.systemRequestPending = false
+          guard self.session == requestSession else {
+            // Stale: watchdog already timed out (or a newer cycle won the
+            // token). No outcome — late granted can't start recording under
+            // a shown error. No newer cycle can own inFlight while ours was
+            // pending (the watchdog keeps it set), so release it here.
+            self.inFlight = false
+            return
+          }
           self.inFlight = false
           // Token change cancels scheduled watchdog (no-op).
           self.session += 1

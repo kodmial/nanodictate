@@ -289,9 +289,12 @@ export const TCC_GRANTS_SELECT_CMD =
  * NANODICTATE_BUNDLE_ID) for BOTH services (Accessibility + Microphone) in
  * both databases; the per-user sqlite3 DELETE then sweeps the LEGACY names
  * (com.dictation.agent / DictatorAgent) that tccutil's exact-id matching
- * cannot see. The whole body runs in a subshell with `set -e` so a failure of
- * any step aborts the command (no false "cleared" success) without changing
- * the caller shell's options. The system db is never opened with sqlite3 here
+ * cannot see. The whole body runs in a subshell that aggregates failures into
+ * an `rc` accumulator — deliberately NO `set -e`: a rejected tccutil reset must
+ * not abort the loop and skip the remaining bundle ids, nor the legacy sqlite3
+ * sweep (the main goal). Every step still runs; the subshell exits 1 if ANY
+ * step failed, 0 otherwise (no false "cleared" success), and never changes the
+ * caller shell's options. The system db is never opened with sqlite3 here
  * — sudo alone is not enough, sqlite3 fails "authorization denied" without
  * Full Disk Access (the CR22 bug the subshell fixes: a plain `;`-joined
  * sequence kept the exit status of the LAST command, so a rejected system-db
@@ -310,7 +313,7 @@ export const TCC_GRANTS_SELECT_CMD =
  * orphaned grants of removed old binaries and do not affect the current ids.
  */
 export const TCC_GRANTS_DELETE_CMD =
-  `${TCC_UDIR_PREFIX}; ( set -e; for id in ${AGENT_BUNDLE_ID} ${NANODICTATE_BUNDLE_ID}; do tccutil reset Accessibility "$id"; tccutil reset Microphone "$id"; done; echo "# legacy records (per-user db, needs Full Disk Access)"; sudo sqlite3 "${TCC_USER_DB_PATH}" "DELETE FROM access WHERE ${TCC_CLIENTS_WHERE};" );`;
+  `${TCC_UDIR_PREFIX}; ( rc=0; for id in ${AGENT_BUNDLE_ID} ${NANODICTATE_BUNDLE_ID}; do tccutil reset Accessibility "$id" || rc=1; tccutil reset Microphone "$id" || rc=1; done; echo "# legacy records (per-user db, needs Full Disk Access)"; sudo sqlite3 "${TCC_USER_DB_PATH}" "DELETE FROM access WHERE ${TCC_CLIENTS_WHERE};" || rc=1; exit $rc );`;
 
 export interface WipePaths {
   tapClone: string;

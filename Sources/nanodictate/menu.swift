@@ -67,6 +67,10 @@ private func restoreTerminalAndExit(_ sig: Int32) {
 /// Installs SIGINT/SIGTERM handlers. Takes the termios snapshot BEFORE
 /// raw mode.
 private func installSignalHandlers() {
+  // Force the lazy global init BEFORE any handler is registered: a Swift
+  // global `let` of Array type allocates on first access, and
+  // restoreTerminalAndExit must not allocate inside a signal handler.
+  _ = showCursorPlusNewline
   if isatty(STDIN_FILENO) == 1 {
     var term = termios()
     if tcgetattr(STDIN_FILENO, &term) == 0 {

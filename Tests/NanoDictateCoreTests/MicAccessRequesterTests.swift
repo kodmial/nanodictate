@@ -8,7 +8,8 @@ import AVFoundation
 ///   • authorized/denied/restricted — sync outcome, no system prompt;
 ///   • granted/denied from system dialog — outcome on main queue;
 ///   • watchdog: callback not arrived by timeout → .timedOut (no eternal wait),
-///     timeout counted in storm policy;
+///     timeout counted in storm policy; the in-flight guard stays up until the
+///     pending callback resolves — a retry cannot pile a second dialog;
 ///   • LATE granted after timeout dropped by session token: no second outcome,
 ///     no storm-counter reset (fix regression);
 ///   • re-request while dialog pending — no second dialog;
@@ -178,16 +179,77 @@ final class MicAccessRequesterTests: XCTestCase {
         // Short watchdog (0.2s) — test does not wait prod's 10s.
         let requester = makeRequester(status: { .notDetermined }, stub: stub, policyFile: file, timeout: 0.2)
 
-        let (outcome, _) = waitForOutcome(requester)
+        let (outcome, outcomes) = waitForOutcome(requester)
         XCTAssertEqual(outcome, .timedOut, "молчащий диалог обязан дать .timedOut")
         XCTAssertEqual(stub.callCount, 1, "запрос стартовал один раз")
-        XCTAssertFalse(requester.isInFlight, "после таймаута флаг «в полёте» снят")
+        // Callback still pending after timeout: the guard stays UP — a retry
+        // must not open a second system request on an unresolved dialog.
+        XCTAssertTrue(requester.isInFlight, "после таймаута гвард держится, пока системный колбэк в ожидании")
+        requester.requestIfNeeded { _ in }
+        XCTAssertEqual(stub.callCount, 1, "ретрай при висящем системном запросе не открывает второй диалог")
+        // Late system answer releases the coordinator; outcome was already
+        // delivered once (.timedOut) — no second outcome.
+        stub.lastCompletion?(true)
+        XCTAssertTrue(
+            eventually { requester.isInFlight == false },
+            "поздний ответ системного колбэка снимает гвард"
+        )
+        XCTAssertEqual(outcomes, [.timedOut], "поздний granted не даёт второго исхода")
         // Watchdog's 3rd timeout (plus 2 seeded) crossed the threshold:
         // fresh policy from same file rejects request now.
         XCTAssertFalse(
             MicRequestPolicy(fileURL: file).allowRequest(now: Date()),
             "таймаут записан в штормовой счётчик (2+1 на пределе)"
         )
+    }
+
+    /// The storm scenario from review: watchdog fires while the system
+    /// requestAccess callback is still pending. inFlight must stay up — a
+    /// retry opens no second system request; only when the pending callback
+    /// resolves may the next request start (fresh dialog, not a pile).
+    @objc func testTimeoutDoesNotOpenStormOfDialogs() {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("requester-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let stub = RequestStub()
+        let requester = makeRequester(status: { .notDetermined }, stub: stub, policyFile: file, timeout: 0.15)
+
+        let (outcome, outcomes) = waitForOutcome(requester)
+        XCTAssertEqual(outcome, .timedOut, "первый цикл: таймаут")
+        XCTAssertEqual(stub.callCount, 1, "первый системный запрос открыт")
+        XCTAssertTrue(requester.isInFlight, "колбэк ещё ждёт ответа — гвард на месте")
+
+        // Retry while the system request is unresolved: no second system
+        // request (this used to pile dialogs up), no outcome.
+        var retryFired = false
+        requester.requestIfNeeded { _ in retryFired = true }
+        // Give the storm a chance to misbehave: a second request WOULD have
+        // produced a second outcome before this deadline.
+        _ = eventually(timeout: 0.3) { retryFired }
+        XCTAssertFalse(retryFired, "ретрай при висящем системном запросе исхода не даёт")
+        XCTAssertEqual(stub.callCount, 1, "ретрай не открывает второй системный запрос")
+
+        // Pending callback finally resolves (late, dropped by the token):
+        // guard released, and the stale answer yields no outcome.
+        stub.lastCompletion?(true)
+        XCTAssertTrue(
+            eventually { requester.isInFlight == false },
+            "поздний ответ системного колбэка снимает гвард"
+        )
+        XCTAssertEqual(outcomes, [.timedOut], "поздний granted не даёт второго исхода")
+
+        // Next request opens exactly one FRESH system request and gets a
+        // real answer.
+        let done = expectation(description: "fresh cycle outcome")
+        var freshOutcomes: [MicAccessRequester.Outcome] = []
+        requester.requestIfNeeded { outcome in
+            freshOutcomes.append(outcome)
+            done.fulfill()
+        }
+        XCTAssertEqual(stub.callCount, 2, "новый цикл открывает ровно один системный запрос")
+        stub.lastCompletion?(true)
+        wait(for: [done], timeout: 2)
+        XCTAssertEqual(freshOutcomes, [.granted])
     }
 
     /// Late grant after timeout — the exact regression that made watchdog
@@ -203,25 +265,35 @@ final class MicAccessRequesterTests: XCTestCase {
         // to limit (after 3rd timeout 4th request blocked).
         let requester = makeRequester(status: { .notDetermined }, stub: stub, policyFile: file, timeout: 0.15)
 
-        // Three timeouts in a row: each cycle a new request, no answer.
+        // Three timeouts in a row. While the system request is unresolved the
+        // guard blocks the next cycle, so each timeout is followed by the
+        // late answer on the pending callback — the ONLY thing that releases
+        // the coordinator (stale answer dropped by the token, storm counter
+        // untouched).
         var lastCycleOutcomes: [MicAccessRequester.Outcome] = []
         for _ in 0..<3 {
             let (outcome, outcomes) = waitForOutcome(requester)
             XCTAssertEqual(outcome, .timedOut)
             lastCycleOutcomes = outcomes
+            // Answer the pending callback after its watchdog already fired.
+            stub.lastCompletion?(true)
+            XCTAssertTrue(
+                eventually { requester.isInFlight == false },
+                "поздний ответ системного колбэка снимает гвард для следующего цикла"
+            )
         }
         // 4th request — anti-storm (counter at limit): system dialog not
         // opened at all, single outcome.
         let (suppressedOutcome, suppressedOutcomes) = waitForOutcome(requester)
         XCTAssertEqual(suppressedOutcome, .suppressedByPolicy)
         XCTAssertEqual(suppressedOutcomes, [.suppressedByPolicy], "анти-шторм: один исход, диалог не открывался")
+        XCTAssertEqual(stub.callCount, 3, "после лимита системные запросы не открываются")
 
-        // Last REAL dialog (3rd cycle) answers granted — BUT after watchdog
-        // fired and changed session.
-        stub.lastCompletion?(true)
-        // Answer that would start recording is absent: last real cycle still
-        // has exactly ONE outcome (.timedOut). drainEngineQueue spins
-        // run loop — undropped grant would have arrived by now.
+        // The 3rd real dialog's late granted was answered above (inside the
+        // loop) after its watchdog fired and changed the session: answer that
+        // would start recording is absent — last real cycle still has exactly
+        // ONE outcome (.timedOut). drainEngineQueue spins run loop —
+        // undropped grant would have arrived by now.
         drainEngineQueue()
         XCTAssertEqual(
             lastCycleOutcomes,
