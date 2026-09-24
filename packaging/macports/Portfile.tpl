@@ -98,18 +98,11 @@ post-activate {
     # launchd refusing the bootstrap, ...) never makes `port install` fail:
     # the plist stays on disk and RunAtLoad picks the service up at next login.
     set launch_dir /Library/LaunchAgents
-    set logs_dir  /Library/Logs/NanoDictate
     set plist_path ${launch_dir}/com.nanodictate.agent.plist
     set agent_bin  ${prefix}/bin/NanoDictateAgent
-    set log_path   ${logs_dir}/agent.log
 
     if {[catch {
-        exec /bin/mkdir -p ${launch_dir} ${logs_dir}
-        # The job runs as the console user (gui/<uid> domain), not root — the
-        # shared log directory must be writable by whoever logs in, but a
-        # world-writable dir under /Library is a symlink-attack target
-        # (CWE-732): 0755, not 0777.
-        exec /bin/chmod 0755 ${logs_dir}
+        exec /bin/mkdir -p ${launch_dir}
     }]} {
         ui_warn "nanodictate: could not create ${launch_dir} — the service will register on first 'nanodictate start'"
     } else {
@@ -129,12 +122,13 @@ post-activate {
   <true/>
   <key>KeepAlive</key>
   <true/>
-  <!-- StandardOutPath/StandardErrorPath deliberately omitted: launchd would
-       open the root-owned global log and fail. -->
+  <!-- StandardOutPath/StandardErrorPath deliberately omitted: the agent logs
+       to its own per-user ~/Library/Logs/NanoDictate, and launchd redirection
+       would target a root-owned path the console user cannot write. -->
 </dict>
 </plist>
 }
-        set content [string map [list __AGENT_BIN__ ${agent_bin} __LOG_PATH__ ${log_path}] ${plist_xml}]
+        set content [string map [list __AGENT_BIN__ ${agent_bin}] ${plist_xml}]
         if {[catch {
             set fd [open ${plist_path} w 0644]
             puts -nonewline ${fd} ${content}

@@ -637,8 +637,11 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
       }
       let key = line[line.startIndex..<eqIndex]
         .trimmingCharacters(in: .whitespaces)
-      let valuePart = line[line.index(after: eqIndex)...]
-        .trimmingCharacters(in: .whitespaces)
+      // Хвостовой комментарий на строке значения отрезаем (TOML-семантика:
+      // `#` вне кавычек — комментарий). Без этого `timeout_seconds = 120 # note`
+      // и `api_key = "v" # note` падали с invalidLine.
+      let valuePart = Self.stripTrailingComment(
+        line[line.index(after: eqIndex)...].trimmingCharacters(in: .whitespaces))
 
       // Ключ внутри секции [providers.X].
       if let providerID = currentProviderID,
@@ -895,6 +898,22 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
 
   // MARK: Value parsers
 
+  /// Отрезает хвостовой комментарий значения (TOML): первая `#` ВНЕ двойных
+  /// кавычек и всё после неё удаляется. `#` внутри кавычек — часть значения
+  /// (`api_key = "abc#def"` не режется). Вызывается до value-парсеров.
+  private static func stripTrailingComment(_ raw: String) -> String {
+    var insideQuotes = false
+    for i in raw.indices {
+      let c = raw[i]
+      if c == "\"" {
+        insideQuotes.toggle()
+      } else if c == "#", !insideQuotes {
+        return String(raw[..<i]).trimmingCharacters(in: .whitespaces)
+      }
+    }
+    return raw
+  }
+
   private static func parseString(_ raw: String, line: Int, rawLine: String) throws -> String {
     let trimmed = raw.trimmingCharacters(in: .whitespaces)
     guard trimmed.count >= 2,
@@ -1058,11 +1077,15 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
       guard lineKey == key else { continue }
       let valueStart = stripped.index(after: eqIndex)
       let newLine: String
-      if let open = line[valueStart...].firstIndex(of: "\""),
-        let close = line[line.index(after: open)...].firstIndex(of: "\"")
+      // Кавычки — только когда первый непустой символ после "=" это `"`.
+      // Иначе `review_before_insert = false # set "true" to enable` правил бы
+      // комментарий вместо значения.
+      let valueTail = line[valueStart...].drop { $0 == " " || $0 == "\t" }
+      if valueTail.first == "\"",
+        let close = valueTail.dropFirst().firstIndex(of: "\"")
       {  // swiftlint:disable:this opening_brace
         // Точечная замена значения в кавычках; хвост строки (комментарий) сохраняем.
-        let prefix = String(line[..<open])
+        let prefix = String(line[..<valueTail.startIndex])
         let suffix = String(line[line.index(after: close)...])
         newLine = prefix + value + suffix
       } else {
@@ -1167,11 +1190,14 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
         guard lineKey == key else { continue }
         let valueStart = stripped.index(after: eqIndex)
         let newLine: String
-        if let open = line[valueStart...].firstIndex(of: "\""),
-          let close = line[line.index(after: open)...].firstIndex(of: "\"")
+        // Кавычки — только когда первый непустой символ после "=" это `"`
+        // (см. writeReviewBeforeInsert): иначе трогается комментарий, не значение.
+        let valueTail = line[valueStart...].drop { $0 == " " || $0 == "\t" }
+        if valueTail.first == "\"",
+          let close = valueTail.dropFirst().firstIndex(of: "\"")
         {  // swiftlint:disable:this opening_brace
           // Точечная замена значения в кавычках; хвостовой комментарий сохраняем.
-          let prefix = String(line[..<open])
+          let prefix = String(line[..<valueTail.startIndex])
           let suffix = String(line[line.index(after: close)...])
           newLine = prefix + value + suffix
         } else {

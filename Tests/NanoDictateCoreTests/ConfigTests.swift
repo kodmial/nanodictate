@@ -147,6 +147,30 @@ final class ConfigTests: XCTestCase {
         XCTAssertTrue(config.soundsEnabled)
     }
 
+    @objc func testParseValueWithTrailingComment() throws {
+        // Хвостовой комментарий значения (TOML): первая `#` вне кавычек —
+        // комментарий, всё после неё отрезается до value-парсера
+        // (stripTrailingComment). Раньше `timeout_seconds = 120 # note` и
+        // `api_key = "v" # note` падали с invalidLine.
+        let content = """
+        timeout_seconds = 120 # note
+        api_key = "v" # note
+        """
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.timeoutSeconds, 120)
+        XCTAssertEqual(config.apiKey, "v")
+    }
+
+    @objc func testParseHashInsideQuotedValueIsPreserved() throws {
+        // `#` внутри двойных кавычек — часть значения, а не комментарий:
+        // `api_key = "abc#def"` не режется, значение и кавычки сохраняются.
+        let content = """
+        api_key = "abc#def"
+        """
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.apiKey, "abc#def")
+    }
+
     // MARK: - Missing file via load()
 
     @objc func testLoadMissingFileReturnsDefaults() throws {
@@ -554,6 +578,32 @@ final class ConfigTests: XCTestCase {
         XCTAssertTrue(content.contains("review_before_insert = true"))
 
         let config = try AppConfig.load(from: path.path)
+        XCTAssertTrue(config.reviewBeforeInsert)
+    }
+
+    @objc func testWriteReviewBeforeInsertWhenCommentContainsQuotes() throws {
+        // CR17-(i): `review_before_insert = false # set "true" to enable` — первый
+        // непустой символ после "=" не кавычка, значит строка некавыченная и
+        // кавычки в комментарии за quotes значения не принимаются. Значение
+        // заменяется целиком, комментарий теряется (как у любой некавыченной).
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_review_comment_\(UUID().uuidString).toml")
+        try """
+        base_url = "https://x"
+        review_before_insert = false # set "true" to enable
+        """.data(using: .utf8)!.write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+
+        try AppConfig.writeReviewBeforeInsert(value: true, to: file.path)
+
+        let content = try String(contentsOf: file, encoding: .utf8)
+        XCTAssertTrue(content.contains("review_before_insert = true"))
+        XCTAssertFalse(content.contains("# set \"true\" to enable"),
+                       "комментарий у некавыченной строки не сохраняется")
+        XCTAssertFalse(content.contains("review_before_insert = false"),
+                       "старое значение с комментарием целиком заменено")
+
+        let config = try AppConfig.load(from: file.path)
         XCTAssertTrue(config.reviewBeforeInsert)
     }
 

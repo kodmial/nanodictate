@@ -720,7 +720,7 @@ export function registerTools(server: McpServer): void {
       description:
         "Signs .build/<configuration>/{NanoDictateAgent,nanodictate} with `codesign --force --sign \"" +
         SIGNING_IDENTITY +
-        "\" --entitlements <file> --options runtime --identifier <bundle-id>` and verifies each with `codesign --verify --strict`. macOS keys the Microphone/Accessibility TCC grants to the signature's designated requirement — identity + bundle id + entitlements — which the fixed identity keeps stable across rebuilds; the cdhash itself changes between rebuilds, which is normal and not a sign of instability. Fails (does not create anything) if the identity is missing from the keychain." +
+        "\" --entitlements <file> --options runtime --identifier <bundle-id>` and verifies each with `codesign --verify --strict`. macOS keys the Microphone/Accessibility TCC grants to the signature's designated requirement — the identifier plus the signing certificate — which the fixed identity keeps stable across rebuilds; the cdhash itself changes between rebuilds, which is normal and not a sign of instability. Fails (does not create anything) if the identity is missing from the keychain." +
         SHARED_FOOTER,
       inputSchema: SignInputSchema,
       outputSchema: SignOutputSchema,

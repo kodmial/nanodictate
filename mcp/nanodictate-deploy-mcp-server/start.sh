@@ -25,11 +25,23 @@ LOG="$DIR/.start-build.log"
 NEEDS_BUILD=false
 NEEDS_INSTALL=false
 BUILD_REASON=""
+
+# package-lock.json may be absent (e.g. a pruned checkout); pass `find` only
+# existing inputs, because a missing path operand makes find exit non-zero and
+# under `set -o pipefail` that would turn the `find ... | grep -q .` freshness
+# probes below into false negatives even when a match was found.
+FIND_INPUTS=("$DIR/src" "$DIR/package.json")
+MANIFEST_INPUTS=("$DIR/package.json")
+if [[ -f "$DIR/package-lock.json" ]]; then
+  FIND_INPUTS+=("$DIR/package-lock.json")
+  MANIFEST_INPUTS+=("$DIR/package-lock.json")
+fi
+
 if [[ ! -f "$DIST" ]]; then
   NEEDS_BUILD=true
   NEEDS_INSTALL=true
   BUILD_REASON="$DIST missing"
-elif find "$DIR/src" "$DIR/package.json" "$DIR/package-lock.json" \
+elif find "${FIND_INPUTS[@]}" \
     -newer "$DIST" -print -quit 2>/dev/null | grep -q .; then
   NEEDS_BUILD=true
   BUILD_REASON="$DIST older than src/ or package files (stale bundle)"
@@ -39,7 +51,7 @@ if [[ ! -d "$DIR/node_modules" ]]; then
   NEEDS_INSTALL=true
   NEEDS_BUILD=true
   [[ -n "$BUILD_REASON" ]] || BUILD_REASON="node_modules missing"
-elif [[ -f "$DIST" ]] && find "$DIR/package.json" "$DIR/package-lock.json" \
+elif [[ -f "$DIST" ]] && find "${MANIFEST_INPUTS[@]}" \
     -newer "$DIST" -print -quit 2>/dev/null | grep -q .; then
   NEEDS_INSTALL=true
 fi

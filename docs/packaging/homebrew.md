@@ -94,8 +94,10 @@ set, so the app runs as a background agent — no Dock icon, no menu bar.
 
 Same canonical service, never a second daemon: the app registers the same
 `~/Library/LaunchAgents/com.nanodictate.agent.plist` via `nanodictate start`
-(label `com.nanodictate.agent`). Installing both the formula and the cask is
-safe — the last installer just re-writes the same file.
+(label `com.nanodictate.agent`). Install **either** the formula **or** the
+cask — **not both**: both link the `nanodictate` binary into
+`$(brew --prefix)/bin`, so the second install fails on the conflicting file.
+Uninstall one before installing the other.
 
 **Quarantine:** the cask's `postflight` runs
 `xattr -dr com.apple.quarantine` on the installed bundle, so the self-signed

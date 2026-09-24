@@ -15,7 +15,8 @@ macOS dictation agent — with a stable code signature so macOS keeps the
 
 macOS stores Accessibility / Microphone grants keyed to the binary's code
 signature — its **designated requirement**, derived by `codesign` from the
-signing identity, bundle identifier and entitlements. Two rebuilds signed
+signing certificate and the bundle identifier (entitlements are **not** part
+of the designated requirement). Two rebuilds signed
 ad-hoc (or with a different identity) produce two different designated
 requirements → the grants silently reset and the agent stops working until
 the user re-grants permissions in System Settings.
@@ -29,7 +30,7 @@ The fix, applied by `dictation_sign` / `dictation_deploy`:
 3. `codesign --force --sign "NanoDictate Code Signing" --entitlements <file>
    --options runtime --identifier <bundle-id> <binary>`.
 
-The same identity + same entitlements + same identifier keep the designated
+The same signing certificate + the same identifier keep the designated
 requirement stable, so the grants survive rebuilds. The cdhash (code
 directory hash) itself **does change** across rebuilds — normal and expected,
 not a sign of instability; the grants are preserved because the designated

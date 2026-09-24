@@ -11,6 +11,8 @@ reviews:
   # CodeRabbit caps at 100 files/run; this PR carries 134 — partition workaround (run A: everything except Tests/**).
   path_filters:
     - "!Tests/**"
+    - "!CHANGELOG.md"
+    - "!Package.resolved"
   # Auto-review starts only after the review-ready label is applied; the label workflow (add-review-label.yml) applies it after CI passes.
   auto_review:
     enabled: false
@@ -31,9 +33,6 @@ reviews:
       instructions: |
         Tests are a plain executable Swift package (no .xctest bundle): runner is Tests/NanoDictateCoreTests/main.swift executed via `swift run NanoDictateCoreTests`.
         New behavior must be covered by tests in that suite.
-  exclude_files:
-    - CHANGELOG.md
-    - Package.resolved
   tools:
     gitleaks:
       enabled: true

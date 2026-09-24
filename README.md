@@ -78,7 +78,7 @@ if [ -e "$P" ] || [ -L "$P" ]; then
 fi
 git clone https://github.com/kodmial/macports-nanodictate "$P"
 chown -R root:admin "$P"
-grep -qxF "$S" "$C" || { grep -qF "[default]" "$C" && sed -i "" "/\[default\]/i\\
+grep -qxF "$S" "$C" || { grep -qE '^[^#].*\[default\]' "$C" && sed -i "" "/^[^#].*\[default\]/i\\
 $S
 " "$C" || echo "$S" >> "$C"; }
 if [ "$USER_CONF" = 1 ]; then chown "$U" "$C"; fi

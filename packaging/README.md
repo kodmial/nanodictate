@@ -112,9 +112,8 @@ generated files get concrete values.
   `homebrew.mxcl.*`) — one daemon regardless of install method or order, the
   second manager takes over. On binary path change (e.g. after an upgrade)
   the CLI prints a TCC re-grant hint.
-- **Version flag.** `nanodictate --version` prints `nanodictate 0.1.0` and
-  lands together with the 0.0.2 release; the formula `test do` block depends
-  on it.
+- **Version flag.** `nanodictate --version` prints `nanodictate <VERSION>`;
+  the formula `test do` block depends on it.
 
 ## TODO
 

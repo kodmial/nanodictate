@@ -15,9 +15,10 @@
 # there is exactly ONE daemon behind one canonical LaunchAgent plist with the
 # single label com.nanodictate.agent — the same ~/Library/LaunchAgents/
 # com.nanodictate.agent.plist that `nanodictate start`, `brew services start`
-# and the MacPorts port's post-activate write. Installing the
-# cask over the formula is safe (idempotent re-registration, never a second
-# daemon); the last installer simply re-writes the same canonical file.
+# and the MacPorts port's post-activate write. Install either the formula or
+# the cask, not both — each links `nanodictate` into $(brew --prefix)/bin, and
+# the second installer fails on the existing symlink. Uninstall one before
+# installing the other.
 #
 # postflight_steps + quarantine: the release binaries are self-signed with the
 # NanoDictate CI Signing identity — no Developer ID, no notarization. A .app

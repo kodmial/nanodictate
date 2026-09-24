@@ -424,7 +424,7 @@ func restartAgentIfNeeded(_ args: [String]) -> Int32 {
   }
   let msg = result.kickError.isEmpty ? result.bootstrapError : result.kickError
   eprint(String(format: L10n.tr("cli.provider.kickfail"), msg.isEmpty ? result.loadError : msg))
-  return 0
+  return 1
 }
 
 func providerStatus() -> Int32 {

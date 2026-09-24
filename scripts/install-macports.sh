@@ -194,11 +194,13 @@ echo "==> эффективный sources.conf: $C"
 if grep -qxF "$S" "$C" 2>/dev/null; then
   echo "==> источник уже прописан: $S"
 else
-  if grep -qF '[default]' "$C" 2>/dev/null; then
+  if grep -qE '^[^#].*\[default\]' "$C" 2>/dev/null; then
     # BSD sed: вставить источник ПЕРЕД строкой [default] — первое совпадение
-    # побеждает, наше дерево затеняет rsync-источник.
+    # побеждает, наше дерево затеняет rsync-источник. Матчим ТОЛЬКО
+    # незакомментированную строку [default]: комментарий stock-конфига с
+    # упоминанием [default] не должен дублировать источник.
     echo "==> вставляю источник перед [default] в $C"
-    sed -i "" "/\[default\]/i\\
+    sed -i "" "/^[^#].*\[default\]/i\\
 $S
 " "$C"
   else
