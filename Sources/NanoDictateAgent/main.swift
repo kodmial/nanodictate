@@ -1997,9 +1997,14 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     if isDebug {
       Logger.log("overlay hide scheduled after \(seconds) s, reason=\(reason)", level: "debug")
     }
+    // The delayed hide belongs to the dictation cycle that scheduled it:
+    // if a new cycle started before the timer fires, this hide is stale —
+    // the new cycle's own terminal point will schedule its hide.
+    let cycle = startSession
     OverlayLifecycle.scheduleHide(
       after: seconds,
       stateProvider: { [weak self] in self?.state ?? .idle },
+      isCurrentCycle: { [weak self] in self?.startSession == cycle },
       hide: { [weak self] in
         self?.overlay.hide(reason: reason)
       }

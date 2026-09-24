@@ -6,7 +6,10 @@ import NanoDictateCore
 /// Runs a subcommand through this same binary (reuses cmdStart/cmdStop
 /// without duplication), returning its printable output in one line.
 func runSelfCommand(_ command: String, _ arguments: [String] = []) -> String {
-  let exe = CommandLine.arguments.first ?? ""
+  // Self-invocation: prefer this binary's resolved executable URL — argv[0]
+  // may be a bare name found through $PATH, which runProcess cannot launch
+  // reliably. Fall back to argv[0] only when the URL is unavailable.
+  let exe = Bundle.main.executableURL?.path ?? (CommandLine.arguments.first ?? "")
   let result = runProcess(exe, [command] + arguments)
   let out = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
   if !out.isEmpty {

@@ -129,8 +129,10 @@ public struct ChunkedPipeline {
     let raw = Self.dedupeOverlap(text: result.text, words: result.words, overlapSeconds: overlap)
     let text = TextRefinement.finalize(raw)
     var insertText = text
-    // F2: space between segments, else adjacent chunk words merge.
-    if index > 0, !insertedText.isEmpty, !insertedText.hasSuffix(" ") {
+    // F2: space between segments, else adjacent chunk words merge. Empty or
+    // whitespace-only final text inserts NO stray space (finalize already
+    // trimmed; live path handleLiveSegment consumes insertText as is).
+    if index > 0, !insertedText.isEmpty, !insertedText.hasSuffix(" "), !text.isEmpty {
       insertText = " " + text
     }
     return (insertText, text)

@@ -251,6 +251,21 @@ final class RecognitionLabelTests: XCTestCase {
         XCTAssertEqual(RecognitionLabel.forSession(config), "cookie-relay→gigaam · gigaam-v3")
     }
 
+    // MARK: - route(): только cookie-relay ведёт через реле
+
+    @objc func testRoute_NonCookieTransportIsDirect() {
+        XCTAssertEqual(RecognitionLabel.route(transport: "http://example.test"), .direct,
+                       "http-транспорт — прямой запрос, не реле")
+        XCTAssertEqual(RecognitionLabel.route(transport: "gateway"), .direct)
+        XCTAssertEqual(RecognitionLabel.route(transport: "direct"), .direct)
+    }
+
+    @objc func testRoute_CookieRelayTrimsToRelay() {
+        XCTAssertEqual(RecognitionLabel.route(transport: "cookie-relay"), .relay("cookie-relay"))
+        XCTAssertEqual(RecognitionLabel.route(transport: "  cookie-relay  "), .relay("cookie-relay"),
+                       "cookie-relay с пробелами тримится до канонического значения")
+    }
+
     // MARK: - Примитивы построителя
 
     // displayProviderName/serverName removed: dead prod code (not in

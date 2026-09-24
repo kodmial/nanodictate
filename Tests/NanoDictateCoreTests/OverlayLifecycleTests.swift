@@ -61,6 +61,39 @@ final class OverlayLifecycleTests: XCTestCase {
         XCTAssertEqual(hideCount, 0, "Новый цикл записи не должен дать скрыть оверлей")
     }
 
+    // MARK: - scheduleHide: привязка к циклу (isCurrentCycle)
+
+    /// isCurrentCycle=false (таймер чужого, уже завершённого цикла):
+    /// hide отбрасывается — панель остаётся видимой для нового цикла.
+    @objc func testScheduleHide_Skipped_WhenCycleNotCurrent() {
+        var hideCount = 0
+        OverlayLifecycle.scheduleHide(
+            after: 0.05,
+            stateProvider: { .idle },
+            isCurrentCycle: { false }
+        ) {
+            hideCount += 1
+        }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        XCTAssertEqual(hideCount, 0, "hide не должен сработать, если цикл-планировщик уже не текущий")
+    }
+
+    /// isCurrentCycle=true: hide срабатывает как раньше (дефолт { true }).
+    @objc func testScheduleHide_Fires_WhenCycleCurrent() {
+        var hideCount = 0
+        let fired = expectation(description: "hide должен сработать")
+        OverlayLifecycle.scheduleHide(
+            after: 0.05,
+            stateProvider: { .idle },
+            isCurrentCycle: { true }
+        ) {
+            hideCount += 1
+            fired.fulfill()
+        }
+        wait(for: [fired], timeout: 1.0)
+        XCTAssertEqual(hideCount, 1)
+    }
+
     // MARK: - Терминальные точки (структура main.swift)
 
     /// Каждая прямая терминальная точка (mic denied, insert done, transcription

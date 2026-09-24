@@ -26,13 +26,14 @@
 # ("damaged"/"unidentified developer"). Homebrew's own curl does not set the
 # attribute, but a browser-downloaded zip (or a brew that stamps it) would
 # break first launch, so the postflight block strips it from the installed
-# bundle. Homebrew's `app` stanza symlinks the bundle into /Applications while
-# keeping it in the staged location, so the block clears the quarantine
-# attribute through the #{appdir}/NanoDictate.app symlink (legacy `postflight`
-# still works for third-party taps; structured `postflight_steps` is required
-# for official taps only). `xattr -dr` exits 0 even when nothing is quarantined
-# (verified on macOS), so the step is a safe no-op on a clean brew-cached
-# download.
+# bundle. Homebrew's `app` stanza MOVES the bundle into appdir
+# (Artifact::App < Artifact::Moved: no staged symlink is kept), so by the time
+# the postflight block runs, the bundle exists only at #{appdir}/NanoDictate.app
+# and the block clears the quarantine attribute on that installed bundle
+# (legacy `postflight` still works for third-party taps; structured
+# `postflight_steps` is required for official taps only). `xattr -dr` exits 0
+# even when nothing is quarantined (verified on macOS), so the step is a safe
+# no-op on a clean brew-cached download.
 
 cask "nanodictate" do
   version "__VERSION__"
@@ -59,13 +60,17 @@ cask "nanodictate" do
   depends_on :macos
 
   app "NanoDictate.app"
-  binary "NanoDictate.app/Contents/MacOS/nanodictate"
+  # `app` MOVES the bundle to appdir BEFORE the binary link phase (artifact
+  # install order: the App group precedes the Binary group), so the executable
+  # source must resolve to the installed location — a staged-relative path
+  # would no longer exist when the binary's symlink is created.
+  binary "#{appdir}/NanoDictate.app/Contents/MacOS/nanodictate"
 
   postflight do
-    # Homebrew's `app` stanza symlinks the bundle into /Applications while
-    # keeping it in the staged location — clear the quarantine attribute on
-    # the symlink target (the staged bundle) so Gatekeeper lets it open.
-    # Exit 0 on a clean tree, so this never fails a cask install.
+    # The `app` stanza moved the bundle into appdir — clear the quarantine
+    # attribute on the installed bundle at #{appdir}/NanoDictate.app so
+    # Gatekeeper lets it open. Exit 0 on a clean tree, so this never fails a
+    # cask install.
     system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{appdir}/NanoDictate.app"]
   end
 

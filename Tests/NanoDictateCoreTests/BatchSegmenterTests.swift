@@ -219,4 +219,22 @@ final class BatchSegmenterTests: XCTestCase {
                        "boundary == bodyStart отклоняется — тело сохраняется целиком (fail-closed)")
         XCTAssertEqual(specs[0].bodyRange, 0..<1, "spec не пуст: bodyRange шириной 1 сэмпл")
     }
+
+    // MARK: WAV-заголовок: стерео отсекается (моно-only)
+
+    @objc func testStereoWAVRejectedAsInvalid() throws {
+        var wav = WAVEncoder.encode(samples: [Int16](repeating: 100, count: 1600))
+        // fmt-чанк: numChannels (Int16 LE) на смещении 22 — патчим в 2 (стерео).
+        wav.replaceSubrange(22..<24, with: [2, 0])
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dct-test-stereo-\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try wav.write(to: url)
+
+        XCTAssertThrowsError(try WAVFilePCMBatchContent(wavURL: url)) { error in
+            XCTAssertEqual(error as? WAVFilePCMBatchContent.WAVFileError, .invalidWAV,
+                           "стерео WAV должен отклоняться stereo-guard'ом")
+        }
+    }
 }

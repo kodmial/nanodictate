@@ -22,13 +22,18 @@ public enum OverlayLifecycle {
   }
 
   /// Hide after delay, re-checking state at fire: new cycle keeps overlay visible.
+  /// `isCurrentCycle` ties the delayed hide to the dictation cycle that scheduled
+  /// it — if a new cycle began meanwhile, the stale hide is dropped (the new
+  /// cycle's own terminal point schedules its hide with its own delay).
   /// Contract: one schedule → at most one `hide()`.
   public static func scheduleHide(
     after delay: TimeInterval,
     stateProvider: @escaping () -> NanoDictateState,
+    isCurrentCycle: @escaping () -> Bool = { true },
     hide: @escaping () -> Void
   ) {
     DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+      guard isCurrentCycle() else { return }
       if shouldHide(currentState: stateProvider()) {
         hide()
       }

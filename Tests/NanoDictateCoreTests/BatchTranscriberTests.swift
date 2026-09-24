@@ -512,6 +512,66 @@ final class BatchTranscriberTests: XCTestCase {
         XCTAssertEqual(outcome.text, "текст 0 текст 1 \(BatchTranscriber.placeholder)")
     }
 
+    // MARK: Auth-ошибки (401/403): abort вместо плейсхолдера + isResolved
+
+    @objc func testRunSequentialAuthErrorAbortsInsteadOfPlaceholder() throws {
+        let samples = tone(8, sampleRate: 1000)
+        for status in [401, 403] {
+            do {
+                _ = try runAsync {
+                    try await BatchTranscriber.run(
+                        samples: samples, sampleRate: 1000, maxSegment: 2, overlap: 0.5,
+                        providerID: "gigaam", sourceFile: "x.wav",
+                        sendOne: { _, _, _, _ in
+                            throw BatchHTTPError.http(status, message: "auth \(status)", retryAfter: nil)
+                        },
+                        delay: { _ in try await self.instantDelay(0) }
+                    )
+                }
+                XCTFail("status \(status): последовательный прогон должен оборваться, а не плейсхолдер")
+            } catch let error as BatchHTTPError {
+                XCTAssertEqual(error.kind, .http)
+                XCTAssertEqual(error.status, status)
+            } catch {
+                XCTFail("неожиданная ошибка: \(error)")
+            }
+        }
+    }
+
+    @objc func testRunParallelAuthErrorAbortsInsteadOfPlaceholder() throws {
+        let samples = tone(8, sampleRate: 1000)
+        for status in [401, 403] {
+            do {
+                _ = try runAsync {
+                    try await BatchTranscriber.run(
+                        samples: samples, sampleRate: 1000, maxSegment: 2, overlap: 0.5,
+                        providerID: "gigaam", sourceFile: "x.wav",
+                        sendOne: { _, _, _, _ in
+                            throw BatchHTTPError.http(status, message: "auth \(status)", retryAfter: nil)
+                        },
+                        delay: { _ in try await self.instantDelay(0) },
+                        maxConcurrent: 2
+                    )
+                }
+                XCTFail("status \(status): параллельный прогон должен оборваться, а не плейсхолдер")
+            } catch let error as BatchHTTPError {
+                XCTAssertEqual(error.kind, .http)
+                XCTAssertEqual(error.status, status)
+            } catch {
+                XCTFail("неожиданная ошибка: \(error)")
+            }
+        }
+    }
+
+    @objc func testIsResolvedOnlyForOKStatus() {
+        XCTAssertTrue(BatchSegmentRecord(index: 0, bodyStart: 0, bodyEnd: 1,
+                                         status: BatchSegmentRecord.statusOK, text: "ok").isResolved)
+        XCTAssertFalse(BatchSegmentRecord(index: 1, bodyStart: 1, bodyEnd: 2,
+                                          status: BatchSegmentRecord.statusSkipped,
+                                          text: BatchTranscriber.placeholder).isResolved,
+                       "skipped-чанк должен оставаться неразрешённым для --resume")
+    }
+
     // MARK: Resume c чужим sourceFile ([1]: sourceFile участвует в валидации)
 
     @objc func testResumeIgnoresCheckpointOfDifferentSourceFile() throws {

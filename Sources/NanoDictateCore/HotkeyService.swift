@@ -129,14 +129,18 @@ public final class HotkeyService {
   }
 
   private func handleEvent(type: CGEventType, event: CGEvent) {
-    // Re-enable tap if it gets disabled by the system (timeout)
+    // Re-enable tap only if the SYSTEM disabled it (watchdog timeout);
+    // .tapDisabledByUserInput means our own stop() already turned it off —
+    // re-enabling would resurrect a stopped tap. Logging kept for both.
     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-      if let tap = eventTap {
+      if type == .tapDisabledByTimeout, let tap = eventTap {
         CGEvent.tapEnable(tap: tap, enable: true)
-      }
-      if isDebug {
-        let reason = type == .tapDisabledByTimeout ? "timeout" : "user input"
-        Logger.log("event tap re-enabled after \(reason)", level: "debug")
+        if isDebug {
+          Logger.log("event tap re-enabled after timeout", level: "debug")
+        }
+      } else if isDebug {
+        // own stop() disabled it — re-enabling would resurrect a stopped tap
+        Logger.log("event tap not re-enabled after user input; restore on agent restart", level: "debug")
       }
       return
     }

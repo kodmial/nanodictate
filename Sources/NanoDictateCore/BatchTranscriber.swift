@@ -150,7 +150,9 @@ public struct BatchSegmentRecord: Codable, Equatable {
   }
 
   public var isResolved: Bool {
-    status == Self.statusOK || status == Self.statusSkipped
+    // Skipped chunks must stay unresolved: on --resume they are retried,
+    // not seeded with the "[…]" placeholder (a wrong key made them skipped).
+    status == Self.statusOK
   }
 }
 
@@ -179,7 +181,7 @@ public struct BatchCheckpoint: Codable, Equatable {
     self.segments = segments
   }
 
-  /// Запись чанка (по ключу — index), если он уже разрешён (ok/skipped).
+  /// Запись чанка (по ключу — index), если он уже разрешён (ok only).
   /// Ищем по полю index, а не по позиции в массиве: в "рваной" контрольной
   /// точке разрешённые чанки могут идти не подряд (пропуски) — позиция в
   /// массиве не обязана совпадать с номером чанка.
@@ -691,6 +693,14 @@ public enum BatchTranscriber {
         if Task.isCancelled {
           throw CancellationError()
         }
+        if let httpError = error as? BatchHTTPError, httpError.kind == .http,
+          httpError.status == 401 || httpError.status == 403
+        {  // swiftlint:disable:this opening_brace
+          // Auth errors are non-retryable and mean a bad key/config — abort
+          // the run instead of skipping every chunk: the checkpoint keeps
+          // the chunk unresolved so --resume retries it after the key is fixed.
+          throw httpError
+        }
         text = Self.placeholder
         status = BatchSegmentRecord.statusSkipped
       }
@@ -796,6 +806,13 @@ public enum BatchTranscriber {
             } catch {
               if Task.isCancelled {
                 throw CancellationError()
+              }
+              if let httpError = error as? BatchHTTPError, httpError.kind == .http,
+                httpError.status == 401 || httpError.status == 403
+              {  // swiftlint:disable:this opening_brace
+                // Same as sequential: abort on auth errors, keep the chunk
+                // unresolved in the checkpoint for --resume.
+                throw httpError
               }
               text = Self.placeholder
               status = BatchSegmentRecord.statusSkipped

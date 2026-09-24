@@ -24,11 +24,18 @@ fi
 cd "$repo_root" || exit 0
 
 # --- Список staged .swift-файлов (A=added, C=copied, M=modified, R=renamed) -
-files=$(git diff --cached --name-only --diff-filter=ACMR | grep '\.swift$' || true)
-if [[ -z "$files" ]]; then
+# git diff --cached -z отдаёт пути NUL-разделителями БЕЗ quotePath-экранирования
+# (обычный --name-only показывает не-ASCII имена как "\NNN..."): читаем сырые
+# пути и фильтруем по суффиксу, чтобы git show :./<f> линтил Swift-файлы с
+# не-ASCII именами как есть.
+file_array=()
+while IFS= read -r -d $'\0' f; do
+    [[ "$f" == *.swift ]] || continue
+    file_array+=("$f")
+done < <(git diff --cached -z --name-only --diff-filter=ACMR)
+if [[ ${#file_array[@]} -eq 0 ]]; then
     exit 0
 fi
-file_array=("${(@f)files}")
 
 blocked=0
 violated=()

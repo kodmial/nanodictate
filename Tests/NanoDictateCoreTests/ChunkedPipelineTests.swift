@@ -317,6 +317,37 @@ final class ChunkedPipelineTests: XCTestCase {
         XCTAssertEqual(third.insertText, "Три четыре.", "текст уже оканчивается пробелом — лишний не добавляется")
     }
 
+    /// Пустой/пробельный STT-текст сегмента: разделительный пробел НЕ
+    /// добавляется (ветка !text.isEmpty) — иначе от пустого чанка вставлялся
+    /// бы голый пробел, склеенный с предыдущим сегментом.
+    @objc func testRecognizeSegmentEmptyTextAddsNoSeparator() throws {
+        let emptyMock = MockSTT(results: [""])
+        let empty = try runAsync {
+            try await ChunkedPipeline.recognizeSegment(
+                samples: self.singleSegmentSamples(),
+                index: 1,
+                insertedText: "Один два.",
+                prompt: nil,
+                stt: { wav, filename, prompt in try await emptyMock.call(wav, filename, prompt) }
+            )
+        }
+        XCTAssertEqual(empty.insertText, "", "пустой текст — разделитель не добавляется")
+        XCTAssertEqual(empty.promptText, "")
+
+        let spacesMock = MockSTT(results: ["   "])
+        let spaces = try runAsync {
+            try await ChunkedPipeline.recognizeSegment(
+                samples: self.singleSegmentSamples(),
+                index: 2,
+                insertedText: "Один два.",
+                prompt: nil,
+                stt: { wav, filename, prompt in try await spacesMock.call(wav, filename, prompt) }
+            )
+        }
+        XCTAssertEqual(spaces.insertText, "", "пробельный текст (обрезан finalize) — разделитель не нужен")
+        XCTAssertEqual(spaces.promptText, "")
+    }
+
     /// finalize: финальный проход по ВСЕМУ WAV — по-словный diff с уже-вставленным
     /// текстом; заменяет хвост одним действием. При совпадении — ничего не делает.
     @objc func testFinalizeChangeAndNoop() throws {

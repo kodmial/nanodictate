@@ -131,16 +131,21 @@ public enum AgentScreen {
     "record cancelled",
     "record limit reached",  // hard limit — recording finalized
     "transcription inserted",
-    // swiftlint:disable:next trailing_comma
     "transcription failed",
+    "microphone unavailable",
+    "empty transcription result",
+    "transcription cancelled by review gate",
+    "chunked transcription cancelled by review gate",
   ]
 
   /// Recording active if after last "record start" no terminal event followed.
+  /// Exact suffix match: "record start timed out/ignored/recovery" and the
+  /// mic-permission line "(record start)" are NOT recording starts.
   public static func isRecordingActive(logLines: [String]) -> Bool {
     var lastStart = -1
     var lastEnd = -1
     for (index, line) in logLines.enumerated() {
-      if line.contains("record start") {
+      if line.hasSuffix("record start") {
         lastStart = index
       }
       if recordingEndMarkers.contains(where: { line.contains($0) }) {

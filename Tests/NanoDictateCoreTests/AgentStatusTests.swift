@@ -62,6 +62,27 @@ final class AgentStatusTests: XCTestCase {
         XCTAssertFalse(AgentScreen.isRecordingActive(logLines: ["mic denied"]))
     }
 
+    @objc func testRecordingInactiveAfterNewEndMarkers() {
+        XCTAssertFalse(AgentScreen.isRecordingActive(
+            logLines: ["record start", "microphone unavailable: boom"]
+        ))
+        XCTAssertFalse(AgentScreen.isRecordingActive(
+            logLines: ["record start", "empty transcription result — not inserted"]
+        ))
+        XCTAssertFalse(AgentScreen.isRecordingActive(
+            logLines: ["record start", "transcription cancelled by review gate"]
+        ))
+        XCTAssertFalse(AgentScreen.isRecordingActive(
+            logLines: ["record start", "chunked transcription cancelled by review gate"]
+        ))
+    }
+
+    @objc func testRecordingStartRequiresSuffixNotSubstring() {
+        XCTAssertFalse(AgentScreen.isRecordingActive(logLines: ["mic permission: authorized (record start)"]))
+        XCTAssertFalse(AgentScreen.isRecordingActive(logLines: ["record start ignored: already starting"]))
+        XCTAssertFalse(AgentScreen.isRecordingActive(logLines: ["record start timed out after 30 s"]))
+    }
+
     // MARK: - Ошибки в логе
 
     @objc func testHasErrorsDetectsErrorLevel() {

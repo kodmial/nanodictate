@@ -266,7 +266,7 @@ func cmdConfigSetKey(path: String, args: [String]) -> Int32 {
     try AppConfig.writeProviderKeyValue(
       providerID: providerID, key: "api_key", value: "\"\(value)\"", to: path)
   } catch {
-    eprint(String(format: L10n.tr("cli.config.writeerror"), providerID, "\(error)"))
+    eprint(String(format: L10n.tr("cli.config.writeerror"), path, "\(error)"))
     return 1
   }
   print(String(format: L10n.tr("cli.setkey.updated"), providerID, path))
@@ -331,7 +331,7 @@ func cmdConfig(_ args: [String]) -> Int32 {
     if !exists {
       print(String(format: L10n.tr("cli.config.missing"), path))
     }
-    print("active_provider: \(ProviderStore.activeProvider?.id ?? L10n.tr("cli.config.noset"))")
+    print("active_provider: \(config.activeProvider.isEmpty ? L10n.tr("cli.config.noset") : config.activeProvider)")
     print("base_url: \(config.baseURL)")
     print("model: \(config.model)")
     print("timeout_seconds: \(config.timeoutSeconds)")

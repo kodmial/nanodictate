@@ -90,6 +90,11 @@ public final class WAVFilePCMBatchContent: PCMBatchContent {
       guard let header = WAVDecoder.pcmHeader(in: prefix) else {
         throw WAVFileError.invalidWAV
       }
+      // readSamples читает 16-bit сэмплы плоским массивом — стерео WAV
+      // дал бы перемеженные каналы двойной длины вместо моно-аудио.
+      guard header.channels == 1 else {
+        throw WAVFileError.invalidWAV
+      }
       // readSamples обращается к произвольным окнам вплоть до
       // dataOffset+dataSize — весь объявленный payload обязан лежать в
       // файле. Усечённый WAV (pcmHeader видит только префикс, dataSize
