@@ -1598,35 +1598,35 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       case .cancel:
         // No insertion happened — extinguish the synthetic-Enter latch
         // (Enter-stop): a fresh Enter-stop must not hang waiting.
-        enterSendLatch.cancel()
-        overlay.resetPhase()
-        overlay.setStatus(L10n.tr("overlay.cancelled"))
-        hideAfter(0.8, reason: "review cancelled")
-        state = .idle
+        self.enterSendLatch.cancel()
+        self.overlay.resetPhase()
+        self.overlay.setStatus(L10n.tr("overlay.cancelled"))
+        self.hideAfter(0.8, reason: "review cancelled")
+        self.state = .idle
         Logger.log("transcription cancelled by review gate")
         return
       }
 
       // Text insertion by the chosen method (cgevent / clipboard) — the only
       // operation that undo below can roll back (lastInserted*).
-      Inserter.insert(text: text, method: insertMethod)
-      lastInsertedText = text
-      lastInsertedAt = CFAbsoluteTimeGetCurrent()
+      Inserter.insert(text: text, method: self.insertMethod)
+      self.lastInsertedText = text
+      self.lastInsertedAt = CFAbsoluteTimeGetCurrent()
 
       // UI+sound — only after the guaranteed insertion.
-      overlay.resetPhase()
-      overlay.setStatus(L10n.tr("overlay.finishing"))
-      sounds.playCompletionAfterInsert()
-      hideAfter(0.8, reason: "insert done")
-      state = .idle
+      self.overlay.resetPhase()
+      self.overlay.setStatus(L10n.tr("overlay.finishing"))
+      self.sounds.playCompletionAfterInsert()
+      self.hideAfter(0.8, reason: "insert done")
+      self.state = .idle
       Logger.log("transcription inserted (\(text.count) chars)")
       // Marker for `nanodictate last` (last recognized text) — persisted to
       // the mode-0600 state file, NOT into agent.log (CWE-532).
-      persistLastText(text)
+      self.persistLastText(text)
       // Enter-stop latch: exactly one synthetic Enter after the insertion.
       // state is already .idle — by posting time (~250 ms) the swallow
       // predicate returns false, the synthetic Return reaches the app.
-      postSyntheticReturnIfPending()
+      self.postSyntheticReturnIfPending()
     }
 
     if reviewBeforeInsert, hasInteractiveStdin {
