@@ -960,9 +960,15 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
     // temp checkpoints keyed "-2-"/"-5-"/"-10-" no longer match the new key
     // and are correctly ignored by resume — same policy as "-pause" above.
     let overlapKey = Int((options.overlap * 1000).rounded())
+    // maxSegment in the key is also encoded in milliseconds — Int(30.5) and
+    // Int(30) both truncated to 30, but 30500 and 30000 differ, so fractional
+    // second values get distinct checkpoint identities (same policy as
+    // overlap above). Old pre-fix temp checkpoints keyed "-30-" no longer
+    // match the new key and are correctly ignored by resume.
+    let maxSegmentKey = Int((options.maxSegment * 1000).rounded())
     let checkpointName =
       "nanodictate-batch-\(stableCheckpointStamp(inputURL.path))-\(provider.id)-"
-      + "\(Int(options.maxSegment))-\(overlapKey)\(pauseFactor).checkpoint.json"
+      + "\(maxSegmentKey)-\(overlapKey)\(pauseFactor).checkpoint.json"
     checkpointPath = fileManager.temporaryDirectory.appendingPathComponent(checkpointName).path
   }
   if options.resume, !fileManager.fileExists(atPath: checkpointPath) {

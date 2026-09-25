@@ -434,6 +434,11 @@ final class AudioServiceWedgeTests: XCTestCase {
     /// converter (format mismatch → convertOnce error → buffer dropped →
     /// corrupted/truncated audio). Guard-under-lock: stale start returns
     /// .failure(.engineSuperseded) WITHOUT writing, fresh converter intact.
+    /// The same lock + generation check gates the stale start's top-of-start
+    /// session reset (didLogFirstBuffer/limit/recordStartTime/collectedSamples/
+    /// rmsHistory/autoStopDetector/gain/live-VAD) — pre-fix it ran BEFORE any
+    /// guard and wiped the LIVE session's accumulation: the buffer emitted
+    /// before the stale start runs (buffer A below) must survive it.
     /// The stale start must also NOT tear down the live session at its TOP
     /// (tap-teardown gate by generation): `tapInstalled` belongs to the fresh
     /// engine — removing the tap + setRecording(false) would kill the live
@@ -489,6 +494,13 @@ final class AudioServiceWedgeTests: XCTestCase {
         }
         XCTAssertEqual(working.node.tapCount, 1, "свежий сеанс ставит свой tap")
 
+        // Buffer A accumulated in the LIVE session BEFORE the stale start runs.
+        // Pre-fix the stale start's top-of-start reset (collectedSamples=[] and
+        // friends) ran BEFORE the generation guard — it would WIPE this buffer;
+        // the stop() assert below (A+B both present) catches a regressed guard.
+        // The reset now runs only under the generation check (same lock).
+        working.node.emit(makeToneBuffer(engine: working))
+
         // Unblock the hung queue: start #1 finishes first (stale SUCCESS →
         // .engineSuperseded, see test above); then start #2 runs its
         // converter-assignment on the stale generation.
@@ -506,15 +518,16 @@ final class AudioServiceWedgeTests: XCTestCase {
             XCTFail("устаревший старт из очереди обязан дать .failure(.engineSuperseded), получили \(String(describing: staleResult))")
         }
 
-        // THE discriminator: fresh buffers AFTER the stale start's converter
-        // step. Pre-fix the stale write left the 48k converter in state — a
-        // 44.1k buffer cannot convert (convertOnce → nil) and is DROPPED:
+        // THE discriminator: buffer B emitted AFTER the stale start completed.
+        // Pre-fix the stale write left the 48k converter in state — a 44.1k
+        // buffer cannot convert (convertOnce → nil) and is DROPPED:
         // accumulation stops at ONE buffer. With the guard-under-lock the write
-        // never happened — converter_B intact, both buffers present.
-        working.node.emit(makeToneBuffer(engine: working))
+        // never happened — converter_B intact. The same guard now also protects
+        // session state: buffer A (accumulated before the stale start) survived
+        // its top-of-start reset — both buffers present.
         working.node.emit(makeToneBuffer(engine: working))
         let samples = service.stop()
-        XCTAssertGreaterThanOrEqual(samples.count, 2 * 1410, "конвертер живого сеанса не тронут — оба свежих буфера сконвертированы (\(samples.count))")
+        XCTAssertGreaterThanOrEqual(samples.count, 2 * 1410, "конвертер и состояние живого сеанса не тронуты — оба буфера (до и после stale-старта) сконвертированы (\(samples.count))")
         XCTAssertLessThanOrEqual(samples.count, 2 * 1560, "сэмплы не должны теряться или задваиваться (\(samples.count))")
 
         // Stale starts tore down THEIR engine — tap removed only by the two

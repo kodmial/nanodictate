@@ -362,21 +362,29 @@ public final class AudioService {
   > {
     // New session: clean buffers, clean limit (after forced stop or failure
     // branch). All state under lock — start runs on the engine queue,
-    // process/stop may read in parallel.
-    didLogFirstBuffer = false
-    limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
-    recordStartTime = CFAbsoluteTimeGetCurrent()
+    // process/stop may read in parallel. The WHOLE reset is gated by the
+    // generation check under the SAME lock: a stale start (queued behind a
+    // wedged engine, run after the swap) must not reset the live session —
+    // the swap advances the generation under this same lock, so the check
+    // and the reset form one atomic step. A stale start skips the reset and
+    // falls through to the generation gate after the converter setup, which
+    // tears down only its own (stale) engine.
     lock.lock()
-    collectedSamples = []
-    rmsHistory = []
-    limitStopScheduled = false
-    // Auto-stop latch — in the ledger (autoStop bit): a new session starts
-    // without "finalization already scheduled".
-    session.clearAutoStop()
-    autoStopDetector.reset()
-    gain.reset()  // new session — zero gain, no residue from the previous recording
-    liveLastCutIndex = 0
-    resetLiveVADLocked()
+    if isCurrentGeneration(startGeneration) {
+      didLogFirstBuffer = false
+      limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
+      recordStartTime = CFAbsoluteTimeGetCurrent()
+      collectedSamples = []
+      rmsHistory = []
+      limitStopScheduled = false
+      // Auto-stop latch — in the ledger (autoStop bit): a new session starts
+      // without "finalization already scheduled".
+      session.clearAutoStop()
+      autoStopDetector.reset()
+      gain.reset()  // new session — zero gain, no residue from the previous recording
+      liveLastCutIndex = 0
+      resetLiveVADLocked()
+    }
     lock.unlock()
 
     // Safe start from scratch: if the previous session left the engine with a

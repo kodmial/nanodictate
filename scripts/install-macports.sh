@@ -60,7 +60,7 @@ if [ "$EUID" -ne 0 ]; then
     # читается 0 байт), а sudo закрывает все файловые дескрипторы >= 3, так
     # что `sudo bash "$0"` не сработает. Скачиваем установщик заново во
     # временный файл и запускаем его под sudo.
-    STAGE="$(mktemp /tmp/install-macports.XXXXXX.sh)"
+    STAGE="$(mktemp /tmp/install-macports.XXXXXX)"
     # trap стоит до exec, но exec подменяет образ процесса и НЕ переносит
     # trap в новый процесс: этот trap живёт, только если curl-ветка выйдет
     # через exit (не exec). Для sudo-процесса путь передаётся через
