@@ -21,14 +21,16 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               state: 'open',
+              per_page: 100,
             });
-            // 'workflow_run' exposes run.head_branch = the BASE branch of the PR (e.g. "main"),
-            // not the PR head ref, and the REST 'head' param requires the strict "owner:ref"
-            // format. Passing a bare branch there never matches, so the list came back empty and
-            // no label was ever applied. List every open PR (no 'head' filter) and select the
-            // right ones in JS: same-repo head + non-draft.
+            // The REST 'head' param of pulls.list requires the strict "owner:ref" format;
+            // a bare ref never matches, so filtering by it returned an empty list and no
+            // label was ever applied. List every open PR (no 'head' filter) and select the
+            // right ones in JS: same-repo head + non-draft + the exact commit that was tested
+            // (run.head_sha), so a run for one PR can never touch another PR's label.
             const ours = prs.data.filter((pr) =>
               !pr.draft &&
+              pr.head.sha === run.head_sha &&
               pr.head.repo.full_name === context.repo.full_name
             );
             if (run.conclusion === 'success') {
