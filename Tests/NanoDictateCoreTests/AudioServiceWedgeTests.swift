@@ -562,3 +562,73 @@ final class AudioServiceWedgeTests: XCTestCase {
         return buffer
     }
 }
+
+/// Wedge fired from INSIDE installTap — вынесено в отдельный сьют, чтобы тело
+/// AudioServiceWedgeTests осталось в лимите type_body_length.
+
+final class AudioServiceInstallTapWedgeTests: XCTestCase {
+
+    /// Generation race in the TAP/RECORDING stage: a start that was already
+    /// past the converter guard (generation W still current) when the wedge
+    /// swaps the engine (W→W+1) from INSIDE installTap. The stale start must
+    /// NOT write setTapInstalled(true)/setRecording(true) into the NEW
+    /// generation's ledger. Unguarded, both writes land in W+1 and its terminal
+    /// branch (teardownEngineOnly) never resets the booleans — the ledger ends
+    /// isRecording==true at idle with no session, and a plain stop() would
+    /// tear down the fresh, never-started engine. Post-fix stop() is a no-op.
+    @objc func testStaleStartWedgeDuringInstallTapLeavesNewLedgerIdle() {
+        let stale = FakeEngine()
+        let working = FakeEngine()
+        var factoryCalls = 0
+        let service = AudioService(
+            logLevel: "info",
+            engine: stale,
+            makeEngine: {
+                factoryCalls += 1
+                return working
+            }
+        )
+        // Fire the wedge exactly inside installTap: after the converter guard
+        // passed (generation current) but before setTapInstalled/setRecording.
+        // replaceEngineAfterWedge tears the old engine down off the engine
+        // queue, so calling it from here cannot deadlock.
+        stale.node.onInstallTap = { [weak service] in service?.replaceEngineAfterWedge() }
+
+        var result: AudioStartResult?
+        service.start { startResult in
+            if result == nil {
+                result = startResult
+            }
+        }
+        XCTAssertTrue(
+            eventually { result != nil },
+            "устаревший старт обязан завершиться"
+        )
+        switch result {
+        case .failure(AudioServiceError.engineSuperseded)?:
+            break
+        default:
+            XCTFail("устаревший старт обязан дать .failure(.engineSuperseded), получили \(String(describing: result))")
+        }
+        XCTAssertEqual(factoryCalls, 1, "подмена создаёт ровно один свежий движок")
+
+        // THE invariant (synchronous discriminator): the stale start must NOT
+        // leave tapInstalled/isRecording set in the NEW generation. Start a
+        // REAL recording on the fresh engine — it must succeed AND must not
+        // spuriously tear the fresh engine down first. A leaked tapInstalled
+        // makes the fresh start's top-of-start (line ~400) run
+        // teardownOnEngineQueue on the fresh engine BEFORE installing its own
+        // tap → working.node.removeTapCount becomes 1. With the guards the leak
+        // never happens → removeTapCount stays 0 here.
+        guard case .success = runStart(service) else {
+            XCTFail("старт на свежем движке после устаревшего обязан пройти")
+            return
+        }
+        XCTAssertEqual(working.node.tapCount, 1, "свежий сеанс ставит свой единственный tap")
+        XCTAssertEqual(
+            working.node.removeTapCount, 0,
+            "устаревший старт не оставил tapInstalled/isRecording в новом поколении — свежий старт не разбирает свежий движок (removeTap=\(working.node.removeTapCount))"
+        )
+        _ = service.stop()
+    }
+}

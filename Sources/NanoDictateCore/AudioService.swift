@@ -524,7 +524,7 @@ public final class AudioService {
         self.process(buffer)
       }
     }
-    if failure == nil {
+    if failure == nil, isCurrentGeneration(startGeneration) {
       setTapInstalled(true)
     }
     if failure == nil, isDebug {
@@ -541,7 +541,9 @@ public final class AudioService {
     // isRecording set BEFORE engine.start(): the first buffer arriving right
     // after the audio stream starts must not be dropped.
     if failure == nil {
-      setRecording(true)
+      if isCurrentGeneration(startGeneration) {
+        setRecording(true)
+      }
       failure = guardedEngineCall {
         try engine.start()
       }

@@ -23,6 +23,7 @@ let suites: [XCTestCase.Type] = [
     AudioCaptureTests.self,
     AudioServiceLifecycleTests.self,
     AudioServiceWedgeTests.self,
+    AudioServiceInstallTapWedgeTests.self,
     AudioServiceVADTests.self,
     AudioServiceAuditFixTests.self,
     LoggerTests.self,
@@ -78,10 +79,10 @@ for cls in suites {
     defer { free(methods) }
 
     var testSelectors: [Selector] = []
-    for m in 0..<Int(methodCount) {
-        let name = String(cString: sel_getName(method_getName(methods[m])))
+    for methodIndex in 0..<Int(methodCount) {
+        let name = String(cString: sel_getName(method_getName(methods[methodIndex])))
         if name.hasPrefix("test") {
-            testSelectors.append(method_getName(methods[m]))
+            testSelectors.append(method_getName(methods[methodIndex]))
         }
     }
     // Deterministic order (class_copyMethodList is unsorted).
@@ -125,8 +126,8 @@ for cls in suites {
             passed += 1
         } else {
             failed.append("\(suiteName).\(selector)")
-            for f in failures {
-                print("  [FAIL] \(f)")
+            for failure in failures {
+                print("  [FAIL] \(failure)")
             }
         }
     }

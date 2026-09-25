@@ -10,6 +10,10 @@ import AudioEngineGuard
 final class FakeInputNode: AudioInputNodeLike {
     var format: AVAudioFormat
     var tapBlock: AVAudioNodeTapBlock?
+    /// Fired synchronously inside installTap (before tapCount grows) — lets a
+    /// test interleave `replaceEngineAfterWedge()` at the exact tap/recording
+    /// stage of a bring-up (the generation-race window). nil = no hook.
+    var onInstallTap: (() -> Void)?
     private(set) var tapCount = 0
     private(set) var removeTapCount = 0
 
@@ -32,6 +36,7 @@ final class FakeInputNode: AudioInputNodeLike {
         format: AVAudioFormat?,
         block tapBlock: @escaping AVAudioNodeTapBlock
     ) {
+        onInstallTap?()
         tapCount += 1
         self.tapBlock = tapBlock
     }
@@ -103,8 +108,8 @@ extension XCTestCase {
     func runStart(_ service: AudioService, file: StaticString = #file, line: UInt = #line) -> AudioStartResult {
         let done = expectation(description: "audio start completion")
         var result: AudioStartResult = .failure(AudioServiceError.engineGone)
-        service.start { r in
-            result = r
+        service.start { startResult in
+            result = startResult
             done.fulfill()
         }
         wait(for: [done], timeout: 5)
