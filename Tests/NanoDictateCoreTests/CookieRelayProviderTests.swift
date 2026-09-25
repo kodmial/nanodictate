@@ -451,31 +451,64 @@ final class CookieRelayProviderTests: XCTestCase {
     // MARK: - Отменённый caller refreshBlocking
 
     @objc func testRefreshBlockingCancelledCallerReturnsNilButKeepsSharedRefresh() {
-        let transport = CookieRelayMockTransport(challengeBody: challengeHTML)
-        let provider = makeProvider(transport: transport)
+        let transport = GatedChallengeTransport(challengeBody: challengeHTML)
+        let provider = CookieRelayProvider(
+            origin: "https://proxy.example.com",
+            transport: transport,
+            now: { Date() }
+        )
 
         runAsync("testCancelledCaller") {
-            // Отменённый caller: refreshBlocking() возвращает nil мгновенно
-            // (не блокирует группу на shared-пересчёте), НО refresh, который
-            // он стартовал, НЕ отменяется — другие caller'ы дожидаются его
-            // результата.
-            let cancelledCaller = Task { () -> String? in
-                // Детерминированно: ждём, пока cancel() применится к задаче,
-                // затем вызываем refreshBlocking уже в отменённом контексте.
-                for _ in 0..<10_000 {
-                    if Task.isCancelled { break }
-                    await Task.yield()
-                }
+            // Safety net: даже при падении ассерта отпустить refresh — никакой
+            // запаркованный таск не должен пережить тест (паттерн ReviewGate).
+            defer { transport.gate.open() }
+
+            // Shared refresh T1 стартует и ДЕТЕРМИНИРОВАННО остаётся in-flight:
+            // его первый send запаркован на гейте транспорта, поэтому T1 не может
+            // завершиться (clearInFlight не сработает), пока гейт закрыт.
+            // Этот (неотменённый) caller — создатель T1: присоединяться ему не
+            // нужно, гонки за startRefresh нет. Он просто ждёт T1.value.
+            let secondCaller = Task { () -> String? in
                 return await provider.refreshBlocking()
             }
-            cancelledCaller.cancel()
+            // requestCount инкрементится в начале send ДО гейта, поэтому >= 1
+            // означает: T1 дошёл до сети и запаркован на гейте (refreshInFlight=T1).
+            let entered = CFAbsoluteTimeGetCurrent() + 3
+            while transport.requestCount < 1 && CFAbsoluteTimeGetCurrent() < entered {
+                await Task.yield()
+            }
+
+            // Отменённый caller присоединяется к СУЩЕСТВУЮЩЕЙ T1 (startRefresh
+            // вернёт T1, т.к. он точно in-flight) и, увидев Task.isCancelled,
+            // мгновенно возвращает nil, НЕ отменяя T1.
+            //
+            // Детерминированный handshake отмены: caller сначала паркуется на
+            // OpenGate и НЕ входит в refreshBlocking. Тест вызывает cancel()
+            // (флаг отмены выставлен синхронно) и только потом open() — к моменту
+            // входа в refreshBlocking флаг отмены ГАРАНТИРОВАННО виден
+            // (happens-before через гейт), без гонки. Никаких спин-циклов/sleep.
+            let startGate = OpenGate()
+            let cancelledCaller = Task { () -> String? in
+                await startGate.waitForOpen()  // парковка до cancel()
+                return await provider.refreshBlocking()
+            }
+            cancelledCaller.cancel()            // выставляет флаг ДО open()
+            startGate.open()                    // отпускает уже отменённый caller
             let first = await cancelledCaller.value
             XCTAssertNil(first, "отменённый caller → nil, а не ожидание сети")
 
-            // Shared refresh жив: обычный caller получает результат ТОГО ЖЕ
-            // пересчёта (суммарно 2 запроса — дубль не запускался, task не был
-            // отменён).
-            let second = await provider.refreshBlocking()
+            // await cancelledCaller.value — ПОЛОЖИТЕЛЬНЫЙ наблюдаемый признак,
+            // что cancelledCaller уже выполнил startRefresh (присоединился к T1):
+            // value резолвится только ПОСЛЕ join + isCancelled-проверки. Значит join
+            // гарантированно произошёл ДО открытия гейта, и дублирующий T2
+            // невозможен (оба caller'а уже прошли свой startRefresh, никто новый
+            // refresh не стартует). Теперь можно открыть гейт — T1 доводит цикл
+            // до конца (2 запроса).
+            transport.gate.open()
+
+            // Второй caller получает результат ТОГО ЖЕ пересчёта
+            // (суммарно 2 запроса — дубль не запускался, task не был отменён).
+            let second = await secondCaller.value
             XCTAssertEqual(second, "__test=" + self.expectedCookie)
             XCTAssertEqual(transport.requestCount, 2,
                            "один общий пересчёт выжил после отмены первого caller'а")
