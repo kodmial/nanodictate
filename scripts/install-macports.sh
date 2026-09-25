@@ -137,7 +137,7 @@ PINDEX="$PREFIX_DIR/bin/portindex"
 # который только что синкнул шаг «Sync MacPorts port tree» (сгенерированный
 # релизный Portfile), либо на живой HEAD дерева (ls-remote) при повторном
 # запуске без синка — сохраняя exact-revision чекаут.
-PIN_REV="4c4ced254593e3865d9f6a8f99ab6c7a3c59f807"
+PIN_REV="d42eee308449cef5d1932fdaf03f3290b864db69"
 
 # owner_gate (CWE-829): before ANY root git command on the tree, the tree must
 # be fully root-owned. git under sudo trusts the tree of the SUDO_UID owner — it
