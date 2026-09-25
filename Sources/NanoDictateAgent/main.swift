@@ -1787,6 +1787,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             Logger.log("retry error ignored: nanodictate cycle active", level: "info")
             return
           }
+          self.overlay.show()
           self.overlay.resetPhase()
           let retryErrorText = networkText ?? Self.message(for: error)
           self.overlay.setStatus(
@@ -1851,17 +1852,24 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// Insertion continuation of retryInsertion: review decision (.insert) or
   /// immediate run when the gate is skipped.
   private func finishRetryInsertion(text: String, decision: ReviewGate.Decision) {
+    // Retry runs in .idle: the previous cycle's hideAfter already put the
+    // panel away, so the terminal status below needs an explicit show()
+    // (same contract as undoLastInsertion) — setStatus alone updates a hidden
+    // panel and the user would never see "Inserted"/"Cancelled".
     switch decision {
     case .insert:
       break
     case .cancel:
       enterSendLatch.cancel()
+      overlay.show()
+      overlay.resetPhase()
       overlay.setStatus(L10n.tr("overlay.retryCancelled"))
       hideAfter(0.8, reason: "retry review cancelled")
       Logger.log("retry cancelled by review gate")
       return
     }
     Inserter.insert(text: text, method: insertMethod)
+    overlay.show()
     overlay.resetPhase()
     overlay.setStatus(L10n.tr("overlay.retryInserted"))
     hideAfter(1.0, reason: "retry inserted")

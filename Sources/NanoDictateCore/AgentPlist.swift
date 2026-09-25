@@ -173,6 +173,33 @@ public enum AgentPlist {
     return args
   }
 
+  /// ProgramArguments of the plan launchd actually holds, parsed from the
+  /// `launchctl print <target>` dump. launchd keeps the in-memory plan from the
+  /// LAST successful bootstrap — rewriting the plist on disk does not touch
+  /// it, so this is the only truthful source of "what will kickstart run".
+  /// The block looks like:
+  ///     program = /path/NanoDictateAgent
+  ///     arguments = {
+  ///         /path/NanoDictateAgent
+  ///         --debug
+  ///     }
+  /// nil — no `arguments = {` block or an empty one (unreadable output,
+  /// service not loaded): the caller must treat the live plan as unknown.
+  public static func programArguments(fromLaunchctlPrint output: String) -> [String]? {
+    var inside = false
+    var args: [String] = []
+    for rawLine in output.split(separator: "\n", omittingEmptySubsequences: false) {
+      let line = rawLine.trimmingCharacters(in: .whitespaces)
+      if !inside {
+        if line == "arguments = {" { inside = true }
+        continue
+      }
+      if line == "}" { break }
+      if !line.isEmpty { args.append(line) }
+    }
+    return args.isEmpty ? nil : args
+  }
+
   /// Atomic plist write with 0600 perms (creates LaunchAgents dir).
   public static func writePlist(
     agentBinary: String,
@@ -211,6 +238,16 @@ public final class Launchctl {
   /// launchctl print — service loaded (status == 0)?
   public func isLoaded(target: String) -> Bool {
     return run("/bin/launchctl", ["print", target]).status == 0
+  }
+
+  /// ProgramArguments of the plan launchd holds in memory for the service
+  /// (not the plist on disk). nil — service not loaded, `print` failed, or
+  /// the arguments block is missing/empty in the dump: the live plan is
+  /// unknown and callers must fall back to the full bootout+bootstrap path.
+  public func loadedProgramArguments(target: String) -> [String]? {
+    let printed = run("/bin/launchctl", ["print", target])
+    guard printed.status == 0 else { return nil }
+    return AgentPlist.programArguments(fromLaunchctlPrint: printed.stdout)
   }
 
   /// launchctl bootout — unload under target; failure tolerable (service
@@ -358,11 +395,12 @@ public struct AgentInstaller {
   }
 
   /// Restart (provider change, config options, menu): canonical plist
-  /// rewritten, then kickstart -k. IMPORTANT: kickstart restarts service per
-  /// STALE in-memory launchd plan (ProgramArguments NOT re-read) — real
-  /// binary path change applies via fallback-install in this method, full
-  /// `nanodictate start`, or re-login. Service not loaded (kickstart failed)
-  /// — full install.
+  /// rewritten, then kickstart -k. kickstart restarts the service per the
+  /// STALE in-memory launchd plan (ProgramArguments NOT re-read from the
+  /// file), so the short path is taken only when BOTH the on-disk plist and
+  /// the live `launchctl print` plan equal the desired one; any mismatch
+  /// (including an unreadable dump) goes the full bootout+bootstrap path, as
+  /// does a failed kickstart (service not loaded) — full install.
   @discardableResult
   public func restart(
     agentBinary: String, flags: [String] = [], logPath: String
@@ -387,7 +425,19 @@ public struct AgentInstaller {
     // Any change in the launchd plan (binary, flags, log path) needs
     // bootout + bootstrap.
     let planChanged = previousData != Data(AgentPlist.plistContent(agentBinary: agentBinary, flags: flags, logPath: logPath).utf8)
-    if !planChanged {
+    // The disk plist is not the whole truth: launchd keeps in memory the plan
+    // it got at the LAST successful bootstrap — rewriting the file does not
+    // touch it. If a previous bootout failed (install() tolerates that), the
+    // file already looks right while launchd still runs the OLD arguments, and
+    // kickstart would restart the old binary yet still report registered. So
+    // the live plan from `launchctl print` decides as well; an unreadable dump
+    // (nil) counts as "not known to match" → full bootout+bootstrap.
+    // The print call is made only on the unchanged-disk-plan path.
+    let desiredArguments = [agentBinary] + flags
+    let livePlanMatches =
+      !planChanged
+      && launchctl.loadedProgramArguments(target: serviceTarget) == desiredArguments
+    if livePlanMatches {
       let kick = launchctl.kickstart(target: serviceTarget)
       if kick.status == 0 {
         result.registered = true

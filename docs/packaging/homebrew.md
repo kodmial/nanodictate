@@ -111,8 +111,11 @@ Uninstall one before installing the other.
 **Quarantine stays until you approve the app.** Nothing in this guide clears
 the `com.apple.quarantine` attribute for you, and the self-signed bundle is
 not notarized — so Gatekeeper may refuse it on first launch until you approve
-it deliberately (Right-click → Open, or System Settings → Privacy & Security).
-To run it unattended, clear the attribute by hand — a Gatekeeper workaround:
+it deliberately. On macOS 15 (Sequoia) and later, Control-click/Right-click →
+Open is no longer available: launch the app once (it is refused), then approve
+it in System Settings → Privacy & Security → "Open Anyway". On macOS 14 and
+older, Right-click → Open still works. To run it unattended, clear the
+attribute by hand — a Gatekeeper workaround:
 `xattr -dr com.apple.quarantine /Applications/NanoDictate.app`.
 
 **Uninstall:** `brew uninstall --cask nanodictate` removes the app only — not
@@ -204,12 +207,14 @@ first launch depends on how the binaries arrived:
 | Install path | Quarantine attribute | Gatekeeper |
 | --- | --- | --- |
 | Homebrew formula (downloads the release tarball) | none — Homebrew's curl does not set it | no prompt, runs as-is |
-| Homebrew cask (downloads the app-bundle zip) | kept until you approve the app (approve via Right-click → Open, or clear it manually — a Gatekeeper workaround) | prompts on first launch; approve once |
+| Homebrew cask (downloads the app-bundle zip) | kept until you approve the app (macOS 15+: launch once, then System Settings → Privacy & Security → "Open Anyway"; macOS 14 and older: Right-click → Open — or clear it manually, a Gatekeeper workaround) | prompts on first launch; approve once |
 | `curl` download from GitHub Releases | none | no prompt, runs as-is |
 | Browser download from GitHub Releases | `com.apple.quarantine` set | **blocked** — "developer cannot be verified" |
 
-If you downloaded the release binaries with a browser, clear the quarantine
-attribute once (or Right-click → Open):
+If you downloaded the release binaries with a browser, the executables carry
+the `com.apple.quarantine` attribute. Right-click → Open only applies to app
+bundles, so for these bare binaries the only route is a Gatekeeper
+workaround — clear the attribute once:
 
 ```sh
 xattr -dr com.apple.quarantine /path/to/NanoDictateAgent /path/to/nanodictate

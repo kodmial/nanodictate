@@ -94,8 +94,10 @@ generated files get concrete values.
   (Cask::Installer → Quarantine.propagate copies it from the downloaded zip
   into the staged path), so a plain `brew install --cask` puts the bundle on
   disk with the attribute — and Gatekeeper prompts on first launch of this
-  self-signed, non-notarized bundle. Approve it via Right-click → Open /
-  System Settings → Privacy & Security, or clear the attribute by hand with
+  self-signed, non-notarized bundle. On macOS 15 and later, launch it once
+  (it is refused), then approve it in System Settings → Privacy & Security →
+  "Open Anyway"; on macOS 14 and older, Right-click → Open still works. You
+  can also clear the attribute by hand with
   `xattr -dr com.apple.quarantine /Applications/NanoDictate.app`.
 - **TCC grants.** Microphone + Accessibility are granted manually per binary
   in System Settings (prompted on first use). Both paths install the same

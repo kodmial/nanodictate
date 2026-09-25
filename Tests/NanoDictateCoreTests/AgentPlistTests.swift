@@ -406,6 +406,63 @@ final class AgentPlistTests: XCTestCase {
     XCTAssertEqual(lc.serviceTarget, "gui/\(getuid())/com.nanodictate.agent")
   }
 
+  // MARK: - launchctl print: план, который реально держит launchd
+
+  /// Дамп `launchctl print` (реальный формат macOS) → ProgramArguments.
+  @objc func testProgramArgumentsFromLaunchctlPrint() {
+    let dump = """
+      com.nanodictate.agent = {
+      	active count = 1
+      	path = /Users/u/Library/LaunchAgents/com.nanodictate.agent.plist
+      	state = running
+
+      	program = /opt/homebrew/bin/NanoDictateAgent
+      	arguments = {
+      		/opt/homebrew/bin/NanoDictateAgent
+      		--debug
+      	}
+
+      	stdout path = /Users/u/Library/Logs/NanoDictate/agent.log
+      	domain = gui/501 [100004]
+      }
+      """
+    XCTAssertEqual(
+      AgentPlist.programArguments(fromLaunchctlPrint: dump),
+      ["/opt/homebrew/bin/NanoDictateAgent", "--debug"])
+  }
+
+  /// Нет блока arguments / блок пуст / пустой вывод → nil («план неизвестен»).
+  @objc func testProgramArgumentsFromLaunchctlPrintUnreadableIsNil() {
+    XCTAssertNil(AgentPlist.programArguments(fromLaunchctlPrint: ""))
+    XCTAssertNil(
+      AgentPlist.programArguments(fromLaunchctlPrint: "service not found"))
+    let noBlock = """
+      com.nanodictate.agent = {
+      \tstate = running
+      }
+      """
+    XCTAssertNil(AgentPlist.programArguments(fromLaunchctlPrint: noBlock))
+    let emptyBlock = """
+      com.nanodictate.agent = {
+      \targuments = {
+      \t}
+      }
+      """
+    XCTAssertNil(AgentPlist.programArguments(fromLaunchctlPrint: emptyBlock))
+  }
+
+  /// launchctl-обёртка: print с ненулевым статусом (сервис не загружен) → nil.
+  @objc func testLaunchctlLoadedProgramArgumentsNilWhenPrintFails() {
+    let mock = MockLaunchctl()
+    mock.printStatus = 1
+    mock.loadedArguments = ["/bin/agent"]
+    let lc = mock.makeLaunchctl()
+
+    XCTAssertNil(lc.loadedProgramArguments(target: "gui/501/com.nanodictate.agent"))
+    XCTAssertEqual(mock.calls.count, 1)
+    XCTAssertEqual(mock.calls.first?.1, ["print", "gui/501/com.nanodictate.agent"])
+  }
+
   // MARK: - install: полный takeover
 
   @objc func testInstallWriteThenBootoutThenBootstrap() throws {
@@ -524,18 +581,77 @@ final class AgentPlistTests: XCTestCase {
     let inst = installer(home: dir, mock: mock)
     _ = inst.install(agentBinary: "/bin/agent", logPath: "/tmp/l.log")
     mock.clear()
+    // launchd держит ровно желаемый план — короткий путь kickstart допустим.
+    mock.loadedArguments = ["/bin/agent"]
 
     let result = inst.restart(agentBinary: "/bin/agent", logPath: "/tmp/l.log")
 
     XCTAssertTrue(result.registered)
     XCTAssertFalse(result.binaryPathChanged)
-    XCTAssertEqual(mock.commandNames(), ["kickstart"])
+    XCTAssertEqual(mock.commandNames(), ["print", "kickstart"])
     XCTAssertEqual(AgentPlist.programArguments(fromPlistAt: inst.plistURL.path), ["/bin/agent"])
+  }
+
+  /// План на диске совпадает, но launchd держит СТАРЫЕ ProgramArguments
+  /// (bootout в install() мог не пройти) → kickstart перезапустил бы старый
+  /// бинарь: полный путь bootout+bootstrap.
+  @objc func testRestartTakesFullPathWhenLaunchdPlanDiffersFromDisk() throws {
+    let dir = try tmpDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let mock = MockLaunchctl()
+    let inst = installer(home: dir, mock: mock)
+    _ = inst.install(agentBinary: "/bin/agent", logPath: "/tmp/l.log")
+    mock.clear()
+    // Диск уже перезаписан restart-ом, launchd — нет (старый бинарь).
+    mock.loadedArguments = ["/old/agent"]
+
+    let result = inst.restart(agentBinary: "/bin/agent", logPath: "/tmp/l.log")
+
+    XCTAssertTrue(result.registered)
+    XCTAssertEqual(mock.commandNames(), ["print", "bootout", "bootstrap"])
+    XCTAssertFalse(mock.commandNames().contains("kickstart"))
+  }
+
+  /// `launchctl print` нечитаем (сервис не загружен / нет блока arguments) →
+  /// план launchd неизвестен → полный путь, а не оптимистичный kickstart.
+  @objc func testRestartTakesFullPathWhenLaunchdPlanUnreadable() throws {
+    let dir = try tmpDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let mock = MockLaunchctl()
+    let inst = installer(home: dir, mock: mock)
+    _ = inst.install(agentBinary: "/bin/agent", logPath: "/tmp/l.log")
+    mock.clear()
+    mock.printStatus = 1  // launchctl print падает
+    mock.loadedArguments = ["/bin/agent"]
+
+    let result = inst.restart(agentBinary: "/bin/agent", logPath: "/tmp/l.log")
+
+    XCTAssertTrue(result.registered)
+    XCTAssertEqual(mock.commandNames(), ["print", "bootout", "bootstrap"])
+    XCTAssertFalse(mock.commandNames().contains("kickstart"))
+  }
+
+  /// Флаги в живом плане launchd старые, хотя диск их уже не менял по этому
+  /// вызову (план launchd отстал по args) → полный путь.
+  @objc func testRestartTakesFullPathWhenLiveFlagsDiffer() throws {
+    let dir = try tmpDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let mock = MockLaunchctl()
+    let inst = installer(home: dir, mock: mock)
+    _ = inst.install(agentBinary: "/bin/agent", flags: ["--debug"], logPath: "/tmp/l.log")
+    mock.clear()
+    mock.loadedArguments = ["/bin/agent"]  // launchd без флага
+
+    let result = inst.restart(agentBinary: "/bin/agent", flags: ["--debug"], logPath: "/tmp/l.log")
+
+    XCTAssertTrue(result.registered)
+    XCTAssertEqual(mock.commandNames(), ["print", "bootout", "bootstrap"])
   }
 
   /// Kickstart fails on an unchanged plan → fallback to full install
   /// (bootout + bootstrap). Plan pre-written (install) so restart takes the
-  /// kickstart shortcut (planChanged == false) before the fallback.
+  /// kickstart shortcut (disk plan unchanged AND launchd plan matches) before
+  /// the fallback.
   @objc func testRestartFallsBackToFullInstallWhenKickstartFails() throws {
     let dir = try tmpDir()
     defer { try? FileManager.default.removeItem(at: dir) }
@@ -545,6 +661,7 @@ final class AgentPlistTests: XCTestCase {
     // planChanged == true and the kickstart shortcut is never reached.
     _ = inst.install(agentBinary: "/bin/agent", logPath: "/tmp/l.log")
     mock.clear()
+    mock.loadedArguments = ["/bin/agent"]
     mock.kickStatus = 1
     mock.stderr = "kickstart: no such process"
 
@@ -552,7 +669,7 @@ final class AgentPlistTests: XCTestCase {
 
     XCTAssertTrue(result.registered)
     XCTAssertFalse(result.kickError.isEmpty)
-    XCTAssertEqual(mock.commandNames(), ["kickstart", "bootout", "bootstrap"])
+    XCTAssertEqual(mock.commandNames(), ["print", "kickstart", "bootout", "bootstrap"])
   }
 
   /// Plan change (flags differ from on-disk plist) → full reinstall path
@@ -602,23 +719,58 @@ private final class MockLaunchctl {
   var printStatus: Int32 = 0
   var stderr = ""
   var calls: [(String, [String])] = []
+  /// Plan, который launchd якобы держит в памяти (ответ `launchctl print`);
+  /// nil — дамп без блока arguments (план неизвестен).
+  var loadedArguments: [String]?
 
   func clear() {
     calls.removeAll()
+  }
+
+  /// Дамп в реальном формате `launchctl print`.
+  private func printDump() -> String {
+    guard
+      let loadedArguments,
+      !loadedArguments.isEmpty
+    else {
+      return "com.nanodictate.agent = {\n\tstate = running\n}\n"
+    }
+    let argsBlock = loadedArguments.map { "\t\t\($0)" }.joined(separator: "\n")
+    return """
+      com.nanodictate.agent = {
+      \tstate = running
+
+      \tprogram = \(loadedArguments[0])
+      \targuments = {
+      \(argsBlock)
+      \t}
+      }
+      """
   }
 
   func makeLaunchctl() -> Launchctl {
     return Launchctl { [self] launchPath, args in
       calls.append((launchPath, args))
       let status: Int32
+      let stdout: String
       switch args.first {
-      case "bootout": status = bootoutStatus
-      case "bootstrap": status = bootstrapStatus
-      case "load": status = loadStatus
-      case "kickstart": status = kickStatus
-      default: status = printStatus
+      case "bootout":
+        status = bootoutStatus
+        stdout = ""
+      case "bootstrap":
+        status = bootstrapStatus
+        stdout = ""
+      case "load":
+        status = loadStatus
+        stdout = ""
+      case "kickstart":
+        status = kickStatus
+        stdout = ""
+      default:
+        status = printStatus
+        stdout = printStatus == 0 ? printDump() : ""
       }
-      return (status: status, stdout: "", stderr: stderr)
+      return (status: status, stdout: stdout, stderr: stderr)
     }
   }
 

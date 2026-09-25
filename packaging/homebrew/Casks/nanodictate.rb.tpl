@@ -29,11 +29,12 @@
 # path), so a plain `brew install --cask` puts the bundle on disk WITH the
 # attribute — and this cask has NO postflight step that would clear it.
 # Gatekeeper may therefore refuse the first launch of the self-signed,
-# non-notarized bundle; the user must approve the app themselves via
-# Right-click → Open / System Settings → Privacy & Security, or run
-# `xattr -dr com.apple.quarantine /Applications/NanoDictate.app` by hand
-# (see the "Signing and quarantine" section in docs/packaging/homebrew.md
-# for the rationale).
+# non-notarized bundle. On macOS 15 (Sequoia) and later, launch the app once
+# (it is refused), then approve it in System Settings → Privacy & Security →
+# "Open Anyway"; on macOS 14 and older, Right-click → Open still works. As an
+# alternative, clear the attribute by hand with `xattr -dr
+# com.apple.quarantine /Applications/NanoDictate.app` (see the "Signing and
+# quarantine" section in docs/packaging/homebrew.md for the rationale).
 
 cask "nanodictate" do
   version "__VERSION__"
@@ -75,9 +76,12 @@ cask "nanodictate" do
 
     Gatekeeper approval: Homebrew Cask keeps the com.apple.quarantine
     attribute on the downloaded bundle, and the app is self-signed and not
-    notarized — so macOS may refuse the first launch. Approve it once via
-    Right-click → Open (or System Settings → Privacy & Security), or clear
-    the attribute by hand with `xattr -dr com.apple.quarantine
+    notarized — so macOS may refuse the first launch. On macOS 15 (Sequoia)
+    and later, Control-click/Right-click → Open is no longer available:
+    launch the app once (it is refused), then approve it in System Settings
+    → Privacy & Security → "Open Anyway". On macOS 14 and older,
+    Right-click → Open still works. Either way you can clear the attribute
+    by hand with `xattr -dr com.apple.quarantine
     /Applications/NanoDictate.app`.
 
     The running binary registers the background agent itself — `nanodictate start`
