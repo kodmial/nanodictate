@@ -533,19 +533,47 @@ final class AgentPlistTests: XCTestCase {
     XCTAssertEqual(AgentPlist.programArguments(fromPlistAt: inst.plistURL.path), ["/bin/agent"])
   }
 
+  /// Kickstart fails on an unchanged plan → fallback to full install
+  /// (bootout + bootstrap). Plan pre-written (install) so restart takes the
+  /// kickstart shortcut (planChanged == false) before the fallback.
   @objc func testRestartFallsBackToFullInstallWhenKickstartFails() throws {
     let dir = try tmpDir()
     defer { try? FileManager.default.removeItem(at: dir) }
     let mock = MockLaunchctl()
+    let inst = installer(home: dir, mock: mock)
+    // The on-disk plan must match what restart() would generate — otherwise
+    // planChanged == true and the kickstart shortcut is never reached.
+    _ = inst.install(agentBinary: "/bin/agent", logPath: "/tmp/l.log")
+    mock.clear()
     mock.kickStatus = 1
     mock.stderr = "kickstart: no such process"
-    let inst = installer(home: dir, mock: mock)
 
     let result = inst.restart(agentBinary: "/bin/agent", logPath: "/tmp/l.log")
 
     XCTAssertTrue(result.registered)
     XCTAssertFalse(result.kickError.isEmpty)
     XCTAssertEqual(mock.commandNames(), ["kickstart", "bootout", "bootstrap"])
+  }
+
+  /// Plan change (flags differ from on-disk plist) → full reinstall path
+  /// (bootout + bootstrap); kickstart shortcut skipped (planChanged == true).
+  @objc func testRestartFlagsChangeTakesFullReinstallPath() throws {
+    let dir = try tmpDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let mock = MockLaunchctl()
+    let inst = installer(home: dir, mock: mock)
+    _ = inst.install(agentBinary: "/bin/agent", logPath: "/tmp/l.log")
+    mock.clear()
+
+    let result = inst.restart(agentBinary: "/bin/agent", flags: ["--debug"], logPath: "/tmp/l.log")
+
+    XCTAssertTrue(result.registered)
+    XCTAssertTrue(result.kickError.isEmpty)
+    XCTAssertEqual(mock.commandNames(), ["bootout", "bootstrap"])
+    XCTAssertFalse(mock.commandNames().contains("kickstart"))
+    XCTAssertEqual(
+      AgentPlist.programArguments(fromPlistAt: inst.plistURL.path),
+      ["/bin/agent", "--debug"])
   }
 
   @objc func testRestartReportsWriteError() throws {

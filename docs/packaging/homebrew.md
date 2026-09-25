@@ -255,6 +255,7 @@ Release drill for a new version (details in
    brew audit --cask --strict nanodictate   # in the tap repo (cask)
    brew style nanodictate                   # in the tap repo
    brew install kodmial/nanodictate/nanodictate # binary download, no build
+   brew uninstall nanodictate # release the formula link so the cask can link
    brew install --cask kodmial/nanodictate/nanodictate # app bundle, no build
    nanodictate --version                    # must print "nanodictate 0.1.0"
    ```

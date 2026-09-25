@@ -105,7 +105,9 @@ sections and options — see [config.example.toml](config.example.toml).
 ## Usage
 
 ```sh
-nanodictate start | stop | status
+nanodictate start
+nanodictate stop
+nanodictate status
 nanodictate config init           # recreate config from the bundled example
 nanodictate config set-key <id>   # set an API key interactively
 nanodictate provider use <id>     # switch active provider

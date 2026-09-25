@@ -652,7 +652,7 @@ func cmdTranscribe(_ args: [String]) -> Int32 {
       i += 2
       batchRequested = true
     case "--max-segment":
-      guard i + 1 < args.count, let value = Double(args[i + 1]), value > 0 else {
+      guard i + 1 < args.count, let value = Double(args[i + 1]), value.isFinite, value > 0, value <= 3600 else {
         eprint(L10n.tr("cli.flag.maxsegment"))
         return 1
       }
@@ -660,7 +660,7 @@ func cmdTranscribe(_ args: [String]) -> Int32 {
       i += 2
       batchRequested = true
     case "--overlap":
-      guard i + 1 < args.count, let value = Double(args[i + 1]), value >= 0 else {
+      guard i + 1 < args.count, let value = Double(args[i + 1]), value.isFinite, value >= 0, value <= 3600 else {
         eprint(L10n.tr("cli.flag.overlap"))
         return 1
       }

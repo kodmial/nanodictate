@@ -100,7 +100,7 @@ public final class WAVFilePCMBatchContent: PCMBatchContent {
       // файле. Усечённый WAV (pcmHeader видит только префикс, dataSize
       // мог бы быть огромным) дал бы пустые read-окна без ошибки — здесь
       // сверяем объявленный размер с фактической длиной и отсекаем.
-      let fileLength = handle.seekToEndOfFile()
+      let fileLength = try handle.seekToEnd()
       guard fileLength >= UInt64(header.dataOffset) + UInt64(header.dataSize) else {
         throw WAVFileError.invalidWAV
       }

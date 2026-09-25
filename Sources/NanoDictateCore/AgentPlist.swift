@@ -371,6 +371,7 @@ public struct AgentInstaller {
       fromPlistAt: plistURL.path, fileManager: fileManager)?.first
     var result = AgentInstallResult(
       binaryPathChanged: previous != nil && previous != agentBinary)
+    let previousData = fileManager.contents(atPath: plistURL.path)
     do {
       try AgentPlist.writePlist(
         agentBinary: agentBinary,
@@ -383,11 +384,10 @@ public struct AgentInstaller {
       return result
     }
 
-    // kickstart restarts per the STALE in-memory launchd plan (ProgramArguments
-    // NOT re-read): a real binary-path change must fail through to the
-    // bootout-and-bootstrap reinstall below, else launchd keeps running the
-    // old binary.
-    if !result.binaryPathChanged {
+    // Any change in the launchd plan (binary, flags, log path) needs
+    // bootout + bootstrap.
+    let planChanged = previousData != Data(AgentPlist.plistContent(agentBinary: agentBinary, flags: flags, logPath: logPath).utf8)
+    if !planChanged {
       let kick = launchctl.kickstart(target: serviceTarget)
       if kick.status == 0 {
         result.registered = true
