@@ -432,6 +432,10 @@ public final class Transcriber {
     request.httpBody = spec.bodyData
     request.setValue(spec.contentType, forHTTPHeaderField: "Content-Type")
     for (name, value) in spec.headers {
+      // An empty key must not produce "Bearer " with no token (same rule as BatchRequestBuilder).
+      if name == "Authorization", apiKey.isEmpty {
+        continue
+      }
       request.setValue(value, forHTTPHeaderField: name)
     }
     if !proxyKey.isEmpty {

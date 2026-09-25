@@ -1256,4 +1256,31 @@ final class TranscriberTests: XCTestCase {
         }
         XCTAssertEqual(transport.requestCount, 0, "без провайдера запрос не строится — HTTP-вызовов нет")
     }
+
+    // MARK: - NEW: пустой apiKey — Authorization не уходит в запрос
+
+    /// Пустой apiKey: адаптер строит в spec.headers «Authorization: Bearer \(apiKey)»
+    /// → «Bearer » без токена (planOpenAICompatible); transcribeViaAdapter скипает
+    /// такой заголовок — в исходящий запрос Authorization не попадает вовсе
+    /// (эталон — BatchRequestBuilder.makeRequest). Непустой ключ покрыт
+    /// testAuthorizationBearerHeader («Bearer my-secret-token»).
+    @objc func testEmptyApiKeyOmitsAuthorizationHeader() {
+        let transport = MockTransport(status: 200, body: Data(#"{"text":"x"}"#.utf8))
+        let transcriber = Transcriber(baseURL: "https://test.api/endpoint",
+                                      model: "m",
+                                      apiKey: "",
+                                      transport: transport,
+                                      networkChecker: { true },
+                                      adapterID: "gigaam")
+
+        runAsync("testEmptyApiKeyNoAuth") {
+            _ = try await transcriber.transcribe(wav: self.wavData)
+            guard let req = transport.lastRequest else {
+                XCTFail("No request")
+                return
+            }
+            XCTAssertNil(req.value(forHTTPHeaderField: "Authorization"),
+                         "пустой apiKey не должен давать «Bearer » без токена")
+        }
+    }
 }

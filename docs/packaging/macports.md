@@ -169,7 +169,11 @@ and RunAtLoad starts the daemon at the next login.
 
    ```sh
    mkdir -p ~/.config/nanodictate
-   install -m 600 "$(port prefix)/share/nanodictate/config.example.toml" ~/.config/nanodictate/config.toml
+   # create config.toml only if it does not exist yet — re-running overwrites
+   # your providers / API keys
+   if [ ! -e ~/.config/nanodictate/config.toml ]; then
+     install -m 600 "$(port prefix)/share/nanodictate/config.example.toml" ~/.config/nanodictate/config.toml
+   fi
    nanodictate config set-key <provider>   # or edit the file and set api_key
    nanodictate provider list
    ```

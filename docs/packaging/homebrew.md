@@ -157,9 +157,12 @@ Registration is explicit: `brew install` does not write the LaunchAgent;
 activate the service once with `brew services start nanodictate` — it runs as
 the user, writes the same canonical plist and loads gui/<uid> (`nanodictate
 start` is the equivalent, idempotent alternative). If the activation runs
-without a GUI session (e.g. over SSH) the bootstrap is skipped; the plist is
-still written (RunAtLoad starts the daemon at the next login) or re-run
-`brew services start nanodictate` in the GUI session.
+without a GUI session (e.g. over SSH) and the SSH user does not own
+/dev/console, Homebrew selects the user/<uid> launchd domain instead of
+gui/<uid> — the service is still bootstrapped, but into the wrong domain.
+Activate the agent from your GUI session (re-run `brew services start
+nanodictate` or `nanodictate start` there) so the service loads into
+gui/<uid> as expected.
 
 1. **TCC grants (required, manual).** In **System Settings → Privacy &
    Security** add the `NanoDictateAgent` binary to **Microphone** (recording)

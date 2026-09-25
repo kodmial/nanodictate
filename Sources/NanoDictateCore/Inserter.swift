@@ -34,6 +34,11 @@ public enum TextRefinement {
 public enum Inserter {
   /// Chunk size (chars/backspaces) between pauses (insert and undo).
   static let chunkSize = 16
+  /// Per-event ceiling for CGEventKeyboardSetUnicodeString: de-facto compat
+  /// limit ~20 UTF-16 units (enigo/espanso chunk at the same bound). Larger
+  /// sequences (emoji, ZWJ, flags, combining marks) get truncated by the
+  /// system — chunker below honors both limits.
+  private static let maxUTF16PerEvent = 20
   private static let delayUSec: useconds_t = 5000  // 5 ms
 
   /// Test hooks (internal, visible via @testable): replace side effects — sleep
@@ -68,25 +73,73 @@ public enum Inserter {
 
   // MARK: - Private
 
-  /// Common chunked path for insert/append.
+  /// Common chunked path for insert/append. Chunks honor BOTH per-event
+  /// ceilings: at most `chunkSize` graphemes AND at most `maxUTF16PerEvent`
+  /// UTF-16 units (single CGEventKeyboardSetUnicodeString call).
   private static func typeText(_ text: String) {
     guard !text.isEmpty else { return }
 
     let source = CGEventSource(stateID: .hidSystemState)
+    let chunks = chunkedForEvents(text)
 
-    let chars = Array(text)
-    var offset = 0
-
-    while offset < chars.count {
-      let end = min(offset + chunkSize, chars.count)
-      let chunk = String(chars[offset..<end])
+    for (index, chunk) in chunks.enumerated() {
       sendChunk(chunk, source: source)
-      offset = end
-
-      if offset < chars.count {
+      if index < chunks.count - 1 {
         sleepAWhile(delayUSec)
       }
     }
+  }
+
+  /// Split text into CGEvent-sized chunks (see typeText). Graphemes stay
+  /// whole while they fit both limits; a single grapheme larger than the
+  /// UTF-16 ceiling is cut at Unicode-scalar boundaries.
+  private static func chunkedForEvents(_ text: String) -> [String] {
+    var chunks: [String] = []
+    var current: [Character] = []
+    var currentUTF16 = 0
+
+    func flush() {
+      if !current.isEmpty {
+        chunks.append(String(current))
+        current = []
+        currentUTF16 = 0
+      }
+    }
+
+    for char in text {
+      let charUTF16 = String(char).utf16.count
+
+      if charUTF16 > maxUTF16PerEvent {
+        // Oversized grapheme (ZWJ emoji, flags, long combining chains):
+        // flush the current chunk, then cut the grapheme itself.
+        flush()
+        var scalarChunk = ""
+        var chunkUTF16 = 0
+        for scalar in char.unicodeScalars {
+          let unit = scalar.utf16.count
+          if chunkUTF16 + unit > maxUTF16PerEvent, !scalarChunk.isEmpty {
+            chunks.append(scalarChunk)
+            scalarChunk = ""
+            chunkUTF16 = 0
+          }
+          scalarChunk.unicodeScalars.append(scalar)
+          chunkUTF16 += unit
+        }
+        if !scalarChunk.isEmpty {
+          chunks.append(scalarChunk)
+        }
+      } else if current.count >= chunkSize || currentUTF16 + charUTF16 > maxUTF16PerEvent {
+        // Adding this grapheme would exceed one of the ceilings — next chunk.
+        flush()
+        current.append(char)
+        currentUTF16 = charUTF16
+      } else {
+        current.append(char)
+        currentUTF16 += charUTF16
+      }
+    }
+    flush()
+    return chunks
   }
 
   // MARK: - Откат (undo)

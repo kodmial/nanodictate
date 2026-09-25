@@ -288,13 +288,13 @@ private func logFileURL() -> URL {
 func readLogFile(maxLines: Int = 500) -> [String] {
   let url = logFileURL()
   guard let handle = try? FileHandle(forReadingFrom: url) else { return [] }
-  defer { handle.closeFile() }
-  let fileSize = handle.seekToEndOfFile()
-  guard fileSize > 0 else { return [] }
+  defer { try? handle.close() }
+  guard let fileSize = try? handle.seekToEnd(), fileSize > 0 else { return [] }
   let maxRead: UInt64 = 1024 * 1024  // 1 MB ≈ 12 000 lines @ ~80 bytes
   let readSize = min(fileSize, maxRead)
-  handle.seek(toFileOffset: fileSize - readSize)
-  let data = handle.readData(ofLength: Int(readSize))
+  guard (try? handle.seek(toOffset: fileSize - readSize)) != nil,
+    let data = try? handle.read(upToCount: Int(readSize))
+  else { return [] }
   let text = String(decoding: data, as: UTF8.self)
   var lines = text.components(separatedBy: .newlines)
   // The first line may be cut (started mid-line) — skip it.
