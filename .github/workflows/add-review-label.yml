@@ -21,10 +21,12 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               state: 'open',
-              head: run.head_branch,
             });
-            // 'workflow_run' runs triggered by pull_request carry the merge SHA, not the
-            // PR head SHA, so match by branch + same repo + open + non-draft only.
+            // 'workflow_run' exposes run.head_branch = the BASE branch of the PR (e.g. "main"),
+            // not the PR head ref, and the REST 'head' param requires the strict "owner:ref"
+            // format. Passing a bare branch there never matches, so the list came back empty and
+            // no label was ever applied. List every open PR (no 'head' filter) and select the
+            // right ones in JS: same-repo head + non-draft.
             const ours = prs.data.filter((pr) =>
               !pr.draft &&
               pr.head.repo.full_name === context.repo.full_name
