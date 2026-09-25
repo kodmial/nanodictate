@@ -33,6 +33,7 @@ let suites: [XCTestCase.Type] = [
     RetryProviderTests.self,
     ClipboardInsertTests.self,
     ReviewGateTests.self,
+    RetryInsertionGateTests.self,
     AgentStatusTests.self,
     VersionTests.self,
     MicErrorCooldownTests.self,

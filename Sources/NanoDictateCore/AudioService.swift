@@ -381,8 +381,15 @@ public final class AudioService {
 
     // Safe start from scratch: if the previous session left the engine with a
     // tap installed (failure branch), remove it BEFORE installTap — a repeat
-    // installTap on the same bus raises NSException (crash).
-    if isTapInstalled {
+    // installTap on the same bus raises NSException (crash). Generation gate:
+    // a start DISPATCHED before the wedge but EXECUTED after it (queued behind
+    // the hung engine) is stale — its top-of-start teardown would tear down
+    // the LIVE fresh session (the tap on `tapInstalled` belongs to the new
+    // engine; teardownOnEngineQueue also setRecording(false) + wipes buffers).
+    // A stale start never reaches installTap (generation guard below), so the
+    // leftover-tap removal is unnecessary for it; its stale engine is torn
+    // down alone at that guard. Current start — unchanged behavior.
+    if isTapInstalled, isCurrentGeneration(startGeneration) {
       teardownOnEngineQueue(using: engine)
     }
 
@@ -435,6 +442,11 @@ public final class AudioService {
       return .failure(AudioServiceError.unsupportedFormat)
     }
     lock.lock()
+    guard isCurrentGeneration(startGeneration) else {
+      lock.unlock()
+      teardownEngineOnly(using: engine)
+      return .failure(AudioServiceError.engineSuperseded)
+    }
     self.converter = converter
     lock.unlock()
     // A stale start (unblocked AFTER the wedge swap) must not subscribe: its
@@ -442,10 +454,6 @@ public final class AudioService {
     // session's observer, leaving the live device without a reaction to
     // device change. Generation guard here — BEFORE subscription; terminal
     // guards below stay for the tap/prepare/start stages.
-    guard isCurrentGeneration(startGeneration) else {
-      teardownEngineOnly(using: engine)
-      return .failure(AudioServiceError.engineSuperseded)
-    }
     // Device-change subscription AFTER the converter is in state: a
     // notification may arrive right after registration.
     observeConfigurationChanges(for: engine)

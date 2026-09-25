@@ -1800,8 +1800,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
 
   /// Insertion of a manual retry result: the common completeInsertion path
   /// (review gate, insertion method, last-text persistence), but outside the
-  /// recording state machine — retry does not touch state and the
-  /// processing session.
+  /// recording state machine — retry does not touch the recording state (the
+  /// processing session token is advanced around the review gate as in the
+  /// recording paths, so the completion re-validates the retry is current).
   private func retryInsertion(_ text: String) {
     // Retry outside the loop's state machine: if the user already started a
     // new loop (recording/recognition), the stale retry text is not inserted
@@ -1816,16 +1817,22 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     if reviewBeforeInsert, hasInteractiveStdin {
       // CR16: confirmAsync reads stdin on a background serial queue and
       // delivers the Decision to the main queue — the hotkey event tap keeps
-      // running while the user decides. The retry stays "in flight" until the
-      // completion processes the decision in finishRetryInsertion; a new loop
-      // started meanwhile makes the re-validating guard drop the stale text.
+      // running while the user decides. The token is advanced here (as in the
+      // recording paths): the completion re-validates against the advanced
+      // token, so a new loop that ran and finished while the user decided
+      // cannot be clobbered by the stale retry text.
+      processingSession += 1
+      let session = processingSession
       ReviewGate.confirmAsync(text: text) { [weak self] decision in
         guard let self else { return }
         // Re-validate the entry guard: a new nanodictate cycle may have
         // started while the user typed the decision.
-        guard self.state == .idle else {
+        guard !RetryInsertionGate.shouldDropRetry(
+          state: self.state,
+          processingSession: self.processingSession,
+          session: session) else {
           Logger.log(
-            "retry result dropped: nanodictate cycle active (state=\(String(describing: self.state)))",
+            "retry result dropped: stale (session advanced)",
             level: "info"
           )
           return

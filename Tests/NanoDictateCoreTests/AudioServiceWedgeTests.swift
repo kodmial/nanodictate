@@ -18,7 +18,10 @@ import AudioEngineGuard
 ///     .failure(start failure), new session alive, only its own engine torn down;
 ///   • start from hung engine's queue, failing in setup on stale
 ///     generation — .failure(setup failure), only its own engine torn down,
-///     current pair untouched.
+///     current pair untouched;
+///   • start QUEUED behind the hung one runs after the fresh session —
+///     generation guard holds the converter write under the same lock,
+///     fresh converter untouched (.engineSuperseded without write).
 final class AudioServiceWedgeTests: XCTestCase {
 
     /// Recovery after hung start: engine swap returns immediately, retry
@@ -418,6 +421,119 @@ final class AudioServiceWedgeTests: XCTestCase {
         XCTAssertTrue(
             eventually { working.stopCount == 2 },
             "повторный teardown текущей пары обязан дойти"
+        )
+    }
+
+    /// Generation race — start QUEUED BEHIND the hung one: dispatched BEFORE
+    /// the wedge (slot = old pair, generation W), it runs only after the hung
+    /// start unblocks — i.e. AFTER the fresh session already started and wrote
+    /// converter_B. Its converter-assignment step must be held by the
+    /// generation guard under the SAME lock: pre-fix code wrote the STALE
+    /// converter (old HAL format) first and only then failed the guard — the
+    /// live session's subsequent buffers would convert with the old engine's
+    /// converter (format mismatch → convertOnce error → buffer dropped →
+    /// corrupted/truncated audio). Guard-under-lock: stale start returns
+    /// .failure(.engineSuperseded) WITHOUT writing, fresh converter intact.
+    /// The stale start must also NOT tear down the live session at its TOP
+    /// (tap-teardown gate by generation): `tapInstalled` belongs to the fresh
+    /// engine — removing the tap + setRecording(false) would kill the live
+    /// recording regardless of the converter guard.
+    @objc func testStaleStartQueuedBehindHangDoesNotClobberFreshConverter() {
+        let hanging = FakeEngine()
+        let working = FakeEngine()
+        // Formats MUST differ: if the stale write clobbers self.converter, the
+        // live 44.1k buffers hit a 48k->16k converter — convertOnce errors
+        // (status .error) and the buffer is dropped (see AudioCaptureTests on
+        // convertOnce). Same-format fakes would hide the clobber (both
+        // converters behave identically).
+        hanging.node.format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 1)!
+        var factoryCalls = 0
+        let service = AudioService(
+            logLevel: "info",
+            engine: hanging,
+            makeEngine: {
+                factoryCalls += 1
+                return working
+            }
+        )
+        let hangSignal = DispatchSemaphore(value: 0)
+        hanging.hangStart = hangSignal
+
+        // Start #1 to hung engine's queue, stalls in start() — holds the queue.
+        service.start { _ in }
+        XCTAssertTrue(
+            eventually { hanging.startCount == 1 },
+            "старт обязан дойти до engine.start() и заблокироваться"
+        )
+
+        // Start #2 to the SAME hung queue, DISPATCHED BEFORE the wedge. Its
+        // completion fills `staleResult` ALONE — so the sample asserts below
+        // run strictly AFTER its converter-assignment step (it is the last
+        // thing before the stale start returns).
+        var staleResult: AudioStartResult?
+        service.start { result in
+            if staleResult == nil {
+                staleResult = result
+            }
+        }
+
+        // Wedge: generation W→W+1, fresh engine + its own queue; stale #2 stays
+        // queued on the hung engine's queue until unblocked.
+        service.replaceEngineAfterWedge()
+        XCTAssertEqual(factoryCalls, 1, "подмена создаёт ровно один свежий движок")
+
+        // Fresh recording on the fresh engine: converter_B installed, tap live.
+        guard case .success = runStart(service) else {
+            XCTFail("повторный старт после подмены обязан пройти")
+            return
+        }
+        XCTAssertEqual(working.node.tapCount, 1, "свежий сеанс ставит свой tap")
+
+        // Unblock the hung queue: start #1 finishes first (stale SUCCESS →
+        // .engineSuperseded, see test above); then start #2 runs its
+        // converter-assignment on the stale generation.
+        hangSignal.signal()
+
+        // Stale #2 must end .failure(.engineSuperseded).
+        XCTAssertTrue(
+            eventually { staleResult != nil },
+            "устаревший старт из очереди обязан завершиться"
+        )
+        switch staleResult {
+        case .failure(AudioServiceError.engineSuperseded)?:
+            break
+        default:
+            XCTFail("устаревший старт из очереди обязан дать .failure(.engineSuperseded), получили \(String(describing: staleResult))")
+        }
+
+        // THE discriminator: fresh buffers AFTER the stale start's converter
+        // step. Pre-fix the stale write left the 48k converter in state — a
+        // 44.1k buffer cannot convert (convertOnce → nil) and is DROPPED:
+        // accumulation stops at ONE buffer. With the guard-under-lock the write
+        // never happened — converter_B intact, both buffers present.
+        working.node.emit(makeToneBuffer(engine: working))
+        working.node.emit(makeToneBuffer(engine: working))
+        let samples = service.stop()
+        XCTAssertGreaterThanOrEqual(samples.count, 2 * 1410, "конвертер живого сеанса не тронут — оба свежих буфера сконвертированы (\(samples.count))")
+        XCTAssertLessThanOrEqual(samples.count, 2 * 1560, "сэмплы не должны теряться или задваиваться (\(samples.count))")
+
+        // Stale starts tore down THEIR engine — tap removed only by the two
+        // stale branches (resume + guard), NOT by a top-of-start teardown of
+        // the live session (tapInstalled=false would have added a third
+        // removeTap and killed the recording).
+        XCTAssertTrue(
+            eventually { hanging.node.removeTapCount == 2 },
+            "устаревшие старты снимают tap ТОЛЬКО со своего движка (две stale-разборки)"
+        )
+        XCTAssertTrue(
+            eventually { hanging.stopCount >= 3 },
+            "устаревший движок обязан быть остановлен (wedge-global + две stale-разборки)"
+        )
+
+        // stop() tore down FRESH engine: its teardown completed.
+        XCTAssertTrue(
+            eventually { working.stopCount == 1 },
+            "teardown свежего движка обязан дойти"
         )
     }
 
