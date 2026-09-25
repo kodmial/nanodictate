@@ -55,9 +55,10 @@ What it does (MacPorts has no `git://` scheme in `sources.conf` —
 cloned by hand once and exposed through a `file://` source):
 
 - **clone** — `kodmial/macports-nanodictate` into
-  `/Users/Shared/macports-nanodictate` — into a fresh path (an already-present
-  tree is reused only when it is the canon repo: origin URL and pinned
-  revision are verified before it is touched).
+  `/Users/Shared/macports-nanodictate` (an already-present tree is reused when
+  it is the canon repo: it must be fully root-owned, its origin URL and pinned
+  revision are verified, and it is reset to the pinned revision before it is
+  touched).
   The
   first clone is always manual: `port selfupdate` only
   `git pull --rebase --autostash`es existing trees.
@@ -123,18 +124,16 @@ only by the manual step above.
 
 **Recovery after a MacPorts reinstall:**
 
-The tree in `/Users/Shared` survives while `sources.conf` is recreated —
-remove the stale tree and run the install command again to re-clone it and
-re-register the source:
+The tree in `/Users/Shared` survives while `sources.conf` is recreated. Run
+the install command again: it reuses the root-owned canon tree, resets it to
+the pinned revision, re-inserts the `file://` line into the recreated
+`sources.conf`, indexes it (`portindex`) and installs the port. Delete the
+tree only if the installer rejects it (a non-root owner, a foreign origin or
+a dirty tree):
 
 ```sh
 sudo rm -rf /Users/Shared/macports-nanodictate
 ```
-
-(the install command clones only into a fresh path, so the stale tree must be
-gone first); then repeat the install command — it clones into the fresh path,
-re-inserts the `file://` line into the recreated `sources.conf`, indexes it
-(`portindex`) and installs the port.
 
 ### After install
 

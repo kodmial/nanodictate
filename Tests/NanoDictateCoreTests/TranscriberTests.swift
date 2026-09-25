@@ -75,11 +75,17 @@ final class SleepRecorder {
 
 // MARK: - Tests
 
-final class TranscriberTests: XCTestCase {
 
-    private let wavData = Data([0x52, 0x49, 0x46, 0x46]) // "RIFF"
+// Shared base class for the Transcriber suites.
+//
+// Helpers live in the base class and the Transcriber suites are split by topic,
+// which keeps each type body smaller.
 
-    private func makeTranscriber(transport: MockTransport, retrySleep: ((TimeInterval) async -> Void)? = nil) -> Transcriber {
+class TranscriberTestCase: XCTestCase {
+
+    fileprivate let wavData = Data([0x52, 0x49, 0x46, 0x46]) // "RIFF"
+
+    fileprivate func makeTranscriber(transport: MockTransport, retrySleep: ((TimeInterval) async -> Void)? = nil) -> Transcriber {
         Transcriber(baseURL: "https://example.test/v1/audio/transcriptions",
                     model: "gigaam-v3",
                     apiKey: "test-key",
@@ -90,7 +96,7 @@ final class TranscriberTests: XCTestCase {
     }
 
     /// Runs an async closure to completion inside a synchronous test method.
-    private func runAsync(_ testName: String, _ body: @escaping () async throws -> Void) {
+    fileprivate func runAsync(_ testName: String, _ body: @escaping () async throws -> Void) {
         let expectation = expectation(description: testName)
         Task {
             do {
@@ -102,6 +108,9 @@ final class TranscriberTests: XCTestCase {
         }
         wait(for: [expectation], timeout: 10)
     }
+}
+
+final class TranscriberTests: TranscriberTestCase {
 
     // MARK: Success
 
@@ -391,6 +400,13 @@ final class TranscriberTests: XCTestCase {
             XCTAssertEqual(transport.requestCount, 2)
         }
     }
+}
+
+// Retries, backoff, Retry-After (429 / HTTP-date), terminal 4xx/5xx, verbose_json
+// word timestamps and timeout — moved into a dedicated suite to keep each type body
+// smaller.
+
+final class TranscriberRetryTests: TranscriberTestCase {
 
     // MARK: - NEW: 429 Retry-After из заголовка ответа
 
@@ -602,6 +618,13 @@ final class TranscriberTests: XCTestCase {
                            "сетевой таймаут терминальный — повторный запрос почти наверняка упрётся в тот же таймаут")
         }
     }
+}
+
+// Request headers (Authorization / X-Proxy-Key), the language multipart field,
+// network preflight, network timeout, prompt context and NetworkReachability —
+// moved into a dedicated suite to keep each type body smaller.
+
+final class TranscriberRequestTests: TranscriberTestCase {
 
     // MARK: - NEW: Authorization header contains Bearer
 
@@ -936,6 +959,12 @@ final class TranscriberTests: XCTestCase {
         XCTAssertTrue(NetworkReachability.isReachable(status: .satisfied, possibleExternalRoute: true))
         XCTAssertFalse(NetworkReachability.isReachable(status: .satisfied, possibleExternalRoute: false))
     }
+}
+
+// Cookie relay, HTTP proxy and the adapter path (adapterID) plus an empty apiKey —
+// moved into a dedicated suite to keep each type body smaller.
+
+final class TranscriberTransportTests: TranscriberTestCase {
 
     // MARK: - Cookie-relay (transport == "cookie-relay")
 
@@ -1148,7 +1177,6 @@ final class TranscriberTests: XCTestCase {
             XCTAssertNil(req.value(forHTTPHeaderField: "Proxy-Authorization"))
         }
     }
-
     // MARK: - Адаптерный путь (adapterID)
 
     @objc func testAdapterOpenAIResolvesDefaultsAndSendsMultipart() {
@@ -1281,6 +1309,47 @@ final class TranscriberTests: XCTestCase {
             }
             XCTAssertNil(req.value(forHTTPHeaderField: "Authorization"),
                          "пустой apiKey не должен давать «Bearer » без токена")
+        }
+    }
+}
+
+// Trailing-slash normalization in http_proxy before joining the URL — moved into a
+// dedicated suite to keep each type body smaller.
+
+final class TranscriberHTTPProxyJoinTests: TranscriberTestCase {
+
+    @objc func testHTTPProxyTrailingSlashNormalizedBeforeJoin() {
+        // Конфиг может задать http_proxy с одним или несколькими trailing slash —
+        // перед join их нужно срезать, иначе URL-as-path получает пустой
+        // первый path-сегмент ("//https://...") и прокси не находит цель.
+        for proxy in ["https://proxy.example.com:8080/", "https://proxy.example.com:8080///"] {
+            let transport = MockTransport(status: 200, body: Data(#"{"text":"ok"}"#.utf8))
+            let transcriber = Transcriber(
+                baseURL: "https://api.example/v1/audio/transcriptions",
+                model: "gigaam-v3",
+                apiKey: "test-key",
+                transport: transport,
+                networkChecker: { true },
+                httpProxy: proxy,
+                adapterID: "gigaam"
+            )
+
+            runAsync("testHTTPProxyTrailingSlash-\(proxy)") {
+                _ = try await transcriber.transcribe(wav: self.wavData)
+                guard let req = transport.lastRequest else {
+                    XCTFail("No STT request captured")
+                    return
+                }
+                XCTAssertEqual(
+                    req.url?.absoluteString,
+                    "https://proxy.example.com:8080/https://api.example/v1/audio/transcriptions",
+                    "trailing slash срезаны перед join (httpProxy = \(proxy))"
+                )
+                XCTAssertFalse(
+                    req.url?.absoluteString.contains("8080//") ?? false,
+                    "нет пустого path-сегмента после хоста (httpProxy = \(proxy))"
+                )
+            }
         }
     }
 }

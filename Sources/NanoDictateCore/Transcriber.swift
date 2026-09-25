@@ -477,7 +477,11 @@ public final class Transcriber {
       Logger.log(
         "http proxy ignored: only an https:// proxy is used (request goes direct)", level: "warn")
     } else if !httpProxy.isEmpty, let original = request.url?.absoluteString {
-      guard let proxiedURL = URL(string: "\(httpProxy)/\(original)") else {
+      var proxyBase = httpProxy
+      while proxyBase.hasSuffix("/") {
+        proxyBase.removeLast()
+      }
+      guard let proxiedURL = URL(string: "\(proxyBase)/\(original)") else {
         throw URLError(.badURL)
       }
       request.url = proxiedURL

@@ -112,8 +112,8 @@ final class OverlayControllerTests: XCTestCase {
         // Caret nil or off-screen → mouse position.
         let mouse = CGPoint(x: 300, y: 400)
         let center = CGPoint(x: 720, y: 450)
-        let isValid = { (p: CGPoint) -> Bool in
-            p.x > 0 && p.x < 2000 && p.y > 0 && p.y < 2000
+        let isValid = { (point: CGPoint) -> Bool in
+            point.x > 0 && point.x < 2000 && point.y > 0 && point.y < 2000
         }
 
         let fromNil = OverlayLayout.resolvePoint(
@@ -132,9 +132,9 @@ final class OverlayControllerTests: XCTestCase {
         // Mouse off-screen (and caret missing) → main screen center.
         let mouse = CGPoint(x: -9999, y: -9999)
         let center = CGPoint(x: 720, y: 450)
-        let isValid = { (p: CGPoint) -> Bool in
-            if p == mouse { return false }
-            return p.x > 0 && p.y > 0
+        let isValid = { (point: CGPoint) -> Bool in
+            if point == mouse { return false }
+            return point.x > 0 && point.y > 0
         }
         let point = OverlayLayout.resolvePoint(
             caret: nil, mouse: mouse, screenCenter: center, isValid: isValid
@@ -428,6 +428,44 @@ final class OverlayControllerTests: XCTestCase {
         XCTAssertTrue(
             block.contains("ensureMeterLoopRunning()"),
             "метр-луп обновляется в обоих путях обработчика"
+        )
+    }
+
+    /// Reduce Motion (CodeRabbit #5317407957): ProcessingDots — единственная
+    /// вью-ветка оверлея, которая крутила бесконечный scale/opacity-пульс без
+    /// учёта accessibilityDisplayShouldReduceMotion. SwiftUI-рендер в юнит-
+    /// раннере недостижим, поэтому контракт охраняется структурно — тем же
+    /// приёмом, что onChange-тест выше: тело вью обязано содержать геттер
+    /// NSWorkspace.shared.accessibilityDisplayShouldReduceMotion, константные
+    /// scale/opacity при нём и nil-анимацию вместо бесконечного пульса.
+    @objc func testProcessingDots_StaticWhenReduceMotionEnabled() {
+        guard let source = Self.overlayControllerSource() else {
+            XCTFail("Не удалось прочитать Sources/NanoDictateCore/OverlayController.swift")
+            return
+        }
+        guard let start = source.range(of: "private struct ProcessingDots: View") else {
+            XCTFail("ProcessingDots не найдена в OverlayController.swift")
+            return
+        }
+        let tail = source[start.upperBound...]
+        let end = tail.range(of: "\n// MARK: ") ?? (tail.startIndex..<tail.endIndex)
+        let view = String(tail[..<end.lowerBound])
+
+        XCTAssertTrue(
+            view.contains("NSWorkspace.shared.accessibilityDisplayShouldReduceMotion"),
+            "ProcessingDots обязана читать настройку Reduce Motion, как RECDot и VU-метр"
+        )
+        XCTAssertTrue(
+            view.contains(".scaleEffect(reduceMotion ?"),
+            "scaleEffect при Reduce Motion — константа, а не пульс по animate"
+        )
+        XCTAssertTrue(
+            view.contains(".opacity(reduceMotion ?"),
+            "opacity при Reduce Motion — константа, а не пульс по animate"
+        )
+        XCTAssertTrue(
+            view.contains("reduceMotion\n              ? nil"),
+            "animation при Reduce Motion — nil (без repeatForever)"
         )
     }
 

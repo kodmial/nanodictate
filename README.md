@@ -59,10 +59,11 @@ exit "$rc" )
 ```
 
 The script re-runs itself under `sudo`, clones the canon tree
-`kodmial/macports-nanodictate` into `/Users/Shared/macports-nanodictate` —
-into a fresh path (an already-present tree is reused only when it is the canon
-repo at the pinned revision — origin and revision are verified before the tree
-is touched). It then inserts its `file://` source into `sources.conf` (before
+`kodmial/macports-nanodictate` into `/Users/Shared/macports-nanodictate` (an
+already-present tree is reused when it is the canon repo at the pinned
+revision — origin and revision are verified, then the tree is reset to the
+pinned revision before it is touched). It then inserts its `file://` source
+into `sources.conf` (before
 `[default]` — first match wins) and installs the port. The port's
 `post-activate` registers the
 global LaunchAgent and bootstraps it — **the service is alive right after
@@ -71,9 +72,10 @@ install**, no `nanodictate start` needed, and it comes back after every reboot
 
 Same prebuilt tarball as Homebrew, nothing compiled. After a MacPorts
 reinstall the tree in `/Users/Shared` survives while `sources.conf` is
-recreated — remove the stale tree (`sudo rm -rf
-/Users/Shared/macports-nanodictate`) and run the install command again to
-re-clone it and re-register the source.
+recreated — run the install command again: it reuses the root-owned canon
+tree, resets it to the pinned revision and re-registers the source. Delete
+the tree only if the installer rejects it (a non-root owner, a foreign origin
+or a dirty tree).
 Every future release is picked up by:
 
 ```sh

@@ -394,9 +394,14 @@ private struct RECDot: View {
 
 /// Анимация «обработка»: три точки, мягко пульсируют каскадом (opacity/scale).
 /// Дешёвые для CPU анимации; перезапускаются при каждом появлении фазы за счёт
-/// свежего @State в подвью.
+/// свежего @State в подвью. При Reduce Motion — статичные точки без анимации
+/// (тот же контракт, что у REC-точки и VU-метра).
 private struct ProcessingDots: View {
   @State private var animate = false
+
+  private var reduceMotion: Bool {
+    NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+  }
 
   var body: some View {
     HStack(spacing: 7) {
@@ -404,12 +409,14 @@ private struct ProcessingDots: View {
         Circle()
           .fill(Color.primary)
           .frame(width: 10, height: 10)
-          .scaleEffect(animate ? 1.0 : 0.35)
-          .opacity(animate ? 1.0 : 0.35)
+          .scaleEffect(reduceMotion ? 0.7 : (animate ? 1.0 : 0.35))
+          .opacity(reduceMotion ? 0.7 : (animate ? 1.0 : 0.35))
           .animation(
-            .easeInOut(duration: 0.6)
-              .repeatForever(autoreverses: true)
-              .delay(Double(i) * 0.2),
+            reduceMotion
+              ? nil
+              : Animation.easeInOut(duration: 0.6)
+                .repeatForever(autoreverses: true)
+                .delay(Double(i) * 0.2),
             value: animate
           )
       }
