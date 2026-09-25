@@ -1,0 +1,30 @@
+{
+  "name": "nanodictate-deploy-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server for building, signing and restarting the macOS dictation agent with stable TCC-preserving code signatures",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "nanodictate-deploy-mcp-server": "dist/index.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test",
+    "test:coverage": "npm run build && node --test --experimental-test-coverage"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.22.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}

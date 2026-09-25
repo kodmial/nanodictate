@@ -1,0 +1,240 @@
+/**
+ * Unit tests for pure functions in src/constants.ts.
+ *
+ * Runs on node:test (node >= 22, no extra dependencies) against the compiled
+ * dist/constants.js — `npm test` builds first.
+ */
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  PROJECT_ROOT,
+  SERVER_ROOT,
+  AGENT_BUNDLE_ID,
+  NANODICTATE_BUNDLE_ID,
+  TCC_GRANTS_DELETE_CMD,
+  TCC_GRANTS_SELECT_CMD,
+  TCC_SYSTEM_DB,
+  TCC_UDIR_PREFIX,
+  APP_BUNDLE_NAME,
+  binaryPaths,
+  defaultEntitlementRoots,
+  resolveEntitlementsPath,
+} from "../dist/constants.js";
+
+// ── binaryPaths ─────────────────────────────────────────────────────────────
+
+function expectedPaths(configuration) {
+  const base = `${PROJECT_ROOT}/.build/${configuration}`;
+  return {
+    agent: `${base}/NanoDictateAgent`,
+    nanodictate: `${base}/nanodictate`,
+    appBundle: `${base}/${APP_BUNDLE_NAME}`,
+  };
+}
+
+test("binaryPaths points into .build for debug and release", () => {
+  assert.deepEqual(binaryPaths("debug"), expectedPaths("debug"));
+  assert.deepEqual(binaryPaths("release"), expectedPaths("release"));
+});
+
+test("APP_BUNDLE_NAME is the packaging-layer .app bundle", () => {
+  assert.equal(APP_BUNDLE_NAME, "NanoDictate.app");
+});
+
+test("defaultEntitlementRoots pairs the main checkout with SERVER_ROOT", () => {
+  assert.deepEqual(defaultEntitlementRoots(), {
+    mainCheckout: PROJECT_ROOT,
+    worktree: SERVER_ROOT,
+  });
+});
+
+// ── resolveEntitlementsPath ─────────────────────────────────────────────────
+
+test("resolveEntitlementsPath prefers the main checkout, then the worktree", () => {
+  const main = mkdtempSync(join(tmpdir(), "nanodictate-main-"));
+  const worktree = mkdtempSync(join(tmpdir(), "nanodictate-wt-"));
+  try {
+    mkdirSync(join(main, "Resources"), { recursive: true });
+    mkdirSync(join(worktree, "Resources"), { recursive: true });
+    writeFileSync(join(main, "Resources", "only-main.entitlements"), "");
+    writeFileSync(join(worktree, "Resources", "only-wt.entitlements"), "");
+    const roots = { mainCheckout: main, worktree };
+
+    assert.deepEqual(resolveEntitlementsPath("only-main.entitlements", roots), {
+      path: join(main, "Resources", "only-main.entitlements"),
+      source: "main-checkout",
+    });
+    assert.deepEqual(resolveEntitlementsPath("only-wt.entitlements", roots), {
+      path: join(worktree, "Resources", "only-wt.entitlements"),
+      source: "worktree",
+    });
+  } finally {
+    rmSync(main, { recursive: true, force: true });
+    rmSync(worktree, { recursive: true, force: true });
+  }
+});
+
+test("resolveEntitlementsPath reports missing when neither checkout has the file", () => {
+  const main = mkdtempSync(join(tmpdir(), "nanodictate-main-"));
+  const worktree = mkdtempSync(join(tmpdir(), "nanodictate-wt-"));
+  try {
+    const res = resolveEntitlementsPath("absent.entitlements", {
+      mainCheckout: main,
+      worktree,
+    });
+    assert.equal(res.source, "missing");
+    assert.equal(res.path, join(main, "Resources", "absent.entitlements"));
+  } finally {
+    rmSync(main, { recursive: true, force: true });
+    rmSync(worktree, { recursive: true, force: true });
+  }
+});
+
+test("resolveEntitlementsPath skips the worktree probe when worktree === mainCheckout", () => {
+  const main = mkdtempSync(join(tmpdir(), "nanodictate-main-"));
+  try {
+    const res = resolveEntitlementsPath("x.entitlements", {
+      mainCheckout: main,
+      worktree: main,
+    });
+    assert.equal(res.source, "missing");
+  } finally {
+    rmSync(main, { recursive: true, force: true });
+  }
+});
+
+// ── TCC manual commands ──────────────────────────────────────────────────────
+
+test("TCC commands resolve the DB path via UDIR (console user), never via $HOME", () => {
+  for (const cmd of [TCC_GRANTS_SELECT_CMD, TCC_GRANTS_DELETE_CMD]) {
+    // $HOME must NOT be used as the path to the TCC.db (under sudo it is
+    // /var/root — the cause of "unable to open database file").
+    assert.equal(cmd.includes("$HOME/Library"), false, `no $HOME db path: ${cmd.slice(0, 40)}…`);
+    // the canon prefix resolves the REAL console user's home and survives sudo
+    assert.ok(cmd.startsWith(TCC_UDIR_PREFIX), "shares the UDIR prefix");
+    assert.ok(cmd.includes('UDIR="$(dscl . -read'), "resolves home via dscl");
+    assert.ok(cmd.includes("stat -f%Su /dev/console"), "console owner via stat");
+    assert.ok(cmd.includes('UDIR="$HOME"'), "falls back to $HOME only when UDIR is empty");
+    // the DB path is always the $UDIR suffix
+    assert.ok(
+      cmd.includes("$UDIR/Library/Application Support/com.apple.TCC/TCC.db"),
+      "DB path is the $UDIR suffix",
+    );
+  }
+});
+
+test("TCC commands cover Accessibility and Microphone — SELECT queries both dbs, DELETE resets current ids via the tccutil $svc loop and sweeps per-user + system dbs", () => {
+  // the read-only CHECK still queries BOTH dbs — system (Accessibility) and
+  // per-user (Microphone) — so neither grant can be silently missed
+  assert.ok(
+    TCC_GRANTS_SELECT_CMD.includes("/Library/Application Support/com.apple.TCC/TCC.db"),
+    "SELECT targets the system db literal",
+  );
+  assert.ok(
+    TCC_GRANTS_SELECT_CMD.includes("$UDIR/Library/Application Support/com.apple.TCC/TCC.db"),
+    "SELECT targets the per-user db via $UDIR",
+  );
+  // the ERASE resets the CURRENT bundle ids via tccutil for BOTH services
+  // (the official tool, which walks the SIP-protected system db itself),
+  // cycling the service with the $svc loop variable…
+  assert.ok(
+    TCC_GRANTS_DELETE_CMD.includes(`for id in ${AGENT_BUNDLE_ID} ${NANODICTATE_BUNDLE_ID}`),
+    "DELETE resets the current bundle ids via tccutil",
+  );
+  assert.ok(
+    TCC_GRANTS_DELETE_CMD.includes("for svc in Accessibility Microphone"),
+    "the tccutil loop cycles both services via $svc",
+  );
+  assert.ok(
+    TCC_GRANTS_DELETE_CMD.includes('tccutil reset "$svc" "$id" 2>&1'),
+    "tccutil is invoked with the $svc / $id variables",
+  );
+  // …and sweeps the per-user db with sqlite3 for the legacy names.
+  assert.ok(
+    TCC_GRANTS_DELETE_CMD.includes("$UDIR/Library/Application Support/com.apple.TCC/TCC.db"),
+    "DELETE sweeps the per-user db via $UDIR",
+  );
+  // …and, LAST, the system db with sqlite3 for the path-based Accessibility
+  // records (client_type = 1): sudo alone is not enough there (authorization
+  // denied without Full Disk Access), and a rejected system delete used to be
+  // masked by the successful per-user one — the system step runs last so its
+  // failure cannot be masked.
+  assert.ok(
+    TCC_GRANTS_DELETE_CMD.includes(
+      `sudo sqlite3 "${TCC_SYSTEM_DB}" "DELETE FROM access WHERE service='kTCCServiceAccessibility' AND client_type=1`,
+    ),
+    "DELETE's last sqlite3 targets the system db and only the path-based (client_type=1) Accessibility records",
+  );
+  assert.equal(TCC_SYSTEM_DB, "/Library/Application Support/com.apple.TCC/TCC.db");
+  // the commands note in their output that the system db needs Full Disk Access
+  assert.match(TCC_GRANTS_SELECT_CMD, /Full Disk Access/);
+  assert.match(TCC_GRANTS_DELETE_CMD, /system db, needs Full Disk Access/);
+});
+
+test("TCC SQL clients are the hard-coded literals — no dynamic interpolation", () => {
+  // the four fixed LIKE patterns; SELECT runs them against BOTH dbs → 8, the
+  // DELETE now carries TWO sqlite3 statements (per-user db + system db), each
+  // with the same four-clause WHERE → 8. Anything dynamic (a client path, `"`,
+  // `$`, backtick) would shift the count and fail this lock.
+  assert.equal(
+    (TCC_GRANTS_SELECT_CMD.match(/LIKE '/g) ?? []).length,
+    8,
+    `four hard-coded LIKE literals per db × both dbs in: ${TCC_GRANTS_SELECT_CMD.slice(0, 60)}…`,
+  );
+  assert.equal(
+    (TCC_GRANTS_DELETE_CMD.match(/LIKE '/g) ?? []).length,
+    8,
+    `four hard-coded LIKE literals per sqlite3 × two sqlite3 statements (per-user + system db) in: ${TCC_GRANTS_DELETE_CMD.slice(0, 60)}…`,
+  );
+});
+
+test("TCC_GRANTS_DELETE_CMD erases only nanodictate-related client records", () => {
+  assert.match(TCC_GRANTS_DELETE_CMD, /DELETE FROM access/);
+  assert.match(TCC_GRANTS_DELETE_CMD, /client LIKE '%nanodictate%'/);
+  assert.match(TCC_GRANTS_DELETE_CMD, /client LIKE '%com\.dictation\.agent%'/);
+  assert.match(TCC_GRANTS_DELETE_CMD, /client LIKE '%DictatorAgent%'/);
+  // failures are AGGREGATED, never aborting: no `set -e`, an `rc` accumulator
+  // keeps every step running (a rejected tccutil reset must not skip the
+  // remaining ids or the legacy sweep — the main goal), the sqlite3 sweep
+  // still runs LAST, and the subshell exits 1 if ANY step failed, else 0
+  assert.equal(
+    TCC_GRANTS_DELETE_CMD.includes("set -e"),
+    false,
+    "no set -e — a failed step must not abort the rest",
+  );
+  assert.match(TCC_GRANTS_DELETE_CMD, /\( rc=0; for id in /, "rc accumulator starts at 0");
+  assert.match(
+    TCC_GRANTS_DELETE_CMD,
+    /out=\$\(tccutil reset "\$svc" "\$id" 2>&1\) \|\| \{ code=\$\?; if printf '%s' "\$out" \| grep -qiE 'not registered\|no such bundle identifier'/,
+    "a tccutil failure is captured and classified via grep on its output",
+  );
+  assert.match(
+    TCC_GRANTS_DELETE_CMD,
+    /echo "# \$id \(\$svc\): not registered - no TCC record to reset"; else echo "# \$id \(\$svc\): tccutil reset failed \(exit \$code\): \$out"; rc=1;/,
+    "an unknown identifier reports 'not registered' without touching rc; a real failure marks rc=1",
+  );
+  assert.match(
+    TCC_GRANTS_DELETE_CMD,
+    /sudo sqlite3 "\$UDIR\/Library\/Application Support\/com\.apple\.TCC\/TCC\.db" "DELETE FROM access WHERE [^"]*" \|\| rc=1/,
+    "the per-user legacy sweep also marks rc on failure",
+  );
+  assert.match(
+    TCC_GRANTS_DELETE_CMD,
+    /echo "# path-based Accessibility records \(system db, needs Full Disk Access\)"; sudo sqlite3 "\/Library\/Application Support\/com\.apple\.TCC\/TCC\.db" "DELETE FROM access WHERE service='kTCCServiceAccessibility' AND client_type=1 AND \([^"]*\);" \|\| rc=1/,
+    "the system db path-based sweep runs last (after the per-user one) and also marks rc on failure",
+  );
+  assert.match(TCC_GRANTS_DELETE_CMD, /exit \$rc/, "subshell exits with rc");
+  assert.match(TCC_GRANTS_DELETE_CMD, /done; done; echo "# legacy records \(per-user db, needs Full Disk Access\)"/);
+});
+
+test("TCC_GRANTS_SELECT_CMD is the read-only check (SELECT … FROM access)", () => {
+  assert.match(TCC_GRANTS_SELECT_CMD, /SELECT service, client, auth_value,/);
+  assert.match(TCC_GRANTS_SELECT_CMD, /FROM access/);
+  assert.match(TCC_GRANTS_SELECT_CMD, /GROUP BY service, client, auth_value/);
+  // read-only: no DELETE in the SELECT command
+  assert.equal(TCC_GRANTS_SELECT_CMD.includes("DELETE FROM"), false);
+});

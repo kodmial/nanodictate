@@ -1,0 +1,171 @@
+import Foundation
+import AVFoundation
+import AudioEngineGuard
+@testable import NanoDictateCore
+
+/// Тесты жизненного цикла AudioService с инъектированным фейковым движком
+/// (железа нет, AVFoundation-крэши недостижимы — тесты проверяют логику):
+///   • ошибка старта (движок не поднялся) обязана дать терминальный .failure,
+///     снять tap и остановить движок (cleanup) и позволить ПОВТОРНЫЙ старт на
+///     том же экземпляре — регрессия краша «повторный installTap на том же bus»;
+///   • старт поверх уже записывающего сервиса снимает старый tap ДО установки
+///     нового (тот же краш-сценарий, вход через рестарт);
+///   • stop()/cancel() разбирают движок асинхронно (совсем не блокируют
+///     главный поток) и позволяют следующий старт;
+///   • process() собирает сэмплы из tap-колбэка, stop() возвращает их;
+///   • ObjC-шлюз (AudioEngineExceptionGuard.m) превращает NSException AVFAudio
+///     в NSError — вместо SIGABRT процесса.
+final class AudioServiceLifecycleTests: XCTestCase {
+
+    // MARK: - Ошибка старта → cleanup → повторный старт
+
+    /// Главная регрессия: движок отказался подниматься → терминальный
+    /// .failure, tap СНЯТ и движок ОСТАНОВЛЕН (cleanup), и повторный старт на
+    /// том же сервисе успешен. Раньше: tap оставался висеть → повторный
+    /// installTap на том же bus = NSException = SIGABRT (crash-петля).
+    @objc func testStartFailureCleansUpAndAllowsRestart() {
+        let engine = FakeEngine()
+        engine.failStart = true
+        let service = AudioService(logLevel: "info", engine: engine)
+
+        let first = runStart(service)
+        guard case .failure = first else {
+            XCTFail("первый старт должен упасть (без микрофона/движка)", file: #file, line: #line)
+            return
+        }
+        XCTAssertEqual(engine.node.tapCount, 1, "установлен ровно один tap")
+        XCTAssertGreaterThanOrEqual(engine.node.removeTapCount, 1, "после ошибки tap обязан быть снят")
+        XCTAssertGreaterThanOrEqual(engine.stopCount, 1, "после ошибки движок обязан быть остановлен")
+
+        // Повторный старт на ТОМ ЖЕ сервисе — теперь движок «исправен»:
+        // не падает, ставит свежий tap, идёт в .recording.
+        engine.failStart = false
+        let second = runStart(service)
+        guard case .success = second else {
+            XCTFail("повторный старт после ошибки должен пройти, получил \(second)", file: #file, line: #line)
+            return
+        }
+        XCTAssertEqual(engine.node.tapCount, 2, "повторный старт ставит свежий tap")
+    }
+
+    /// Краш-сценарий «повторный installTap на занятом bus» через рестарт
+    /// поверх уже записывающего сервиса: старый tap снимается ДО установки
+    /// нового.
+    @objc func testRestartWhileActiveRemovesOldTapBeforeInstall() {
+        let engine = FakeEngine()
+        let service = AudioService(logLevel: "info", engine: engine)
+
+        guard case .success = runStart(service) else {
+            XCTFail("первый старт должен пройти", file: #file, line: #line)
+            return
+        }
+        XCTAssertEqual(engine.node.tapCount, 1)
+        XCTAssertEqual(engine.node.removeTapCount, 0)
+
+        guard case .success = runStart(service) else {
+            XCTFail("повторный старт поверх активного должен пройти (не краш)", file: #file, line: #line)
+            return
+        }
+        XCTAssertEqual(engine.node.tapCount, 2, "второй установленный tap")
+        XCTAssertEqual(engine.node.removeTapCount, 1, "старый tap снят ровно один раз — ДО второго install")
+    }
+
+    // MARK: - stop/cancel
+
+    /// stop() возвращает сэмплы синхронно, а teardown движка уходит на фоновую
+    /// очередь (главный поток не блокируется): tap снят, движок остановлен.
+    @objc func testStopTearsDownAsyncAndAllowsRestart() {
+        let engine = FakeEngine()
+        let service = AudioService(logLevel: "info", engine: engine)
+
+        guard case .success = runStart(service) else {
+            XCTFail("старт должен пройти", file: #file, line: #line)
+            return
+        }
+
+        let samples = service.stop()
+        XCTAssertEqual(samples.count, 0, "пока tap ничего не отдал — сэмплов нет")
+
+        drainEngineQueue()
+        XCTAssertEqual(engine.node.removeTapCount, 1, "stop() обязан снять tap")
+        XCTAssertEqual(engine.stopCount, 1, "stop() обязан остановить движок")
+
+        guard case .success = runStart(service) else {
+            XCTFail("старт после stop() должен пройти", file: #file, line: #line)
+            return
+        }
+        XCTAssertEqual(engine.node.tapCount, 2, "старт после stop() ставит свежий tap")
+    }
+
+    /// Отмена тоже разбирает движок и не мешает следующему старту.
+    @objc func testCancelTearsDownAndAllowsRestart() {
+        let engine = FakeEngine()
+        let service = AudioService(logLevel: "info", engine: engine)
+
+        guard case .success = runStart(service) else {
+            XCTFail("старт должен пройти", file: #file, line: #line)
+            return
+        }
+
+        service.cancel()
+        drainEngineQueue()
+        XCTAssertGreaterThanOrEqual(engine.node.removeTapCount, 1, "cancel() обязан снять tap")
+        XCTAssertGreaterThanOrEqual(engine.stopCount, 1, "cancel() обязан остановить движок")
+
+        let restart = runStart(service)
+        guard case .success = restart else {
+            XCTFail("старт после cancel() должен пройти", file: #file, line: #line)
+            return
+        }
+        XCTAssertEqual(engine.node.tapCount, 2)
+    }
+
+    // MARK: - Сбор сэмплов
+
+    /// process() из tap-колбэка конвертирует 44.1 кГц → 16 кГц моно, и stop()
+    /// возвращает собранные сэмплы — проверяет новую синхронизацию накопления
+    /// под блокировкой (и что колбэк tap реально раздаёт буферы движку).
+    @objc func testProcessCollectsSamplesAndStopReturnsThem() {
+        let engine = FakeEngine()
+        let service = AudioService(logLevel: "info", engine: engine)
+
+        guard case .success = runStart(service) else {
+            XCTFail("старт должен пройти", file: #file, line: #line)
+            return
+        }
+
+        // Один буфер 44.1 кГц × 4096 фр. ≈ 92.9 мс → ~1486 фр. @ 16 кГц.
+        let buffer = AVAudioPCMBuffer(pcmFormat: engine.node.format, frameCapacity: 4096)!
+        buffer.frameLength = 4096
+        let channel = buffer.floatChannelData![0]
+        for i in 0..<4096 {
+            channel[i] = 0.2 // −14 dBFS, не тишина
+        }
+        engine.node.emit(buffer)
+
+        let samples = service.stop()
+        XCTAssertGreaterThanOrEqual(samples.count, 1410, "первый буфер обязан дать ≥ ~1486 сэмплов (допуск)")
+        XCTAssertLessThanOrEqual(samples.count, 1560, "сэмплы не должны задваиваться/раздуваться (допуск)")
+        // Амплитуда 0.2 прошла конвертацию без клиппинга (max < 32767).
+        let maxAbs = samples.map { abs(Int($0)) }.max() ?? 0
+        XCTAssertLessThanOrEqual(maxAbs, 32767, "амплитуда не должна клиппиться")
+        XCTAssertGreaterThanOrEqual(maxAbs, 3000, "амплитуда 0.2 должна дойти до накопления")
+    }
+
+    // MARK: - ObjC-шлюз NSException
+
+    /// NSException AVFAudio (сценарий реального краша SetOutputFormat) внутри
+    /// шлюза превращается в NSError, а нормальный блок проходит без ошибки —
+    /// это и есть отсутствие SIGABRT при старте движка.
+    @objc func testEngineExceptionGuardConvertsExceptionToError() {
+        let service = AudioService(logLevel: "info", engine: FakeEngine())
+
+        let raised = service.guardedEngineCall {
+            NanoDictateRaiseAudioEngineTestException()
+        }
+        XCTAssertNotNil(raised, "NSException внутри шлюза обязан стать NSError")
+
+        let clean = service.guardedEngineCall {}
+        XCTAssertNil(clean, "блок без исключения — без ошибки")
+    }
+}

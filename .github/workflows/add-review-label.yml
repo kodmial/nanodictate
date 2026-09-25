@@ -13,7 +13,7 @@ jobs:
   add-label:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/github-script@v7
+      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             const run = context.payload.workflow_run;
@@ -21,12 +21,16 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               state: 'open',
-              head: run.head_branch,
+              per_page: 100,
             });
-            // 'workflow_run' runs triggered by pull_request carry the merge SHA, not the
-            // PR head SHA, so match by branch + same repo + open + non-draft only.
+            // The REST 'head' param of pulls.list requires the strict "owner:ref" format;
+            // a bare ref never matches, so filtering by it returned an empty list and no
+            // label was ever applied. List every open PR (no 'head' filter) and select the
+            // right ones in JS: same-repo head + non-draft + the exact commit that was tested
+            // (run.head_sha), so a run for one PR can never touch another PR's label.
             const ours = prs.data.filter((pr) =>
               !pr.draft &&
+              pr.head.sha === run.head_sha &&
               pr.head.repo.full_name === context.repo.full_name
             );
             if (run.conclusion === 'success') {

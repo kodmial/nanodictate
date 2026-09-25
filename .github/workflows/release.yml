@@ -26,7 +26,7 @@ on:
     inputs:
       version:
         description: >-
-          Version to publish (e.g. 0.1.0 or v0.1.0). Leave empty to derive it
+          Version to publish (e.g. 0.0.2 or v0.0.2). Leave empty to derive it
           from Sources/NanoDictateCore/Version.swift.
         required: false
         type: string
@@ -103,11 +103,11 @@ jobs:
             echo "::error::Could not extract a semver from Sources/NanoDictateCore/Version.swift (and no tag/input version was provided)."
             exit 1
           fi
-          # User version policy: only 0.0.1..0.0.100 and 0.1.0..0.1.100 may be
-          # released. Any higher version, prerelease, or lower 0.0.x (0.0.0,
-          # 0.0.101+) fails.
-          if ! [[ "$VERSION" =~ ^0\.(0\.(0?[1-9]|[1-9][0-9]|100)|1\.(0|[1-9][0-9]?|100))$ ]]; then
-            echo "::error::Forbidden version $VERSION: only 0.0.1..0.0.100 and 0.1.0..0.1.100 are allowed (user policy)"
+          # User version policy: only the 0.0.x and 0.1.x series may be
+          # released — any other major/minor, a prerelease, or a leading zero
+          # (0.0.05) fails.
+          if ! [[ "$VERSION" =~ ^0\.(0|1)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Forbidden version $VERSION: only 0.0.x and 0.1.x (no leading zeros) are allowed (user policy)"
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -135,7 +135,12 @@ jobs:
         #                    norm, not a failure), the MacPorts Portfile
         #                    (github.setup) AND the sha256 of the published
         #                    release's SHA256SUMS.txt (union across formula
-        #                    tarball hashes + cask zip hashes).
+        #                    tarball hashes + cask zip hashes). AND the
+        #                    installer pin: PIN_REV in
+        #                    scripts/install-macports.sh must equal the
+        #                    macports-nanodictate tree HEAD — a committed
+        #                    manifest set whose pin push failed must not be
+        #                    skipped forever (the re-run repairs the pin).
         #                    A re-run whose committed formula is stale (wrong
         #                    version, or sha256 absent from the release) leaves
         #                    skip_manifests FALSE and REGENERATES — a stale
@@ -204,7 +209,7 @@ jobs:
               content="$(git show "origin/main:$f")"
               case "$f" in
                 *.rb)
-                  # Homebrew formula pins the version as `version "X.Y.N"`.
+                  # Homebrew formula pins the version as `version "0.0.N"`.
                   if ! grep -q "version \"$VERSION\"" <<<"$content"; then
                     echo "Committed $f does not pin version $VERSION — formula is stale."
                     MANIFESTS_OK=false
@@ -275,6 +280,29 @@ jobs:
             else
               echo "Could not download SHA256SUMS.txt from release v$VERSION — cannot prove the committed sha256 matches; regenerate."
               MANIFESTS_OK=false
+            fi
+            # Installer-pin check: the manifests job syncs the MacPorts tree
+            # to the just-published Portfile and pins
+            # scripts/install-macports.sh PIN_REV to the tree revision it
+            # pushed. If that pin push fails after the manifests commit
+            # succeeded, the committed manifests match while the installer
+            # still points at a stale revision — and a re-run's
+            # skip_manifests would otherwise skip the pin repair. So the skip
+            # decision now includes the synced tree revision: only when the
+            # committed pin already equals the tree's current HEAD is the
+            # skip kept. A failed HEAD resolution forces regeneration (same
+            # "cannot prove, so do not skip" direction as the sha256 check);
+            # regenerating identical manifests is harmless and deterministic.
+            if [[ "$MANIFESTS_OK" == "true" ]]; then
+              TREE_HEAD="$(git ls-remote https://github.com/kodmial/macports-nanodictate refs/heads/main 2>/dev/null | awk '{print $1}' || true)"
+              PIN_COMMITTED="$(git show "origin/main:scripts/install-macports.sh" 2>/dev/null | sed -n 's/^PIN_REV="\([0-9a-f]*\)"$/\1/p')"
+              if [ -n "$TREE_HEAD" ] && [ "$PIN_COMMITTED" != "$TREE_HEAD" ]; then
+                echo "Committed scripts/install-macports.sh pins PIN_REV ${PIN_COMMITTED:-<none>}, but the macports-nanodictate tree HEAD is $TREE_HEAD — the installer pin is stale; regenerate."
+                MANIFESTS_OK=false
+              elif [ -z "$TREE_HEAD" ]; then
+                echo "Could not resolve the macports-nanodictate tree HEAD — cannot verify the installer pin; regenerate."
+                MANIFESTS_OK=false
+              fi
             fi
             if [[ "$MANIFESTS_OK" == "true" ]]; then
               echo "Committed manifests already match v$VERSION — manifest regeneration is skipped."
@@ -774,36 +802,42 @@ jobs:
           # The generated formula must parse (Ruby syntax check).
           ruby -c packaging/homebrew/nanodictate.rb
           # Homebrew requires the class name to be the CamelCase of the file
-          # stem ("nanodictate.rb" -> Nanodictate) and the Release tarball
-          # convention demands a post_install that registers the LaunchAgent
-          # (hybrid A+B packaging — homebrew & macports write the same
-          # canonical ~/Library/LaunchAgents/com.nanodictate.agent.plist).
+          # stem ("nanodictate.rb" -> Nanodictate) and the filled tarball
+          # url + sha256 stanzas: release-prep.rb replaces the __VERSION__ /
+          # __SHA256_*__ tokens, so a formula that lost them (or a template
+          # that was not regenerated) is caught here. Service registration is
+          # explicit — `brew services start nanodictate` — and the canonical
+          # label is checked by the service-block greps below.
           grep -q '^class Nanodictate < Formula$' packaging/homebrew/nanodictate.rb
-          grep -q 'def post_install' packaging/homebrew/nanodictate.rb
+          grep -q '^    url "https://github.com/kodmial/nanodictate/releases/download/' packaging/homebrew/nanodictate.rb
+          grep -q '^    sha256 "' packaging/homebrew/nanodictate.rb
           # Service block with the canonical label: a lost label would let brew invent homebrew.mxcl.nanodictate — a second daemon.
           grep -q '^  service do$' packaging/homebrew/nanodictate.rb
           grep -q 'name macos: "com.nanodictate.agent"' packaging/homebrew/nanodictate.rb
           # The generated cask must parse (Ruby syntax check) and carry the .app
-          # stanza plus the quarantine-clearing postflight_steps — a cask that lost
-          # either would install an app Gatekeeper refuses on first launch
-          # (self-signed, no notarization; the zip's quarantine bit is what the
-          # postflight_steps strips via the {{staged_path}} token). `depends_on :macos`
-          # must also survive: without it brew rejects the cask at tap time with
+          # stanza — self-signed and not notarized, the bundle relies on the
+          # user's approval when Gatekeeper refuses it, so the cask deliberately
+          # has NO quarantine-clearing postflight (consistent with
+          # docs/packaging/homebrew.md). `depends_on :macos` must also survive:
+          # without it brew rejects the cask at tap time with
           # "Invalid cask (Linux ...)" — "Missing Linux stanzas ...".
           ruby -c packaging/homebrew/Casks/nanodictate.rb
           grep -q '^cask "nanodictate" do$' packaging/homebrew/Casks/nanodictate.rb
           grep -q '^  app "NanoDictate.app"$' packaging/homebrew/Casks/nanodictate.rb
           grep -q '^  depends_on :macos$' packaging/homebrew/Casks/nanodictate.rb
-          grep -q '^  postflight_steps do$' packaging/homebrew/Casks/nanodictate.rb
-          # The postflight_steps body MUST use the new InstallSteps DSL — `run` with a
-          # `{{staged_path}}` template token — not the deprecated `system_command`
-          # / `staged_path.join` form. CaskLoader instance_evals the body on
-          # Homebrew::InstallSteps::DSL (which has no system_command/staged_path), so
-          # the old body dies with NameError — the exact failure `brew tap` would hit.
-          grep -q 'run "/usr/bin/xattr"' packaging/homebrew/Casks/nanodictate.rb
-          grep -q '{{staged_path}}/NanoDictate.app' packaging/homebrew/Casks/nanodictate.rb
+          # The cask must still reference the installed bundle path: the `app`
+          # stanza MOVES the bundle into appdir and the `binary` stanza resolves
+          # the executable from the installed location at #{appdir}/NanoDictate.app.
+          grep -q '#{appdir}/NanoDictate.app' packaging/homebrew/Casks/nanodictate.rb
+          # The cask must never clear quarantine (Gatekeeper stays until the
+          # user approves); negative guard — a regression here would silently
+          # re-enable the xattr -dr postflight.
+          if grep -q '^  postflight do' packaging/homebrew/Casks/nanodictate.rb; then
+            echo "ERROR: cask must never clear quarantine (postflight found)" >&2
+            exit 1
+          fi
           # Then load the cask FOR REAL through CaskLoader — the same path brew uses
-          # on tap/install. This catches the postflight_steps NameError above (a cask
+          # on tap/install. This catches any cask load error (a cask
           # that parses yet fails to load) and any `depends_on :macos` loss (which
           # would otherwise load as a Linux cask on this ubuntu runner). Homebrew on
           # ubuntu-latest is NOT in PATH (preinstalled at /home/linuxbrew/.linuxbrew),
@@ -825,8 +859,11 @@ jobs:
           # No unfilled __PLACEHOLDER__ may remain in the generated files
           # (formula + cask + port; the cask's zip tokens are distinct from the
           # formula's tarball tokens by design, see release-prep.rb).
-          ! grep -E '__VERSION__|__SHA256_(ARM64|X86_64)__|__ZIP_SHA256_(ARM64|X86_64)__|__MAINTAINERS__|__REVISION__' \
-            packaging/homebrew/nanodictate.rb packaging/homebrew/Casks/nanodictate.rb packaging/macports/Portfile
+          if grep -qE '__VERSION__|__SHA256_(ARM64|X86_64)__|__ZIP_SHA256_(ARM64|X86_64)__|__MAINTAINERS__|__REVISION__' \
+            packaging/homebrew/nanodictate.rb packaging/homebrew/Casks/nanodictate.rb packaging/macports/Portfile; then
+            echo "ERROR: unfilled placeholders remain in generated manifests" >&2
+            exit 1
+          fi
           # Structural Portfile sanity (a macOS-only `port lint` is impossible
           # on the ubuntu runner, so grep the generated file instead): a
           # numeric revision, an empty build phase, no configure step, a real
@@ -943,6 +980,99 @@ jobs:
             git commit -m "chore(release): sync nanodictate v$VERSION port tree"
             git push origin main
           fi
+
+      # Pin the installer to the synchronized kodmial/macports-nanodictate tree
+      # revision: PIN_REV in scripts/install-macports.sh is the installer's
+      # exact-revision checkout of the tree — if it stays on an older commit,
+      # fresh installs check out a stale Portfile (not the one generated by
+      # this very workflow). A STANDALONE step, not part of the tree-sync step
+      # (which skip_release can gate off on a re-run): when a pin push failed
+      # after a successful tree sync, the re-run must still repair the pin —
+      # preflight's pin check keeps skip_manifests=false while the pinned
+      # revision differs from the tree HEAD, so this step, gated on
+      # skip_manifests like the rest of the job, runs exactly then. Runs on
+      # both paths (tree changed or not): TREE_SHA is the tree HEAD either way,
+      # and the installer commit is skipped when the pin is already current.
+      # The pin commit is based on freshly fetched origin/main, prepared in a
+      # separate temporary worktree: a re-run's checked-out release ref predates
+      # the previously pushed manifests and would fail the non-fast-forward guard
+      # below, and a detached checkout of origin/main in the main workspace would
+      # hand the following "Update tap repo" step origin/main's manifest bytes
+      # instead of the ones this job generated. Push mirrors the manifests
+      # step's non-fast-forward guard; the checkout's persisted GITHUB_TOKEN
+      # (contents: write) authenticates it — gh's TAP_PAT helper only ever
+      # serves the /tmp tree clone above, never this workspace push.
+      - name: Pin install-macports.sh to synced macports tree revision
+        if: ${{ needs.preflight.outputs.skip_manifests != 'true' }}
+        run: |
+          set -euo pipefail
+          # The revision to pin: the HEAD the tree-sync step just pushed when it
+          # ran (the /tmp clone is left in place), else the tree's live main tip
+          # via ls-remote — the same probe preflight's pin check uses for a
+          # sync-free re-run.
+          if [ -d /tmp/macports-nanodictate/.git ]; then
+            TREE_SHA="$(git -C /tmp/macports-nanodictate rev-parse HEAD)"
+          else
+            TREE_SHA="$(git ls-remote https://github.com/kodmial/macports-nanodictate refs/heads/main | awk '{print $1}')"
+          fi
+          if ! [[ "$TREE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::could not resolve the macports-nanodictate tree HEAD (${TREE_SHA:-<empty>}) — cannot pin install-macports.sh"
+            exit 1
+          fi
+          # Stale-pin guard: the revision about to be pinned is only good if
+          # remote main still matches it. When the tree-sync step ran in this
+          # run, the /tmp clone reports the HEAD this run pushed — a concurrent
+          # release that advanced the tree after that push keeps the clone on the
+          # older HEAD, and pinning it would hand fresh installs a stale
+          # Portfile. Compare the live remote main against TREE_SHA before
+          # committing; any drift fails the step for a retry.
+          REMOTE_MAIN="$(git ls-remote https://github.com/kodmial/macports-nanodictate refs/heads/main | awk '{print $1}')"
+          if ! [[ "$REMOTE_MAIN" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::could not resolve the macports-nanodictate remote main revision (${REMOTE_MAIN:-<empty>}) — cannot verify the pin target; re-run the workflow"
+            exit 1
+          fi
+          if [[ "$REMOTE_MAIN" != "$TREE_SHA" ]]; then
+            echo "::error::macports-nanodictate remote main ($REMOTE_MAIN) no longer matches the revision this run synced ($TREE_SHA) — a concurrent release advanced the tree after the sync step. Do not pin a stale tree; re-run the workflow to pin the current tip."
+            exit 1
+          fi
+          # The pin is prepared in a temporary linked worktree at origin/main so
+          # the main workspace ($GITHUB_WORKSPACE) keeps its working tree — the
+          # packaging/homebrew manifests generated earlier in this job — intact
+          # for the "Update tap repo" step that copies them from there.
+          git -C "$GITHUB_WORKSPACE" fetch origin main
+          WS="$(mktemp -d)/pin"
+          git -C "$GITHUB_WORKSPACE" worktree add --detach "$WS" origin/main
+          sed -i "s/^PIN_REV=\"[^\"]*\"$/PIN_REV=\"$TREE_SHA\"/" "$WS/scripts/install-macports.sh"
+          if ! grep -qxF "PIN_REV=\"$TREE_SHA\"" "$WS/scripts/install-macports.sh"; then
+            echo "::error::PIN_REV in scripts/install-macports.sh was not updated to $TREE_SHA"
+            exit 1
+          fi
+          git -C "$WS" config user.name "dima"
+          git -C "$WS" config user.email "dima@users.noreply.github.com"
+          git -C "$WS" add scripts/install-macports.sh
+          if git -C "$WS" diff --cached --quiet; then
+            # Reached only when the stale-pin guard above passed (remote main
+            # still == TREE_SHA): a drifted remote would have failed the step
+            # even though the pin already matches — no silent no-op on a stale
+            # tree, and nothing to push here.
+            echo "install-macports.sh already pins the synced tree revision $TREE_SHA — nothing to commit."
+          else
+            git -C "$WS" commit -m "chore(release): pin install-macports.sh to macports tree $TREE_SHA"
+            # Race guard: main can move between the fetch above and this commit
+            # — re-check before push (a race after this loses only to the
+            # server's own non-fast-forward refusal).
+            git -C "$WS" fetch origin main
+            git -C "$WS" merge-base --is-ancestor origin/main HEAD || {
+              echo "::error::main has moved ahead of the pin commit — the PIN_REV commit would not fast-forward. Reset main to the current tip (or merge it) and re-run the workflow."
+              exit 1
+            }
+            git -C "$WS" push origin HEAD:main
+            echo "Pinned install-macports.sh PIN_REV to the synced tree revision $TREE_SHA"
+          fi
+          # The pin revision is only consumed inside this step — drop the
+          # temporary worktree. The main workspace is left untouched, so the
+          # "Update tap repo" step still copies THIS job's generated manifests.
+          git -C "$GITHUB_WORKSPACE" worktree remove --force "$WS"
 
       # Sync the formula + cask into the kodmial/homebrew-nanodictate tap (optional,
       # needs the TAP_PAT repo secret — a Personal Access Token, classic

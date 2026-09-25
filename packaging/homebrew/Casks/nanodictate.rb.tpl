@@ -14,24 +14,27 @@
 # binaries plus config.example.toml, the bundled config source). Either way
 # there is exactly ONE daemon behind one canonical LaunchAgent plist with the
 # single label com.nanodictate.agent — the same ~/Library/LaunchAgents/
-# com.nanodictate.agent.plist that `nanodictate start`, the formula's
-# post_install and the MacPorts port's post-activate write. Installing the
-# cask over the formula is safe (idempotent re-registration, never a second
-# daemon); the last installer simply re-writes the same canonical file.
+# com.nanodictate.agent.plist that `nanodictate start`, `brew services start`
+# and the MacPorts port's post-activate write. Install either the formula or
+# the cask, not both — each links `nanodictate` into $(brew --prefix)/bin, and
+# the second installer fails on the existing symlink. Uninstall one before
+# installing the other.
 #
-# postflight_steps + quarantine: the release binaries are self-signed with the
-# NanoDictate CI Signing identity — no Developer ID, no notarization. A .app
-# carrying the com.apple.quarantine attribute is refused by Gatekeeper
-# ("damaged"/"unidentified developer"). Homebrew's own curl does not set the
-# attribute, but a browser-downloaded zip (or a brew that stamps it) would
-# break first launch, so the postflight_steps strips it from the installed bundle.
-# Homebrew expands the `{{staged_path}}` template token (install_steps.rb) to the
-# staged source: after the `app` artifact moved the bundle into /Applications, it
-# is a symlink to it (FileUtils.ln_sf); xattr follows the link and clears the
-# attribute on the REAL installed app. `xattr -dr` exits 0 even when nothing is
-# quarantined (verified on macOS), so the step is a safe no-op on a clean
-# brew-cached download. `postflight_steps` is the current brew DSL stanza; the
-# deprecated `postflight` alias warns on every tap.
+# quarantine: the release binaries are self-signed with the NanoDictate CI
+# Signing identity — no Developer ID, no notarization. A .app carrying the
+# com.apple.quarantine attribute is refused by Gatekeeper on first launch
+# ("damaged"/"unidentified developer"). Homebrew Cask stamps the quarantine
+# attribute on the downloaded container by default (Cask::Installer →
+# Quarantine.propagate copies it from the downloaded zip into the staged
+# path), so a plain `brew install --cask` puts the bundle on disk WITH the
+# attribute — and this cask has NO postflight step that would clear it.
+# Gatekeeper may therefore refuse the first launch of the self-signed,
+# non-notarized bundle. On macOS 15 (Sequoia) and later, launch the app once
+# (it is refused), then approve it in System Settings → Privacy & Security →
+# "Open Anyway"; on macOS 14 and older, Right-click → Open still works. As an
+# alternative, clear the attribute by hand with `xattr -dr
+# com.apple.quarantine /Applications/NanoDictate.app` (see the "Signing and
+# quarantine" section in docs/packaging/homebrew.md for the rationale).
 
 cask "nanodictate" do
   version "__VERSION__"
@@ -58,16 +61,11 @@ cask "nanodictate" do
   depends_on :macos
 
   app "NanoDictate.app"
-  binary "NanoDictate.app/Contents/MacOS/nanodictate"
-
-  postflight_steps do
-    # The {{staged_path}} token is dereferenced by Homebrew at install time to
-    # the staged source — after the `app` artifact moved the bundle into
-    # /Applications, it is a symlink to it (FileUtils.ln_sf), so xattr follows
-    # the link and clears the attribute on the REAL installed app. Exit 0 on a
-    # clean tree, so this never fails a cask install.
-    run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{staged_path}}/NanoDictate.app"]
-  end
+  # `app` MOVES the bundle to appdir BEFORE the binary link phase (artifact
+  # install order: the App group precedes the Binary group), so the executable
+  # source must resolve to the installed location — a staged-relative path
+  # would no longer exist when the binary's symlink is created.
+  binary "#{appdir}/NanoDictate.app/Contents/MacOS/nanodictate"
 
   caveats <<~EOS
     NanoDictate needs manual macOS privacy grants (System Settings → Privacy & Security):
@@ -75,6 +73,16 @@ cask "nanodictate" do
       - Accessibility:  enable NanoDictateAgent (the agent inserts recognized text)
     macOS prompts on first use; grants are per-binary, so an upgrade that
     replaces the app may require re-granting.
+
+    Gatekeeper approval: Homebrew Cask keeps the com.apple.quarantine
+    attribute on the downloaded bundle, and the app is self-signed and not
+    notarized — so macOS may refuse the first launch. On macOS 15 (Sequoia)
+    and later, Control-click/Right-click → Open is no longer available:
+    launch the app once (it is refused), then approve it in System Settings
+    → Privacy & Security → "Open Anyway". On macOS 14 and older,
+    Right-click → Open still works. Either way you can clear the attribute
+    by hand with `xattr -dr com.apple.quarantine
+    /Applications/NanoDictate.app`.
 
     The running binary registers the background agent itself — `nanodictate start`
     writes the canonical ~/Library/LaunchAgents/com.nanodictate.agent.plist and

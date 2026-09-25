@@ -1,0 +1,163 @@
+import Foundation
+@testable import NanoDictateCore
+
+// MARK: - Тесты VAD-сегментации (AudioSegmenter)
+//
+// Synthetic RMS timelines and samples; no network or I/O.
+
+final class AudioSegmenterTests: XCTestCase {
+
+    private let speech: Float = 0.05   // above silence threshold
+    private let silence: Float = 0.001 // below silence threshold
+
+    private func cfg(
+        pause: TimeInterval = 1.0,
+        min: TimeInterval = 3.0,
+        max: TimeInterval = 45.0,
+        overlap: TimeInterval = 1.0
+    ) -> AudioSegmenterConfig {
+        AudioSegmenterConfig(
+            pauseDuration: pause,
+            minSegment: min,
+            maxSegment: max,
+            overlap: overlap
+        )
+    }
+
+    // MARK: - RMS-таймлайн (окно = 1 c)
+
+    @objc func testPauseBoundarySplits() {
+        let rms: [Float] = [speech, speech, speech, silence, speech, speech, speech]
+        let ranges = AudioSegmenter.splitRanges(
+            rms: rms, windowDuration: 1.0, config: cfg(min: 1.0)
+        )
+        XCTAssertEqual(ranges, [0..<3, 4..<7])
+    }
+
+    @objc func testShortSegmentIsMerged() {
+        // Pause exists but segment < minSegment — no split.
+        let rms: [Float] = [speech, silence, speech, speech, speech]
+        let ranges = AudioSegmenter.splitRanges(
+            rms: rms, windowDuration: 1.0, config: cfg(min: 3.0)
+        )
+        XCTAssertEqual(ranges, [0..<5])
+    }
+
+    @objc func testTrailingShortSpeechMerges_WhenCombinedWithinMax() {
+        // Pause splits [0..<5] (pause 2s, min 3s); trailing 1s of speech
+        // < minSegment merges back into the last segment because combined
+        // length (8s) <= maxSegment (9s).
+        let rms: [Float] = [speech, speech, speech, speech, speech, silence, silence, speech]
+        let ranges = AudioSegmenter.splitRanges(
+            rms: rms, windowDuration: 1.0, config: cfg(pause: 2.0, min: 3.0, max: 9.0)
+        )
+        XCTAssertEqual(ranges, [0..<8])
+    }
+
+    @objc func testTrailingShortSpeechNotMerged_WhenCombinedExceedsMax() {
+        // Hard-cap cut at 4s (max 4s); trailing 1s of speech < minSegment,
+        // but combined length (5s) > maxSegment (4s) — merge condition
+        // fails, trail stays its own segment.
+        let rms: [Float] = [speech, speech, speech, speech, speech]
+        let ranges = AudioSegmenter.splitRanges(
+            rms: rms, windowDuration: 1.0, config: cfg(min: 3.0, max: 4.0)
+        )
+        XCTAssertEqual(ranges, [0..<4, 4..<5])
+    }
+
+    @objc func testHardMaxBoundary() {
+        // 50 speech windows, maxSegment 10s → five segments.
+        let rms = Array(repeating: speech, count: 50)
+        let ranges = AudioSegmenter.splitRanges(
+            rms: rms, windowDuration: 1.0, config: cfg(min: 1.0, max: 10.0)
+        )
+        XCTAssertEqual(ranges, [0..<10, 10..<20, 20..<30, 30..<40, 40..<50])
+    }
+
+    @objc func testPauseShorterThanRequiredDoesNotSplit() {
+        // Pause of 1 window < pauseDuration 2s — no split.
+        let rms: [Float] = [speech, speech, silence, speech, speech, speech]
+        let ranges = AudioSegmenter.splitRanges(
+            rms: rms, windowDuration: 1.0, config: cfg(pause: 2.0, min: 1.0)
+        )
+        XCTAssertEqual(ranges, [0..<6])
+    }
+
+    @objc func testSingleSpeechBlockIsOneSegment() {
+        let rms: [Float] = [speech, speech, speech]
+        let ranges = AudioSegmenter.splitRanges(
+            rms: rms, windowDuration: 1.0, config: cfg(min: 1.0)
+        )
+        XCTAssertEqual(ranges, [0..<3])
+    }
+
+    @objc func testEmptyRMSNoSegments() {
+        let ranges = AudioSegmenter.splitRanges(rms: [], windowDuration: 1.0)
+        XCTAssertTrue(ranges.isEmpty)
+    }
+
+    // MARK: - Сэмплы (16 кГц) + оверлэп
+
+    private func makeSamples(_ blocks: [(amplitude: Float, seconds: Double)], sampleRate: Int = 16000) -> [Int16] {
+        var out: [Int16] = []
+        for block in blocks {
+            let count = Int((block.seconds * Double(sampleRate)).rounded())
+            let phaseStep = 2 * Double.pi * 440.0 / Double(sampleRate)
+            for i in 0..<count {
+                let v = block.amplitude * Float(sin(phaseStep * Double(i)))
+                out.append(Int16(v * 32767))
+            }
+        }
+        return out
+    }
+
+    @objc func testSamplesOverlapPrependToNextSegment() {
+        // Speech 2s, pause 1.5s, speech 2s → 2 segments, 1s overlap prepended.
+        let samples = makeSamples([
+            (amplitude: 0.1, seconds: 2.0),
+            (amplitude: 0.0, seconds: 1.5),
+            (amplitude: 0.1, seconds: 2.0)
+        ])
+        let segments = AudioSegmenter.segments(
+            samples: samples,
+            sampleRate: 16000,
+            config: cfg(pause: 1.0, min: 1.0, overlap: 1.0)
+        )
+
+        XCTAssertEqual(segments.count, 2)
+
+        let first = segments[0]
+        XCTAssertEqual(first.start, 0)
+        let firstEnd = Int((first.end * 16000).rounded())
+        XCTAssertEqual(first.samples.count, firstEnd) // no overlap on first segment
+
+        let second = segments[1]
+        let bodyStart = Int((second.start * 16000).rounded())
+        let bodyEnd = Int((second.end * 16000).rounded())
+        XCTAssertEqual(second.samples.count, bodyEnd - bodyStart + 16000) // body + 1s overlap
+        // Overlap is tail of previous body (speech), not pause silence.
+        XCTAssertEqual(
+            Array(second.samples[0..<16000]),
+            Array(samples[(firstEnd - 16000)..<firstEnd])
+        )
+        XCTAssertTrue(second.samples[0..<16000].contains { abs($0) > 0 })
+    }
+
+    @objc func testSamplesNoSegmentsWhenAllSilent() {
+        let samples = makeSamples([(amplitude: 0.0, seconds: 3.0)])
+        let segments = AudioSegmenter.segments(samples: samples, sampleRate: 16000)
+        XCTAssertTrue(segments.isEmpty)
+    }
+
+    // MARK: - F4: запись обрывается посреди паузы
+
+    @objc func testRecordingCutsMidPause() {
+        // Speech 2s, silence 0.7s (< minSegment), recording cut → one segment.
+        let rms: [Float] = [speech, speech, silence]
+        let ranges = AudioSegmenter.splitRanges(
+            rms: rms, windowDuration: 1.0, config: cfg(pause: 1.0, min: 1.0)
+        )
+        XCTAssertEqual(ranges.count, 1)
+        XCTAssertEqual(ranges[0], 0..<3)
+    }
+}

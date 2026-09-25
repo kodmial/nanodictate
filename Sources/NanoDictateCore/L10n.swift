@@ -1,0 +1,556 @@
+import Foundation
+
+// swiftlint:disable file_length
+
+// MARK: - AppLanguage
+
+public enum AppLanguage: String, CaseIterable, Sendable {
+  // swiftlint:disable:next identifier_name
+  case en, ru
+}
+
+// MARK: - L10n
+
+public enum L10n {
+  public static var language: AppLanguage = .en
+
+  public static func tr(_ key: String) -> String {
+    table(language)[key] ?? key
+  }
+
+  /// Next language for menu toggle (Status key "0"): .en ↔ .ru.
+  public static func toggled() -> AppLanguage {
+    language == .en ? .ru : .en
+  }
+
+  static func table(_ lang: AppLanguage) -> [String: String] {
+    switch lang {
+    case .en: return english
+    case .ru: return russian
+    }
+  }
+}
+
+// MARK: - EN table
+
+extension L10n {
+  private static let english: [String: String] = [
+    // menu.*
+    "menu.language": "Language",
+    "menu.languageEn": "English",
+    "menu.languageRu": "Русский",
+    "menu.providers": "Providers",
+    "menu.noProviders": "(no providers)",
+    "menu.noProvidersLegacy": "(no providers — legacy config)",
+    "menu.notSelected": "(not selected — nanodictate provider use <name>)",
+    "menu.logs": "Logs",
+    "menu.stopAgent": "Stop agent",
+    "menu.startAgent": "Start agent",
+    "menu.showLastText": "Show last recognition text",
+    "menu.retryOther": "Re-recognize with different provider",
+    "menu.reviewToggle": "Review before insert (on/off)",
+    "menu.quit": "Quit",
+    // overlay.*
+    "overlay.recording": "Recording...",
+    "overlay.recognizing": "Recognizing...",
+    "overlay.recognizingPart": "Recognizing... (part {n})",
+    "overlay.finalProcessing": "Final processing...",
+    "overlay.finishing": "Finishing...",
+    "overlay.cancelled": "Cancelled",
+    "overlay.insertCancelled": "Insert cancelled",
+    "overlay.emptyResult": "Empty result",
+    "overlay.error": "Error: {message}",
+    "overlay.retryError": "Retry error: {message}",
+    "overlay.retryCancelled": "Retry cancelled",
+    "overlay.retryInserted": "Retry inserted",
+    // error.*
+    "error.noInternet": "No internet",
+    "error.sttTimeout": "STT timeout",
+    "error.micPermission": "Allow microphone access: System Settings → Privacy",
+    "error.micPermissionUnhandled":
+      "Microphone access request timed out: System Settings → Privacy",
+    "error.micEnableFailed": "Failed to enable microphone",
+    "error.micNoResponse": "Microphone not responding",
+    "error.accessibilityRequired":
+      "Accessibility must be enabled: System Settings → Privacy & Security",
+    "error.agentLaunchFailed": "Failed to launch dictation agent",
+    "error.unsupportedAudioFormat": "Unsupported audio format",
+    "error.audioServiceUnavailable": "Audio service unavailable",
+    // status.*
+    "status.title": "NanoDictate — status",
+    "status.logs": "Logs — agent.log ({n} lines total)",
+    "status.hintNav": "digits/arrows — navigate · Enter — select · q/esc — exit",
+    "status.hintProviders":
+      "digit/Enter — select · y/Enter — confirm · other — cancel · r — refresh · q/esc — back",
+    "status.hintLogs": "↑/↓ — scroll · q/esc — back",
+    "status.agent": "Agent",
+    "status.recording": "Recording",
+    "status.provider": "Provider",
+    "status.log": "Log",
+    "status.size": "Size",
+    "status.hasErrors": "errors: yes",
+    "status.noErrors": "errors: no",
+    "status.logTail": "Log tail:",
+    "status.running": "running",
+    "status.stopped": "stopped",
+    "status.active": "active",
+    "status.idle": "idle",
+    // review.*
+    "review.prompt": "Text",
+    "review.confirmInsert": "Insert [Enter] / Cancel [Esc]",
+    // debug.*
+    "debug.recordingSaveFailed": "Failed to save audio recording {path}: {error}",
+    // ── CLI + Batch (nanodictate) ──
+    "usage.title": "Usage: nanodictate <command> [args]",
+    "usage.cmds": "Commands:",
+    "usage.start": "Install and start the LaunchAgent",
+    "usage.stop": "Stop the LaunchAgent",
+    "usage.status": "Agent status (launchctl + pgrep — process pid)",
+    "usage.config": "Show config (secrets masked: abcd***wxyz)",
+    "usage.config.init": "Create config.toml template (chmod 600; existing file overwritten only"
+      + " after confirmation without --force)",
+    "usage.config.setkey":
+      "Write api_key to [providers.PROVIDER] section (chmod 600; key not specified"
+      + " — keyboard input or stdin with --stdin/--pipe; NANODICTATE_API_KEY warning)",
+    "usage.config.path": "Config file path (alias config --path)",
+    "usage.config.showfile": "Config file contents with masked secrets",
+    "usage.provider": "STT providers from config.toml (* = active)",
+    "usage.provider.use":
+      "Make NAME the active provider: edit active_provider in config.toml, chmod 600"
+      + " and restart agent (--no-restart skips restart)",
+    "usage.provider.status": "Active provider + agent status",
+    "usage.provider.show": "Detailed provider info (secrets masked)",
+    "usage.routing":
+      "STT routing by roles ([routing]):\n  segment/final + their effective (fallback to active)",
+    "usage.routing.set":
+      "ROLE = segment (step-by-step dictation segments) or final (full-recording pass);"
+      + " NAME among [providers.X]; edit config.toml (chmod 600), restart agent (--no-restart skips restart)",
+    "usage.routing.unset": "Clear role — fallback to active provider",
+    "usage.transcribe":
+      "One-shot audio file transcription\n  (non-WAV converted via afconvert; with --json"
+      + " raw response saved to transcription_raw.json next to FILE)",
+    "usage.batch": "Batch mode for long files: same flags",
+    "usage.batch.desc":
+      "One provider (default gigaam), max-segment chunks with overlap, 3× retry, […]"
+      + " placeholder on failure, checkpoint <out>.checkpoint.json (without --out — in temp dir) for --resume",
+    "usage.retry": "Re-transcribe last recording with a different provider\n  (agent holds last WAV"
+      + " in memory; insertion performed by the agent)",
+    "usage.last": "Show last recognized text (saved on successful insert)",
+    "usage.logs": "Last 50 lines of agent log",
+    "usage.help": "Show this help",
+    "cli.dir.error": "Failed to create directories: %@",
+    "cli.agent.notfound": "Failed to locate NanoDictateAgent path",
+    "cli.agent.tccRehint":
+      "Note: the agent binary path changed — macOS may ask again to grant"
+      + " Microphone and Accessibility permissions.",
+    "cli.plist.writeerror": "Failed to write plist: %@",
+    "cli.bootstrap.nodata": "launchctl bootstrap: no output",
+    "cli.bootstrap.fail": "launchctl bootstrap failed: %@",
+    "cli.load.nodata": "launchctl load fallback: no output",
+    "cli.load.fail": "launchctl load fallback failed: %@",
+    "cli.bootout.nodata": "launchctl bootout: no output",
+    "cli.bootout.fail": "launchctl bootout failed: %@",
+    "cli.unload.nodata": "launchctl unload fallback: no output",
+    "cli.unload.fail": "launchctl unload fallback failed: %@",
+    "cli.no.providers": "(no providers — legacy config)",
+    "cli.no.active": "(not selected — `nanodictate provider use <name>`)",
+    "cli.config.hint":
+      "Config not found — it will be created automatically on first launch"
+      + " from config.example.toml (`nanodictate config init` writes it now)",
+    "cli.pid.none": "none",
+    "cli.config.overwrite": "Config %@ exists. Overwrite? (y/N)",
+    "cli.config.exists": "Config already exists: %@",
+    "cli.config.forcehint": "Use `nanodictate config init --force` to overwrite.",
+    "cli.config.writeerror": "ERROR: failed to write %@: %@",
+    "cli.config.example.notfound":
+      "ERROR: config.example.toml not found (look next to the binary"
+      + " or in share/nanodictate)",
+    "cli.config.template": "Config template created: %@ (chmod 600)",
+    "cli.config.fillserts":
+      "Fill secrets: `nanodictate config set-key <provider>` or edit the file.",
+    "cli.config.noread": "Failed to read config: %@",
+    "cli.config.missing":
+      "Config not found: created automatically on first launch from"
+      + " config.example.toml; `nanodictate config init` writes it now (%@)",
+    "cli.config.noset": "(not selected)",
+    "cli.setkey.usage": "Usage: nanodictate config set-key <provider-id> [key] [--stdin]",
+    "cli.setkey.prompt": "Enter api_key value for '%@' (Enter to confirm):",
+    "cli.setkey.cancelled": "Cancelled",
+    "cli.setkey.empty": "Value is empty — key not written (pass as argument or via stdin)",
+    "cli.setkey.invalid": "ERROR: value contains invalid characters (\", \\, newline)",
+    "cli.setkey.envwarn":
+      "WARNING: NANODICTATE_API_KEY env var is set — it takes priority over file api_key"
+      + " for the ACTIVE provider only;",
+    "cli.setkey.envnote":
+      "the written key will not be used by the active provider while it is set (failover/"
+      + "role providers keep their own file keys; see `nanodictate config show`).",
+    "cli.setkey.updated": "api_key for provider '%@' updated: %@ (chmod 600)",
+    "cli.provider.nosections": "No [providers.X] sections in config (using legacy config).",
+    "cli.provider.active": "Active provider: %@",
+    "cli.provider.notfound": "ERROR: provider '%@' not found. Available: %@",
+    "cli.provider.restart": "Agent restarted",
+    "cli.provider.norestart": "Agent not restarted (--no-restart)",
+    "cli.provider.kickfail": "Agent not restarted (run `nanodictate start`): %@",
+    "cli.routing.usage":
+      "Usage: nanodictate routing set segment|final <provider-id> [--no-restart]",
+    "cli.routing.unset.usage": "Usage: nanodictate routing unset segment|final [--no-restart]",
+    "cli.routing.noexist": "ERROR: provider '%@' not found. Available: %@",
+    "cli.routing.role": "Role %@: %@",
+    "cli.routing.reset": "Role %@ reset — fallback to active provider",
+    "cli.routing.main.usage": "Usage: nanodictate routing [show]|set|unset",
+    "cli.transcribe.usage": "Usage: nanodictate transcribe FILE [--json]",
+    "cli.transcribe.nofile": "Usage: nanodictate transcribe FILE [--json]",
+    "cli.transcribe.extra": "ERROR: extra argument %@",
+    "cli.transcribe.warn": "WARNING: provider 'gigaam' not found in config — selected '%@'",
+    "cli.transcribe.noprovider": "ERROR: provider '%@' not found. Available: %@",
+    "cli.transcribe.nourl": "ERROR: provider '%@' has empty base_url in config",
+    "cli.transcribe.filenotfound": "ERROR: file not found: %@",
+    "cli.transcribe.readerror": "ERROR: failed to read %@: %@",
+    "cli.transcribe.waverror": "ERROR: failed to convert %@ to WAV: %@",
+    "cli.transcribe.converror": "ERROR: failed to open converted WAV (%@)",
+    "progress.eta.sec": "~%d sec left",
+    "progress.eta.min": "~%d min left",
+    "progress.eta.hour": "~%d hr left",
+    "progress.eta.hm": "~%d hr %d min left",
+    "progress.summary":
+      "Done: duration %@, segments %d, recognized %d, skipped %d, processing time %d s",
+    "progress.skipped": "; skipped segments: %@",
+    "progress.checkpoint": "Checkpoint: %@",
+    "progress.jsonsaved": "Saved: %@",
+    "progress.jsonfail": "Failed to save %@: %@",
+    "progress.noresume": "WARNING: --resume but checkpoint %@ not found — starting from scratch",
+    "progress.badcheckpoint":
+      "WARNING: checkpoint %@ is from a different file ('%@') — ignored, starting from scratch",
+    "cli.last.notext": "No recognized text saved yet.",
+    "cli.retry.usage": "Usage: nanodictate retry NAME",
+    "cli.retry.available": "Available providers: %@",
+    "cli.retry.notrunning": "ERROR: agent not running — last WAV is held in agent memory. Start"
+      + " the agent (`nanodictate start`) and retry.",
+    "cli.retry.sent": "Retry sent to agent: re-transcribing last recording with provider '%@ [%@]'",
+    "cli.logs.notfound": "Log not found",
+    "cli.help.usage": "Usage: nanodictate <command> [args]",
+    "cli.cmd.unknown": "Unknown command: %@",
+    "cli.flag.provider": "ERROR: --provider requires id (e.g. gigaam)",
+    "cli.flag.out": "ERROR: --out requires a path",
+    "cli.flag.maxsegment": "ERROR: --max-segment requires a positive number of seconds",
+    "cli.flag.overlap": "ERROR: --overlap requires a non-negative number of seconds",
+    "cli.flag.parallel": "ERROR: --parallel requires an integer >= 1 (number of workers)",
+    "cli.flag.unknown": "ERROR: unknown flag %@",
+    "cli.flag.extra": "ERROR: extra argument %@",
+    "cli.flag.configload": "ERROR: failed to load config: %@",
+    "menu.items": "Items:",
+    "menu.empty.providers": "(no providers — legacy config used)",
+    "menu.empty.log": "(log empty or not found)",
+    "menu.no.providers.retry": "No providers for retry (legacy config)",
+    "menu.switch.confirm": "Switch active provider to '%@' [%@]?",
+    "menu.switch.hint": "  (y/Enter — confirm · other key — cancel)",
+    "menu.switch.cancelled": "Cancelled",
+    "menu.switch.error": "Switch error: %@",
+    "menu.switch.ok": "Provider '%@' is now active · %@",
+    "menu.retry.prompt": "Re-transcribe last recording with provider:",
+    "menu.retry.hint": "  (number — select · other key — cancel)",
+    "menu.review.on":
+      "Review: on · %@ — WARNING: under launchd without a terminal review is skipped,"
+      + " text is inserted immediately",
+    "menu.review.off": "Review before insert: off · %@",
+    "menu.review.configerror": "Config write error: %@",
+    "menu.nav.status": "digits/arrows — select · Enter — open · q — quit",
+    "menu.nav.providers":
+      "digit/Enter — select · y/Enter — confirm · other key — cancel · r — refresh · q/esc — back",
+    "menu.nav.logs": "↑/↓ — scroll · q/esc — back",
+    "menu.running": "running",
+    "menu.stopped": "stopped",
+    "menu.agent.notfound": "command completed (exit %@)",
+    "menu.agent.tccRehint":
+      "Note: the agent binary path changed — macOS may ask again to grant"
+      + " Microphone and Accessibility permissions.",
+    // ── Remaining CLI gaps ──
+    "cli.placeholder.empty": "(empty)",
+    "cli.provider.activeMarker": "(* = active provider)",
+    "cli.config.secretWarning": "! api_key: WARNING — secret not set",
+    "cli.config.secretFileMissing": "! api_key_file: WARNING — file does not exist (%@)",
+    "cli.config.unset": "(unset)",
+    "cli.config.active": "(active)",
+    "cli.routing.listHint": "List: `nanodictate provider list`",
+    "progress.avgPerChunk": "%.1fs/chunk",
+    "cli.batch.badBaseUrl": "Failed to build request: bad base_url for '%@'",
+    "cli.batch.parseError": "Failed to parse response: %@",
+    "cli.transcribe.writeError": "ERROR: failed to write %@: %@",
+    "cli.error.generic": "ERROR: %@",
+    // usage placeholders (syntax lines)
+    "usage.placeholder.provider": "PROVIDER",
+    "usage.placeholder.key": "KEY",
+    "usage.placeholder.name": "NAME",
+    "usage.placeholder.role": "ROLE",
+    "usage.placeholder.file": "FILE",
+    "usage.placeholder.path": "path",
+    "usage.placeholder.seconds": "s",
+    // swiftlint:disable:next trailing_comma
+    "usage.placeholder.setAlias": "set — alias for use",
+  ]
+}
+
+// MARK: - RU table
+
+extension L10n {
+  private static let russian: [String: String] = [
+    // menu.*
+    "menu.language": "Язык",
+    "menu.languageEn": "English",
+    "menu.languageRu": "Русский",
+    "menu.providers": "Провайдеры",
+    "menu.noProviders": "(нет провайдеров)",
+    "menu.noProvidersLegacy": "(нет провайдеров — legacy-конфиг)",
+    "menu.notSelected": "(не выбран — `nanodictate provider use <имя>`)",
+    "menu.logs": "Логи",
+    "menu.stopAgent": "Остановить агента",
+    "menu.startAgent": "Запустить агента",
+    "menu.showLastText": "Показать последний текст распознавания",
+    "menu.retryOther": "Повторить распознавание другим провайдером",
+    "menu.reviewToggle": "Ревью перед вставкой (вкл/выкл)",
+    "menu.quit": "Выход",
+    // overlay.*
+    "overlay.recording": "Записываю…",
+    "overlay.recognizing": "Распознаю…",
+    "overlay.recognizingPart": "Распознаю… (часть {n})",
+    "overlay.finalProcessing": "Финальная обработка…",
+    "overlay.finishing": "Завершаю…",
+    "overlay.cancelled": "Отменено",
+    "overlay.insertCancelled": "Отменена вставка",
+    "overlay.emptyResult": "Пустой результат",
+    "overlay.error": "Ошибка: {message}",
+    "overlay.retryError": "Ошибка retry: {message}",
+    "overlay.retryCancelled": "Retry отменён",
+    "overlay.retryInserted": "Retry вставлен",
+    // error.*
+    "error.noInternet": "Нет интернета",
+    "error.sttTimeout": "Таймаут STT",
+    "error.micPermission": "Разрешите доступ к микрофону: System Settings → Конфиденциальность",
+    "error.micPermissionUnhandled":
+      "Запрос доступа к микрофону не обработан: System Settings → Конфиденциальность",
+    "error.micEnableFailed": "Не удалось включить микрофон",
+    "error.micNoResponse": "Микрофон не отвечает",
+    "error.accessibilityRequired": "Разрешите доступность для клавиатуры: System Settings"
+      + " → Конфиденциальность и безопасность",
+    "error.agentLaunchFailed": "Не удалось запустить агент диктовки",
+    "error.unsupportedAudioFormat": "Неподдерживаемый аудиоформат",
+    "error.audioServiceUnavailable": "Аудио-сервис недоступен",
+    // status.*
+    "status.title": "NanoDictate — статус",
+    "status.logs": "Логи — agent.log (всего {n} строк)",
+    "status.hintNav": "цифры/стрелки — выбор · Enter — выполнить · q/esc — выход",
+    "status.hintProviders":
+      "цифра/Enter — выбрать · y/Enter — подтвердить · другая клавиша — отмена"
+      + " · r — обновить · q/esc — назад",
+    "status.hintLogs": "↑/↓ — прокрутка · q/esc — назад",
+    "status.agent": "Агент",
+    "status.recording": "Запись",
+    "status.provider": "Провайдер",
+    "status.log": "Лог",
+    "status.size": "Размер",
+    "status.hasErrors": "ошибки: есть",
+    "status.noErrors": "ошибки: нет",
+    "status.logTail": "Хвост лога:",
+    "status.running": "работает",
+    "status.stopped": "остановлен",
+    "status.active": "идет",
+    "status.idle": "нет",
+    // review.*
+    "review.prompt": "Текст",
+    "review.confirmInsert": "Вставить [Enter] / Отменить [Esc]",
+    // debug.*
+    "debug.recordingSaveFailed": "Не удалось сохранить аудиозапись {path}: {error}",
+    // ── CLI + Batch (nanodictate) ──
+    "usage.title": "Использование: nanodictate <команда> [аргументы]",
+    "usage.cmds": "Команды:",
+    "usage.start": "Установить и запустить LaunchAgent",
+    "usage.stop": "Остановить LaunchAgent",
+    "usage.status": "Статус агента (launchctl + pgrep — pid процесса)",
+    "usage.config": "Показать конфиг (секреты маскируются: abcd***wxyz)",
+    "usage.config.init": "Создать шаблон config.toml (chmod 600; существующий файл без --force"
+      + " перезаписывается только после подтверждения в терминале)",
+    "usage.config.setkey":
+      "Записать api_key в секцию [providers.ПРОВАЙДЕР] (chmod 600; КЛЮЧ не указан"
+      + " — ввод с клавиатуры или stdin при --stdin/пайпе; предупреждение, если задан"
+      + " NANODICTATE_API_KEY)",
+    "usage.config.path": "Путь к конфиг-файлу (алиас config --path)",
+    "usage.config.showfile": "Содержимое конфиг-файла с маскировкой секретов",
+    "usage.provider": "STT-провайдеры из config.toml (* — активный)",
+    "usage.provider.use": "Сделать ИМЯ активным провайдером: правка active_provider в config.toml,"
+      + " chmod 600 и перезапуск агента (--no-restart без перезапуска)",
+    "usage.provider.status": "Активный провайдер + статус агента",
+    "usage.provider.show": "Подробно о провайдере (секреты маскируются)",
+    "usage.routing":
+      "Маршрутизация STT по ролям ([routing]):\n  segment/final + их effective (фолбэк на active)",
+    "usage.routing.set":
+      "РОЛЬ = segment (сегменты пошаговой диктовки) или final (проход по всей записи);"
+      + " ИМЯ среди [providers.X]; правка config.toml (chmod 600), перезапуск агента"
+      + " (--no-restart без перезапуска)",
+    "usage.routing.unset": "Очистить роль — фолбэк на активного провайдера",
+    "usage.transcribe":
+      "Разовая расшифровка аудиофайла\n  (не-WAV конвертируется через afconvert; с --json"
+      + " сырой ответ сохраняется в transcription_raw.json рядом с ФАЙЛ)",
+    "usage.batch": "Пакетный режим для длинных файлов: те же флаги",
+    "usage.batch.desc":
+      "Один провайдер (по умолчанию gigaam), чанки max-segment с overlap, retry 3×,"
+      + " плейсхолдер […] при провале, чекпоинт <out>.checkpoint.json (без --out — во временной"
+      + " папке) для --resume",
+    "usage.retry": "Повторить распознавание последней записи другим провайдером\n  (агент хранит"
+      + " последний WAV в памяти; вставку выполняет сам агент)",
+    "usage.last": "Показать последний распознанный текст (сохраняется при успешной вставке)",
+    "usage.logs": "Последние 50 строк лога агента",
+    "usage.help": "Показать эту справку",
+    "cli.dir.error": "Не удалось создать директории: %@",
+    "cli.agent.notfound": "Не удалось определить путь к NanoDictateAgent",
+    "cli.agent.tccRehint":
+      "Внимание: изменился путь бинаря агента — macOS может запросить"
+      + " разрешение на Микрофон и Доступность заново.",
+    "cli.plist.writeerror": "Не удалось записать plist: %@",
+    "cli.bootstrap.nodata": "launchctl bootstrap: нет вывода",
+    "cli.bootstrap.fail": "launchctl bootstrap не удался: %@",
+    "cli.load.nodata": "launchctl load fallback: нет вывода",
+    "cli.load.fail": "launchctl load fallback не удался: %@",
+    "cli.bootout.nodata": "launchctl bootout: нет вывода",
+    "cli.bootout.fail": "launchctl bootout не удался: %@",
+    "cli.unload.nodata": "launchctl unload fallback: нет вывода",
+    "cli.unload.fail": "launchctl unload fallback не удался: %@",
+    "cli.no.providers": "(нет провайдеров — legacy-конфиг)",
+    "cli.no.active": "(не выбран — `nanodictate provider use <имя>`)",
+    "cli.config.hint":
+      "Конфиг не найден — будет создан автоматически при первом запуске из"
+      + " config.example.toml (`nanodictate config init` запишет сейчас)",
+    "cli.pid.none": "нет",
+    "cli.config.overwrite": "Конфиг %@ уже существует. Перезаписать? (y/N)",
+    "cli.config.exists": "Конфиг уже существует: %@",
+    "cli.config.forcehint": "Для перезаписи используйте `nanodictate config init --force`.",
+    "cli.config.writeerror": "ОШИБКА: не удалось записать %@: %@",
+    "cli.config.example.notfound":
+      "ОШИБКА: config.example.toml не найден (поищите рядом с бинарником"
+      + " или в share/nanodictate)",
+    "cli.config.template": "Шаблон конфига создан: %@ (chmod 600)",
+    "cli.config.fillserts":
+      "Заполните секреты: `nanodictate config set-key <provider>` или отредактируйте файл.",
+    "cli.config.noread": "Не удалось прочитать конфиг: %@",
+    "cli.config.missing":
+      "Конфиг не найден: создаётся автоматически при первом запуске из"
+      + " config.example.toml; `nanodictate config init` запишет сейчас (%@)",
+    "cli.config.noset": "(не выбран)",
+    "cli.setkey.usage": "Использование: nanodictate config set-key <provider-id> [ключ] [--stdin]",
+    "cli.setkey.prompt": "Введите значение api_key для '%@' (Enter для подтверждения):",
+    "cli.setkey.cancelled": "Отменено",
+    "cli.setkey.empty": "Значение пусто — ключ не записан (передайте аргументом или через stdin)",
+    "cli.setkey.invalid": "ОШИБКА: значение содержит запрещённые символы (\", \\, перенос строки)",
+    "cli.setkey.envwarn": "ПРЕДУПРЕЖДЕНИЕ: задана переменная окружения NANODICTATE_API_KEY —"
+      + " она имеет приоритет над файловым api_key ТОЛЬКО у активного провайдера;",
+    "cli.setkey.envnote": "записанный ключ не будет использоваться активным провайдером,"
+      + " пока задана переменная (failover/роли сохраняют свои файловые ключи;"
+      + " см. `nanodictate config show`).",
+    "cli.setkey.updated": "api_key провайдера '%@' обновлён: %@ (chmod 600)",
+    "cli.provider.nosections": "Нет секций [providers.X] в конфиге (legacy-конфиг).",
+    "cli.provider.active": "Активный провайдер: %@",
+    "cli.provider.notfound": "ОШИБКА: провайдер '%@' не найден. Доступные: %@",
+    "cli.provider.restart": "Агент перезапущен",
+    "cli.provider.norestart": "Агент не перезапущен (--no-restart)",
+    "cli.provider.kickfail": "Агент не перезапущен (запустите `nanodictate start`): %@",
+    "cli.routing.usage":
+      "Использование: nanodictate routing set segment|final <provider-id> [--no-restart]",
+    "cli.routing.unset.usage":
+      "Использование: nanodictate routing unset segment|final [--no-restart]",
+    "cli.routing.noexist": "ОШИБКА: провайдер '%@' не найден. Доступные: %@",
+    "cli.routing.role": "Роль %@: %@",
+    "cli.routing.reset": "Роль %@ сброшена — фолбэк на активного провайдера",
+    "cli.routing.main.usage": "Использование: nanodictate routing [show]|set|unset",
+    "cli.transcribe.usage": "Использование: nanodictate transcribe ФАЙЛ [--json]",
+    "cli.transcribe.nofile": "Использование: nanodictate transcribe ФАЙЛ [--json]",
+    "cli.transcribe.extra": "ОШИБКА: лишний аргумент %@",
+    "cli.transcribe.warn": "ПРЕДУПРЕЖДЕНИЕ: провайдер 'gigaam' не найден в конфиге — выбран '%@'",
+    "cli.transcribe.noprovider": "ОШИБКА: провайдер '%@' не найден. Доступные: %@",
+    "cli.transcribe.nourl": "ОШИБКА: у провайдера '%@' пустой base_url в конфиге",
+    "cli.transcribe.filenotfound": "ОШИБКА: файл не найден: %@",
+    "cli.transcribe.readerror": "ОШИБКА: не удалось прочитать %@: %@",
+    "cli.transcribe.waverror": "ОШИБКА: не удалось конвертировать %@ в WAV: %@",
+    "cli.transcribe.converror": "ОШИБКА: не удалось открыть сконвертированный WAV (%@)",
+    "progress.eta.sec": "~%d сек осталось",
+    "progress.eta.min": "~%d мин осталось",
+    "progress.eta.hour": "~%d ч осталось",
+    "progress.eta.hm": "~%d ч %d мин осталось",
+    "progress.summary":
+      "Готово: длительность %@, сегментов %d, распознано %d, пропущено %d, время обработки %d с",
+    "progress.skipped": "; пропущенные сегменты: %@",
+    "progress.checkpoint": "Чекпоинт: %@",
+    "progress.jsonsaved": "Сохранено: %@",
+    "progress.jsonfail": "Не удалось сохранить %@: %@",
+    "progress.noresume": "ПРЕДУПРЕЖДЕНИЕ: --resume, но чекпоинт %@ не найден — начинаю с нуля",
+    "progress.badcheckpoint":
+      "ПРЕДУПРЕЖДЕНИЕ: чекпоинт %@ от другого файла ('%@') — он не используется,"
+      + " начинаю с нуля",
+    "cli.last.notext": "Пока нет сохранённого распознанного текста.",
+    "cli.retry.usage": "Использование: nanodictate retry ИМЯ",
+    "cli.retry.available": "Доступные провайдеры: %@",
+    "cli.retry.notrunning": "ОШИБКА: агент не запущен — последний WAV хранится в памяти агента."
+      + " Запустите агент (`nanodictate start`) и повторите.",
+    "cli.retry.sent":
+      "Retry отправлен агенту: повторное распознавание последней записи провайдером '%@ [%@]'",
+    "cli.logs.notfound": "Лог не найден",
+    "cli.help.usage": "Использование: nanodictate <команда> [аргументы]",
+    "cli.cmd.unknown": "Неизвестная команда: %@",
+    "cli.flag.provider": "ОШИБКА: --provider требует id (например, gigaam)",
+    "cli.flag.out": "ОШИБКА: --out требует путь",
+    "cli.flag.maxsegment": "ОШИБКА: --max-segment требует положительное число секунд",
+    "cli.flag.overlap": "ОШИБКА: --overlap требует неотрицательное число секунд",
+    "cli.flag.parallel": "ОШИБКА: --parallel требует целое число >= 1 (число воркеров)",
+    "cli.flag.unknown": "ОШИБКА: неизвестный флаг %@",
+    "cli.flag.extra": "ОШИБКА: лишний аргумент %@",
+    "cli.flag.configload": "ОШИБКА: не удалось загрузить конфиг: %@",
+    "menu.items": "Пункты:",
+    "menu.empty.providers": "(нет провайдеров — используется legacy-конфиг)",
+    "menu.empty.log": "(лог пуст или не найден)",
+    "menu.no.providers.retry": "Нет провайдеров для retry (legacy-конфиг)",
+    "menu.switch.confirm": "Переключить активного провайдера на '%@' [%@]?",
+    "menu.switch.hint": "  (y/Enter — подтвердить · другая клавиша — отмена)",
+    "menu.switch.cancelled": "Отменено",
+    "menu.switch.error": "Ошибка переключения: %@",
+    "menu.switch.ok": "Провайдер '%@' теперь активен · %@",
+    "menu.retry.prompt": "Повторить распознавание последней записи провайдером:",
+    "menu.retry.hint": "  (номер — выбор · другая клавиша — отмена)",
+    "menu.review.on": "Ревью: вкл · %@ — ВНИМАНИЕ: под launchd без терминала ревью пропускается,"
+      + " текст вставляется сразу",
+    "menu.review.off": "Ревью перед вставкой: выкл · %@",
+    "menu.review.configerror": "Ошибка записи конфига: %@",
+    "menu.nav.status": "цифры/стрелки — выбор · Enter — выполнить · q — выход",
+    "menu.nav.providers": "цифра/Enter — выбрать · y/Enter — подтвердить · другая клавиша — отмена"
+      + " · r — обновить · q/esc — назад",
+    "menu.nav.logs": "↑/↓ — прокрутка · q/esc — назад",
+    "menu.running": "работает",
+    "menu.stopped": "остановлен",
+    "menu.agent.notfound": "команда завершилась (exit %@)",
+    "menu.agent.tccRehint":
+      "Внимание: изменился путь бинаря агента — macOS может запросить"
+      + " разрешение на Микрофон и Доступность заново.",
+    // ── Остатки CLI ──
+    "cli.placeholder.empty": "(пусто)",
+    "cli.provider.activeMarker": "(* — активный провайдер)",
+    "cli.config.secretWarning": "! api_key: ВНИМАНИЕ — секрет не задан",
+    "cli.config.secretFileMissing": "! api_key_file: ВНИМАНИЕ — файл не существует (%@)",
+    "cli.config.unset": "(не задан)",
+    "cli.config.active": "(активный)",
+    "cli.routing.listHint": "Список: `nanodictate provider list`",
+    "progress.avgPerChunk": "средн. %.1fс/чанк",
+    "cli.batch.badBaseUrl": "Не удалось собрать запрос: битый base_url у '%@'",
+    "cli.batch.parseError": "Не удалось разобрать ответ: %@",
+    "cli.transcribe.writeError": "ОШИБКА: не удалось записать %@: %@",
+    "cli.error.generic": "ОШИБКА: %@",
+    // placeholders в usage
+    "usage.placeholder.provider": "ПРОВАЙДЕР",
+    "usage.placeholder.key": "КЛЮЧ",
+    "usage.placeholder.name": "ИМЯ",
+    "usage.placeholder.role": "РОЛЬ",
+    "usage.placeholder.file": "ФАЙЛ",
+    "usage.placeholder.path": "путь",
+    "usage.placeholder.seconds": "с",
+    // swiftlint:disable:next trailing_comma
+    "usage.placeholder.setAlias": "алиас use",
+  ]
+}
+
+// swiftlint:enable file_length
