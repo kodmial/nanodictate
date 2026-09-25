@@ -95,6 +95,33 @@ if [ -z "$H" ]; then
   # dscl не сработал — фолбэк на eval (безопасен: $U уже отвалидирован выше)
   H="$(eval echo "~${U}")"
 fi
+# eval без работающего HOME отдаёт буквальную "~user" (или "~"), а не путь —
+# такой HOME уехал бы и в export HOME ниже, и в sudo -u "$U". $U уже
+# провалидирован, поэтому канонический путь восстанавливаем напрямую.
+if [ "${H#\~}" != "$H" ]; then
+  H="/Users/$U"
+fi
+
+# Изоляция git от конфига вызывающего пользователя (CWE-829). macOS sudoers
+# по умолчанию СОХРАНЯЕТ HOME, поэтому git, работающий от root, читал бы
+# ~/.gitconfig пользователя: core.attributesFile с smudge-фильтром (или
+# credential.helper, core.sshCommand) исполнились бы при clone / reset --hard
+# уже ОТ ROOT. Флаг -c core.hooksPath=/dev/null хуки отключает, но НЕ
+# отключает global/system config — нужны переменные окружения. Ставим их
+# ЗДЕСЬ: $H уже вычислен выше и далее используется явно, поэтому подмена HOME
+# не ломает ни sources.conf, ни пользовательские пути. Изоляция снимается в
+# конце git-секции (перед шагом 5), где HOME возвращается в $H.
+# XDG_CONFIG_HOME уводим в заведомо несуществующий каталог: GIT_ATTR_NOSYSTEM
+# глушит только системный gitattributes, а атрибуты git всё ещё читаются из
+# $XDG_CONFIG_HOME/git/attributes. Каталог создавать не нужно — git просто не
+# найдёт файл. Осознанный размен: GIT_CONFIG_NOSYSTEM=1 глушит и /etc/gitconfig,
+# поэтому на корпоративной машине с http.proxy в /etc/gitconfig клон может
+# упасть — так намеренно (требование CodeRabbit 4101913387), обратно не чинить.
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_ATTR_NOSYSTEM=1
+export XDG_CONFIG_HOME=/var/root/.config-nanodictate-none
+export HOME=/var/root
 
 # 4) Канон-дерево --------------------------------------------------------------
 P="${NANODICTATE_TREE:-/Users/Shared/macports-nanodictate}"
@@ -205,6 +232,12 @@ if [ -n "$(tree_violations)" ]; then
   echo "==> ОШИБКА: канон-дерево не чистое — portindex от root НЕ запускаю (модифицированные/untracked/ignored файлы в $P)." >&2
   exit 1
 fi
+
+# Git-секция закончена (дальше git не вызывается): возвращаем HOME пользователя
+# и снимаем изоляцию — шаги sources.conf / portindex / port должны видеть
+# ~/.macports/macports.conf и sudo -u "$U" — работать ровно как раньше, с HOME=$H.
+export HOME="$H"
+unset GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM GIT_ATTR_NOSYSTEM XDG_CONFIG_HOME
 
 # 5) Эффективный sources.conf --------------------------------------------------
 C="$PREFIX_DIR/etc/macports/sources.conf"
