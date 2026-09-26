@@ -137,12 +137,13 @@ jobs:
                 }
               );
 
+              // Use the latest CodeRabbit review of ANY state on this exact SHA.
+              // This deliberately treats COMMENTED/DISMISSED after an approval as
+              // a blocker rather than accidentally falling back to an older APPROVED.
               return reviews
                 .filter(review =>
                   review.user?.login?.startsWith('coderabbitai') &&
-                  review.commit_id === pr.head.sha &&
-                  (review.state === 'APPROVED' ||
-                   review.state === 'CHANGES_REQUESTED')
+                  review.commit_id === pr.head.sha
                 )
                 .sort((a, b) => {
                   const time =
@@ -298,10 +299,11 @@ jobs:
                 continue;
               }
 
-              // The authoritative acceptance signal is CodeRabbit's GitHub-native
-              // review verdict on this exact SHA. With request_changes_workflow
-              // enabled, CodeRabbit requests changes for actionable findings and
-              // submits APPROVED once its comments are resolved.
+              // The authoritative acceptance signal is CodeRabbit's latest
+              // GitHub-native review on this exact SHA. With
+              // request_changes_workflow enabled, CodeRabbit requests changes for
+              // actionable findings and submits APPROVED once they are resolved.
+              // Any later non-APPROVED review blocks merging.
               const decision = await latestCodeRabbitDecision(pr);
               if (!decision || decision.state !== 'APPROVED') {
                 core.info(
