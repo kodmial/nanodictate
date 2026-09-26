@@ -47,7 +47,7 @@ jobs:
     steps:
       - name: Dispatch OpenCode for CodeRabbit findings
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           REVIEW_ID: ${{ github.event.review.id }}
@@ -82,7 +82,8 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 1
-          persist-credentials: false
+          token: ${{ github.token }}
+          persist-credentials: true
           ref: ${{ inputs.head_ref || github.ref }}
 
       - name: Configure Git identity
@@ -94,7 +95,7 @@ jobs:
         if: github.event_name != 'workflow_dispatch'
         uses: anomalyco/opencode/github@545f51d26cc39a907d2867492d498d9607ea5fa4
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
         with:
           model: ${{ vars.OPENCODE_MODEL || 'opencode/big-pickle' }}
@@ -105,7 +106,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.mode == 'coderabbit-fix'
         uses: anomalyco/opencode/github@545f51d26cc39a907d2867492d498d9607ea5fa4
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
         with:
           model: ${{ vars.OPENCODE_MODEL || 'opencode/big-pickle' }}
