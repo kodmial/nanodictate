@@ -146,8 +146,49 @@ jobs:
               code change; explain the reason in the existing PR conversation.
             - If no actionable findings remain, leave the code unchanged.
 
-      - name: Resolve merge conflict with main
+      - name: Prepare merge with current main
+        id: conflict_merge
         if: github.event_name == 'workflow_dispatch' && inputs.mode == 'resolve-conflict'
+        env:
+          HEAD_REF: ${{ inputs.head_ref }}
+        run: |
+          set -euo pipefail
+
+          git fetch origin main
+          if git merge-base --is-ancestor origin/main HEAD; then
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+            echo "PR branch already contains current main."
+            exit 0
+          fi
+
+          set +e
+          git merge --no-ff --no-commit origin/main
+          rc=$?
+          set -e
+
+          if [[ $rc -eq 0 ]]; then
+            git commit -m "chore: sync main into OpenCode PR branch"
+            git push origin "HEAD:$HEAD_REF"
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+            echo "Main merged cleanly without invoking the LLM."
+            exit 0
+          fi
+
+          unmerged=$(git diff --name-only --diff-filter=U)
+          if [[ -z "$unmerged" ]]; then
+            echo "::error::Merge failed but Git reports no unmerged paths."
+            exit 1
+          fi
+
+          echo "conflict=true" >> "$GITHUB_OUTPUT"
+          echo "Real merge conflicts prepared for OpenCode:"
+          printf '%s\n' "$unmerged"
+
+      - name: Resolve real merge conflicts with OpenCode
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          inputs.mode == 'resolve-conflict' &&
+          steps.conflict_merge.outputs.conflict == 'true'
         uses: anomalyco/opencode/github@545f51d26cc39a907d2867492d498d9607ea5fa4
         env:
           GITHUB_TOKEN: ${{ secrets.TAP_PAT }}
@@ -157,20 +198,17 @@ jobs:
           use_github_token: true
           share: false
           prompt: |
-            Resolve the merge conflict between pull request #${{ inputs.pr_number }} and the current main branch.
+            Resolve the existing merge conflicts between pull request #${{ inputs.pr_number }} and main.
 
-            Context:
-            - The current checkout is the existing PR head branch: ${{ inputs.head_ref }}.
-            - A trusted controller already tried GitHub's update-branch API and it reported
-              that the branch could not be updated cleanly.
+            The workflow has already fetched current main and attempted the real merge.
+            The worktree now contains the actual conflict state and conflict markers.
 
             Requirements:
-            - Fetch the current origin/main and merge it into the current PR branch.
-            - Resolve every merge conflict while preserving the intended behavior from both
-              the PR and main; do not discard unrelated changes from either side.
-            - Do not rebase, force-push, reset away either side, or create a new pull request.
-            - Run the relevant tests, linters, or validation after resolving the conflicts.
-            - Commit the merge/conflict resolution and push it to the current PR branch.
+            - Resolve every unmerged path while preserving the intended behavior from both sides.
+            - Do not abort the merge, rebase, force-push, reset away either side, or create a new PR.
+            - Remove all conflict markers and verify that no unmerged paths remain.
+            - Run the relevant tests and linters.
+            - Commit the completed merge and push it to the current PR branch.
             - Keep all comments and commit messages in English.
 
       - name: Fix failed CI
