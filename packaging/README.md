@@ -129,9 +129,13 @@ generated files get concrete values.
   both packages declare a test that asserts the version. The formula's
   `test do` block compares the output against `version.to_s`, and it runs
   only on an explicit `brew test nanodictate`. The Portfile runs it as a
-  real `test` phase (`test.run yes` +
-  `test.cmd ${destroot}${prefix}/bin/nanodictate` + `test.target --version`)
-  against the staged destroot binary, and that runs only on an explicit
+  real `test` phase against the staged destroot binary, with an empty
+  `test.target` and a self-contained `test.cmd` shell pipeline that
+  asserts two things: the command exits 0, and the port version occurs
+  in the output as a whole token (`grep -Fx` over `tr -c "0-9." "\n"`,
+  so a longer number that merely contains it, like `0.1.01` or `10.1.0`,
+  does not match). The rest of the output line is not checked, and
+  nothing outside `--version` is exercised. It runs only on an explicit
   `sudo port test nanodictate`. Neither test phase runs as part of the
   install, and a failure in either is reported without blocking the install.
 

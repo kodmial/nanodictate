@@ -248,10 +248,10 @@ pre-deactivate {
 
 livecheck.type      github
 
-# Smoke test: run the freshly staged binary and check it starts and prints its
-# version. `nanodictate --version` is a pure, non-interactive query — it prints
-# one line and exits 0, so it is safe under `port test` (no TTY, no TCC prompt,
-# no config/network access).
+# Smoke test: run the freshly staged binary and check that it starts AND that
+# the version it prints is the version this port installs. Exit status 0 alone
+# is too weak a check: a tarball staged whose Version.swift was never bumped,
+# or a stub that prints nothing at all, would pass it.
 #
 # The command must point at the DESTROOT, not ${prefix}: the test phase runs
 # after destroot but before install/activate, so nothing has been copied into
@@ -263,6 +263,36 @@ livecheck.type      github
 # checksum extract patch configure build destroot`: the test phase requires
 # destroot but not install, so at test time the binary does not exist under
 # ${prefix}/bin yet and ${destroot}${prefix}/bin/<tool> is the only working form.
+#
+# What the pipeline below checks, and nothing more:
+#   1. `nanodictate --version` exits 0 — its stdout is captured first and the
+#      rest is &&-chained to that, so a non-zero exit stops the check (and
+#      fails `port test`) before anything is compared;
+#   2. the port version occurs in that output as a WHOLE token: the output is
+#      split on every character that is neither a digit nor a dot, and one of
+#      the resulting lines must equal ${version} exactly (grep -F, so the
+#      version is a literal and not a pattern). An empty output, a different
+#      version (9.9.9) and a longer number that merely contains the version
+#      (0.1.01, 10.1.0) therefore all fail.
+# It does NOT check the rest of the line, and cannot: the port knows only its
+# own version, so whatever the CLI prints around it is accepted. Today that is
+# "nanodictate <version>" (Sources/nanodictate/main.swift, NanoDictateVersion);
+# reformatting the prefix will not break this test. Nothing outside --version
+# is exercised either — no config, no network, no audio device, no TCC.
+#
+# The command is a shell pipeline because MacPorts assembles the test command
+# line and runs it through /bin/sh — the same form the ports tree uses for
+# e.g. `test.cmd echo y | ./test`. The string is braced and filled with
+# `string map` so the shell's `$out` / `$(...)` reach /bin/sh untouched and
+# only the two placeholders are substituted.
+set _version_check [string map [list \
+        @BIN@ ${destroot}${prefix}/bin/nanodictate \
+        @VER@ ${version}] \
+    {out=$(@BIN@ --version) && printf "%s\n" "$out" | /usr/bin/tr -c "0-9." "\n" | /usr/bin/grep -Fxq "@VER@"}]
+
 test.run            yes
-test.cmd            ${destroot}${prefix}/bin/nanodictate
-test.target         --version
+test.cmd            ${_version_check}
+# The command is self-contained (the invocation and the check are one shell
+# line), so nothing may be appended after it: test.target is left empty, which
+# also empties the default test.pre_args {${test.target}}.
+test.target

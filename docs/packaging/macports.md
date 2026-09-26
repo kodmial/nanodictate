@@ -240,22 +240,43 @@ every release — this section is the manual drill that the workflow runs.
    sudo port test nanodictate               # run the test phase alone
    ```
 
-   The Portfile declares a real `test` phase (`test.run yes`, `test.cmd
-   ${destroot}${prefix}/bin/nanodictate`, `test.target --version`), but the
-   phase is optional: MacPorts runs it only when you ask for it with `sudo port
+   The Portfile declares a real `test` phase, but the phase is optional:
+   MacPorts runs it only when you ask for it with `sudo port
    test nanodictate`, not as part of `sudo port install`. A failure there is
    reported and makes `sudo port test` itself exit non-zero, but it does not
    block the install. Run it explicitly as the smoke test, since nothing else
    in the install path exercises the staged binary.
 
+   `test.cmd` is a self-contained `/bin/sh` one-liner and `test.target` is
+   empty, so nothing is appended to the command. It checks exactly two
+   things about `<destroot>/<prefix>/bin/nanodictate --version`:
+
+   1. the binary exits 0 — the output is captured first and the rest is
+      `&&`-chained to it, so a non-zero exit fails `port test` before
+      anything is compared;
+   2. the port version occurs in that output as a **whole token**: the
+      output is split on every character that is neither a digit nor a dot
+      (`tr -c "0-9."`), and one of the resulting lines must equal the port
+      version exactly (`grep -Fx`, so the version is a literal and not a
+      pattern). An empty output, a different version, and a longer number
+      that merely contains the version (`0.1.01`, `10.1.0`) all fail.
+
+   Nothing beyond that is checked. In particular the rest of the output
+   line is **not** verified: the port knows only its own version, so a CLI
+   that prints the same version under a different prefix
+   (`NanoDictate <VERSION>` instead of `nanodictate <VERSION>`) still passes.
+   Nothing outside `--version` is exercised either — no config, no network,
+   no audio device, no TCC. Read it as a "does the staged binary run and
+   does it report this version" smoke test, nothing more.
+
    When `port test` runs on its own against a port that is not installed
-   yet, `${prefix}` holds no binary at that point — hence `test.cmd` points
-   at the staged destroot copy (`${destroot}${prefix}/bin/nanodictate`),
-   the only place the binary exists then. `${worksrcdir}` holds no binary
-   at all: the port ships a prebuilt tarball, not sources. Once the port
-   is installed, as in step 4 above, `activate` has already populated
-   `${prefix}` and the picture changes — see the standalone `port test`
-   paragraph below.
+   yet, `${prefix}` holds no binary at that point — hence the command in
+   `test.cmd` runs the staged destroot copy
+   (`${destroot}${prefix}/bin/nanodictate`), the only place the binary
+   exists then. `${worksrcdir}` holds no binary at all: the port ships a
+   prebuilt tarball, not sources. Once the port is installed, as in step 4
+   above, `activate` has already populated `${prefix}` and the picture
+   changes — see the standalone `port test` paragraph below.
 
    The MacPorts Guide's Port Phases section (chapter 5.3,
    guide.macports.org/chunked/reference.phases.html) lists the phases as
