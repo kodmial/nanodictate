@@ -217,16 +217,28 @@ jobs:
                 return true;
               } catch (err) {
                 const message = String(err.message || err);
-                if (
-                  err.status === 409 ||
-                  err.status === 422 ||
-                  /conflict|cannot be performed|not updateable|update branch/i.test(message)
-                ) {
-                  await dispatchConflictRepair(pr, message);
+
+                // GitHub returns 422 when expected_head_sha became stale. That is
+                // a normal race with OpenCode/CI/main-sync, not a merge conflict.
+                // Re-read before deciding whether a repair agent is warranted.
+                const fresh = await getPull(pr.number);
+                if (fresh.head.sha !== pr.head.sha) {
+                  core.info(
+                    `PR #${pr.number}: head advanced from ${pr.head.sha} to ${fresh.head.sha} during update; no conflict repair needed.`
+                  );
                   return false;
                 }
+
+                if (
+                  err.status === 409 ||
+                  /merge conflict|conflict|cannot be performed|not updateable/i.test(message)
+                ) {
+                  await dispatchConflictRepair(fresh, message);
+                  return false;
+                }
+
                 core.warning(
-                  `PR #${pr.number}: update-branch failed transiently: ${message}`
+                  `PR #${pr.number}: update-branch failed without a confirmed conflict: ${message}`
                 );
                 return false;
               }
