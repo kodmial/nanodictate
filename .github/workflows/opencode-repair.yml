@@ -200,7 +200,7 @@ jobs:
           fi
 
           gh label create opencode-ci-repair --repo "$GITHUB_REPOSITORY" --color FBCA04 \
-            --description "One automatic OpenCode CI repair attempt is active until CI succeeds." \
+            --description "One automatic OpenCode CI repair attempt per failing PR head." \
             --force >/dev/null
 
           if [[ "$CONCLUSION" == "success" ]]; then
@@ -213,7 +213,7 @@ jobs:
 
           if gh api "repos/$GITHUB_REPOSITORY/issues/$pr/labels" \
             --jq '.[].name' | grep -Fxq opencode-ci-repair; then
-            echo "An automatic CI repair was already attempted and CI is still failing; stopping to avoid a loop."
+            echo "An automatic CI repair was already attempted for this exact PR head; waiting for a new head or a successful rerun."
             exit 0
           fi
 

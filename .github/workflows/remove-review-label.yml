@@ -22,7 +22,14 @@ jobs:
           script: |
             const { owner, repo, number } = context.issue;
 
-            for (const name of ['review-ready', 'coderabbit-review-requested']) {
+            // A new head invalidates review readiness and also starts a fresh
+            // CI-repair opportunity. The CI lock is therefore per-head, not
+            // permanent until some later run happens to turn green.
+            for (const name of [
+              'review-ready',
+              'coderabbit-review-requested',
+              'opencode-ci-repair',
+            ]) {
               try {
                 await github.rest.issues.removeLabel({
                   owner,
