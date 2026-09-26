@@ -35,10 +35,9 @@ jobs:
                 /Next included review available in\s+([^\n<.]+)/i
               );
               if (!match) {
-                // CodeRabbit sometimes replies only with "Review rate limited"
-                // and does not expose a countdown. Its current included-review
-                // cadence is hourly; use a conservative fallback so the PR can
-                // never get stuck waiting for a delay string that was omitted.
+                // CodeRabbit sometimes returns only "Review rate limited"
+                // without a countdown. Never let such a PR get stuck forever:
+                // use a conservative fallback beyond the hourly included-review cadence.
                 if (/Review rate limited|Review limit reached/i.test(body)) {
                   return 65 * 60_000;
                 }

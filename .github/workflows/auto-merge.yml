@@ -137,12 +137,13 @@ jobs:
                 }
               );
 
+              // Use the latest CodeRabbit review of ANY state on this exact SHA.
+              // This deliberately treats COMMENTED/DISMISSED after an approval as
+              // a blocker rather than accidentally falling back to an older APPROVED.
               return reviews
                 .filter(review =>
                   review.user?.login?.startsWith('coderabbitai') &&
-                  review.commit_id === pr.head.sha &&
-                  (review.state === 'APPROVED' ||
-                   review.state === 'CHANGES_REQUESTED')
+                  review.commit_id === pr.head.sha
                 )
                 .sort((a, b) => {
                   const time =
@@ -216,16 +217,28 @@ jobs:
                 return true;
               } catch (err) {
                 const message = String(err.message || err);
-                if (
-                  err.status === 409 ||
-                  err.status === 422 ||
-                  /conflict|cannot be performed|not updateable|update branch/i.test(message)
-                ) {
-                  await dispatchConflictRepair(pr, message);
+
+                // GitHub returns 422 when expected_head_sha became stale. That is
+                // a normal race with OpenCode/CI/main-sync, not a merge conflict.
+                // Re-read before deciding whether a repair agent is warranted.
+                const fresh = await getPull(pr.number);
+                if (fresh.head.sha !== pr.head.sha) {
+                  core.info(
+                    `PR #${pr.number}: head advanced from ${pr.head.sha} to ${fresh.head.sha} during update; no conflict repair needed.`
+                  );
                   return false;
                 }
+
+                if (
+                  err.status === 409 ||
+                  /merge conflict|conflict|cannot be performed|not updateable/i.test(message)
+                ) {
+                  await dispatchConflictRepair(fresh, message);
+                  return false;
+                }
+
                 core.warning(
-                  `PR #${pr.number}: update-branch failed transiently: ${message}`
+                  `PR #${pr.number}: update-branch failed without a confirmed conflict: ${message}`
                 );
                 return false;
               }
@@ -298,10 +311,11 @@ jobs:
                 continue;
               }
 
-              // The authoritative acceptance signal is CodeRabbit's GitHub-native
-              // review verdict on this exact SHA. With request_changes_workflow
-              // enabled, CodeRabbit requests changes for actionable findings and
-              // submits APPROVED once its comments are resolved.
+              // The authoritative acceptance signal is CodeRabbit's latest
+              // GitHub-native review on this exact SHA. With
+              // request_changes_workflow enabled, CodeRabbit requests changes for
+              // actionable findings and submits APPROVED once they are resolved.
+              // Any later non-APPROVED review blocks merging.
               const decision = await latestCodeRabbitDecision(pr);
               if (!decision || decision.state !== 'APPROVED') {
                 core.info(
