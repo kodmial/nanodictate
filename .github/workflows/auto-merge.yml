@@ -1,0 +1,420 @@
+name: Auto-merge reviewed pull requests
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  pull_request_review:
+    types: [submitted, dismissed]
+  status:
+  push:
+    branches: [main]
+  schedule:
+    # Safety net for missed/delayed webhook events.
+    - cron: '1,6,11,16,21,26,31,36,41,46,51,56 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: nanodictate-auto-merge
+  cancel-in-progress: false
+
+jobs:
+  controller:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      actions: write
+      contents: write
+      issues: write
+      pull-requests: write
+      statuses: read
+
+    steps:
+      - name: Merge only fully reviewed current heads
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          # Use the repository PAT intentionally. A merge performed with the
+          # ephemeral GITHUB_TOKEN does not reliably fan out into the downstream
+          # push/merge workflows (version bump, release, PR reconciliation).
+          github-token: ${{ secrets.TAP_PAT }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const repoFullName = `${owner}/${repo}`;
+            const AUTO_MERGE_BLOCK_LABEL = 'no-auto-merge';
+            const CONFLICT_LOCK_LABEL = 'opencode-conflict-repair';
+
+            async function ensureLabel(name, color, description) {
+              try {
+                await github.rest.issues.createLabel({
+                  owner, repo, name, color, description,
+                });
+              } catch (err) {
+                if (err.status !== 422) throw err; // label already exists
+              }
+            }
+
+            await ensureLabel(
+              AUTO_MERGE_BLOCK_LABEL,
+              'B60205',
+              'Do not automatically merge this pull request.'
+            );
+            await ensureLabel(
+              CONFLICT_LOCK_LABEL,
+              'B60205',
+              'One automatic OpenCode conflict-repair attempt per conflict episode.'
+            );
+
+            function hasLabel(pr, name) {
+              return (pr.labels || []).some(label => label.name === name);
+            }
+
+            async function getPull(pullNumber) {
+              const { data } = await github.rest.pulls.get({
+                owner, repo, pull_number: pullNumber,
+              });
+              return data;
+            }
+
+            async function compareWithMain(headSha) {
+              const { data } = await github.request(
+                'GET /repos/{owner}/{repo}/compare/{basehead}',
+                {
+                  owner,
+                  repo,
+                  basehead: `main...${headSha}`,
+                }
+              );
+              return data;
+            }
+
+            async function latestCurrentHeadCi(pr) {
+              const runs = await github.paginate(
+                github.rest.actions.listWorkflowRunsForRepo,
+                {
+                  owner,
+                  repo,
+                  branch: pr.head.ref,
+                  event: 'pull_request',
+                  per_page: 100,
+                }
+              );
+
+              return runs
+                .filter(run => run.name === 'CI' && run.head_sha === pr.head.sha)
+                .sort(
+                  (a, b) =>
+                    new Date(b.created_at).getTime() -
+                    new Date(a.created_at).getTime()
+                )[0] || null;
+            }
+
+            async function latestCodeRabbitStatus(headSha) {
+              const { data } = await github.rest.repos.getCombinedStatusForRef({
+                owner, repo, ref: headSha,
+              });
+
+              return (data.statuses || [])
+                .filter(status => status.context === 'CodeRabbit')
+                .sort(
+                  (a, b) =>
+                    new Date(b.updated_at || b.created_at).getTime() -
+                    new Date(a.updated_at || a.created_at).getTime()
+                )[0] || null;
+            }
+
+            async function latestCodeRabbitDecision(pr) {
+              const reviews = await github.paginate(
+                github.rest.pulls.listReviews,
+                {
+                  owner,
+                  repo,
+                  pull_number: pr.number,
+                  per_page: 100,
+                }
+              );
+
+              return reviews
+                .filter(review =>
+                  review.user?.login?.startsWith('coderabbitai') &&
+                  review.commit_id === pr.head.sha &&
+                  (review.state === 'APPROVED' ||
+                   review.state === 'CHANGES_REQUESTED')
+                )
+                .sort((a, b) => {
+                  const time =
+                    new Date(a.submitted_at || 0).getTime() -
+                    new Date(b.submitted_at || 0).getTime();
+                  return time || Number(a.id) - Number(b.id);
+                })
+                .at(-1) || null;
+            }
+
+            async function dispatchConflictRepair(pr, reason) {
+              if (hasLabel(pr, CONFLICT_LOCK_LABEL)) {
+                core.info(
+                  `PR #${pr.number}: conflict repair already active; waiting.`
+                );
+                return;
+              }
+
+              await github.rest.issues.addLabels({
+                owner,
+                repo,
+                issue_number: pr.number,
+                labels: [CONFLICT_LOCK_LABEL],
+              });
+
+              try {
+                await github.request(
+                  'POST /repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches',
+                  {
+                    owner,
+                    repo,
+                    workflow_id: 'opencode.yml',
+                    ref: 'main',
+                    inputs: {
+                      mode: 'resolve-conflict',
+                      pr_number: String(pr.number),
+                      head_ref: pr.head.ref,
+                    },
+                  }
+                );
+                core.notice(
+                  `PR #${pr.number}: dispatched OpenCode conflict repair (${reason}).`
+                );
+              } catch (err) {
+                try {
+                  await github.rest.issues.removeLabel({
+                    owner,
+                    repo,
+                    issue_number: pr.number,
+                    name: CONFLICT_LOCK_LABEL,
+                  });
+                } catch (_) {}
+                throw err;
+              }
+            }
+
+            async function updateFromMain(pr) {
+              try {
+                await github.request(
+                  'PUT /repos/{owner}/{repo}/pulls/{pull_number}/update-branch',
+                  {
+                    owner,
+                    repo,
+                    pull_number: pr.number,
+                    expected_head_sha: pr.head.sha,
+                  }
+                );
+                core.notice(
+                  `PR #${pr.number}: updated from main; waiting for fresh CI and CodeRabbit review.`
+                );
+                return true;
+              } catch (err) {
+                const message = String(err.message || err);
+                if (
+                  err.status === 409 ||
+                  err.status === 422 ||
+                  /conflict|cannot be performed|not updateable|update branch/i.test(message)
+                ) {
+                  await dispatchConflictRepair(pr, message);
+                  return false;
+                }
+                core.warning(
+                  `PR #${pr.number}: update-branch failed transiently: ${message}`
+                );
+                return false;
+              }
+            }
+
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: 'open',
+              base: 'main',
+              per_page: 100,
+            });
+
+            // Oldest first makes autonomous behavior deterministic.
+            pulls.sort(
+              (a, b) =>
+                new Date(a.created_at).getTime() -
+                new Date(b.created_at).getTime()
+            );
+
+            for (const listed of pulls) {
+              let pr = await getPull(listed.number);
+
+              if (
+                pr.state !== 'open' ||
+                pr.draft ||
+                pr.head.repo?.full_name !== repoFullName
+              ) {
+                continue;
+              }
+
+              if (hasLabel(pr, AUTO_MERGE_BLOCK_LABEL)) {
+                core.info(
+                  `PR #${pr.number}: ${AUTO_MERGE_BLOCK_LABEL} is set; skipping.`
+                );
+                continue;
+              }
+
+              // Never merge code tested/reviewed against an older main.
+              const comparison = await compareWithMain(pr.head.sha);
+              if (comparison.behind_by > 0) {
+                await updateFromMain(pr);
+                continue;
+              }
+
+              const ci = await latestCurrentHeadCi(pr);
+              if (
+                !ci ||
+                ci.status !== 'completed' ||
+                ci.conclusion !== 'success'
+              ) {
+                core.info(
+                  `PR #${pr.number}: waiting for successful CI on head ${pr.head.sha}.`
+                );
+                continue;
+              }
+
+              // CodeRabbit commit status proves the review job itself completed,
+              // but it does NOT prove acceptance: historical NanoDictate PRs show
+              // "Review completed" even alongside CHANGES_REQUESTED.
+              const rabbitStatus = await latestCodeRabbitStatus(pr.head.sha);
+              if (
+                !rabbitStatus ||
+                rabbitStatus.state !== 'success' ||
+                !/Review completed/i.test(rabbitStatus.description || '')
+              ) {
+                core.info(
+                  `PR #${pr.number}: waiting for completed CodeRabbit status on current head.`
+                );
+                continue;
+              }
+
+              // The authoritative acceptance signal is CodeRabbit's GitHub-native
+              // review verdict on this exact SHA. With request_changes_workflow
+              // enabled, CodeRabbit requests changes for actionable findings and
+              // submits APPROVED once its comments are resolved.
+              const decision = await latestCodeRabbitDecision(pr);
+              if (!decision || decision.state !== 'APPROVED') {
+                core.info(
+                  `PR #${pr.number}: latest CodeRabbit decision for current head is ${decision?.state || 'missing'}; not mergeable yet.`
+                );
+                continue;
+              }
+
+              // Enforce our intended ordering: CI first, CodeRabbit review after.
+              const ciCompletedAt = new Date(ci.updated_at || ci.created_at).getTime();
+              const approvalAt = new Date(decision.submitted_at || 0).getTime();
+              const rabbitCompletedAt = new Date(
+                rabbitStatus.updated_at || rabbitStatus.created_at
+              ).getTime();
+              if (
+                approvalAt < ciCompletedAt ||
+                rabbitCompletedAt < ciCompletedAt
+              ) {
+                core.info(
+                  `PR #${pr.number}: CodeRabbit approval/status predates current-head CI; waiting for the post-CI review.`
+                );
+                continue;
+              }
+
+              // Re-read every merge-critical fact immediately before the write.
+              pr = await getPull(pr.number);
+              if (
+                pr.state !== 'open' ||
+                pr.draft ||
+                pr.head.repo?.full_name !== repoFullName ||
+                hasLabel(pr, AUTO_MERGE_BLOCK_LABEL)
+              ) {
+                continue;
+              }
+
+              const finalComparison = await compareWithMain(pr.head.sha);
+              if (finalComparison.behind_by > 0) {
+                await updateFromMain(pr);
+                continue;
+              }
+
+              const finalCi = await latestCurrentHeadCi(pr);
+              const finalRabbitStatus = await latestCodeRabbitStatus(pr.head.sha);
+              const finalDecision = await latestCodeRabbitDecision(pr);
+
+              if (
+                !finalCi ||
+                finalCi.status !== 'completed' ||
+                finalCi.conclusion !== 'success' ||
+                !finalRabbitStatus ||
+                finalRabbitStatus.state !== 'success' ||
+                !/Review completed/i.test(finalRabbitStatus.description || '') ||
+                !finalDecision ||
+                finalDecision.state !== 'APPROVED'
+              ) {
+                core.info(
+                  `PR #${pr.number}: gate changed during final revalidation; merge cancelled.`
+                );
+                continue;
+              }
+
+              const finalCiCompletedAt = new Date(
+                finalCi.updated_at || finalCi.created_at
+              ).getTime();
+              if (
+                new Date(finalDecision.submitted_at || 0).getTime() <
+                  finalCiCompletedAt ||
+                new Date(
+                  finalRabbitStatus.updated_at ||
+                  finalRabbitStatus.created_at
+                ).getTime() < finalCiCompletedAt
+              ) {
+                core.info(
+                  `PR #${pr.number}: post-CI CodeRabbit ordering changed; merge cancelled.`
+                );
+                continue;
+              }
+
+              if (pr.mergeable === false || pr.mergeable_state === 'dirty') {
+                await dispatchConflictRepair(
+                  pr,
+                  `mergeable_state=${pr.mergeable_state}`
+                );
+                continue;
+              }
+              if (pr.mergeable === null) {
+                core.info(
+                  `PR #${pr.number}: GitHub mergeability is still being computed; waiting.`
+                );
+                continue;
+              }
+
+              const { data: result } = await github.rest.pulls.merge({
+                owner,
+                repo,
+                pull_number: pr.number,
+                merge_method: 'squash',
+                sha: pr.head.sha,
+              });
+
+              if (!result.merged) {
+                core.warning(
+                  `PR #${pr.number}: GitHub refused merge: ${result.message || 'unknown reason'}`
+                );
+                continue;
+              }
+
+              core.notice(
+                `PR #${pr.number}: auto-merged at reviewed head ${pr.head.sha}; merge commit ${result.sha}.`
+              );
+
+              // Merge at most one PR per controller run. The main push triggers
+              // a new run, which first refreshes every remaining branch from the
+              // new main and forces fresh CI + CodeRabbit review before merging.
+              break;
+            }
