@@ -1,0 +1,143 @@
+name: OpenCode conflict repair
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        required: true
+        type: string
+      head_ref:
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  detect-pr-conflict:
+    if: >-
+      github.event_name == 'pull_request_target' &&
+      github.event.pull_request.state == 'open' &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.event.pull_request.head.ref, 'opencode/')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      pull-requests: read
+    steps:
+      - name: Dispatch repair when PR is not mergeable
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          for _ in 1 2 3 4 5; do
+            pr=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")
+            mergeable=$(jq -r '.mergeable' <<<"$pr")
+            state=$(jq -r '.mergeable_state' <<<"$pr")
+            [[ "$mergeable" != "null" ]] && break
+            sleep 2
+          done
+          if [[ "$mergeable" == "false" || "$state" == "dirty" || "$state" == "behind" ]]; then
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/actions/workflows/opencode-conflict-repair.yml/dispatches" \
+              -f ref=main \
+              -f "inputs[pr_number]=${PR_NUMBER}" \
+              -f "inputs[head_ref]=${HEAD_REF}"
+          fi
+
+  detect-after-main-update:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      pull-requests: read
+    steps:
+      - name: Dispatch repairs for affected OpenCode PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls?state=open&base=main&per_page=100" \
+            --jq '.[] | select(.head.repo.full_name == env.GITHUB_REPOSITORY) | select(.head.ref | startswith("opencode/")) | [.number,.head.ref] | @tsv' |
+          while IFS=$'\t' read -r number head_ref; do
+            [[ -z "$number" ]] && continue
+            pr=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}")
+            mergeable=$(jq -r '.mergeable' <<<"$pr")
+            state=$(jq -r '.mergeable_state' <<<"$pr")
+            if [[ "$mergeable" == "false" || "$state" == "dirty" || "$state" == "behind" ]]; then
+              gh api --method POST "repos/${GITHUB_REPOSITORY}/actions/workflows/opencode-conflict-repair.yml/dispatches" \
+                -f ref=main \
+                -f "inputs[pr_number]=${number}" \
+                -f "inputs[head_ref]=${head_ref}"
+            fi
+          done
+
+  repair:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    concurrency:
+      group: opencode-conflict-${{ inputs.pr_number }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.TAP_PAT }}
+          persist-credentials: true
+          ref: ${{ inputs.head_ref }}
+
+      - name: Configure Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge current main
+        id: merge
+        env:
+          HEAD_REF: ${{ inputs.head_ref }}
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          if git merge-base --is-ancestor origin/main HEAD; then
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          set +e
+          git merge --no-ff --no-commit origin/main
+          rc=$?
+          set -e
+          if [[ $rc -eq 0 ]]; then
+            git commit -m "chore: sync main into OpenCode PR branch"
+            git push origin "HEAD:${HEAD_REF}"
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            test -n "$(git diff --name-only --diff-filter=U)"
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve real merge conflicts with OpenCode
+        if: steps.merge.outputs.conflict == 'true'
+        uses: anomalyco/opencode/github@545f51d26cc39a907d2867492d498d9607ea5fa4
+        env:
+          GITHUB_TOKEN: ${{ secrets.TAP_PAT }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        with:
+          model: ${{ vars.OPENCODE_MODEL || 'opencode/big-pickle' }}
+          use_github_token: true
+          share: false
+          prompt: |
+            Resolve the existing merge conflicts between pull request #${{ inputs.pr_number }} and main.
+            The real merge has already been attempted and the worktree contains the actual conflict state.
+            Resolve every unmerged path, preserve the intended behavior from both sides, remove all conflict markers,
+            run the relevant tests and linters, and do not create a new pull request or abort the merge.
