@@ -7,6 +7,10 @@ reviews:
   high_level_summary: true
   poem: false
   review_status: true
+  # Auto-merge consumes this current-HEAD status in addition to the GitHub
+  # APPROVED/CHANGES_REQUESTED review verdict. Keep both signals explicit.
+  commit_status: true
+  fail_commit_status: true
   collapse_walkthrough: false
   # CodeRabbit caps at 100 files/run; this PR carries 134 — partition workaround (run A: everything except Tests/**).
   path_filters:
