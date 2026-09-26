@@ -26,8 +26,13 @@
 # Every no-release outcome is a GREEN no-op (exit 0, nothing written, nothing
 # pushed, no release dispatch). Only a broken policy/configuration input — a
 # version that cannot be parsed or a version outside the allowed series — is
-# allowed to fail the workflow, because that is a human error that must be
+# allowed to fail the workflow, because a human error that must be
 # surfaced rather than silently swallowed.
+#
+# The RELEASE itself is also here, not in the workflow: policy_next_version
+# computes the bumped version and policy_changelog_cut_release cuts the matching
+# CHANGELOG section, so the Version.swift constant and the changelog a test
+# compares it against can never drift apart.
 
 # Files whose diff alone must never publish a version. Full paths are anchored
 # on both ends; a bare `LICENSE` must not swallow `packaging/LICENSE.txt`.
@@ -176,4 +181,101 @@ policy_automatic_bump_blocked() {
 policy_next_version() {
   local version=${1:-}
   printf '%s.%s\n' "${version%.*}" "$(( 10#${version##*.} + 1 ))"
+}
+
+# policy_changelog_cut_release <version> <date>
+#
+# stdin:  the whole CHANGELOG.md
+# stdout: the CHANGELOG with the `## [Unreleased]` block closed into a
+#         `## [<version>] - <date>` release section, a fresh empty
+#         `## [Unreleased]` reopened above it, and the compare links
+#         (`[Unreleased]`, `[<version>]`) refreshed.
+#
+# The bump step in .github/workflows/bump-version.yml calls this together with
+# the Version.swift rewrite, because the two are one release: a version bump
+# without the matching changelog section is what makes
+# VersionTests.testVersionStringEqualsCurrentRelease fail — the test compares
+# Version.swift against the first `## [<semver>]` header after `## [Unreleased]`.
+# The compare links are part of the same story: without this they would keep
+# spanning the already published version.
+#
+# The Unreleased body is NOT copied or reworded: it simply stays where it is and
+# thereby becomes the body of the new release section, which is what
+# "release what has accumulated" means. Nothing is inserted when the header is
+# missing — a changelog without `## [Unreleased]` is a policy error (exit 1) and
+# must fail the workflow instead of publishing a version with no notes.
+#
+# A missing or malformed `## [Unreleased]` is the only failure; a changelog
+# without compare-link definitions is accepted (the links are simply left
+# alone), and so is a missing trailing newline, which is preserved byte for byte
+# so an automatic bump never produces a whitespace-only diff.
+policy_changelog_cut_release() {
+  local version=${1:-} date=${2:-}
+  if [[ -z "$version" || -z "$date" ]]; then
+    echo "policy_changelog_cut_release: <version> and <date> are required" >&2
+    return 1
+  fi
+  if ! policy_version_is_allowed "$version"; then
+    echo "policy_changelog_cut_release: '$version' is not a publishable version" >&2
+    return 1
+  fi
+
+  # One read of stdin: the previous release (the left side of every new compare
+  # link) has to be known BEFORE the section is cut, and the transformation then
+  # needs the same bytes again. The trailing sentinel survives the command
+  # substitution's trailing-newline stripping, so the content stays byte exact.
+  local content previous
+  content=$(cat; printf 'x') || return 1
+  content=${content%x}
+  local final_newline=1
+  [[ "$content" == *$'\n' ]] || final_newline=0
+
+  # The previous release is the first semver header after `## [Unreleased]` —
+  # the same header the Swift test picks.
+  previous=$(printf '%s' "$content" | awk '
+    /^## \[Unreleased\]$/ { after = 1; next }
+    after && /^## \[[0-9]+\.[0-9]+\.[0-9]+\]/ {
+      header = $0
+      sub(/^## \[/, "", header)
+      sub(/\].*$/, "", header)
+      print header
+      exit
+    }
+  ')
+
+  # Output is buffered and only printed once the changelog is known to be
+  # cuttable, so a failure never leaves a half-written changelog on stdout.
+  printf '%s' "$content" | awk -v version="$version" -v date="$date" \
+    -v previous="$previous" -v final_newline="$final_newline" '
+    {
+      if (!cut && $0 ~ /^## \[Unreleased\]$/) {
+        # Close the accumulated notes into a release section and reopen an empty
+        # Unreleased above it. The blank line that followed the header in the
+        # input becomes the separator after the new section header.
+        out = out $0 "\n\n## [" version "] - " date "\n"
+        cut = 1
+        next
+      }
+      # Link references live in a trailing block; a line starting with `[` can
+      # never be the `## [Unreleased]` header, so there is no ambiguity. The
+      # label and the compare path are both stripped to recover the repository
+      # URL, which is the only part that is reused.
+      if (previous != "" && $0 ~ /^\[Unreleased\]:/) {
+        base = $0
+        sub(/^\[[^]]*\]:[[:space:]]*/, "", base)
+        sub(/\/compare\/.*$/, "", base)
+        # The reopened Unreleased now spans "since the release just cut", so it
+        # starts at v<version>; the new release itself spans the old one.
+        out = out "[Unreleased]: " base "/compare/v" version "...HEAD\n"
+        out = out "[" version "]: " base "/compare/v" previous "...v" version "\n"
+        next
+      }
+      out = out $0 "\n"
+    }
+    END {
+      if (!cut) { exit 2 }
+      if (!final_newline) { sub(/\n$/, "", out) }
+      printf "%s", out
+    }
+  '
 }

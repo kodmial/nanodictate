@@ -2,9 +2,10 @@ name: Bump version
 
 # Auto-bump the patch version after a PR is merged into main — this closes the
 # "merge -> bump -> release" chain: a merge whose PR did NOT bump
-# Sources/NanoDictateCore/Version.swift gets the version bumped 0.0.N -> 0.0.(N+1)
-# and the Release workflow is dispatched for the new version, so a release is
-# created without any human action.
+# Sources/NanoDictateCore/Version.swift gets the version bumped 0.0.N -> 0.0.(N+1),
+# the matching `## [<version>]` section is cut in CHANGELOG.md (both writes land
+# in one commit) and the Release workflow is dispatched for the new version, so a
+# release is created without any human action.
 #
 # If the PR DID bump the version already (Version.swift is ahead of the latest
 # published release) this workflow is a green no-op — no double bump.
@@ -228,9 +229,23 @@ jobs:
           fi
           echo "Bumped Sources/NanoDictateCore/Version.swift: $CURRENT -> $NEW"
 
+          # The version constant and the changelog are one release: the
+          # VersionTests.testVersionStringEqualsCurrentRelease test compares
+          # Version.swift with the first `## [<semver>]` header after
+          # `## [Unreleased]`, so a bump that skips the changelog turns every
+          # later build red (v0.1.2 was published with no CHANGELOG section
+          # because of exactly that). Cut the section in the same commit.
+          if ! policy_changelog_cut_release "$NEW" "$(date -u +%F)" < CHANGELOG.md > CHANGELOG.md.new; then
+            rm -f CHANGELOG.md.new
+            echo "::error::Failed to cut a '## [$NEW]' release section in CHANGELOG.md — is the '## [Unreleased]' header present?"
+            exit 1
+          fi
+          mv CHANGELOG.md.new CHANGELOG.md
+          echo "Cut the CHANGELOG.md release section: ## [$NEW] - $(date -u +%F)"
+
           git config user.name "kodmial"
           git config user.email "kodmial@gmail.com"
-          git add Sources/NanoDictateCore/Version.swift
+          git add Sources/NanoDictateCore/Version.swift CHANGELOG.md
           git commit -m "chore(version): bump v$NEW"
           git push origin main
 
@@ -272,7 +287,7 @@ jobs:
                 echo "Version.swift unchanged, nothing committed or pushed, the Release workflow was not dispatched."
                 ;;
               releasable)
-                echo "Bumped Version.swift and dispatched the Release workflow for **v${NEW_VERSION}**."
+                echo "Bumped Version.swift, cut the \`## [${NEW_VERSION}]\` CHANGELOG section and dispatched the Release workflow for **v${NEW_VERSION}**."
                 ;;
               no-changes)
                 echo "Green no-op — nothing changed since the latest release tag."

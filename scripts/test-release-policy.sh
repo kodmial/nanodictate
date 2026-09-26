@@ -229,6 +229,88 @@ assert_eq 'next version: 0.0.9 -> 0.0.10' \
 assert_eq 'next version: 0.1.12 keeps its minor series' \
   '0.1.13' "$(policy_next_version '0.1.12')"
 
+# --- 4b. The changelog cut a bump has to make ---------------------------------
+# The invariant VersionTests.testVersionStringEqualsCurrentRelease enforces on
+# macOS: Version.swift equals the first `## [<semver>]` header after
+# `## [Unreleased]`. A bump that touches only Version.swift breaks it, so the cut
+# below is what keeps a green bump from turning every build red.
+
+CHANGELOG=$'# Changelog\n\n## [Unreleased]\n\n### Added\n\n- pending entry\n\n## [0.1.1] - 2026-09-26\n\n### Fixed\n\n- old entry\n\n[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.0...HEAD\n[0.1.1]: https://github.com/kodmial/nanodictate/compare/v0.0.16...v0.1.1\n[0.0.16]: https://github.com/kodmial/nanodictate/releases/tag/v0.0.16'
+CHANGELOG_FILE="${TMP_DIR}/CHANGELOG.md"
+printf '%s\n' "$CHANGELOG" > "$CHANGELOG_FILE"
+
+CUT=$(printf '%s\n' "$CHANGELOG" | policy_changelog_cut_release 0.1.2 2026-09-26)
+# The whole file, so a misplaced blank line or a rewritten note is caught too:
+# the accumulated Unreleased body must become the body of the new release, an
+# empty Unreleased is reopened above it, and nothing else moves.
+assert_eq 'changelog: the Unreleased body is cut into a release section' \
+  $'# Changelog\n\n## [Unreleased]\n\n## [0.1.2] - 2026-09-26\n\n### Added\n\n- pending entry\n\n## [0.1.1] - 2026-09-26\n\n### Fixed\n\n- old entry\n\n[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.2...HEAD\n[0.1.2]: https://github.com/kodmial/nanodictate/compare/v0.1.1...v0.1.2\n[0.1.1]: https://github.com/kodmial/nanodictate/compare/v0.0.16...v0.1.1\n[0.0.16]: https://github.com/kodmial/nanodictate/releases/tag/v0.0.16' \
+  "$CUT"
+assert_eq 'changelog: the new version is the first release header after Unreleased' \
+  '0.1.2' \
+  "$(printf '%s\n' "$CUT" | awk '
+    /^## \[Unreleased\]$/ { after = 1; next }
+    after && /^## \[[0-9]+\.[0-9]+\.[0-9]+\]/ {
+      header = $0; sub(/^## \[/, "", header); sub(/\].*$/, "", header)
+      print header; exit
+    }')"
+assert_eq 'changelog: the cut is idempotent — a second cut targets the next version' \
+  '0.1.3' \
+  "$(printf '%s\n' "$CUT" | policy_changelog_cut_release 0.1.3 2026-09-27 | awk '
+    /^## \[Unreleased\]$/ { after = 1; next }
+    after && /^## \[[0-9]+\.[0-9]+\.[0-9]+\]/ {
+      header = $0; sub(/^## \[/, "", header); sub(/\].*$/, "", header)
+      print header; exit
+    }')"
+
+# A changelog with no compare links is still cuttable (the links are simply
+# left alone) — a missing link block must not fail a release.
+NO_LINKS=$'# Changelog\n\n## [Unreleased]\n\n- pending entry\n\n## [0.1.1] - 2026-09-26\n'
+assert_eq 'changelog: a changelog without compare links is still cut' \
+  $'# Changelog\n\n## [Unreleased]\n\n## [0.1.2] - 2026-09-26\n\n- pending entry\n\n## [0.1.1] - 2026-09-26' \
+  "$(printf '%s' "$NO_LINKS" | policy_changelog_cut_release 0.1.2 2026-09-26)"
+
+# A changelog with no `## [Unreleased]` header is a policy error: the notes
+# cannot be cut, and a silent no-op would publish a version with no section —
+# the exact state that made CI red for v0.1.2.
+NO_UNRELEASED=$'# Changelog\n\n## [0.1.1] - 2026-09-26\n'
+assert_not_ok 'changelog: a changelog without an Unreleased header is a policy error' \
+  policy_changelog_cut_release 0.1.2 2026-09-26 < <(printf '%s' "$NO_UNRELEASED")
+assert_eq 'changelog: the failed cut writes nothing, so no half-written changelog' \
+  '' \
+  "$(policy_changelog_cut_release 0.1.2 2026-09-26 < <(printf '%s' "$NO_UNRELEASED") 2>/dev/null)"
+
+# The version and the date are inputs, not decoration: an unpublishable version
+# or a missing date is rejected instead of cutting a bogus header.
+assert_not_ok 'changelog: an unpublishable version is a policy error' \
+  policy_changelog_cut_release 1.0.0 2026-09-26 < "$CHANGELOG_FILE"
+assert_not_ok 'changelog: a missing date is a policy error' \
+  policy_changelog_cut_release 0.1.2 < "$CHANGELOG_FILE"
+
+# A trailing newline must survive the cut, and a missing one (as in the
+# repository's own CHANGELOG.md) must not be added: either way the automatic
+# bump produces no whitespace-only hunk.
+CUT_FILE="${TMP_DIR}/CHANGELOG.cut"
+last_byte() { tail -c 1 "$1" | od -An -tx1 | tr -d ' \n'; }
+policy_changelog_cut_release 0.1.2 2026-09-26 < "$CHANGELOG_FILE" > "$CUT_FILE"
+assert_eq 'changelog: a trailing newline is kept' \
+  "$(last_byte "$CHANGELOG_FILE")" "$(last_byte "$CUT_FILE")"
+printf '%s' "$CHANGELOG" > "$CHANGELOG_FILE"
+policy_changelog_cut_release 0.1.2 2026-09-26 < "$CHANGELOG_FILE" > "$CUT_FILE"
+assert_eq 'changelog: a missing trailing newline is not added' \
+  "$(last_byte "$CHANGELOG_FILE")" "$(last_byte "$CUT_FILE")"
+
+# The real repository changelog must satisfy the same invariant the macOS test
+# asserts, so the fix for it cannot silently regress here.
+assert_eq 'changelog: the repository changelog matches Version.swift' \
+  "$(grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' "${REPO_ROOT}/Sources/NanoDictateCore/Version.swift")" \
+  "$(awk '
+    /^## \[Unreleased\]$/ { after = 1; next }
+    after && /^## \[[0-9]+\.[0-9]+\.[0-9]+\]/ {
+      header = $0; sub(/^## \[/, "", header); sub(/\].*$/, "", header)
+      print header; exit
+    }' "${REPO_ROOT}/CHANGELOG.md")"
+
 # --- 5. End-to-end against a real git diff ----------------------------------
 # Replays exactly the shell the workflow runs, against a throwaway repository
 # tagged like a published release, so a change in the grep patterns or in the

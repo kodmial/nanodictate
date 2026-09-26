@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The automatic bump no longer leaves `CHANGELOG.md` behind `Version.swift`.
+  `bump-version.yml` bumped the version constant on every releasable merge but
+  never cut a matching release section, so the very first automatic bump
+  (v0.1.2) turned `VersionTests.testVersionStringEqualsCurrentRelease` red on
+  `main` and on every open PR. The bump step now cuts the `## [<version>]`
+  section, reopens an empty `## [Unreleased]` above it and refreshes the compare
+  links, through the tested `policy_changelog_cut_release` in
+  `scripts/release-policy.sh`. The missing v0.1.2 section is added below.
+
+## [0.1.2] - 2026-09-26
+
 ### Added
 
 - `skip-release` PR label — the explicit opt-out from release automation. A
@@ -293,7 +306,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/kodmial/nanodictate/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/kodmial/nanodictate/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/kodmial/nanodictate/compare/v0.0.16...v0.1.0
 [0.0.16]: https://github.com/kodmial/nanodictate/compare/v0.0.13...v0.0.16
