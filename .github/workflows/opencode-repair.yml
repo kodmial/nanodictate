@@ -77,12 +77,16 @@ jobs:
           gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" \
             -f 'labels[]=opencode-conflict-repair' >/dev/null
 
-          gh api --method POST \
+          if ! gh api --method POST \
             "repos/$GITHUB_REPOSITORY/actions/workflows/opencode.yml/dispatches" \
             -f ref=main \
             -f "inputs[mode]=resolve-conflict" \
             -f "inputs[pr_number]=$PR_NUMBER" \
-            -f "inputs[head_ref]=$HEAD_REF"
+            -f "inputs[head_ref]=$HEAD_REF"; then
+            remove_lock
+            echo "::error::Failed to dispatch OpenCode conflict repair; lock cleared for retry."
+            exit 1
+          fi
 
   sync-open-prs-after-main-update:
     if: github.event_name == 'push'
@@ -139,12 +143,17 @@ jobs:
             gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$pr/labels" \
               -f 'labels[]=opencode-conflict-repair' >/dev/null
 
-            gh api --method POST \
+            if ! gh api --method POST \
               "repos/$GITHUB_REPOSITORY/actions/workflows/opencode.yml/dispatches" \
               -f ref=main \
               -f "inputs[mode]=resolve-conflict" \
               -f "inputs[pr_number]=$pr" \
-              -f "inputs[head_ref]=$head_ref"
+              -f "inputs[head_ref]=$head_ref"; then
+              gh api --method DELETE \
+                "repos/$GITHUB_REPOSITORY/issues/$pr/labels/opencode-conflict-repair" \
+                >/dev/null 2>&1 || true
+              echo "::warning::Failed to dispatch conflict repair for PR #$pr; lock cleared for retry."
+            fi
           done
 
   ci-repair:
@@ -152,7 +161,8 @@ jobs:
       github.event_name == 'workflow_run' &&
       github.event.workflow_run.event == 'pull_request' &&
       (github.event.workflow_run.conclusion == 'success' ||
-       github.event.workflow_run.conclusion == 'failure')
+       github.event.workflow_run.conclusion == 'failure' ||
+       github.event.workflow_run.conclusion == 'timed_out')
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -210,10 +220,16 @@ jobs:
           gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$pr/labels" \
             -f 'labels[]=opencode-ci-repair' >/dev/null
 
-          gh api --method POST \
+          if ! gh api --method POST \
             "repos/$GITHUB_REPOSITORY/actions/workflows/opencode.yml/dispatches" \
             -f ref=main \
             -f "inputs[mode]=ci-fix" \
             -f "inputs[pr_number]=$pr" \
             -f "inputs[head_ref]=$head_ref" \
-            -f "inputs[run_id]=$RUN_ID"
+            -f "inputs[run_id]=$RUN_ID"; then
+            gh api --method DELETE \
+              "repos/$GITHUB_REPOSITORY/issues/$pr/labels/opencode-ci-repair" \
+              >/dev/null 2>&1 || true
+            echo "::error::Failed to dispatch OpenCode CI repair; lock cleared for retry."
+            exit 1
+          fi
