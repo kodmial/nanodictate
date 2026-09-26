@@ -332,7 +332,19 @@ jobs:
           - Keep all comments and commit messages in English.
           EOF
           )
+          BEFORE_SHA=$(git rev-parse HEAD)
           opencode run --auto --model "$OPENCODE_MODEL" "$PROMPT"
+          AFTER_SHA=$(git rev-parse HEAD)
+
+          # If the agent correctly decided there is no code fix to make (for
+          # example a transient runner/network failure), give the same CI head
+          # one trusted retry instead of leaving the PR stuck forever. The
+          # opencode-ci-repair lock remains set, so a repeatedly failing rerun
+          # cannot create an unbounded same-head loop.
+          if [[ "$AFTER_SHA" == "$BEFORE_SHA" ]]; then
+            echo "OpenCode produced no new commit; rerunning failed CI jobs once."
+            gh run rerun "$RUN_ID" --failed
+          fi
 
       - name: Clear conflict-repair lock
         if: always() && github.event_name == 'workflow_dispatch' && inputs.mode == 'resolve-conflict'
