@@ -17,6 +17,7 @@ jobs:
         with:
           script: |
             const run = context.payload.workflow_run;
+            const repoFullName = `${context.repo.owner}/${context.repo.repo}`;
             const prs = await github.rest.pulls.list({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -31,8 +32,9 @@ jobs:
             const ours = prs.data.filter((pr) =>
               !pr.draft &&
               pr.head.sha === run.head_sha &&
-              pr.head.repo.full_name === context.repo.full_name
+              pr.head.repo.full_name === repoFullName
             );
+            console.log(`Matched ${ours.length} open PR(s) for CI head ${run.head_sha}`);
             if (run.conclusion === 'success') {
               for (const pr of ours) {
                 await github.rest.issues.addLabels({
@@ -41,6 +43,7 @@ jobs:
                   issue_number: pr.number,
                   labels: ['review-ready'],
                 });
+                console.log(`Added review-ready to #${pr.number}`);
               }
             } else {
               for (const pr of ours) {
@@ -51,6 +54,7 @@ jobs:
                     issue_number: pr.number,
                     name: 'review-ready',
                   });
+                  console.log(`Removed review-ready from #${pr.number}`);
                 } catch (err) {
                   // label absent, nothing to remove
                 }
