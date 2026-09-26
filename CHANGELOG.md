@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-09-26
+
+Repository automation only: `Sources/NanoDictateCore` changed in
+`Version.swift` alone, so the dictation pipeline, the STT providers and the
+packaging surface are identical to 0.1.1.
+
+### Added
+
+- Repository agent workflows. `.github/workflows/opencode.yml` runs the
+  OpenCode agent on issue/PR comments and on CodeRabbit review threads;
+  `.github/workflows/opencode-repair.yml` is a `pull_request_target` controller
+  that never checks out or executes PR code and instead keeps the current
+  `opencode/*` branch in sync and drives headless conflict and CI repair. Both
+  run against `opencode.json`, which denies `external_directory`, `doom_loop`
+  and `question` — an agent run can neither stall on a question nor write
+  outside the worktree. `AGENTS.md` records the same rules for local runs.
+- `.github/workflows/coderabbit-retry.yml` polls every five minutes and
+  re-requests a CodeRabbit review that was skipped because the bot hit a rate
+  limit, so a throttled review is not lost.
+
+### Changed
+
+- CI skips the macOS runner for documentation-only work: `ci.yml` ignores
+  `*.md`, `docs/**` and `LICENSE` on pushes to `main`, and the new
+  `Classify changes` job decides per pull request whether the diff is
+  documentation-only and gates `Build & Test (macOS)` on it. Any code or
+  non-documentation change still runs swift-format lint, SwiftLint, the build
+  and the whole test suite.
+- CodeRabbit is driven by the label workflows instead of its own automatic
+  review: `add-review-label.yml` marks a pull request review-ready only after CI
+  succeeded for that exact head sha and then requests exactly one incremental
+  review for it, `remove-review-label.yml` drops both the readiness marker and
+  the review-requested lock on every new push, and `.coderabbit.yaml` disables
+  native auto-review. `pre_merge_checks.issue_assessment` is raised to `error`,
+  so a pull request without a linked issue assessment cannot merge.
+- The release workflow re-synced the Homebrew formula and cask, the MacPorts
+  `Portfile` and the `scripts/install-macports.sh` tree pin to v0.1.2.
+
 ## [0.1.1] - 2026-09-26
 
 ### Changed
@@ -266,7 +304,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/kodmial/nanodictate/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/kodmial/nanodictate/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/kodmial/nanodictate/compare/v0.0.16...v0.1.0
 [0.0.16]: https://github.com/kodmial/nanodictate/compare/v0.0.13...v0.0.16
