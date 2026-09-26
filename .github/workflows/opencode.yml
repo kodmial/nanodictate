@@ -5,17 +5,66 @@ on:
     types: [created]
   pull_request_review_comment:
     types: [created]
+  pull_request_review:
+    types: [submitted]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Invocation mode"
+        required: true
+        type: string
+      pr_number:
+        description: "Pull request number"
+        required: false
+        type: string
+      head_ref:
+        description: "Pull request head branch"
+        required: false
+        type: string
+      review_id:
+        description: "Source CodeRabbit review id"
+        required: false
+        type: string
 
 permissions: {}
 
 jobs:
-  opencode:
-    # This is a public repository. Only the repository owner may invoke an
-    # agent with write access by posting /oc or /opencode.
+  dispatch-coderabbit-fix:
     if: >-
-      github.actor == github.repository_owner &&
-      (contains(github.event.comment.body, '/oc') ||
-       contains(github.event.comment.body, '/opencode'))
+      github.event_name == 'pull_request_review' &&
+      github.event.action == 'submitted' &&
+      github.event.review.user.login == 'coderabbitai[bot]' &&
+      github.event.review.state == 'changes_requested' &&
+      github.event.pull_request.state == 'open' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    permissions:
+      actions: write
+      contents: read
+
+    steps:
+      - name: Dispatch OpenCode for CodeRabbit findings
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          REVIEW_ID: ${{ github.event.review.id }}
+        run: |
+          gh api --method POST             "repos/${GITHUB_REPOSITORY}/actions/workflows/opencode.yml/dispatches"             -f ref=main             -f "inputs[mode]=coderabbit-fix"             -f "inputs[pr_number]=${PR_NUMBER}"             -f "inputs[head_ref]=${HEAD_REF}"             -f "inputs[review_id]=${REVIEW_ID}"
+
+  opencode:
+    # Manual invocations remain owner-only. CodeRabbit fixes arrive through the
+    # internal workflow_dispatch created above after a CHANGES_REQUESTED review.
+    if: >-
+      (github.event_name == 'workflow_dispatch' &&
+       inputs.mode == 'coderabbit-fix') ||
+      ((github.event_name == 'issue_comment' ||
+        github.event_name == 'pull_request_review_comment') &&
+       github.actor == github.repository_owner &&
+       (contains(github.event.comment.body, '/oc') ||
+        contains(github.event.comment.body, '/opencode')))
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -25,7 +74,7 @@ jobs:
       pull-requests: write
 
     concurrency:
-      group: opencode-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
+      group: opencode-${{ inputs.pr_number || github.event.issue.number || github.event.pull_request.number || github.run_id }}
       cancel-in-progress: false
 
     steps:
@@ -34,6 +83,7 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+          ref: ${{ inputs.head_ref || github.ref }}
 
       - name: Configure Git identity
         run: |
@@ -41,6 +91,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Run OpenCode
+        if: github.event_name != 'workflow_dispatch'
         uses: anomalyco/opencode/github@545f51d26cc39a907d2867492d498d9607ea5fa4
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -49,3 +100,32 @@ jobs:
           model: ${{ vars.OPENCODE_MODEL || 'opencode/big-pickle' }}
           use_github_token: true
           share: false
+
+      - name: Fix CodeRabbit review findings
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'coderabbit-fix'
+        uses: anomalyco/opencode/github@545f51d26cc39a907d2867492d498d9607ea5fa4
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        with:
+          model: ${{ vars.OPENCODE_MODEL || 'opencode/big-pickle' }}
+          use_github_token: true
+          share: false
+          prompt: |
+            Fix the actionable CodeRabbit review feedback on pull request #${{ inputs.pr_number }}.
+
+            Context:
+            - CodeRabbit submitted review id ${{ inputs.review_id }} with CHANGES_REQUESTED.
+            - The current checkout is the existing PR head branch: ${{ inputs.head_ref }}.
+            - Inspect that CodeRabbit review, its inline review comments, the PR conversation,
+              and the current diff using GitHub CLI/API as needed.
+
+            Requirements:
+            - Address every actionable finding from that CodeRabbit review.
+            - Keep fixes scoped to the review feedback; do not make unrelated refactors.
+            - Run the relevant tests, linters, or validation for the files you change.
+            - Commit and push fixes to the current PR branch so the existing PR is updated.
+            - Do not create a new pull request.
+            - If a finding is incorrect or no longer applicable, do not make a speculative
+              code change; explain the reason in the existing PR conversation.
+            - If no actionable findings remain, leave the code unchanged.
