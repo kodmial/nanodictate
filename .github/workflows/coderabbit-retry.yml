@@ -34,7 +34,15 @@ jobs:
               const match = body.match(
                 /Next included review available in\s+([^\n<.]+)/i
               );
-              if (!match) return null;
+              if (!match) {
+                // CodeRabbit sometimes returns only "Review rate limited"
+                // without a countdown. Never let such a PR get stuck forever:
+                // use a conservative fallback beyond the hourly included-review cadence.
+                if (/Review rate limited|Review limit reached/i.test(body)) {
+                  return 65 * 60_000;
+                }
+                return null;
+              }
 
               if (/less than\s+(?:a|one)\s+minute/i.test(match[1])) {
                 return 60_000;
