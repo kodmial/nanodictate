@@ -148,7 +148,106 @@ jobs:
             - Do not create a new pull request.
             - If a finding is incorrect or no longer applicable, do not make a speculative
               code change; explain the reason in the existing PR conversation.
+            - Do not resolve or dismiss CodeRabbit review threads yourself. CodeRabbit will
+              independently verify every original finding after this repair step completes.
             - If no actionable findings remain, leave the code unchanged.
+
+      - name: Ask CodeRabbit to verify every original finding
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'coderabbit-fix'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          REVIEW_ID: ${{ inputs.review_id }}
+        with:
+          github-token: ${{ secrets.TAP_PAT }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pullNumber = Number(process.env.PR_NUMBER);
+            const reviewId = Number(process.env.REVIEW_ID);
+
+            if (!Number.isInteger(pullNumber) || !Number.isInteger(reviewId)) {
+              core.setFailed('Invalid pull request number or CodeRabbit review id.');
+              return;
+            }
+
+            const pr = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: pullNumber,
+            });
+            const headSha = pr.data.head.sha;
+
+            const comments = await github.paginate(
+              github.rest.pulls.listReviewComments,
+              {
+                owner,
+                repo,
+                pull_number: pullNumber,
+                per_page: 100,
+              }
+            );
+
+            const findings = comments.filter(
+              (comment) =>
+                comment.pull_request_review_id === reviewId &&
+                comment.user?.login === 'coderabbitai[bot]' &&
+                !comment.in_reply_to_id
+            );
+
+            if (findings.length === 0) {
+              core.setFailed(
+                `CodeRabbit review ${reviewId} has no inline findings to verify.`
+              );
+              return;
+            }
+
+            let requested = 0;
+            for (const finding of findings) {
+              const marker =
+                `<!-- opencode-coderabbit-verification review=${reviewId} finding=${finding.id} head=${headSha} -->`;
+
+              const duplicate = comments.some(
+                (comment) =>
+                  comment.in_reply_to_id === finding.id &&
+                  comment.body?.includes(marker)
+              );
+              if (duplicate) {
+                core.info(
+                  `Verification already requested for finding ${finding.id} at ${headSha}.`
+                );
+                continue;
+              }
+
+              const body = [
+                marker,
+                '@coderabbitai Re-check this exact original finding after the OpenCode fixes.',
+                '',
+                `Current PR HEAD: \`${headSha}\``,
+                '',
+                'Compare the original finding in this thread with the current code itself,',
+                'not merely with the latest incremental diff or the OpenCode report.',
+                '',
+                'Reply with **RESOLVED** only if the underlying issue is fully fixed.',
+                'Otherwise reply with **UNRESOLVED** and state exactly what remains.',
+              ].join('\n');
+
+              await github.request(
+                'POST /repos/{owner}/{repo}/pulls/{pull_number}/comments/{comment_id}/replies',
+                {
+                  owner,
+                  repo,
+                  pull_number: pullNumber,
+                  comment_id: finding.id,
+                  body,
+                }
+              );
+              requested += 1;
+            }
+
+            core.notice(
+              `Requested CodeRabbit verification for ${requested}/${findings.length} findings from review ${reviewId} at HEAD ${headSha}.`
+            );
 
       - name: Resolve merge conflict with main
         if: github.event_name == 'workflow_dispatch' && inputs.mode == 'resolve-conflict'
