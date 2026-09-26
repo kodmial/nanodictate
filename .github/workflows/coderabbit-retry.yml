@@ -2,7 +2,9 @@ name: Retry CodeRabbit after rate limit
 
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    # GitHub's minimum schedule interval is 5 minutes. Avoid minute 0, where
+    # scheduled workflows are more likely to be delayed under high load.
+    - cron: '3,8,13,18,23,28,33,38,43,48,53,58 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -10,9 +12,14 @@ permissions:
   pull-requests: write
   issues: write
 
+concurrency:
+  group: coderabbit-rate-limit-retry
+  cancel-in-progress: false
+
 jobs:
   retry:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Retry due CodeRabbit reviews
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
@@ -21,6 +28,39 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const now = Date.now();
+
+            function parseRetryDelayMs(body = '') {
+              const match = body.match(
+                /Next included review available in\s+([^\n<.]+)/i
+              );
+              if (!match) return null;
+
+              if (/less than\s+(?:a|one)\s+minute/i.test(match[1])) {
+                return 60_000;
+              }
+
+              let totalMs = 0;
+              let found = false;
+              const parts = match[1].matchAll(
+                /(\d+)\s*(hours?|hrs?|minutes?|mins?|seconds?|secs?)/gi
+              );
+
+              for (const part of parts) {
+                found = true;
+                const value = Number(part[1]);
+                const unit = part[2].toLowerCase();
+
+                if (unit.startsWith('hour') || unit.startsWith('hr')) {
+                  totalMs += value * 60 * 60_000;
+                } else if (unit.startsWith('minute') || unit.startsWith('min')) {
+                  totalMs += value * 60_000;
+                } else {
+                  totalMs += value * 1_000;
+                }
+              }
+
+              return found ? totalMs : null;
+            }
 
             const pulls = await github.paginate(github.rest.pulls.list, {
               owner, repo, state: 'open', per_page: 100,
@@ -33,24 +73,34 @@ jobs:
                 owner, repo, issue_number: pr.number, per_page: 100,
               });
 
-              // CodeRabbit edits its summary comment when capacity is exhausted.
-              // Use the newest bot comment that gives an explicit retry delay.
+              // CodeRabbit edits its summary/status comment when review capacity
+              // is exhausted. The comment carries a relative retry delay such as
+              // "Next included review available in 57 minutes."
               const limited = comments
                 .filter(c => c.user?.login === 'coderabbitai[bot]')
                 .map(c => {
-                  const m = c.body?.match(/Next included review available in\s+(\d+)\s+minutes?/i);
-                  return m ? { comment: c, minutes: Number(m[1]) } : null;
+                  const delayMs = parseRetryDelayMs(c.body || '');
+                  return delayMs === null ? null : { comment: c, delayMs };
                 })
                 .filter(Boolean)
-                .sort((a, b) => new Date(b.comment.updated_at) - new Date(a.comment.updated_at))[0];
+                .sort(
+                  (a, b) =>
+                    new Date(b.comment.updated_at).getTime() -
+                    new Date(a.comment.updated_at).getTime()
+                )[0];
 
               if (!limited) continue;
 
               const limitedAt = new Date(limited.comment.updated_at).getTime();
-              const dueAt = limitedAt + limited.minutes * 60_000;
+              // Small safety margin prevents a retry from landing a few seconds
+              // before CodeRabbit's own quota clock has actually reset.
+              const dueAt = limitedAt + limited.delayMs + 30_000;
               if (now < dueAt) continue;
 
-              // Do not duplicate a retry already posted after the rate-limit state.
+              // If somebody already requested a review after this exact
+              // rate-limit state, do not create another command. If that request
+              // is rate-limited again, CodeRabbit updates its status timestamp
+              // and the next cycle is calculated from the new state.
               const retryAlreadyPosted = comments.some(c =>
                 c.user?.login !== 'coderabbitai[bot]' &&
                 c.body?.trim() === '@coderabbitai review' &&
@@ -58,17 +108,24 @@ jobs:
               );
               if (retryAlreadyPosted) continue;
 
-              // If CodeRabbit produced any newer non-rate-limit response, the state moved on.
+              // A newer successful/in-progress CodeRabbit response means the
+              // rate-limit state is stale even if an older bot comment remains.
               const newerRabbitActivity = comments.some(c =>
                 c.user?.login === 'coderabbitai[bot]' &&
                 new Date(c.updated_at).getTime() > limitedAt &&
-                !/Review rate limited|Review limit reached|Next included review available/i.test(c.body || '')
+                !/Review rate limited|Review limit reached|Next included review available/i.test(
+                  c.body || ''
+                )
               );
               if (newerRabbitActivity) continue;
 
               await github.rest.issues.createComment({
-                owner, repo, issue_number: pr.number,
+                owner,
+                repo,
+                issue_number: pr.number,
                 body: '@coderabbitai review',
               });
-              core.notice(`Retried CodeRabbit review for PR #${pr.number}`);
+              core.notice(
+                `Retried CodeRabbit review for PR #${pr.number} after its rate-limit window expired`
+              );
             }
