@@ -107,6 +107,17 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+      # workflow_dispatch repair modes must NOT use "opencode github run":
+      # that integration owns a branch/PR lifecycle and can open a new PR even
+      # when the prompt says not to. Plain "opencode run" works in this already
+      # checked-out PR branch and has no built-in PR-creation lifecycle.
+      - name: Install OpenCode CLI for automated repair
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          curl -fsSL https://opencode.ai/install | bash
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+
       - name: Run OpenCode
         if: github.event_name != 'workflow_dispatch'
         uses: anomalyco/opencode/github@545f51d26cc39a907d2867492d498d9607ea5fa4
@@ -123,87 +134,205 @@ jobs:
 
       - name: Fix CodeRabbit review findings
         if: github.event_name == 'workflow_dispatch' && inputs.mode == 'coderabbit-fix'
-        uses: anomalyco/opencode/github@545f51d26cc39a907d2867492d498d9607ea5fa4
         env:
-          GITHUB_TOKEN: ${{ secrets.TAP_PAT }}
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          OPENCODE_MODEL: ${{ vars.OPENCODE_MODEL || 'opencode/big-pickle' }}
+          GITHUB_TOKEN: ${{ secrets.TAP_PAT }}
+          GH_TOKEN: ${{ secrets.TAP_PAT }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          REVIEW_ID: ${{ inputs.review_id }}
+          HEAD_REF: ${{ inputs.head_ref }}
+        run: |
+          set -euo pipefail
+          PROMPT=$(cat <<EOF
+          Fix the actionable CodeRabbit review feedback on pull request #${PR_NUMBER}.
+
+          Context:
+          - CodeRabbit submitted review id ${REVIEW_ID} with CHANGES_REQUESTED.
+          - The current checkout is the existing PR head branch: ${HEAD_REF}.
+          - Inspect that CodeRabbit review, its inline review comments, the PR conversation,
+            and the current diff using GitHub CLI/API as needed.
+
+          Requirements:
+          - Address every actionable finding from that CodeRabbit review.
+          - Keep fixes scoped to the review feedback; do not make unrelated refactors.
+          - Run the relevant tests, linters, or validation for the files you change.
+          - Work only in the current checked-out PR branch. Do not create or switch to
+            another branch and do not create a new pull request.
+          - Commit and push fixes to the current PR branch so the existing PR is updated.
+          - If a finding is incorrect or no longer applicable, do not make a speculative
+            code change; explain the reason in the existing PR conversation.
+          - Do not resolve or dismiss CodeRabbit review threads yourself. CodeRabbit will
+            independently verify every original finding after this repair step completes.
+          - If no actionable findings remain, leave the code unchanged.
+          - Keep all comments and commit messages in English.
+          EOF
+          )
+          opencode run --auto --model "$OPENCODE_MODEL" "$PROMPT"
+
+      - name: Ask CodeRabbit to verify every original finding
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'coderabbit-fix'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          REVIEW_ID: ${{ inputs.review_id }}
         with:
-          model: ${{ vars.OPENCODE_MODEL || 'opencode/big-pickle' }}
-          use_github_token: true
-          share: false
-          prompt: |
-            Fix the actionable CodeRabbit review feedback on pull request #${{ inputs.pr_number }}.
+          github-token: ${{ secrets.TAP_PAT }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pullNumber = Number(process.env.PR_NUMBER);
+            const reviewId = Number(process.env.REVIEW_ID);
 
-            Context:
-            - CodeRabbit submitted review id ${{ inputs.review_id }} with CHANGES_REQUESTED.
-            - The current checkout is the existing PR head branch: ${{ inputs.head_ref }}.
-            - Inspect that CodeRabbit review, its inline review comments, the PR conversation,
-              and the current diff using GitHub CLI/API as needed.
+            if (!Number.isInteger(pullNumber) || !Number.isInteger(reviewId)) {
+              core.setFailed('Invalid pull request number or CodeRabbit review id.');
+              return;
+            }
 
-            Requirements:
-            - Address every actionable finding from that CodeRabbit review.
-            - Keep fixes scoped to the review feedback; do not make unrelated refactors.
-            - Run the relevant tests, linters, or validation for the files you change.
-            - Commit and push fixes to the current PR branch so the existing PR is updated.
-            - Do not create a new pull request.
-            - If a finding is incorrect or no longer applicable, do not make a speculative
-              code change; explain the reason in the existing PR conversation.
-            - If no actionable findings remain, leave the code unchanged.
+            const pr = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: pullNumber,
+            });
+            const headSha = pr.data.head.sha;
+
+            const comments = await github.paginate(
+              github.rest.pulls.listReviewComments,
+              {
+                owner,
+                repo,
+                pull_number: pullNumber,
+                per_page: 100,
+              }
+            );
+
+            const findings = comments.filter(
+              (comment) =>
+                comment.pull_request_review_id === reviewId &&
+                comment.user?.login === 'coderabbitai[bot]' &&
+                !comment.in_reply_to_id
+            );
+
+            if (findings.length === 0) {
+              core.setFailed(
+                `CodeRabbit review ${reviewId} has no inline findings to verify.`
+              );
+              return;
+            }
+
+            let requested = 0;
+            for (const finding of findings) {
+              const marker =
+                `<!-- opencode-coderabbit-verification review=${reviewId} finding=${finding.id} head=${headSha} -->`;
+
+              const duplicate = comments.some(
+                (comment) =>
+                  comment.in_reply_to_id === finding.id &&
+                  comment.body?.includes(marker)
+              );
+              if (duplicate) {
+                core.info(
+                  `Verification already requested for finding ${finding.id} at ${headSha}.`
+                );
+                continue;
+              }
+
+              const body = [
+                marker,
+                '@coderabbitai Re-check this exact original finding after the OpenCode fixes.',
+                '',
+                `Current PR HEAD: \`${headSha}\``,
+                '',
+                'Compare the original finding in this thread with the current code itself,',
+                'not merely with the latest incremental diff or the OpenCode report.',
+                '',
+                'Reply with **RESOLVED** only if the underlying issue is fully fixed.',
+                'Otherwise reply with **UNRESOLVED** and state exactly what remains.',
+              ].join('\n');
+
+              await github.request(
+                'POST /repos/{owner}/{repo}/pulls/{pull_number}/comments/{comment_id}/replies',
+                {
+                  owner,
+                  repo,
+                  pull_number: pullNumber,
+                  comment_id: finding.id,
+                  body,
+                }
+              );
+              requested += 1;
+            }
+
+            core.notice(
+              `Requested CodeRabbit verification for ${requested}/${findings.length} findings from review ${reviewId} at HEAD ${headSha}.`
+            );
 
       - name: Resolve merge conflict with main
         if: github.event_name == 'workflow_dispatch' && inputs.mode == 'resolve-conflict'
-        uses: anomalyco/opencode/github@545f51d26cc39a907d2867492d498d9607ea5fa4
         env:
-          GITHUB_TOKEN: ${{ secrets.TAP_PAT }}
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-        with:
-          model: ${{ vars.OPENCODE_MODEL || 'opencode/big-pickle' }}
-          use_github_token: true
-          share: false
-          prompt: |
-            Resolve the merge conflict between pull request #${{ inputs.pr_number }} and the current main branch.
+          OPENCODE_MODEL: ${{ vars.OPENCODE_MODEL || 'opencode/big-pickle' }}
+          GITHUB_TOKEN: ${{ secrets.TAP_PAT }}
+          GH_TOKEN: ${{ secrets.TAP_PAT }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          HEAD_REF: ${{ inputs.head_ref }}
+        run: |
+          set -euo pipefail
+          PROMPT=$(cat <<EOF
+          Resolve the merge conflict between pull request #${PR_NUMBER} and the current main branch.
 
-            Context:
-            - The current checkout is the existing PR head branch: ${{ inputs.head_ref }}.
-            - This workflow was dispatched only after GitHub reported that the PR cannot
-              be updated cleanly from main.
+          Context:
+          - The current checkout is the existing PR head branch: ${HEAD_REF}.
+          - This workflow was dispatched only after GitHub reported that the PR cannot
+            be updated cleanly from main.
 
-            Requirements:
-            - Fetch the current origin/main and merge it into the current PR branch.
-            - Resolve every merge conflict while preserving the intended behavior from both
-              the PR and main; do not discard unrelated changes from either side.
-            - Do not rebase, force-push, reset away either side, or create a new pull request.
-            - Run the relevant tests, linters, or validation after resolving the conflicts.
-            - Commit the merge/conflict resolution and push it to the current PR branch.
-            - Keep all comments and commit messages in English.
+          Requirements:
+          - Fetch the current origin/main and merge it into the current PR branch.
+          - Resolve every merge conflict while preserving the intended behavior from both
+            the PR and main; do not discard unrelated changes from either side.
+          - Work only in the current checked-out PR branch. Do not create or switch to
+            another branch and do not create a new pull request.
+          - Do not rebase, force-push, or reset away either side.
+          - Run the relevant tests, linters, or validation after resolving the conflicts.
+          - Commit the merge/conflict resolution and push it to the current PR branch.
+          - Keep all comments and commit messages in English.
+          EOF
+          )
+          opencode run --auto --model "$OPENCODE_MODEL" "$PROMPT"
 
       - name: Fix failed CI
         if: github.event_name == 'workflow_dispatch' && inputs.mode == 'ci-fix'
-        uses: anomalyco/opencode/github@545f51d26cc39a907d2867492d498d9607ea5fa4
         env:
-          GITHUB_TOKEN: ${{ secrets.TAP_PAT }}
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-        with:
-          model: ${{ vars.OPENCODE_MODEL || 'opencode/big-pickle' }}
-          use_github_token: true
-          share: false
-          prompt: |
-            Fix the failed CI for pull request #${{ inputs.pr_number }}.
+          OPENCODE_MODEL: ${{ vars.OPENCODE_MODEL || 'opencode/big-pickle' }}
+          GITHUB_TOKEN: ${{ secrets.TAP_PAT }}
+          GH_TOKEN: ${{ secrets.TAP_PAT }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          RUN_ID: ${{ inputs.run_id }}
+          HEAD_REF: ${{ inputs.head_ref }}
+        run: |
+          set -euo pipefail
+          PROMPT=$(cat <<EOF
+          Fix the failed CI for pull request #${PR_NUMBER}.
 
-            Context:
-            - The current checkout is the existing PR head branch: ${{ inputs.head_ref }}.
-            - The failed CI workflow run id is ${{ inputs.run_id }}.
-            - Inspect that run, its failed jobs and logs using GitHub CLI/API before changing code.
+          Context:
+          - The current checkout is the existing PR head branch: ${HEAD_REF}.
+          - The failed CI workflow run id is ${RUN_ID}.
+          - Inspect that run, its failed jobs and logs using GitHub CLI/API before changing code.
 
-            Requirements:
-            - Identify the concrete CI failure from the workflow logs and fix its root cause.
-            - Keep the change scoped to the failure; do not make unrelated refactors.
-            - If the failure is clearly transient or external infrastructure, do not make a
-              speculative code change; explain the reason in the existing PR conversation.
-            - Run the relevant tests, linters, or validation locally in the runner when practical.
-            - Commit and push any required fix to the current PR branch so the existing PR updates.
-            - Do not create a new pull request.
-            - Keep all comments and commit messages in English.
+          Requirements:
+          - Identify the concrete CI failure from the workflow logs and fix its root cause.
+          - Keep the change scoped to the failure; do not make unrelated refactors.
+          - If the failure is clearly transient or external infrastructure, do not make a
+            speculative code change; explain the reason in the existing PR conversation.
+          - Work only in the current checked-out PR branch. Do not create or switch to
+            another branch and do not create a new pull request.
+          - Run the relevant tests, linters, or validation locally in the runner when practical.
+          - Commit and push any required fix to the current PR branch so the existing PR updates.
+          - Keep all comments and commit messages in English.
+          EOF
+          )
+          opencode run --auto --model "$OPENCODE_MODEL" "$PROMPT"
 
       - name: Clear conflict-repair lock
         if: always() && github.event_name == 'workflow_dispatch' && inputs.mode == 'resolve-conflict'
