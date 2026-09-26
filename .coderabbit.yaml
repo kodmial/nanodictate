@@ -33,6 +33,9 @@ reviews:
       instructions: |
         Tests are a plain executable Swift package (no .xctest bundle): runner is Tests/NanoDictateCoreTests/main.swift executed via `swift run NanoDictateCoreTests`.
         New behavior must be covered by tests in that suite.
+  pre_merge_checks:
+    issue_assessment:
+      mode: error
   tools:
     gitleaks:
       enabled: true
