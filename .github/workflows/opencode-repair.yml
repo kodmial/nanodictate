@@ -36,7 +36,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          gh label create opencode-conflict-repair --color B60205 \
+          gh label create opencode-conflict-repair --repo "$GITHUB_REPOSITORY" --color B60205 \
             --description "One automatic OpenCode conflict-repair attempt per conflict episode." \
             --force >/dev/null
 
@@ -96,7 +96,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          gh label create opencode-conflict-repair --color B60205 \
+          gh label create opencode-conflict-repair --repo "$GITHUB_REPOSITORY" --color B60205 \
             --description "One automatic OpenCode conflict-repair attempt per conflict episode." \
             --force >/dev/null
 
@@ -189,7 +189,7 @@ jobs:
             exit 0
           fi
 
-          gh label create opencode-ci-repair --color FBCA04 \
+          gh label create opencode-ci-repair --repo "$GITHUB_REPOSITORY" --color FBCA04 \
             --description "One automatic OpenCode CI repair attempt is active until CI succeeds." \
             --force >/dev/null
 
