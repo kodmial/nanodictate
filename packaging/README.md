@@ -88,22 +88,28 @@ generated files get concrete values.
   version injected into `Contents/Info.plist` before the signature seals the
   bundle). `Contents/MacOS/` holds the SAME two binaries as the tarball — one
   daemon, one canonical `com.nanodictate.agent` label whether the user
-  installed the formula, the cask or the port. The cask has NO postflight
-  step that would clear the bundle's quarantine attribute: Homebrew Cask
-  keeps the `com.apple.quarantine` attribute on the downloaded container
-  (Cask::Installer → Quarantine.propagate copies it from the downloaded zip
-  into the staged path), so a plain `brew install --cask` puts the bundle on
-  disk with the attribute — and Gatekeeper prompts on first launch of this
-  self-signed, non-notarized bundle. On macOS 15 and later, launch it once
-  (it is refused), then approve it in System Settings → Privacy & Security →
-  "Open Anyway"; on macOS 14 and older, Right-click → Open still works. You
-  can also clear the attribute by hand with
-  `xattr -dr com.apple.quarantine /Applications/NanoDictate.app`.
+  installed the formula, the cask or the port. The cask declares
+  `depends_on macos: :monterey` — the same floor as the formula, so the two
+  packages never disagree about supported machines — and its
+  `postflight_steps` block removes `com.apple.quarantine` from
+  `/Applications/NanoDictate.app` after the install, so a plain
+  `brew install --cask` leaves no quarantine prompt and the user never needs
+  "Open Anyway" or a manual `xattr` (a first-launch signing warning is still
+  possible — the bundle is self-signed and not notarized, so clearing the
+  attribute will not silence it). The removal is deliberately narrow: it
+  strips that ONE attribute, not the whole extended-attribute set (no
+  `xattr -cr`), it never touches other xattr keys, it never runs
+  `spctl --master-disable`, and Gatekeeper stays globally enabled. The code
+  signature is unaffected — quarantine is a download-provenance tag, not a
+  signature — so the bundle keeps its self-signed identity and the TCC grants
+  it has already earned. Privacy grants (Microphone, Accessibility) are a
+  separate mechanism and are untouched by the postflight: macOS asks for them
+  on the agent's first run.
 - **TCC grants.** Microphone + Accessibility are granted manually per binary
   in System Settings (prompted on first use). Both paths install the same
   release binaries — no rebuild per install — so grants only need re-applying
   when a newer release replaces the binary.
-- **LaunchAgent — гибрид A+B.** The running binary registers the service
+- **LaunchAgent — hybrid A+B.** The running binary registers the service
   itself: `nanodictate start` writes the canonical
   `~/Library/LaunchAgents/com.nanodictate.agent.plist` (Label
   `com.nanodictate.agent`) with symlink-resolved binary/log paths and
@@ -120,7 +126,18 @@ generated files get concrete values.
   second manager takes over. On binary path change (e.g. after an upgrade)
   the CLI prints a TCC re-grant hint.
 - **Version flag.** `nanodictate --version` prints `nanodictate <VERSION>`;
-  the formula `test do` block depends on it.
+  both packages declare a test that asserts the version. The formula's
+  `test do` block compares the output against `version.to_s`, and it runs
+  only on an explicit `brew test nanodictate`. The Portfile runs it as a
+  real `test` phase against the staged destroot binary, with an empty
+  `test.target` and a self-contained `test.cmd` shell pipeline that
+  asserts two things: the command exits 0, and the port version occurs
+  in the output as a whole token (`grep -Fx` over `tr -c "0-9." "\n"`,
+  so a longer number that merely contains it, like `0.1.01` or `10.1.0`,
+  does not match). The rest of the output line is not checked, and
+  nothing outside `--version` is exercised. It runs only on an explicit
+  `sudo port test nanodictate`. Neither test phase runs as part of the
+  install, and a failure in either is reported without blocking the install.
 
 ## TODO
 

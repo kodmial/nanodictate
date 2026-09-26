@@ -156,8 +156,8 @@ jobs:
           fi
           echo "Bumped Sources/NanoDictateCore/Version.swift: $CURRENT -> $NEW"
 
-          git config user.name "dima"
-          git config user.email "dima@users.noreply.github.com"
+          git config user.name "kodmial"
+          git config user.email "kodmial@gmail.com"
           git add Sources/NanoDictateCore/Version.swift
           git commit -m "chore(version): bump v$NEW"
           git push origin main

@@ -27,17 +27,17 @@ class Nanodictate < Formula
   end
 
   def install
-    # Каждая релизная тарболка содержит на верхнем уровне два бинаря и
-    # config.example.toml (плюс Resources/ для справки — см. release.yml).
-    # Только бинарь + конфиг: службу активирует сам пользователь командой
-    # `brew services start nanodictate` (service-блок ниже) — тот же
-    # единственный Label com.nanodictate.agent, что и `nanodictate start`,
-    # без новых label, чтобы не плодить второй демон.
+    # Every release tarball has two binaries and config.example.toml at the
+    # top level (plus Resources/ for reference — see release.yml).
+    # Only the binaries + config are installed: the user activates the service
+    # with `brew services start nanodictate` (the service block below) — the
+    # same single Label com.nanodictate.agent as `nanodictate start`, with no
+    # extra labels, so a second daemon is never spawned.
     bin.install "nanodictate", "NanoDictateAgent"
 
-    # config.example.toml — копируемый источник, не живой конфиг: CLI всегда
-    # читает ~/.config/nanodictate/config.toml (AppConfig.defaultPath()), никогда
-    # файл под etc/. Пример живёт в share/nanodictate/.
+    # config.example.toml is a copyable source, not the live config: the CLI
+    # always reads ~/.config/nanodictate/config.toml (AppConfig.defaultPath()),
+    # never a file under etc/. The example lives in share/nanodictate/.
     (share/"nanodictate").install "config.example.toml"
   end
 
@@ -57,13 +57,13 @@ class Nanodictate < Formula
   end
 
   def caveats
-    # Регистрация службы — service-блок `brew services start nanodictate`
-    # либо `nanodictate start` — оба пишут тот же канонический
-    # ~/Library/LaunchAgents/com.nanodictate.agent.plist и грузят его через
-    # launchctl, повторные запуски идемпотентны. Первый запуск бинаря лишь
-    # перезаписывает тот же plist (realpath) при необходимости.
-    # config.example.toml копируется в ~/.config/nanodictate/config.toml при
-    # первом запуске приложения.
+    # Service registration — the service block (`brew services start
+    # nanodictate`) or `nanodictate start` — both write the same canonical
+    # ~/Library/LaunchAgents/com.nanodictate.agent.plist and load it via
+    # launchctl; repeat runs are idempotent. The first run of the binary only
+    # rewrites that same plist (realpath) if needed.
+    # config.example.toml is copied to ~/.config/nanodictate/config.toml on the
+    # app's first launch.
     <<~EOS
       NanoDictate needs manual macOS privacy grants (System Settings → Privacy & Security):
         - Microphone:     enable NanoDictateAgent (recording)
@@ -124,11 +124,10 @@ class Nanodictate < Formula
       install or uninstall.
 
       Release binaries are self-signed with the NanoDictate CI Signing identity
-      (hardened runtime); there is no Developer ID signature and no
-      notarization. Homebrew's download does not set the quarantine
-      attribute, so Gatekeeper stays quiet; only *browser* downloads get
-      com.apple.quarantine (see docs/packaging/homebrew.md for the `xattr -dr`
-      workaround).
+      (hardened runtime); there is no Developer ID signature and they are not
+      notarized by Apple. This install path sets no quarantine attribute, so
+      no Gatekeeper dialog is expected on the first launch of the binaries in
+      #{opt_prefix}/bin, and none has been observed.
     EOS
   end
 

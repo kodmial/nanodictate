@@ -1,190 +1,259 @@
 # NanoDictate
 
-Live voice dictation into any macOS app (12+). Double-tap **Alt** to start and
-stop: speak, and the recognized text is typed into the focused app. No clicks,
-no window switching. Two pieces:
+Lightweight voice dictation for macOS. Double-tap **Alt**, speak, and NanoDictate types the recognized text directly into the app you are already using.
 
-- `NanoDictateAgent` — background agent (LaunchAgent), does the recording and
-  text insertion
-- `nanodictate` — control CLI
+- **~25 MB RAM** in normal background use
+- **Works out of the box** with a preconfigured STT provider and model — no API key required
+- Types directly into the currently focused macOS app
+- **Double-Alt** to start/stop, **Esc** to cancel, quick double-Alt to undo the last insertion
+- Stable-signed release builds so Microphone and Accessibility permissions normally persist across upgrades
+- OpenAI, Groq, Cloudflare Workers AI, and custom OpenAI-compatible transcription endpoints
+- Apple Silicon and Intel
+- macOS **12 Monterey or later**
+- No Xcode or Swift toolchain required
 
-STT runs on OpenAI, Groq, Cloudflare Workers AI, or any OpenAI-compatible
-endpoint. Default provider `airubiz` needs no key. Release binaries are signed
-with a stable identity, so Microphone/Accessibility grants survive upgrades.
+## Quick start
 
-## Install
+Install the app with Homebrew Cask:
 
-### Homebrew
-
-```sh
-brew install kodmial/nanodictate/nanodictate
-brew services start kodmial/nanodictate/nanodictate   # start the background dictation agent (outside the sandbox)
-```
-
-The first command installs the prebuilt binary (nothing is compiled — no
-Xcode needed) and taps `kodmial/homebrew-nanodictate` on the way: the fully
-qualified `owner/tap/formula` name resolves the formula without a separate
-`brew tap` line — a bare `brew install nanodictate` would not find the formula
-unless the tap were already added. The last command registers the background
-agent and starts it now and at
-every login — it is the explicit activation step, since install alone does
-not register the service. `brew services stop kodmial/nanodictate/nanodictate`
-stops it.
-
-Prefer an app bundle?
-
-```sh
+```bash
 brew install --cask kodmial/nanodictate/nanodictate
 ```
 
-Installs **NanoDictate.app** — the same two binaries in a `.app`, background
-agent only (no Dock icon). Same single daemon as the formula: one
-`~/Library/LaunchAgents/com.nanodictate.agent.plist`, register it once with
-`nanodictate start`.
-
-### MacPorts
-
-The port is not in the official MacPorts tree yet, so a bare
-`sudo port install nanodictate` does not work on a clean machine. First install
-is **one command** — the script registers this repo as a git port source and
-installs the same prebuilt binary:
+Start the background agent:
 
 ```bash
-( tmp="$(mktemp)" \
-  && curl -fsSL https://raw.githubusercontent.com/kodmial/nanodictate/main/scripts/install-macports.sh -o "$tmp" \
-  && bash "$tmp"
-rc=$?
-rm -f "$tmp"
-exit "$rc" )
+nanodictate start
 ```
 
-The script re-runs itself under `sudo`, clones the canon tree
-`kodmial/macports-nanodictate` into `/Users/Shared/macports-nanodictate` (an
-already-present tree is reused when it is the canon repo at the pinned
-revision — origin and revision are verified, then the tree is reset to the
-pinned revision before it is touched). It then inserts its `file://` source
-into `sources.conf` (before
-`[default]` — first match wins) and installs the port. The port's
-`post-activate` registers the
-global LaunchAgent and bootstraps it — **the service is alive right after
-install**, no `nanodictate start` needed, and it comes back after every reboot
-(RunAtLoad + KeepAlive).
+On first use, allow **NanoDictateAgent** in **System Settings → Privacy & Security**:
 
-Same prebuilt tarball as Homebrew, nothing compiled. After a MacPorts
-reinstall the tree in `/Users/Shared` survives while `sources.conf` is
-recreated — run the install command again: it reuses the root-owned canon
-tree, resets it to the pinned revision and re-registers the source. Delete
-the tree only if the installer rejects it (a non-root owner, a foreign origin
-or a dirty tree).
-Every future release is picked up by:
+- **Microphone** — records your voice
+- **Accessibility** — inserts recognized text into the focused app
 
-```sh
-sudo port selfupdate && sudo port upgrade nanodictate
+If the global hotkey does not respond, also enable **Input Monitoring**.
+
+Release builds use a stable signing identity, so these permissions are normally granted once and retained across upgrades.
+
+Now use:
+
+```text
+Double-Alt   Start recording
+Double-Alt   Stop and transcribe
+Esc          Cancel
+Double-Alt   Immediately after insertion: undo
 ```
 
-### After install
+No configuration is required for the default setup.
 
-Only manual step: grant **Microphone** and **Accessibility** to
-`NanoDictateAgent` once — System Settings → Privacy & Security (add **Input
-Monitoring** if the hotkey does not fire). Then double-**Alt** and speak. No
-config, no keys: `~/.config/nanodictate/config.toml` is created from the
-bundled `config.example.toml` on first launch.
+## Features
 
-## Configuration
+- System-wide voice dictation into the focused application
+- Global double-Alt hotkey
+- Automatic or explicit speech-language selection
+- English and Russian interface/language workflow
+- Preconfigured keyless STT provider for immediate use
+- OpenAI transcription
+- Groq transcription
+- Cloudflare Workers AI transcription
+- Custom OpenAI-compatible endpoints
+- Runtime provider switching
+- Interactive terminal UI
+- One-shot audio-file transcription
+- Optional provider failover
+- Optional chunked transcription and provider routing
+- Optional review before text insertion
+- Configurable insertion method, sounds, timeouts, and logging
 
-Config lives at `~/.config/nanodictate/config.toml` (chmod 600, atomic
-writes). `nanodictate config init` recreates it from the bundled example
-`config.example.toml` — the single source of defaults.
+## Providers
 
-Top-level options: `active_provider` (STT backend, default `airubiz`),
-`language` (STT hint; empty = auto-detect), `sounds_enabled`, `timeout_seconds`,
-`log_level`. Per-provider sections take `api_key` (or `api_key_file`),
-`base_url` and `model` — any OpenAI-compatible endpoint works by setting
-`base_url` + `model` in its section. `NANODICTATE_API_KEY` overrides the file
-for the active provider only and is never written to disk. Full list of
-sections and options — see [config.example.toml](config.example.toml).
+NanoDictate ships with a working default configuration:
 
-## Usage
+| Provider | Default model | API key |
+| --- | --- | --- |
+| Airubiz | `gigaam-v3-ctc-sherpa` | Not required |
+| OpenAI | Provider default / configurable | Required |
+| Groq | Provider default / configurable | Required |
+| Cloudflare Workers AI | Configurable | Required |
 
-```sh
+Any supported OpenAI-compatible transcription endpoint can also be configured with a custom `base_url` and `model`.
+
+List providers:
+
+```bash
+nanodictate provider list
+```
+
+Switch provider:
+
+```bash
+nanodictate provider use <id>
+```
+
+Set an API key securely:
+
+```bash
+nanodictate config set-key <id>
+```
+
+## CLI
+
+Run without arguments to open the interactive TUI:
+
+```bash
+nanodictate
+```
+
+Common commands:
+
+```bash
 nanodictate start
 nanodictate stop
 nanodictate status
-nanodictate config init           # recreate config from the bundled example
-nanodictate config set-key <id>   # set an API key interactively
-nanodictate provider use <id>     # switch active provider
-nanodictate transcribe FILE       # one-shot file transcription
-nanodictate logs                  # last 50 log lines
+
+nanodictate provider list
+nanodictate provider use <id>
+
+nanodictate config init
+nanodictate config set-key <id>
+
+nanodictate transcribe FILE
+nanodictate logs
+
+nanodictate --help
+nanodictate --version
 ```
 
-Double-**Alt** starts dictation, double-**Alt** stops (**Esc** cancels; a
-double-**Alt** right after an insertion undoes it). Run `nanodictate` with no
-arguments for the interactive TUI (status, provider list, log viewer,
-EN/RU language toggle).
+`nanodictate transcribe FILE` performs one-shot file transcription without using the global dictation workflow.
 
-## Development
+## Configuration
 
-```sh
-swift build -c debug              # or -c release
-swift run NanoDictateCoreTests    # executable target — `swift test` does not run it
-swift run nanodictate --help
+The user configuration is stored at:
+
+```text
+~/.config/nanodictate/config.toml
 ```
 
-### Git hooks
+It is created automatically from the bundled defaults on first launch. Recreate it explicitly with:
 
-Staged Swift files are linted by the repo's pre-commit hook
-([`.githooks/pre-commit`](.githooks/pre-commit)) — lint errors block the
-commit, warnings only print. Git does not run hooks from `.githooks/` by
-default; activate once per clone:
-
-```sh
-git config core.hooksPath .githooks
+```bash
+nanodictate config init
 ```
 
-### SWIFT_TOOLCHAIN
+The full configuration reference is [`config.example.toml`](config.example.toml).
 
-The Command Line Tools' SwiftPM manifest API lacks
-`PackageDescription.swiftmodule`, so a bare `swift build` cannot parse
-`Package.swift` on such machines. Point SwiftPM at a full Swift toolchain
-instead (replace `/path/to/full/swift-toolchain` with the path to your full
-Swift toolchain — required for SwiftPM; the Xcode command-line tools are not
-sufficient):
+### Core options
 
-```sh
-export SWIFT_TOOLCHAIN=/path/to/full/swift-toolchain
-export SWIFT_EXEC_MANIFEST="$SWIFT_TOOLCHAIN/usr/bin/swiftc"
-export SWIFTPM_CUSTOM_LIBS_DIR="$SWIFT_TOOLCHAIN/usr/lib/swift/pm"
-swift build -c debug
+| Option | Purpose |
+| --- | --- |
+| `active_provider` | Active STT provider |
+| `language` | STT language hint; empty means automatic detection |
+| `ui_language` | UI language |
+| `sounds_enabled` | Enable start/stop feedback sounds |
+| `timeout_seconds` | STT request timeout |
+| `log_level` | Logging verbosity |
+| `double_alt_max_interval` | Maximum interval between Alt presses |
+| `undo_max_interval` | Time window for quick undo |
+| `undo_sound_enabled` | Play feedback for undo |
+| `insert_method` | Text insertion method |
+| `review_before_insert` | Review transcription before insertion |
+| `chunked` | Enable chunked transcription |
+| `auto_failover` | Enable provider failover |
+| `providers` | Provider list used by failover |
+
+### Provider options
+
+Each provider can define:
+
+```toml
+base_url = ""
+model = ""
+api_key = ""
+# api_key_file = "~/.config/nanodictate/keys/provider.txt"
 ```
 
-A Node.js MCP server automates build + sign + restart of the agent with a
-stable signature (`mcp/nanodictate-deploy-mcp-server/`, see its
-[README](mcp/nanodictate-deploy-mcp-server/README.md)). Build locally with a
-raw `swift build` only for testing: macOS TCC grants (Microphone,
-Accessibility) are keyed to the binary's signature, and an ad-hoc-signed
-rebuild changes it, so re-grant the permissions once after such a build.
+For the active provider, `NANODICTATE_API_KEY` can override the configured key without writing it to disk.
+
+Advanced provider configurations can also use transport/proxy settings such as:
+
+```text
+transport
+http_proxy
+proxy_user
+proxy_password
+proxy_key
+proxy_key_header
+```
+
+Optional routing can select different providers for chunk segments and the final pass:
+
+```toml
+[routing]
+segment_provider = "cloudflare"
+final_provider = "groq"
+```
+
+See [`config.example.toml`](config.example.toml) for the canonical defaults and complete examples.
+
+## Update
+
+```bash
+brew update
+brew upgrade --cask nanodictate
+```
+
+Normal release upgrades keep the same signing identity, so existing Microphone and Accessibility grants should remain valid.
 
 ## Uninstall
 
-**Homebrew** — `brew services stop kodmial/nanodictate/nanodictate` then
-`brew uninstall kodmial/nanodictate/nanodictate` (the stop unloads the
-LaunchAgent and removes its plist; your config stays behind — remove it by
-hand if you want it gone).
-**Cask** — stop the service first, then uninstall: `nanodictate stop`, then
-`brew uninstall --cask kodmial/nanodictate/nanodictate` removes the app only —
-it does **not** remove the user LaunchAgent
-(`~/Library/LaunchAgents/com.nanodictate.agent.plist`).
-If the agent was not stopped beforehand, unload it and remove the plist by
-hand: `launchctl bootout gui/$(id -u)/com.nanodictate.agent` + `rm
-~/Library/LaunchAgents/com.nanodictate.agent.plist`.
-**MacPorts** — `nanodictate stop; rm -f ~/Library/LaunchAgents/com.nanodictate.agent.plist`
-(`launchctl bootout gui/$(id -u)/com.nanodictate.agent` first if the stop did
-not unload it), then `sudo port uninstall nanodictate` — it boots out the agent
-and removes the global plist in one command. What stays behind: your config
-(`~/.config/nanodictate/`), your logs (`~/Library/Logs/NanoDictate/`), and —
-unless removed by the `rm` above — the user LaunchAgent plist, whose `KeepAlive`
-keeps relaunching the removed binary.
+Stop the background agent first:
+
+```bash
+nanodictate stop
+brew uninstall --cask nanodictate
+```
+
+NanoDictate leaves user data in place:
+
+```text
+~/.config/nanodictate/
+~/Library/Logs/NanoDictate/
+```
+
+Remove those directories manually only if you also want to delete your configuration and logs.
+
+## Alternative installation: MacPorts
+
+NanoDictate is also available through the project MacPorts tree.
+
+Initial installation:
+
+```bash
+tmp="$(mktemp)" &&
+curl -fsSL https://raw.githubusercontent.com/kodmial/nanodictate/main/scripts/install-macports.sh -o "$tmp" &&
+bash "$tmp"
+rc=$?
+rm -f "$tmp"
+exit "$rc"
+```
+
+Update:
+
+```bash
+sudo port selfupdate
+sudo port upgrade nanodictate
+```
+
+Uninstall:
+
+```bash
+sudo port uninstall nanodictate
+```
+
+## Development
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for build, test, and contribution instructions.
 
 ## License
 
-[MIT](LICENSE) — Copyright (c) 2026 NanoDictate contributors.
+[MIT](LICENSE)

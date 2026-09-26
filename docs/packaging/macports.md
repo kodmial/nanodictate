@@ -116,11 +116,10 @@ sudo port uninstall nanodictate
 
 That two-line cleanup is manual — `port uninstall` itself is one command: its
 `pre-deactivate` step unloads the running agent
-(`launchctl bootout gui/$uid/com.nanodictate.agent`), deletes the global
-`/Library/LaunchAgents/com.nanodictate.agent.plist` and
-`/Library/Logs/NanoDictate`. Only user files (`~/.config/nanodictate`,
-`~/Library/Logs/NanoDictate`) survive; the user LaunchAgent plist is removed
-only by the manual step above.
+(`launchctl bootout gui/$uid/com.nanodictate.agent`) and deletes the global
+`/Library/LaunchAgents/com.nanodictate.agent.plist`. Only user files
+(`~/.config/nanodictate`, `~/Library/Logs/NanoDictate`) survive; the user
+LaunchAgent plist is removed only by the manual step above.
 
 **Recovery after a MacPorts reinstall:**
 
@@ -190,12 +189,21 @@ and RunAtLoad starts the daemon at the next login.
 ### Why no Developer ID?
 
 Same as Homebrew: `port install` downloads the tarball with MacPorts' own
-fetcher, so the installed binaries carry no quarantine attribute and
-Gatekeeper does not block them. Only browser downloads of the GitHub
-Releases tarballs get `com.apple.quarantine`; clear it once with
-`xattr -dr com.apple.quarantine /path/to/binary`. See
-[Signing and quarantine in homebrew.md](homebrew.md#signing-and-quarantine) for
-the comparison table.
+fetcher, so the port's own fetcher does not stamp `com.apple.quarantine` on
+the installed binaries — no "Open Anyway" and no manual `xattr` are part of
+the MacPorts install flow either, and with no quarantine attribute on the
+binaries no Gatekeeper dialog is expected on the first launch — none has been
+observed. The port installs the same self-signed, not notarized binaries, and
+the signature is what `spctl` reports on (see
+[Signing and quarantine in homebrew.md](homebrew.md#signing-and-quarantine)).
+
+Browser downloads of the GitHub Releases tarballs carry
+`com.apple.quarantine`, and those are outside the install path entirely — see
+[Troubleshooting: only if Gatekeeper still refuses in
+homebrew.md](homebrew.md#troubleshooting-only-if-gatekeeper-still-refuses) for
+the comparison table and the recovery command. The Homebrew Cask is the one
+path that installs a quarantined app *bundle*, and its `postflight_steps`
+block clears the attribute as part of the install.
 
 ## For the maintainer
 
@@ -226,10 +234,69 @@ every release — this section is the manual drill that the workflow runs.
 4. **Validate:**
 
    ```sh
-   port lint                                    # in the ports checkout
-   sudo port -v install nanodictate             # clean-machine test
-   nanodictate --version                        # must print "nanodictate 0.1.0"
+   port lint                                # in the ports checkout
+   sudo port -v install nanodictate         # clean-machine test
+   nanodictate --version                    # must print "nanodictate <VERSION>"
+   sudo port test nanodictate               # run the test phase alone
    ```
+
+   The Portfile declares a real `test` phase, but the phase is optional:
+   MacPorts runs it only when you ask for it with `sudo port
+   test nanodictate`, not as part of `sudo port install`. A failure there is
+   reported and makes `sudo port test` itself exit non-zero, but it does not
+   block the install. Run it explicitly as the smoke test, since nothing else
+   in the install path exercises the staged binary.
+
+   `test.cmd` is a self-contained `/bin/sh` one-liner and `test.target` is
+   empty, so nothing is appended to the command. It checks exactly two
+   things about `<destroot>/<prefix>/bin/nanodictate --version`:
+
+   1. the binary exits 0 — the output is captured first and the rest is
+      `&&`-chained to it, so a non-zero exit fails `port test` before
+      anything is compared;
+   2. the port version occurs in that output as a **whole token**: the
+      output is split on every character that is neither a digit nor a dot
+      (`tr -c "0-9."`), and one of the resulting lines must equal the port
+      version exactly (`grep -Fx`, so the version is a literal and not a
+      pattern). An empty output, a different version, and a longer number
+      that merely contains the version (`0.1.01`, `10.1.0`) all fail.
+
+   Nothing beyond that is checked. In particular the rest of the output
+   line is **not** verified: the port knows only its own version, so a CLI
+   that prints the same version under a different prefix
+   (`NanoDictate <VERSION>` instead of `nanodictate <VERSION>`) still passes.
+   Nothing outside `--version` is exercised either — no config, no network,
+   no audio device, no TCC. Read it as a "does the staged binary run and
+   does it report this version" smoke test, nothing more.
+
+   When `port test` runs on its own against a port that is not installed
+   yet, `${prefix}` holds no binary at that point — hence the command in
+   `test.cmd` runs the staged destroot copy
+   (`${destroot}${prefix}/bin/nanodictate`), the only place the binary
+   exists then. `${worksrcdir}` holds no binary at all: the port ships a
+   prebuilt tarball, not sources. Once the port is installed, as in step 4
+   above, `activate` has already populated `${prefix}` and the picture
+   changes — see the standalone `port test` paragraph below.
+
+   The MacPorts Guide's Port Phases section (chapter 5.3,
+   guide.macports.org/chunked/reference.phases.html) lists the phases as
+   `build` → `test` → `destroot` → `install`, but that is a listing, not
+   a dependency order. MacPorts' own test target requires them through
+   `target_requires ... main fetch checksum extract patch configure build
+   destroot` in its `porttest.tcl`
+   (`/opt/local/libexec/macports/lib/port1.0/porttest.tcl:11`):
+   `destroot` is a prerequisite of the test phase and `install` is not.
+   The test therefore always runs after `destroot` and before
+   `install`/`activate`.
+
+   `sudo port test nanodictate` runs the test phase on its own. It does not
+   reuse anything the install left behind: `portautoclean` defaults to `yes`,
+   so a completed install runs the `clean` target right after `install` and
+   removes the whole build directory, state file included. The first
+   `port test` after an install therefore re-runs the required targets and
+   re-stages the destroot itself, downloading and extracting the tarball
+   again. A `sudo port clean nanodictate` is only needed to re-run an earlier
+   `port test`, since that one does leave its state file behind.
 
 5. **Sync the generated Portfile into `kodmial/macports-nanodictate`** —
    **automated since 0.0.x**: on every release, the `manifests` job of

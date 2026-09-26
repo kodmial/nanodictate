@@ -7,6 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-26
+
+### Changed
+
+- Homebrew Cask: `depends_on macos: :monterey` replaces `depends_on :macos`, so
+  the cask sets the same macOS floor as the formula and brew refuses an install
+  on an older system. The platform requirement itself stays, or brew rejects
+  the cask at tap validation.
+- Release workflow: the negative check "the cask must not clear quarantine"
+  becomes a positive one — the release fails unless the generated cask still
+  has exactly one `postflight_steps` block running `/usr/bin/xattr` with
+  `args: ["-dr", "com.apple.quarantine", "{{appdir}}/NanoDictate.app"]` and
+  still declares `depends_on macos: :monterey`. The "did not become clearing
+  all attributes / does not poke spctl" check is kept, but now runs against a
+  comment-stripped copy of the cask, so that future prose in the template
+  legitimately mentioning those tokens cannot break the guard.
+- MacPorts: the architecture test is now a `switch -- ${os.arch}` with an
+  explicit `default` branch, so an unsupported architecture reports a clear
+  error instead of silently falling back to the Intel tarball. A real smoke
+  test replaces the stub commented out as "for a future release" —
+  `test.run yes` running `nanodictate --version` against the staged destroot
+  copy — and `test.ignore_archs yes` disables MacPorts' own architecture check,
+  which compares the `arm`/`i386` vocabulary against the `arm64`/`x86_64`
+  binaries and would warn on every install.
+- Release workflow: the git identity for the automated commits in this repo was
+  `dima <dima@users.noreply.github.com>` and is now
+  `kodmial <kodmial@gmail.com>` — the manifest-sync steps, the MacPorts tree,
+  `scripts/install-macports.sh` and the tap. `bump-version.yml` now sets the
+  same identity.
+- Packaging docs: `docs/packaging/homebrew.md`, `docs/packaging/macports.md`
+  and `packaging/README.md` are aligned with the templates. The Homebrew guide
+  documents the cask postflight and its macOS 12 floor and demotes the manual
+  "Open Anyway" / `xattr` steps to troubleshooting; the MacPorts guide drops
+  the claim that `port uninstall` removes `/Library/Logs/NanoDictate` and
+  explains the `test` phase; `packaging/README.md` records that both packages
+  declare a version test which neither runs during install. Documentation only.
+- README restructured around a "Quick start" that installs the app bundle via
+  `brew install --cask kodmial/nanodictate/nanodictate`, with dedicated upgrade
+  and uninstall sections, an "Alternative installation: MacPorts" section, and
+  the macOS 12 Monterey-or-newer requirement stated with the other platform
+  requirements at the top.
+
+### Fixed
+
+- Homebrew Cask — Gatekeeper no longer blocks the first launch: the
+  `postflight_steps` block runs `/usr/bin/xattr` with
+  `args: ["-dr", "com.apple.quarantine", "{{appdir}}/NanoDictate.app"]`,
+  removing exactly one attribute from the installed bundle, so a plain
+  `brew install --cask` needs neither an "Open Anyway" click nor a manual
+  `xattr`. The removal is deliberately narrow: not `xattr -cr`, no other xattr
+  keys, no `spctl --master-disable` — Gatekeeper stays globally enabled and the
+  code signature is untouched, so the bundle keeps its self-signed identity
+  and the grants it already has. TCC permissions are separate: macOS asks for
+  Microphone and Accessibility on the agent's first run.
+- Homebrew Formula: the overreaching `caveats` wording is retired and reworded
+  rather than deleted. The two misleading sentences are gone — the blanket
+  claim that "Homebrew's download does not set the quarantine attribute, so
+  Gatekeeper stays quiet", and the "only *browser* downloads get
+  com.apple.quarantine" pointer at a manual `xattr -dr` workaround. What
+  survives is scoped to this install path and hedged with an observation: no
+  quarantine attribute is set here, so no Gatekeeper dialog is expected on the
+  first launch of the binaries in `#{opt_prefix}/bin`, and none has been
+  observed. The caveats mention no manual `xattr` or "Open Anyway".
+- MacPorts: a LaunchAgent bootstrap failure is now diagnosed — with a GUI
+  session present, the concrete launchctl error is printed with the commands to
+  inspect and recover the job instead of a generic "it will start at next
+  login" message, while a headless or SSH install stays non-fatal and each
+  `catch` is scoped to one command. After a successful bootstrap the port runs
+  `launchctl print` to confirm launchd really kept the job, since bootstrap can
+  return 0 while the job dies at once. The dead `/Library/Logs/NanoDictate`
+  cleanup in `pre-deactivate` was removed: the port never creates that
+  directory, so it could only ever print a misleading "logs ... removed".
+
 ## [0.1.0] - 2026-09-22
 
 ### Changed
@@ -193,7 +266,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/kodmial/nanodictate/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/kodmial/nanodictate/compare/v0.0.16...v0.1.0
 [0.0.16]: https://github.com/kodmial/nanodictate/compare/v0.0.13...v0.0.16
 [0.0.13]: https://github.com/kodmial/nanodictate/compare/v0.0.12...v0.0.13

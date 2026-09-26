@@ -22,16 +22,32 @@ revision            __REVISION__
 
 master_sites        https://github.com/kodmial/nanodictate/releases/download/v__VERSION__
 
-# MacPorts os.arch is NOT the Apple arch string: it maps tcl_platform(machine)
-# to arm / i386 / powerpc (macports.tcl), so Apple Silicon is "arm", not
-# "arm64" — checking "arm64" would never match and Intel's tarball was picked.
-if {${os.arch} eq "arm"} {
-    distfiles       nanodictate-__VERSION__-macos-arm64.tar.gz
-    checksums       sha256  __SHA256_ARM64__
-} else {
-    distfiles       nanodictate-__VERSION__-macos-x86_64.tar.gz
-    checksums       sha256  __SHA256_X86_64__
+# MacPorts ${os.arch} is NOT the Apple arch string: MacPorts base rewrites
+# tcl_platform(machine) to match `uname -p` (macports1.0/macports.tcl,
+# "Set os_arch to match `uname -p`"), so Apple Silicon reports "arm" and
+# every Intel Mac reports "i386". Testing for "arm64" / "x86_64" here would
+# therefore never match and would silently pick the wrong tarball.
+#
+# Only those two architectures have a release asset. Anything else (e.g. a
+# legacy "powerpc" host) is a hard error rather than a fall-back to the Intel
+# tarball, which would download a binary that cannot execute there.
+switch -- ${os.arch} {
+    arm {
+        set distfile_arch    arm64
+        set distfile_sha256  __SHA256_ARM64__
+    }
+    i386 {
+        set distfile_arch    x86_64
+        set distfile_sha256  __SHA256_X86_64__
+    }
+    default {
+        ui_error "nanodictate supports only Apple Silicon (arm64) and Intel (x86_64) macOS; this machine reports os.arch \"${os.arch}\"."
+        return -code error "unsupported architecture: ${os.arch}"
+    }
 }
+
+distfiles           nanodictate-__VERSION__-macos-${distfile_arch}.tar.gz
+checksums           sha256  ${distfile_sha256}
 
 platforms           {darwin >= 21}
 categories          audio
@@ -70,9 +86,9 @@ destroot {
     # console user, so `sudo port install` leaves the daemon live with no
     # manual `nanodictate start`. No startupitem (a separate startupitem would
     # create a second launchd job).
-    # config.example.toml — канон дефолтов: при первом запуске приложение
-    # копирует его в юзер-конфиг ~/.config/nanodictate/config.toml (CLI никогда
-    # не читает ${prefix}/etc).
+    # config.example.toml — the canonical set of defaults: on first run the
+    # application copies it to the per-user config
+    # ~/.config/nanodictate/config.toml (the CLI never reads ${prefix}/etc).
     set share_dir ${destroot}${prefix}/share/nanodictate
     xinstall -d -m 755 ${share_dir}
     xinstall -m 644 ${workpath}/config.example.toml ${share_dir}/
@@ -94,17 +110,22 @@ post-activate {
     # and the same plist shape the CLI writes, so there is always exactly one
     # daemon regardless of install method or order.
     #
-    # Every system command is wrapped in catch so a failure (headless install,
-    # launchd refusing the bootstrap, ...) never makes `port install` fail:
-    # the plist stays on disk and RunAtLoad picks the service up at next login.
+    # A headless / SSH install (no GUI session for the console user) is NOT
+    # fatal: the plist stays on disk and RunAtLoad picks the service up at the
+    # next login. But when a GUI session *does* exist and the bootstrap still
+    # fails, that is a real problem the user has to know about — so the actual
+    # launchctl error is surfaced together with the commands to inspect and
+    # recover the job. Each catch is scoped to exactly one command (never a
+    # blanket catch around the whole phase), so an unrelated Tcl error cannot
+    # be silently reported as "headless install".
     set launch_dir /Library/LaunchAgents
     set plist_path ${launch_dir}/com.nanodictate.agent.plist
     set agent_bin  ${prefix}/bin/NanoDictateAgent
+    set label      com.nanodictate.agent
 
-    if {[catch {
-        exec /bin/mkdir -p ${launch_dir}
-    }]} {
-        ui_warn "nanodictate: could not create ${launch_dir} — the service will register on first 'nanodictate start'"
+    if {[catch {exec /bin/mkdir -p ${launch_dir}} mkdir_err]} {
+        ui_warn "nanodictate: could not create ${launch_dir}: ${mkdir_err}"
+        ui_warn "nanodictate: the service will register on the first 'nanodictate start' run by the desktop user."
     } else {
         # Single authoritative XML block (one place to edit).
         set plist_xml {
@@ -133,24 +154,58 @@ post-activate {
             set fd [open ${plist_path} w 0644]
             puts -nonewline ${fd} ${content}
             close ${fd}
-        }]} {
-            ui_warn "nanodictate: could not write ${plist_path} — the service will register on first 'nanodictate start'"
+        } write_err]} {
+            ui_warn "nanodictate: could not write ${plist_path}: ${write_err}"
+            ui_warn "nanodictate: the service will register on the first 'nanodictate start' run by the desktop user."
         } else {
             # Bootstrap into the CURRENT console user's GUI session so the
             # service is live immediately. uid 0 = no GUI session (SSH/
             # headless install or login screen): nothing to bootstrap now,
-            # RunAtLoad covers the next login.
-            if {[catch {set uid [exec /usr/bin/stat -f %u /dev/console]}]} {
-                ui_msg "nanodictate: could not determine console user — the service will start at next login (plist: ${plist_path})"
+            # RunAtLoad covers the next login. This stays non-fatal.
+            if {[catch {set uid [exec /usr/bin/stat -f %u /dev/console]} stat_err]} {
+                ui_msg "nanodictate: could not determine the console user (${stat_err}) — the service will start at next login (plist: ${plist_path})"
             } elseif {${uid} ne "0"} {
                 # Unload a possibly already-loaded job first (re-install over
-                # a running service / upgrade): bootout error when the service
-                # is not loaded is normal — catch, don't fail the phase.
-                catch {exec /bin/launchctl bootout gui/${uid}/com.nanodictate.agent}
-                if {[catch {exec /bin/launchctl bootstrap gui/${uid} ${plist_path}}]} {
-                    ui_msg "nanodictate: could not bootstrap the service now — it will start at next login (plist: ${plist_path})"
+                # a running service / upgrade): a bootout error when the
+                # service is not loaded is normal and expected, so its result
+                # is deliberately discarded here.
+                catch {exec /bin/launchctl bootout gui/${uid}/${label}}
+                if {[catch {exec /bin/launchctl bootstrap gui/${uid} ${plist_path}} boot_err]} {
+                    # A GUI session exists but the bootstrap failed: surface
+                    # the real reason plus the inspect/recover commands.
+                    ui_warn "nanodictate: a GUI session is present (uid ${uid}) but the service failed to bootstrap: ${boot_err}"
+                    ui_warn "nanodictate: check the job with:  launchctl print gui/${uid}/${label}"
+                    ui_warn "nanodictate: recover with either:  launchctl bootstrap gui/${uid} ${plist_path}   (or, as the logged-in user: nanodictate start)"
+                    ui_warn "nanodictate: the plist is in place, so the service will also start at the next login."
                 } else {
-                    ui_msg "nanodictate: service registered and running (gui/${uid}), plist ${plist_path}"
+                    ui_msg "nanodictate: service bootstrapped (gui/${uid}), plist ${plist_path}"
+                    # Confirm launchd actually accepted and kept the job —
+                    # bootstrap can return 0 while the job immediately dies
+                    # (bad path, missing entitlements, ...). 'launchctl print'
+                    # on its own only proves the job is REGISTERED: a
+                    # repeatedly failing KeepAlive job stays in the domain in
+                    # a throttled state, and a job whose process has already
+                    # exited is still listed. The live state is therefore read
+                    # from the printout — a running job carries
+                    # "state = running" together with a "pid = <n>" line, a
+                    # dead one reports "state = not running" and has no pid.
+                    if {[catch {exec /bin/launchctl print gui/${uid}/${label}} print_result]} {
+                        ui_warn "nanodictate: bootstrapped, but 'launchctl print' does not show ${label}: ${print_result}"
+                        ui_warn "nanodictate: recover with either:  launchctl bootstrap gui/${uid} ${plist_path}   (or, as the logged-in user: nanodictate start)"
+                    } else {
+                        set job_state "unknown"
+                        set job_pid ""
+                        regexp {(?m)^[ \t]*state = ([^\n]+)} ${print_result} -> job_state
+                        regexp {(?m)^[ \t]*pid = ([0-9]+)} ${print_result} -> job_pid
+                        if {${job_state} eq "running" && ${job_pid} ne ""} {
+                            ui_msg "nanodictate: service registered and running (pid ${job_pid}, gui/${uid}), plist ${plist_path}"
+                        } else {
+                            ui_msg "nanodictate: service registered in launchd (gui/${uid}), plist ${plist_path}"
+                            ui_warn "nanodictate: the job is registered but has no live process (state: ${job_state}, pid: ${job_pid}) — a KeepAlive agent that keeps failing stays throttled in the domain like this"
+                            ui_warn "nanodictate: check the job with:  launchctl print gui/${uid}/${label}"
+                            ui_warn "nanodictate: recover with either:  launchctl bootstrap gui/${uid} ${plist_path}   (or, as the logged-in user: nanodictate start)"
+                        }
+                    }
                 }
             } else {
                 ui_msg "nanodictate: no console user (headless) — the service will start at next login (plist: ${plist_path})"
@@ -167,7 +222,6 @@ pre-deactivate {
     # service, so the gap is a brief service break at worst. Idempotent:
     # bootout of a service that is not loaded is normal (catch).
     set plist_path "/Library/LaunchAgents/com.nanodictate.agent.plist"
-    set logs_dir  "/Library/Logs/NanoDictate"
     # plist removal is not tied to the console user — do it first so it also
     # happens when stat fails below.
     if {[catch {file delete -force ${plist_path}}]} {
@@ -175,16 +229,15 @@ pre-deactivate {
     } else {
         ui_msg "nanodictate: plist ${plist_path} removed"
     }
-    # Root-owned service log dir created by post-activate — remove it too, so
-    # `sudo port uninstall` leaves no trace (idempotent: a dir that was never
-    # created simply does not exist).
-    if {[catch {file delete -force ${logs_dir}}]} {
-        ui_warn "nanodictate: could not remove ${logs_dir}"
-    } else {
-        ui_msg "nanodictate: logs ${logs_dir} removed"
-    }
-    if {[catch {set uid [exec /usr/bin/stat -f %u /dev/console]}]} {
-        ui_msg "nanodictate: could not determine console user — skipping service unload"
+    # NOTE: no /Library/Logs/NanoDictate cleanup here. This port never creates
+    # that directory — the agent writes to the per-user ~/Library/Logs/
+    # NanoDictate (Sources: logDirectory = "~/Library/Logs/NanoDictate"), and
+    # the plist deliberately omits StandardOutPath/StandardErrorPath so launchd
+    # creates no root-owned log dir. The previous cleanup was therefore dead
+    # code that could only ever print a misleading "logs ... removed". User
+    # logs under ~ are left alone on uninstall on purpose.
+    if {[catch {set uid [exec /usr/bin/stat -f %u /dev/console]} stat_err]} {
+        ui_msg "nanodictate: could not determine the console user (${stat_err}) — skipping service unload"
     } elseif {${uid} ne "0"} {
         catch {exec /bin/launchctl bootout gui/${uid}/com.nanodictate.agent}
         ui_msg "nanodictate: service unloaded (gui/${uid})"
@@ -195,7 +248,51 @@ pre-deactivate {
 
 livecheck.type      github
 
-# Optional smoke test once `nanodictate --version` lands (planned for a future 0.0.x release):
-# test.run    yes
-# test.cmd    ${prefix}/bin/nanodictate
-# test.target --version
+# Smoke test: run the freshly staged binary and check that it starts AND that
+# the version it prints is the version this port installs. Exit status 0 alone
+# is too weak a check: a tarball staged whose Version.swift was never bumped,
+# or a stub that prints nothing at all, would pass it.
+#
+# The command must point at the DESTROOT, not ${prefix}: the test phase runs
+# after destroot but before install/activate, so nothing has been copied into
+# ${prefix} yet. This matches the documented default test.dir of ${build.dir}
+# (a command is run as `cd ${test.dir} && ${test.cmd} ${test.target}`).
+#
+# MacPorts' own test target (libexec/macports/lib/port1.0/porttest.tcl:11)
+# requires the test phase via `target_requires ${org.macports.test} main fetch
+# checksum extract patch configure build destroot`: the test phase requires
+# destroot but not install, so at test time the binary does not exist under
+# ${prefix}/bin yet and ${destroot}${prefix}/bin/<tool> is the only working form.
+#
+# What the pipeline below checks, and nothing more:
+#   1. `nanodictate --version` exits 0 — its stdout is captured first and the
+#      rest is &&-chained to that, so a non-zero exit stops the check (and
+#      fails `port test`) before anything is compared;
+#   2. the port version occurs in that output as a WHOLE token: the output is
+#      split on every character that is neither a digit nor a dot, and one of
+#      the resulting lines must equal ${version} exactly (grep -F, so the
+#      version is a literal and not a pattern). An empty output, a different
+#      version (9.9.9) and a longer number that merely contains the version
+#      (0.1.01, 10.1.0) therefore all fail.
+# It does NOT check the rest of the line, and cannot: the port knows only its
+# own version, so whatever the CLI prints around it is accepted. Today that is
+# "nanodictate <version>" (Sources/nanodictate/main.swift, NanoDictateVersion);
+# reformatting the prefix will not break this test. Nothing outside --version
+# is exercised either — no config, no network, no audio device, no TCC.
+#
+# The command is a shell pipeline because MacPorts assembles the test command
+# line and runs it through /bin/sh — the same form the ports tree uses for
+# e.g. `test.cmd echo y | ./test`. The string is braced and filled with
+# `string map` so the shell's `$out` / `$(...)` reach /bin/sh untouched and
+# only the two placeholders are substituted.
+set _version_check [string map [list \
+        @BIN@ ${destroot}${prefix}/bin/nanodictate \
+        @VER@ ${version}] \
+    {out=$(@BIN@ --version) && printf "%s\n" "$out" | /usr/bin/tr -c "0-9." "\n" | /usr/bin/grep -Fxq "@VER@"}]
+
+test.run            yes
+test.cmd            ${_version_check}
+# The command is self-contained (the invocation and the check are one shell
+# line), so nothing may be appended after it: test.target is left empty, which
+# also empties the default test.pre_args {${test.target}}.
+test.target
