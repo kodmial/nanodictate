@@ -25,6 +25,10 @@ on:
         description: "Source CodeRabbit review id"
         required: false
         type: string
+      run_id:
+        description: "Source CI workflow run id"
+        required: false
+        type: string
 
 permissions: {}
 
@@ -52,22 +56,28 @@ jobs:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           REVIEW_ID: ${{ github.event.review.id }}
         run: |
-          gh api --method POST             "repos/${GITHUB_REPOSITORY}/actions/workflows/opencode.yml/dispatches"             -f ref=main             -f "inputs[mode]=coderabbit-fix"             -f "inputs[pr_number]=${PR_NUMBER}"             -f "inputs[head_ref]=${HEAD_REF}"             -f "inputs[review_id]=${REVIEW_ID}"
+          gh api --method POST \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/opencode.yml/dispatches" \
+            -f ref=main \
+            -f "inputs[mode]=coderabbit-fix" \
+            -f "inputs[pr_number]=$PR_NUMBER" \
+            -f "inputs[head_ref]=$HEAD_REF" \
+            -f "inputs[review_id]=$REVIEW_ID"
 
   opencode:
-    # Manual invocations remain owner-only. CodeRabbit fixes arrive through the
-    # internal workflow_dispatch created above after a CHANGES_REQUESTED review.
+    # Manual invocations remain owner-only. Automated repair modes arrive via
+    # internal workflow_dispatch events from trusted workflows on main.
     if: >-
       (github.event_name == 'workflow_dispatch' &&
-       inputs.mode == 'coderabbit-fix') ||
+       (inputs.mode == 'coderabbit-fix' ||
+        inputs.mode == 'resolve-conflict' ||
+        inputs.mode == 'ci-fix')) ||
       ((github.event_name == 'issue_comment' ||
         github.event_name == 'pull_request_review_comment') &&
        github.actor == github.repository_owner &&
        (contains(github.event.comment.body, '/oc') ||
         contains(github.event.comment.body, '/opencode')))
     runs-on: ubuntu-latest
-    # OpenCode is configured to fail fast instead of waiting for interactive
-    # permission prompts on the headless runner. Keep a bounded fallback too.
     timeout-minutes: 30
 
     permissions:
@@ -83,11 +93,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          fetch-depth: 1
-          # Use the repository PAT rather than github.token. OpenCode may need
-          # to push changes under .github/workflows/**; the installation token
-          # is rejected by GitHub for those updates without workflows access.
-          # TAP_PAT must be a classic PAT with repo + workflow scopes.
+          # Conflict repair needs full history to merge the current main branch.
+          fetch-depth: 0
+          # TAP_PAT is used instead of github.token because OpenCode may update
+          # files under .github/workflows/** and must trigger subsequent workflows.
           token: ${{ secrets.TAP_PAT }}
           persist-credentials: true
           ref: ${{ inputs.head_ref || github.ref }}
@@ -101,9 +110,6 @@ jobs:
         if: github.event_name != 'workflow_dispatch'
         uses: anomalyco/opencode/github@545f51d26cc39a907d2867492d498d9607ea5fa4
         env:
-          # use_github_token=true below tells OpenCode to use this exact env
-          # credential for GitHub API operations. Keep it aligned with the
-          # checkout credential so both gh calls and git push use TAP_PAT.
           GITHUB_TOKEN: ${{ secrets.TAP_PAT }}
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
         with:
@@ -139,3 +145,58 @@ jobs:
             - If a finding is incorrect or no longer applicable, do not make a speculative
               code change; explain the reason in the existing PR conversation.
             - If no actionable findings remain, leave the code unchanged.
+
+      - name: Resolve merge conflict with main
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'resolve-conflict'
+        uses: anomalyco/opencode/github@545f51d26cc39a907d2867492d498d9607ea5fa4
+        env:
+          GITHUB_TOKEN: ${{ secrets.TAP_PAT }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        with:
+          model: ${{ vars.OPENCODE_MODEL || 'opencode/big-pickle' }}
+          use_github_token: true
+          share: false
+          prompt: |
+            Resolve the merge conflict between pull request #${{ inputs.pr_number }} and the current main branch.
+
+            Context:
+            - The current checkout is the existing PR head branch: ${{ inputs.head_ref }}.
+            - A trusted controller already tried GitHub's update-branch API and it reported
+              that the branch could not be updated cleanly.
+
+            Requirements:
+            - Fetch the current origin/main and merge it into the current PR branch.
+            - Resolve every merge conflict while preserving the intended behavior from both
+              the PR and main; do not discard unrelated changes from either side.
+            - Do not rebase, force-push, reset away either side, or create a new pull request.
+            - Run the relevant tests, linters, or validation after resolving the conflicts.
+            - Commit the merge/conflict resolution and push it to the current PR branch.
+            - Keep all comments and commit messages in English.
+
+      - name: Fix failed CI
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'ci-fix'
+        uses: anomalyco/opencode/github@545f51d26cc39a907d2867492d498d9607ea5fa4
+        env:
+          GITHUB_TOKEN: ${{ secrets.TAP_PAT }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        with:
+          model: ${{ vars.OPENCODE_MODEL || 'opencode/big-pickle' }}
+          use_github_token: true
+          share: false
+          prompt: |
+            Fix the failed CI for pull request #${{ inputs.pr_number }}.
+
+            Context:
+            - The current checkout is the existing PR head branch: ${{ inputs.head_ref }}.
+            - The failed CI workflow run id is ${{ inputs.run_id }}.
+            - Inspect that run, its failed jobs and logs using GitHub CLI/API before changing code.
+
+            Requirements:
+            - Identify the concrete CI failure from the workflow logs and fix its root cause.
+            - Keep the change scoped to the failure; do not make unrelated refactors.
+            - If the failure is clearly transient or external infrastructure, do not make a
+              speculative code change; leave a concise explanation in the existing PR conversation.
+            - Run the relevant tests, linters, or validation locally in the runner when practical.
+            - Commit and push any required fix to the current PR branch so the existing PR updates.
+            - Do not create a new pull request.
+            - Keep all comments and commit messages in English.
