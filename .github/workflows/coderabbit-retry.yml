@@ -1,0 +1,74 @@
+name: Retry CodeRabbit after rate limit
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  retry:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Retry due CodeRabbit reviews
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const now = Date.now();
+
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              owner, repo, state: 'open', per_page: 100,
+            });
+
+            for (const pr of pulls) {
+              if (pr.draft) continue;
+
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number: pr.number, per_page: 100,
+              });
+
+              // CodeRabbit edits its summary comment when capacity is exhausted.
+              // Use the newest bot comment that gives an explicit retry delay.
+              const limited = comments
+                .filter(c => c.user?.login === 'coderabbitai[bot]')
+                .map(c => {
+                  const m = c.body?.match(/Next included review available in\s+(\d+)\s+minutes?/i);
+                  return m ? { comment: c, minutes: Number(m[1]) } : null;
+                })
+                .filter(Boolean)
+                .sort((a, b) => new Date(b.comment.updated_at) - new Date(a.comment.updated_at))[0];
+
+              if (!limited) continue;
+
+              const limitedAt = new Date(limited.comment.updated_at).getTime();
+              const dueAt = limitedAt + limited.minutes * 60_000;
+              if (now < dueAt) continue;
+
+              // Do not duplicate a retry already posted after the rate-limit state.
+              const retryAlreadyPosted = comments.some(c =>
+                c.user?.login !== 'coderabbitai[bot]' &&
+                c.body?.trim() === '@coderabbitai review' &&
+                new Date(c.created_at).getTime() > limitedAt
+              );
+              if (retryAlreadyPosted) continue;
+
+              // If CodeRabbit produced any newer non-rate-limit response, the state moved on.
+              const newerRabbitActivity = comments.some(c =>
+                c.user?.login === 'coderabbitai[bot]' &&
+                new Date(c.updated_at).getTime() > limitedAt &&
+                !/Review rate limited|Review limit reached|Next included review available/i.test(c.body || '')
+              );
+              if (newerRabbitActivity) continue;
+
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: pr.number,
+                body: '@coderabbitai review',
+              });
+              core.notice(`Retried CodeRabbit review for PR #${pr.number}`);
+            }
