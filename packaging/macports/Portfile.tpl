@@ -181,12 +181,30 @@ post-activate {
                     ui_msg "nanodictate: service bootstrapped (gui/${uid}), plist ${plist_path}"
                     # Confirm launchd actually accepted and kept the job —
                     # bootstrap can return 0 while the job immediately dies
-                    # (bad path, missing entitlements, ...).
-                    if {[catch {exec /bin/launchctl print gui/${uid}/${label}} print_err]} {
-                        ui_warn "nanodictate: bootstrapped, but 'launchctl print' does not show ${label}: ${print_err}"
+                    # (bad path, missing entitlements, ...). 'launchctl print'
+                    # on its own only proves the job is REGISTERED: a
+                    # repeatedly failing KeepAlive job stays in the domain in
+                    # a throttled state, and a job whose process has already
+                    # exited is still listed. The live state is therefore read
+                    # from the printout — a running job carries
+                    # "state = running" together with a "pid = <n>" line, a
+                    # dead one reports "state = not running" and has no pid.
+                    if {[catch {exec /bin/launchctl print gui/${uid}/${label}} print_result]} {
+                        ui_warn "nanodictate: bootstrapped, but 'launchctl print' does not show ${label}: ${print_result}"
                         ui_warn "nanodictate: recover with either:  launchctl bootstrap gui/${uid} ${plist_path}   (or, as the logged-in user: nanodictate start)"
                     } else {
-                        ui_msg "nanodictate: service registered and running (gui/${uid}), plist ${plist_path}"
+                        set job_state "unknown"
+                        set job_pid ""
+                        regexp {(?m)^[ \t]*state = ([^\n]+)} ${print_result} -> job_state
+                        regexp {(?m)^[ \t]*pid = ([0-9]+)} ${print_result} -> job_pid
+                        if {${job_state} eq "running" && ${job_pid} ne ""} {
+                            ui_msg "nanodictate: service registered and running (pid ${job_pid}, gui/${uid}), plist ${plist_path}"
+                        } else {
+                            ui_msg "nanodictate: service registered in launchd (gui/${uid}), plist ${plist_path}"
+                            ui_warn "nanodictate: the job is registered but has no live process (state: ${job_state}, pid: ${job_pid}) — a KeepAlive agent that keeps failing stays throttled in the domain like this"
+                            ui_warn "nanodictate: check the job with:  launchctl print gui/${uid}/${label}"
+                            ui_warn "nanodictate: recover with either:  launchctl bootstrap gui/${uid} ${plist_path}   (or, as the logged-in user: nanodictate start)"
+                        }
                     }
                 }
             } else {
@@ -248,11 +266,3 @@ livecheck.type      github
 test.run            yes
 test.cmd            ${destroot}${prefix}/bin/nanodictate
 test.target         --version
-
-# get_canonical_archs returns ${os.arch}, which MacPorts reports as "arm" /
-# "i386" while the shipped Mach-O binaries are "arm64" / "x86_64". The
-# built-in test_archs check compares those two vocabularies and would emit a
-# bogus "built for the wrong architecture" warning on every install, so turn
-# that check off; the architecture is already enforced above, where the
-# correct distfile is selected.
-test.ignore_archs   yes
