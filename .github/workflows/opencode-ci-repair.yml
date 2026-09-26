@@ -1,0 +1,97 @@
+name: OpenCode CI repair
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
+jobs:
+  repair-failed-ci:
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Find PR and repair state
+        env:
+          GH_TOKEN: ${{ secrets.TAP_PAT }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          set -euo pipefail
+
+          # Resolve the open PR from the CI head SHA instead of trusting the
+          # workflow_run.pull_requests array, which can be empty in edge cases.
+          pr_data="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/pulls" \
+            --jq '[.[] | select(.state == "open" and .base.ref == "main")][0] // empty')"
+
+          if [[ -z "$pr_data" || "$pr_data" == "null" ]]; then
+            echo "No open pull request found for CI run ${RUN_ID}; nothing to repair."
+            exit 0
+          fi
+
+          pr_number="$(jq -r '.number' <<<"$pr_data")"
+          head_ref="$(jq -r '.head.ref' <<<"$pr_data")"
+          head_repo="$(jq -r '.head.repo.full_name // ""' <<<"$pr_data")"
+
+          if [[ "$head_repo" != "$GITHUB_REPOSITORY" || "$head_ref" != opencode/* ]]; then
+            echo "PR #${pr_number}: not an eligible same-repository OpenCode PR; skipping."
+            exit 0
+          fi
+
+          if [[ "$CONCLUSION" == "success" ]]; then
+            # A successful CI resets the one-attempt circuit breaker so a
+            # later independent regression may be repaired automatically once.
+            gh api --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/issues/${pr_number}/labels/opencode-ci-repair-attempted" \
+              >/dev/null 2>&1 || true
+            echo "PR #${pr_number}: CI is green; repair circuit breaker reset."
+            exit 0
+          fi
+
+          if [[ "$CONCLUSION" != "failure" && "$CONCLUSION" != "timed_out" ]]; then
+            echo "PR #${pr_number}: CI conclusion '${CONCLUSION}' is not auto-repairable."
+            exit 0
+          fi
+
+          labels="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${pr_number}" --jq '.labels[].name')"
+          if grep -Fxq 'opencode-ci-repair-attempted' <<<"$labels"; then
+            echo "PR #${pr_number}: one automatic CI repair was already attempted; stopping the loop."
+            exit 0
+          fi
+
+          # Create the repository label if needed, then use it as a persistent
+          # circuit breaker until CI succeeds.
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/labels" \
+            -f name='opencode-ci-repair-attempted' \
+            -f color='FBCA04' \
+            -f description='One automatic OpenCode CI repair has been attempted' \
+            >/dev/null 2>&1 || true
+
+          gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/issues/${pr_number}/labels" \
+            -f 'labels[]=opencode-ci-repair-attempted' \
+            >/dev/null
+
+          echo "PR #${pr_number}: CI failed; dispatching one OpenCode repair attempt."
+          if ! gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/opencode.yml/dispatches" \
+            -f ref=main \
+            -f 'inputs[mode]=ci-fix' \
+            -f "inputs[pr_number]=${pr_number}" \
+            -f "inputs[head_ref]=${head_ref}" \
+            -f "inputs[run_id]=${RUN_ID}"; then
+            # Dispatch did not happen, so do not consume the repair attempt.
+            gh api --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/issues/${pr_number}/labels/opencode-ci-repair-attempted" \
+              >/dev/null 2>&1 || true
+            exit 1
+          fi
