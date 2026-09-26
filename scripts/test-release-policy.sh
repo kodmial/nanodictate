@@ -14,8 +14,8 @@
 #   * the path-based guard, asserted against REAL `git diff` output from a
 #     throwaway repository so a broken grep cannot pass the pure-function cases.
 #
-# Temporary fixtures live in .opencode-tmp/ inside the worktree (never in /tmp)
-# and are removed on exit.
+# Temporary fixtures live in a per-run directory under .opencode-tmp/ inside the
+# worktree (never in /tmp) and are removed on exit.
 
 set -uo pipefail
 
@@ -23,7 +23,11 @@ REPO_ROOT=$(git rev-parse --show-toplevel) || exit 1
 # shellcheck source=scripts/release-policy.sh
 source "${REPO_ROOT}/scripts/release-policy.sh"
 
-TMP_DIR="${REPO_ROOT}/.opencode-tmp/release-policy-tests"
+# `mktemp -d` gives every run its own fixture repository, so two concurrent runs
+# in the same worktree cannot delete each other's fixtures, and `cleanup` below
+# only ever removes what this run created.
+mkdir -p "${REPO_ROOT}/.opencode-tmp" || exit 1
+TMP_DIR=$(mktemp -d "${REPO_ROOT}/.opencode-tmp/release-policy-tests.XXXXXX") || exit 1
 PASSED=0
 FAILED=0
 
@@ -191,6 +195,18 @@ assert_eq 'installer: a real line survives the PIN_REV filter' \
   '-OLD_URL=x' \
   "$(printf '%s\n' $'--- a/scripts/install-macports.sh\n+++ b/scripts/install-macports.sh\n@@ -1 +1 @@\n-PIN_REV=old\n+PIN_REV=new\n-OLD_URL=x' | policy_installer_diff_wo_pinrev)"
 
+# Hunk-aware filtering: diff/hunk headers carry no content, but a content line
+# that itself starts with `++`/`--` is a real change and must survive.
+assert_eq 'installer: diff and hunk headers are not mistaken for changes' \
+  $'-OLD_URL=x\n-#-- a separator\n++ a leading plus' \
+  "$(printf '%s\n' $'diff --git a/scripts/install-macports.sh b/scripts/install-macports.sh\nindex 1234567..89abcde 100755\n--- a/scripts/install-macports.sh\n+++ b/scripts/install-macports.sh\n@@ -1,2 +1,2 @@\n-OLD_URL=x\n-#-- a separator\n+PIN_REV=new\n++ a leading plus' | policy_installer_diff_wo_pinrev)"
+assert_eq 'installer: a file-mode change counts as a real installer edit' \
+  $'old mode 100644\nnew mode 100755' \
+  "$(printf '%s\n' $'diff --git a/scripts/install-macports.sh b/scripts/install-macports.sh\nold mode 100644\nnew mode 100755' | policy_installer_diff_wo_pinrev)"
+assert_eq 'installer: a mode-only change makes the installer releasable' \
+  'releasable' \
+  "$(policy_decide "$EMPTY" 'scripts/install-macports.sh' "$(printf '%s\n' $'old mode 100644\nnew mode 100755' | policy_installer_diff_wo_pinrev)")"
+
 # --- 4. Version policy -------------------------------------------------------
 
 assert_ok 'version: 0.0.1 is allowed' policy_version_is_allowed '0.0.1'
@@ -273,6 +289,15 @@ printf 'https://example.com/real\n' >> "$FIXTURE/scripts/install-macports.sh"
 git -C "$FIXTURE" add -A
 git -C "$FIXTURE" commit -q -m 'real installer edit'
 assert_eq 'fixture: a real installer edit is releasable' \
+  'releasable' "$(fixture_decide "$EMPTY")"
+
+# A chmod of the installer produces a mode-only diff (no +/- lines at all); it
+# is still a real installer edit, so it must not be swallowed as PIN_REV-only.
+git -C "$FIXTURE" checkout -q -B mode-only v0.0.1
+chmod +x "$FIXTURE/scripts/install-macports.sh"
+git -C "$FIXTURE" add -A
+git -C "$FIXTURE" commit -q -m 'installer mode change only'
+assert_eq 'fixture: a mode-only installer change is releasable' \
   'releasable' "$(fixture_decide "$EMPTY")"
 
 # --- summary -----------------------------------------------------------------

@@ -196,7 +196,10 @@ jobs:
           # grow past patch=100 (0.1.101 is fine), so it is gated on the "0.0."
           # prefix. Checked here, not in the bump step, so a capped version is
           # a decision (and stays a green no-op) instead of a half-applied bump.
-          if policy_automatic_bump_blocked "$CURRENT"; then
+          # Gated on DECISION == releasable: a no-changes / non-releasable
+          # merge never reaches the bump, so the cap must not overwrite its
+          # own (more precise) reason in the job summary.
+          if [[ "$DECISION" == releasable ]] && policy_automatic_bump_blocked "$CURRENT"; then
             echo "::warning::Version $CURRENT is the 0.0.100 hard cap of the 0.0.x series (user policy) — refusing to bump to 0.0.101. A future series (e.g. 0.1.x) requires a manual version change."
             echo "decision=at-cap" >> "$GITHUB_OUTPUT"
           fi

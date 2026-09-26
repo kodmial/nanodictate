@@ -81,8 +81,21 @@ policy_pr_has_label() {
 # stdin: `git diff <tag>..HEAD -- scripts/install-macports.sh` output.
 # stdout: the added/removed lines that are NOT the generated PIN_REV edit, i.e.
 # the evidence of a real installer change (empty = PIN_REV-only).
+#
+# Filtering is hunk-aware: `diff --git` / `---` / `+++` headers carry no
+# content, so only the +/- lines INSIDE a `@@` hunk are considered. A plain
+# `grep -vE '^(\+\+\+|---)'` would also throw away real content that itself
+# starts with `++` or `--` (an added `+foo` line, a removed `-- bar` line), and
+# it would miss a mode-only change (chmod) entirely, because `old mode` /
+# `new mode` lines are not +/- lines. Both are real installer edits, so a
+# file-mode change is kept as evidence.
 policy_installer_diff_wo_pinrev() {
-  grep -E '^[+-]' | grep -vE '^(\+\+\+|---)|^[+-]PIN_REV=' || true
+  awk '
+    /^(old mode|new mode|new file mode|deleted file mode) / { print; next }
+    /^diff --git / { in_hunk = 0; next }
+    /^@@ / { in_hunk = 1; next }
+    in_hunk && /^[+-]/ && $0 !~ /^[+-]PIN_REV=/ { print }
+  '
 }
 
 # policy_releasable_paths <installer-diff-wo-pinrev>
