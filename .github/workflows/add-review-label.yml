@@ -19,7 +19,7 @@ jobs:
           script: |
             const run = context.payload.workflow_run;
             const repoFullName = `${context.repo.owner}/${context.repo.repo}`;
-            const prs = await github.rest.pulls.list({
+            const prs = await github.paginate(github.rest.pulls.list, {
               owner: context.repo.owner,
               repo: context.repo.repo,
               state: 'open',
@@ -28,7 +28,7 @@ jobs:
 
             // Match only the non-draft PR whose current head is the exact commit
             // that CI just tested, and only when the PR branch is in this repository.
-            const ours = prs.data.filter((pr) =>
+            const ours = prs.filter((pr) =>
               !pr.draft &&
               pr.head.sha === run.head_sha &&
               pr.head.repo.full_name === repoFullName
@@ -61,7 +61,15 @@ jobs:
                   }
                 );
 
-                if (!comments.some((comment) => comment.body?.includes(marker))) {
+                // Only the workflow bot's own marker counts, so a comment from
+                // another author cannot suppress the automated review request.
+                if (
+                  !comments.some(
+                    (comment) =>
+                      comment.user?.login === 'github-actions[bot]' &&
+                      comment.body?.includes(marker)
+                  )
+                ) {
                   await github.rest.issues.createComment({
                     owner: context.repo.owner,
                     repo: context.repo.repo,
