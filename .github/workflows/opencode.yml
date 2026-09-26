@@ -35,12 +35,17 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Configure Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
       - name: Run OpenCode
         uses: anomalyco/opencode/github@545f51d26cc39a907d2867492d498d9607ea5fa4
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
         with:
-          model: opencode/space-bunny-free
+          model: ${{ vars.OPENCODE_MODEL || 'opencode/space-bunny-free' }}
           use_github_token: true
           share: false
