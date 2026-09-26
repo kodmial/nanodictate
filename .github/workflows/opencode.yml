@@ -84,7 +84,11 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 1
-          token: ${{ github.token }}
+          # Use the repository PAT rather than github.token. OpenCode may need
+          # to push changes under .github/workflows/**; the installation token
+          # is rejected by GitHub for those updates without workflows access.
+          # TAP_PAT must be a classic PAT with repo + workflow scopes.
+          token: ${{ secrets.TAP_PAT }}
           persist-credentials: true
           ref: ${{ inputs.head_ref || github.ref }}
 
@@ -97,7 +101,10 @@ jobs:
         if: github.event_name != 'workflow_dispatch'
         uses: anomalyco/opencode/github@545f51d26cc39a907d2867492d498d9607ea5fa4
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          # use_github_token=true below tells OpenCode to use this exact env
+          # credential for GitHub API operations. Keep it aligned with the
+          # checkout credential so both gh calls and git push use TAP_PAT.
+          GITHUB_TOKEN: ${{ secrets.TAP_PAT }}
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
         with:
           model: ${{ vars.OPENCODE_MODEL || 'opencode/big-pickle' }}
@@ -108,7 +115,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.mode == 'coderabbit-fix'
         uses: anomalyco/opencode/github@545f51d26cc39a907d2867492d498d9607ea5fa4
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.TAP_PAT }}
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
         with:
           model: ${{ vars.OPENCODE_MODEL || 'opencode/big-pickle' }}
