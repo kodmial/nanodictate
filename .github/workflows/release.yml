@@ -814,28 +814,334 @@ jobs:
           # Service block with the canonical label: a lost label would let brew invent homebrew.mxcl.nanodictate — a second daemon.
           grep -q '^  service do$' packaging/homebrew/nanodictate.rb
           grep -q 'name macos: "com.nanodictate.agent"' packaging/homebrew/nanodictate.rb
+          # POSITIVE guard on the formula prose. The caveats used to state, as
+          # fact, that a Homebrew download never sets the quarantine attribute
+          # and that the attribute is limited to browser downloads. That is
+          # false — the cask has to clear the attribute itself — and it was
+          # removed from the .tpl, but nothing stops it from coming back and it
+          # would tell users the opposite of what the cask does. The text lives
+          # in the caveats heredoc, i.e. in plain prose rather than in a Ruby
+          # comment, so the whole file is read here.
+          #
+          # One Perl program instead of grep + dd + cut + awk + tr, which spelled
+          # out FOUR ways of asking the same question — show me the text around
+          # this match: a flattened copy, a paragraph copy, a `dd` byte window
+          # and a `grep -o` character window. The SEAM between them is where the
+          # old guard leaked: the word `cask`, part of the shared corrective
+          # vocabulary, sat in the window before an appended lie and silenced it,
+          # and the same word silenced the paragraph-scoped branch. Perl does the
+          # offset arithmetic natively ($-[0] / substr) over raw bytes, so the file
+          # is read once and the LC_ALL / multibyte question cannot arise at all.
+          # The program arrives on stdin (`perl - FILE`), so the failing path
+          # writes nothing to disk: it prints one line naming the reason on stderr
+          # and exits 1, and `set -e` stops the step there. Perl is preinstalled
+          # on the ubuntu runner next to the ruby this step already needs; should
+          # it ever go missing the shell reports 127 and the step FAILS rather
+          # than passing with the check silently skipped.
+          #
+          # Three branches, tried in order, each judged on its own evidence:
+          #   A) claim + consequence ("... so Gatekeeper stays quiet"): the
+          #      consequence is what turns a claim into user-facing advice.
+          #      Judged PER OCCURRENCE — the corrective test reads only the text
+          #      between the start of THAT occurrence's own PARAGRAPH and the
+          #      occurrence, so a correction beside one claim cannot veto a
+          #      different, uncorrected claim in another paragraph.
+          #   B) the attribute attributed to browser downloads alone, false
+          #      whoever the subject is. Narrowed to windows that also name the
+          #      attribute and skipped when such a window is corrective. Left on a
+          #      BYTE window ($B_PAD, and `open '<:raw'` above so it really is a
+          #      byte count): that phrasing carries its claim on its own.
+          #   C) the bare claim, silenced when the PARAGRAPH holding it refutes it
+          #      rather than asserts it. The unit is the paragraph and not a
+          #      character count because a claim and its correction are one
+          #      thought that a fixed cut splits for no reason — a correction 137
+          #      characters earlier in the same paragraph is still the same
+          #      correction, and cutting there turned correct prose into a
+          #      release failure. A uses that same unit, and for that same reason.
+          #
+          # THE PARAGRAPH IS THE UNIT FOR A AND C ALIKE, and the boundary it draws
+          # is the contract, stated here so no reader has to infer it: a refutation
+          # in the SAME paragraph as the claim silences it at ANY distance — 52
+          # bytes back or 250 — and a refutation in a DIFFERENT paragraph silences
+          # nothing. A lies introduced with its own corrective one paragraph up is
+          # therefore still caught, which is what the paragraph boundary buys.
+          #
+          # WHAT COUNTS AS A REFUTATION differs per branch, and that difference
+          # is the fix, not a detail:
+          #   A knows CUE words only (wrong, was once, no longer, do not, ...).
+          #      Words like cask / postflight / xattr are NOT refutations — they
+          #      name the mechanism and deny nothing. Counting them as denial is
+          #      what let a correct sentence in the same paragraph veto a lie
+          #      appended next to it, which is the scenario this guard exists for.
+          #      A consequence-carrying lie now trips A wherever it sits.
+          #   C also accepts a MECHANISM refutation, but only one that acts on the
+          #      attribute: cask / postflight / xattr / ... together with does /
+          #      clears / removes / instead. The claim text is blanked out of the
+          #      paragraph first, so the claim's own "does not" cannot veto
+          #      itself. A bare mention of a mechanism no longer silences C.
+          #
+          # Documented trade-offs — what this guard still misses, and what it
+          # still lets through. Neither "it never fires on correct text" nor "it
+          # catches every lie" is claimed; the branches above are the contract.
+          #   - A claim with NO consequence, in a paragraph that also ACTS on the
+          #      mechanism ("the cask does nothing" beside a bare claim), is still
+          #      silenced by C. Telling an assertion from a correction about the
+          #      same subject needs a claim-vs-correction parser, and the price of
+          #      guessing is failing releases on correct prose, so the conservative
+          #      branch is kept and the gap is written down here.
+          #   - A refutation phrased OUTSIDE the closed CUE vocabulary above still
+          #      reads as a claim. Five ordinary English corrections are carried in
+          #      $cue for exactly this reason -- "is false", "formerly",
+          #      "rather than", "instead of", "documented that" -- so the common
+          #      editorial rewrites of the caveat are not failed by the guard. A
+          #      rewrite phrased outside even those must use one of the CUE words
+          #      ("wrong", "no longer", "used to", "previously", "was once",
+          #      "not true", "that claim", ...) or name a mechanism that ACTS on
+          #      the attribute ($mech: cask/formula/tarball/... with clears/
+          #      removes/handles) to be recognised as a correction.
+          #   - A's veto window stops at the paragraph boundary and nowhere else.
+          #      It is NOT true that a correction further back in the paragraph is
+          #      left to branch C: when A matches it sets $why and C is then
+          #      skipped entirely (`if ($why eq '')`), so C never re-examines
+          #      anything A already judged. The window had been a fixed 80 bytes
+          #      and that was simply a bug — a correction 150 bytes earlier was
+          #      outside the window, A fired, C never ran, and correct prose failed
+          #      the release. The window is now paragraph-wide, which is the unit
+          #      C already used and the unit a correction actually lives in.
+          #   - The guard reads the file with `or exit 0`, so on an UNREADABLE or
+          #      MISSING file it fails OPEN and lets the release through. That is
+          #      safe only because the `ruby -c packaging/homebrew/nanodictate.rb`
+          #      line above already read the same path and would have stopped the
+          #      step first; do not move or drop that line without giving this one
+          #      a hard failure.
+          perl - packaging/homebrew/nanodictate.rb <<'ND_QUARANTINE_GUARD'
+          use strict;
+          use warnings;
+
+          # Positive guard on the formula prose. $ARGV[0] is the generated formula; the
+          # program arrives on stdin, so nothing is written to disk on the failing path.
+          # Read as raw bytes on purpose: every window below counts BYTES, so a multibyte
+          # character earlier in the file cannot shift a window and an exported LC_ALL
+          # cannot change the result.
+          my $file = shift @ARGV;
+          open(my $fh, '<:raw', $file) or exit 0;
+          my $src = do { local $/; <$fh> };
+          close $fh;
+          $src = '' unless defined $src;
+
+          # The retired claim, and the user-facing consequence that turns it into advice.
+          #
+          # DELIBERATE: $claim is NOT widened to the SEMANTIC claim, and must not be.
+          # It matches the retired WORDING only, and that is a considered trade, not an
+          # oversight — widening was measured, not guessed (see the trade-off note below).
+          # The template DELIBERATELY retains a hedged restatement of the same idea:
+          #   "This install path sets no quarantine attribute, so no Gatekeeper dialog
+          #    is expected ... and none has been observed."
+          # That sentence is CORRECT and must reach users. It asserts the same thing the
+          # retired claim asserted — no quarantine attribute on this path — so there is
+          # no semantic predicate that separates the two; they differ only in subject
+          # ("this install path" vs "Homebrew's download"). A $claim widened to the
+          # semantic claim (matching "sets no quarantine", "no quarantine attribute",
+          # or a bare negation near the word) FIRES ON THE GOOD ARTIFACT and would break
+          # every future release. A subject-anchored widening is subtler and still fails:
+          # it catches the retired claim reworded, but it equally catches the RETAINED
+          # hedge restated with a Homebrew subject ("Homebrew's download does not set any
+          # quarantine attribute, so no Gatekeeper dialog is expected"), which is correct
+          # prose an editor may legitimately write. Measured over a fixture set, every
+          # widening level that caught the reworded retired claim blocked 6/6 legitimate
+          # rewrites of the retained hedge.
+          #
+          # So the cost is accepted knowingly: a REWORDED retired claim that no longer
+          # contains this literal string is a KNOWN GAP, not a regression, and under-firing
+          # on an unanticipated rewording is a maintainer-reviewable MEDIUM. A false
+          # positive that blocks a correct release is a P0 and is the worse failure by
+          # every margin. If the retired caveat ever needs policing again, the cheap and
+          # safe way is a POSITIVE assertion that the correct sentence is present (the
+          # retained hedge or the postflight stanza), not a wider $claim: a positive check
+          # can only fail on prose that is genuinely missing, never on a rewording.
+          my $claim = qr/Homebrew'?s?\s+download\s+does\s+not\s+set\s+the\s+quarantine/i;
+          my $conseq = qr/\s(?:so|therefore|thus|hence)\s+[^.]{0,80}(?:Gatekeeper|stays\s+quiet|no\s+action|nothing\s+to\s+do|warn)/i;
+          # Refutation cues ONLY. Words like cask/postflight/xattr name the mechanism;
+          # they do not deny anything, and counting them as denial is what let a correct
+          # sentence in the same paragraph veto a lie appended next to it.
+          #
+          # The list is CLOSED: a phrase outside it does not refute, so an ordinary
+          # English correction phrased any other way reads as a claim. The five that
+          # matter most for real editorial rewrites are carried here — "is false",
+          # "formerly", "rather than", "instead of", "documented that" — because a
+          # caveat that refutes the retired advice with any of them is correct prose
+          # and must not fail a release. Dropping them (as a once-tried revision did)
+          # turned a working refutation into rc=1 on the very sentence it corrects.
+          # The cost is the ordinary cost of a cue list, already accepted for its
+          # members: a cue sitting in the same paragraph about a DIFFERENT subject
+          # silences this one ("the bundle formerly shipped a seal ... <claim>"). The
+          # existing members -- previously, used to, no longer, wrong -- behave
+          # identically, so this widens a known trade-off rather than opening a new
+          # hole; distinguishing assertion from correction needs the claim-vs-
+          # correction parser this guard deliberately does not attempt.
+          my $cue = qr/wrong|incorrect|misleading|myth|untrue|not\s+true|do\s+not|don'?t|no\s+longer|was\s+once|used\s+to|previously|documented\s+that|formerly|is\s+false|rather\s+than|instead\s+of|contrary\s+to|opposite\s+of|that\s+claim|this\s+claim|wrongly|incorrectly/i;
+          # Branch B: the attribute handed to browser downloads alone.
+          my $browser = qr/only\s+(?:the\s+)?[*_]*browser[*_]*\s+downloads?\s+(?:get|set|receive)/i;
+          # Branch C: a mechanism that is ACTED ON, not merely named.
+          my $mech = qr/\b(?:cask|postflight|xattr|formula|tarball)\b[^.]{0,60}\b(?:does|do|clears?|clearing|removes?|removing|strips?|handles?|handled|instead|rather)\b/i;
+
+          my $A_AHEAD = 400;  # bytes of context read AFTER a claim occurrence
+          my $B_PAD = 120;    # bytes of context on each side of a browser-only mention
+
+          # One flattened view for the two windowed branches. The old claim was wrapped
+          # across several template lines and its halves can sit a dozen lines apart,
+          # which a line window truncates or splits.
+          my $flat = $src;
+          $flat =~ s/\n/ /g;
+          my $why = '';
+
+          # Start offset of every paragraph, cut on a blank line exactly as branch C cuts
+          # it. The flatten above swaps each "\n" for a single space, so $flat is the
+          # SAME LENGTH as $src and an offset means the same place in both — which is why
+          # these offsets can be cut on $src and applied to $flat. A paragraph boundary
+          # cannot be found in $flat itself: there the blank line is two ordinary spaces,
+          # indistinguishable from Ruby indentation.
+          my @para_start = (0);
+          while ($src =~ /\n\s*\n/g) {
+            push @para_start, $+[0];
+          }
+
+          # A) per occurrence: claim + consequence, vetoed only by a cue word between the
+          #    START OF THIS OCCURRENCE'S OWN PARAGRAPH and the occurrence. A claim and
+          #    the correction that neutralises it are one thought, so the unit is the
+          #    paragraph and not a byte count: a fixed 80-byte cut split a correction
+          #    sitting 150 bytes earlier from the claim it corrects, and because A
+          #    matches first that turned correct prose into a release failure.
+          #    The window stops at the paragraph on purpose. A correction in a
+          #    NEIGHBOURING paragraph says nothing about this one, so a lie introduced
+          #    with its own corrective one paragraph up is still caught.
+          #    Every OTHER claim occurrence is blanked out of the window before the cue
+          #    test, for the same reason branch C blanks the claim text: a claim's own
+          #    "does not" must never veto it, and neither must a claim that was itself
+          #    corrected a sentence earlier. The window therefore also stops at the END
+          #    of the PREVIOUS claim occurrence: a cue sitting in the gap between two
+          #    claims belongs to the first one ("that is wrong: <claim>. ... <claim>, so
+          #    Gatekeeper stays quiet"), and letting it reach the second claim would
+          #    hand a writer a paragraph in which any lie goes unchallenged.
+          my $prev_end = 0;   # end offset of the previous claim occurrence, 0 if none
+          while ($flat =~ /$claim/g) {
+            # $-[0] and $& are read here, before any nested match can reset them.
+            my $off = $-[0];
+            my $gap_start = $prev_end;          # end of the previous occurrence
+            $prev_end = $off + length($&);     # advanced for EVERY occurrence, including
+                                               # one that fails the consequence test below:
+                                               # a bare claim earlier in the paragraph is
+                                               # still a claim an earlier cue was about.
+            next unless substr($flat, $off, $A_AHEAD) =~ /^$claim.{0,200}$conseq/;
+            my $start = 0;
+            for my $p (@para_start) {
+              last if $p > $off;
+              $start = $p;
+            }
+            $start = $gap_start if $gap_start > $start;
+            my $win = substr($flat, $start, $off - $start);
+            $win =~ s/$claim/(claim)/gi;
+            next if $win =~ /$cue/i;
+            $why = 'claim plus user-facing consequence';
+            last;
+          }
+
+          # B) the attribute attributed to browser downloads alone, which is false
+          #    whoever the subject is. Narrowed to windows that also name the attribute,
+          #    and skipped when such a window is corrective.
+          if ($why eq '') {
+            while ($flat =~ /.{0,$B_PAD}$browser.{0,$B_PAD}/g) {
+              my $win = $&;
+              next unless $win =~ /quarantine/i;
+              next if $win =~ /$cue/i;
+              $why = 'attribute limited to browser downloads';
+              last;
+            }
+          }
+
+          # C) the bare claim, judged on the PARAGRAPH that holds it (a blank source line
+          #    ends a paragraph; after flattening a blank line is two spaces and no
+          #    longer distinguishable from Ruby indentation). A claim and its correction
+          #    are one thought, so a cue anywhere in that paragraph — in front or after —
+          #    refutes it.
+          if ($why eq '') {
+            for my $para (split /\n\s*\n/, $src) {
+              next unless $para =~ /$claim/i;
+              my $rest = $para;
+              $rest =~ s/$claim/(claim)/gi;  # the claim must not veto itself
+              next if $rest =~ /$cue/i || $rest =~ /$mech/i;
+              $why = 'unattributed bare claim';
+              last;
+            }
+          }
+
+          if ($why ne '') {
+            print STDERR "ERROR: generated formula matches the retired quarantine caveat VERBATIM ($why); this guard matches that one retired WORDING, not the general idea — the correctly-worded hedge in packaging/homebrew/nanodictate.rb.tpl (\"This install path sets no quarantine attribute, so no Gatekeeper dialog is expected\") is intended to ship; see docs/packaging/homebrew.md\n";
+            exit 1;
+          }
+          exit 0;
+          ND_QUARANTINE_GUARD
           # The generated cask must parse (Ruby syntax check) and carry the .app
-          # stanza — self-signed and not notarized, the bundle relies on the
-          # user's approval when Gatekeeper refuses it, so the cask deliberately
-          # has NO quarantine-clearing postflight (consistent with
-          # docs/packaging/homebrew.md). `depends_on :macos` must also survive:
-          # without it brew rejects the cask at tap time with
-          # "Invalid cask (Linux ...)" — "Missing Linux stanzas ...".
+          # stanza. The release bundle is self-signed and NOT notarized, so the
+          # download carries com.apple.quarantine and Homebrew propagates it
+          # into /Applications on install (Cask::Quarantine.propagate). The
+          # cask therefore clears THAT ONE attribute in a postflight step, so
+          # a normal `brew install --cask` never needs "Open Anyway" nor a
+          # manual `xattr -dr`. Gatekeeper itself is left untouched.
           ruby -c packaging/homebrew/Casks/nanodictate.rb
           grep -q '^cask "nanodictate" do$' packaging/homebrew/Casks/nanodictate.rb
           grep -q '^  app "NanoDictate.app"$' packaging/homebrew/Casks/nanodictate.rb
-          grep -q '^  depends_on :macos$' packaging/homebrew/Casks/nanodictate.rb
+          # macOS floor: the app requires Monterey. `depends_on :macos` alone
+          # only marks the cask macOS-only; the version symbol is what makes
+          # brew refuse the install on an older macOS.
+          grep -q '^  depends_on macos: :monterey$' packaging/homebrew/Casks/nanodictate.rb
+          if grep -q '^  depends_on :macos$' packaging/homebrew/Casks/nanodictate.rb; then
+            echo "ERROR: cask lost the macOS floor (depends_on :macos found)" >&2
+            exit 1
+          fi
           # The cask must still reference the installed bundle path: the `app`
           # stanza MOVES the bundle into appdir and the `binary` stanza resolves
           # the executable from the installed location at #{appdir}/NanoDictate.app.
           grep -q '#{appdir}/NanoDictate.app' packaging/homebrew/Casks/nanodictate.rb
-          # The cask must never clear quarantine (Gatekeeper stays until the
-          # user approves); negative guard — a regression here would silently
-          # re-enable the xattr -dr postflight.
-          if grep -q '^  postflight do' packaging/homebrew/Casks/nanodictate.rb; then
-            echo "ERROR: cask must never clear quarantine (postflight found)" >&2
+          # POSITIVE guard on the quarantine fix: a release must not silently
+          # drop the postflight and bring the Gatekeeper warning back. Every
+          # token of the structured `postflight_steps` block is asserted.
+          # EXACTLY one such block — a positive count, not a single match. A
+          # duplicated or half-merged block would run the step twice, and a
+          # stanza at a different indentation would slip past a line grep.
+          # Checked before the token greps below so that BOTH a missing block
+          # and a second one fail with a message naming the count.
+          POSTFLIGHT_COUNT="$(grep -c '^  postflight_steps do$' packaging/homebrew/Casks/nanodictate.rb || true)"
+          if [ "$POSTFLIGHT_COUNT" -ne 1 ]; then
+            echo "ERROR: expected exactly 1 postflight_steps block in the cask, found $POSTFLIGHT_COUNT" >&2
             exit 1
           fi
+          grep -q '^  postflight_steps do$' packaging/homebrew/Casks/nanodictate.rb
+          grep -q 'run "/usr/bin/xattr",' packaging/homebrew/Casks/nanodictate.rb
+          grep -q 'args: \["-dr", "com.apple.quarantine", "{{appdir}}/NanoDictate.app"\]$' packaging/homebrew/Casks/nanodictate.rb
+          # Removing quarantine must not become removing every extended
+          # attribute (-c) and must never reach for the Gatekeeper override.
+          # Scoped to executable code: full-line comments are stripped first, so
+          # that prose in the template which legitimately mentions these tokens
+          # cannot trip this guard. Nothing in today's cask requires it — it is
+          # there so that the next comment explaining the scope of the
+          # postflight cannot break the release. The filtered copy goes to a
+          # temp file rather than a pipe because this job runs under
+          # `set -o pipefail`.
+          # The flag lives on the `args:` line, NOT on the `run` line: the
+          # idiomatic cask form is two lines (`run "/usr/bin/xattr",` then
+          # `args: ["-dr", ...]`), so a `run`-anchored pattern alone MISSES a
+          # "-c"/"-cr" substituted into that second line. Hence the args-anchored
+          # alternative — a line that begins with `args:` and carries the flag
+          # is the regression regardless of which line the tool call is on.
+          CASK_CODE="$(mktemp)"
+          grep -vE '^[[:space:]]*#' packaging/homebrew/Casks/nanodictate.rb > "$CASK_CODE" || true
+          if grep -qE 'run[[:space:]].*xattr.*"-(c|cr)"|xattr.*"-(c|cr)"|^[[:space:]]*args:.*"-(c|cr)"|/usr/sbin/spctl|spctl[[:space:]]+--master-disable' "$CASK_CODE"; then
+            echo "ERROR: cask clears all xattrs or touches the Gatekeeper override" >&2
+            rm -f "$CASK_CODE"
+            exit 1
+          fi
+          rm -f "$CASK_CODE"
           # Then load the cask FOR REAL through CaskLoader — the same path brew uses
           # on tap/install. This catches any cask load error (a cask
           # that parses yet fails to load) and any `depends_on :macos` loss (which
@@ -853,7 +1159,7 @@ jobs:
             BREW_BIN=""
           fi
           if [ -n "$BREW_BIN" ]; then
-            "$BREW_BIN" ruby -e 'require "cask/cask_loader"; c = Cask::CaskLoader::FromContentLoader.new(File.read("packaging/homebrew/Casks/nanodictate.rb")).load(config: nil) || abort("cask failed to load"); abort("cask lost depends_on :macos") unless c.supports_macos? && !c.supports_linux?'
+            "$BREW_BIN" ruby -e 'require "cask/cask_loader"; c = Cask::CaskLoader::FromContentLoader.new(File.read("packaging/homebrew/Casks/nanodictate.rb")).load(config: nil) || abort("cask failed to load"); abort("cask lost its macOS dependency") unless c.supports_macos? && !c.supports_linux?'
           fi
           echo "=== CaskLoader load-check done ==="
           # No unfilled __PLACEHOLDER__ may remain in the generated files
@@ -906,8 +1212,8 @@ jobs:
           VERSION: ${{ needs.preflight.outputs.version }}
         run: |
           set -euo pipefail
-          git config user.name "dima"
-          git config user.email "dima@users.noreply.github.com"
+          git config user.name "kodmial"
+          git config user.email "kodmial@gmail.com"
           # The manifest outputs are tracked in git (root nanodictate.rb plus
           # packaging/homebrew/nanodictate.rb, packaging/homebrew/Casks/
           # nanodictate.rb and packaging/macports/Portfile).
@@ -971,8 +1277,8 @@ jobs:
           cp packaging/macports/Portfile /tmp/macports-nanodictate/audio/nanodictate/Portfile
           cp config.example.toml /tmp/macports-nanodictate/audio/nanodictate/config.example.toml
           cd /tmp/macports-nanodictate
-          git config user.name "dima"
-          git config user.email "dima@users.noreply.github.com"
+          git config user.name "kodmial"
+          git config user.email "kodmial@gmail.com"
           git add audio/nanodictate/Portfile audio/nanodictate/config.example.toml
           if git diff --cached --quiet; then
             echo "MacPorts tree unchanged since the last release — nothing to commit."
@@ -1047,8 +1353,8 @@ jobs:
             echo "::error::PIN_REV in scripts/install-macports.sh was not updated to $TREE_SHA"
             exit 1
           fi
-          git -C "$WS" config user.name "dima"
-          git -C "$WS" config user.email "dima@users.noreply.github.com"
+          git -C "$WS" config user.name "kodmial"
+          git -C "$WS" config user.email "kodmial@gmail.com"
           git -C "$WS" add scripts/install-macports.sh
           if git -C "$WS" diff --cached --quiet; then
             # Reached only when the stale-pin guard above passed (remote main
@@ -1098,8 +1404,8 @@ jobs:
           mkdir -p /tmp/tap/Casks
           cp packaging/homebrew/Casks/nanodictate.rb /tmp/tap/Casks/nanodictate.rb
           cd /tmp/tap
-          git config user.name "dima"
-          git config user.email "dima@users.noreply.github.com"
+          git config user.name "kodmial"
+          git config user.email "kodmial@gmail.com"
           git add nanodictate.rb Casks/nanodictate.rb
           if git diff --cached --quiet; then
             echo "Tap formula unchanged since the last release — nothing to commit."

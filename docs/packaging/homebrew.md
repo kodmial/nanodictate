@@ -15,7 +15,7 @@ layout, the generator and cross-package notes see
 ### Requirements
 
 - macOS 12+ (Monterey) — the released binaries target macOS 12+; the formula
-  declares `depends_on :macos => :monterey`.
+  declares `depends_on macos: :monterey`.
 - Homebrew itself.
 - **No Xcode, no Command Line Tools** — the formula selects the right tarball
   (`arm64` or `x86_64`) from `Hardware::CPU.arm?` and installs it directly.
@@ -46,8 +46,11 @@ LaunchAgent — `nanodictate start` is the equivalent, idempotent alternative
 Prefer a proper app bundle? `brew install --cask kodmial/nanodictate/nanodictate` installs
 **NanoDictate.app** — the same two release binaries inside a `.app` bundle,
 the same `com.nanodictate.agent` service (one daemon either way), and the
-quarantine attribute is kept until you approve the app (see
-[Install the app bundle via cask](#install-the-app-bundle-via-cask)).
+install's postflight step clears the download-provenance quarantine attribute
+for you, so the first launch needs no quarantine approval (no "Open Anyway"
+click) and no Gatekeeper dialog is expected — none has been observed (see
+[Install the app bundle via cask](#install-the-app-bundle-via-cask) and
+[Signing and quarantine](#signing-and-quarantine)).
 
 ### Install via the tap
 
@@ -93,6 +96,11 @@ placeholders are unfilled and the formula will fail.
 brew install --cask kodmial/nanodictate/nanodictate
 ```
 
+Requires **macOS 12 Monterey or later** — the cask declares
+`depends_on macos: :monterey`, the same floor as the formula, so `brew` refuses
+the install outright on anything older instead of installing a bundle that
+cannot run.
+
 Builds nothing: the cask downloads the **app-bundle zip**
 (`nanodictate-<VER>-macos-<arch>.zip` — a second, distinct release asset; the
 formula pins the tarball sha256s, the cask pins the zip sha256s) and moves
@@ -108,15 +116,55 @@ cask — **not both**: both link the `nanodictate` binary into
 `$(brew --prefix)/bin`, so the second install fails on the conflicting file.
 Uninstall one before installing the other.
 
-**Quarantine stays until you approve the app.** Nothing in this guide clears
-the `com.apple.quarantine` attribute for you, and the self-signed bundle is
-not notarized — so Gatekeeper may refuse it on first launch until you approve
-it deliberately. On macOS 15 (Sequoia) and later, Control-click/Right-click →
-Open is no longer available: launch the app once (it is refused), then approve
-it in System Settings → Privacy & Security → "Open Anyway". On macOS 14 and
-older, Right-click → Open still works. To run it unattended, clear the
-attribute by hand — a Gatekeeper workaround:
-`xattr -dr com.apple.quarantine /Applications/NanoDictate.app`.
+**No Gatekeeper dance after install.** The bundle is self-signed and not
+notarized, but you do not have to clear the attribute by hand: the cask's
+`postflight_steps` block removes the `com.apple.quarantine` attribute from
+`/Applications/NanoDictate.app` at the end of the install, so the first launch
+needs no "Open Anyway" click and no `xattr` typed by you. The bundle stays
+self-signed and not notarized, but with no quarantine attribute left on it
+macOS does not assess it on launch, so no Gatekeeper dialog is expected and
+none has been observed (see
+[Signing and quarantine](#signing-and-quarantine)).
+
+The removal is deliberately narrow — it strips exactly that one attribute and
+nothing else:
+
+- no `xattr -cr` (which would wipe *all* extended attributes),
+- no other xattr keys,
+- no `spctl --master-disable` — Gatekeeper stays globally enabled,
+- the code signature is untouched, since quarantine is a download-provenance
+  tag rather than part of the signature; the bundle keeps its self-signed
+  identity and the TCC grants it has already earned.
+
+TCC privacy grants (Microphone, Accessibility) are a separate mechanism and
+are not affected by the postflight — macOS asks for those on the agent's first
+run (see [After install](#after-install)).
+
+**Troubleshooting — only if Gatekeeper still refuses.** Two situations look
+alike; they need different responses.
+
+**(a) The `com.apple.quarantine` attribute is still set** — the bundle arrived
+by a path that skipped the cask postflight (a manually copied bundle, a
+`brew reinstall` interrupted before the postflight ran). Launch it once —
+macOS refuses it — and then approve it in **System Settings → Privacy &
+Security → "Open Anyway"**. That control is available on macOS 15 (Sequoia)
+and later as well, so approval is not limited to the older Right-click → Open
+route. Clearing the attribute yourself works too:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/NanoDictate.app
+```
+
+Reinstalling the cask (`brew reinstall --cask kodmial/nanodictate/nanodictate`)
+runs the postflight again and fixes it without either manual step.
+
+**(b) Only a signing warning is left** — the attribute is already gone (or
+was never there) and the first launch still reports that the developer cannot
+be verified. The binaries are self-signed and not notarized on every install
+path, and the signature is independent of `com.apple.quarantine`, so no
+attribute work silences it; on the non-quarantined paths no such warning has
+been observed (see
+[Signing and quarantine](#signing-and-quarantine)).
 
 **Uninstall:** `brew uninstall --cask nanodictate` removes the app only — not
 the LaunchAgent, not your config. Stop the service first:
@@ -201,23 +249,51 @@ gui/<uid> as expected.
 ### Signing and quarantine
 
 All packaged paths serve the **same self-signed release binaries** — there is
-no Developer ID signature and no notarization. Whether macOS complains at
-first launch depends on how the binaries arrived:
+no Developer ID signature and no notarization. Gatekeeper's verdict rests on
+the signature; the quarantine attribute is a separate question, and whether it
+is present at all depends on how the binaries arrived.
 
 | Install path | Quarantine attribute | Gatekeeper |
 | --- | --- | --- |
-| Homebrew formula (downloads the release tarball) | none — Homebrew's curl does not set it | no prompt, runs as-is |
-| Homebrew cask (downloads the app-bundle zip) | kept until you approve the app (macOS 15+: launch once, then System Settings → Privacy & Security → "Open Anyway"; macOS 14 and older: Right-click → Open — or clear it manually, a Gatekeeper workaround) | prompts on first launch; approve once |
-| `curl` download from GitHub Releases | none | no prompt, runs as-is |
+| Homebrew formula (downloads the release tarball) | none — Homebrew's own download of the tarball leaves no quarantine attribute | no Gatekeeper dialog expected; none observed |
+| Homebrew cask (downloads the app-bundle zip) | removed by the cask's `postflight_steps` after install | no Gatekeeper dialog expected; none observed |
+| `curl` download from GitHub Releases | none | no Gatekeeper dialog expected; none observed |
 | Browser download from GitHub Releases | `com.apple.quarantine` set | **blocked** — "developer cannot be verified" |
 
-If you downloaded the release binaries with a browser, the executables carry
-the `com.apple.quarantine` attribute. Right-click → Open only applies to app
-bundles, so for these bare binaries the only route is a Gatekeeper
-workaround — clear the attribute once:
+The cask is the one path that installs an app *bundle* from a quarantined
+container: Homebrew would otherwise propagate
+`com.apple.quarantine` from the downloaded zip into the staged app, and
+Gatekeeper would refuse the first launch. The `postflight_steps` block strips
+exactly that one attribute after the install phases finish, and nothing else —
+no `xattr -cr`, no other xattr keys, no `spctl --master-disable`, and
+Gatekeeper stays globally enabled. Because the cask does this for you, a normal
+`brew install --cask` needs no "Open Anyway" click and no manual `xattr`; the
+formula path needs no such step either, because its own download sets no
+quarantine attribute.
+
+#### Troubleshooting: only if Gatekeeper still refuses
+
+The formula and the `curl` path arrive without the attribute, and the cask's
+`postflight_steps` clears it on install — so none of those three is expected
+to raise a Gatekeeper dialog, and none has been observed. The binaries are
+self-signed and not notarized all the same, and clearing the attribute never
+changes the signature.
+
+Browser downloads are the case where the attribute itself is the blocker: the
+executables carry `com.apple.quarantine`. Right-click → Open only applies to
+app bundles, so for these bare binaries the only route is to clear the
+attribute once by hand:
 
 ```sh
 xattr -dr com.apple.quarantine /path/to/NanoDictateAgent /path/to/nanodictate
+```
+
+Treat this as a recovery measure, not an installation step. The cask already
+does this for you, so if the attribute is still in place after a cask install,
+prefer re-running the install over editing attributes by hand:
+
+```sh
+brew reinstall --cask kodmial/nanodictate/nanodictate
 ```
 
 ## For the maintainer
@@ -263,13 +339,21 @@ Release drill for a new version (details in
    brew audit --cask --strict nanodictate   # in the tap repo (cask)
    brew style nanodictate                   # in the tap repo
    brew install kodmial/nanodictate/nanodictate # binary download, no build
+   brew test nanodictate                    # run the test block on its own
    brew uninstall nanodictate # release the formula link so the cask can link
    brew install --cask kodmial/nanodictate/nanodictate # app bundle, no build
-   nanodictate --version                    # must print "nanodictate 0.1.0"
+   nanodictate --version                    # must print "nanodictate <VERSION>"
    ```
 
-The formula `test do` block asserts `nanodictate --version` matches the
-released version.
+The formula `test do` block asserts that `nanodictate --version` prints
+the released version, but it is optional: Homebrew runs it only when
+you ask for it explicitly with `brew test nanodictate`, not as part of
+`brew install` — and `brew install --include-test` merely pulls the
+test dependencies, it still does not run the test. A failure there
+makes `brew test` itself exit non-zero, but nothing in the install
+path runs it, so it does not block the install. Run it explicitly as
+the smoke test, since nothing else in the install path exercises the
+installed binary.
 
 ## TODO
 
