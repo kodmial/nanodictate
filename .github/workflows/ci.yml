@@ -9,6 +9,22 @@ permissions:
   contents: read
 
 jobs:
+  # The release policy that decides whether a merge into main publishes a
+  # version lives in scripts/release-policy.sh (used by bump-version.yml). It is
+  # plain bash, so it is tested on Linux — the `skip-release` label opt-out, the
+  # path-based exclusions and the version-shape rules — against real `git diff`
+  # output from a throwaway repository.
+  release-policy:
+    name: Release policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Test the release policy
+        run: bash scripts/test-release-policy.sh
+
   build-and-test:
     name: Build & Test (macOS)
     # macos-latest tracks macOS 26 (Xcode 26, SDK 26.5), too new for any

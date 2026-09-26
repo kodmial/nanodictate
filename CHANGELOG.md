@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `skip-release` PR label — the explicit opt-out from release automation. A
+  merged PR carrying the label is a green no-op in `bump-version.yml`:
+  `Sources/NanoDictateCore/Version.swift` stays untouched, nothing is committed
+  or pushed, and `release.yml` is not dispatched, even when the PR's file paths
+  would count as releasable. The label is read straight from the
+  `pull_request` event payload (no extra API call) and checked before the
+  version comparison, the diff classification and any write. Documented in
+  `CONTRIBUTING.md` and in the PR template.
+- `scripts/release-policy.sh` — the release policy (`skip-release` gate,
+  path-based exclusions, macports `PIN_REV`-only installer diff, version shape
+  and the 0.0.x automatic-bump cap) extracted from the workflow so it can be
+  unit-tested, plus `scripts/test-release-policy.sh`, run by `ci.yml` on
+  `ubuntu-latest` against real `git diff` output.
+
+### Fixed
+
+- `bump-version.yml` no longer fails the run when a merge is correctly
+  classified as not releasable. The "no code changes" guard (docs-only,
+  `.github/`-only, packaging-only, `PIN_REV`-only changes) used to `exit 1`
+  after already refusing the bump, turning a green no-op into a red check on
+  the merge; it now finishes successfully, records the reason in the job
+  summary and leaves the version and the release workflow alone. Only a genuine
+  policy error — an unparsable `Version.swift` or a version outside
+  `0.0.x` / `0.1.x` — still fails the workflow.
+
 ## [0.1.1] - 2026-09-26
 
 ### Changed
