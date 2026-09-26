@@ -8,6 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
   pull-requests: write
   issues: write
@@ -62,21 +63,12 @@ jobs:
               return found ? totalMs : null;
             }
 
-            const pulls = await github.paginate(github.rest.pulls.list, {
-              owner, repo, state: 'open', per_page: 100,
-            });
+            function hasReviewReadyLabel(pr) {
+              return (pr.labels || []).some(label => label.name === 'review-ready');
+            }
 
-            for (const pr of pulls) {
-              if (pr.draft) continue;
-
-              const comments = await github.paginate(github.rest.issues.listComments, {
-                owner, repo, issue_number: pr.number, per_page: 100,
-              });
-
-              // CodeRabbit edits its summary/status comment when review capacity
-              // is exhausted. The comment carries a relative retry delay such as
-              // "Next included review available in 57 minutes."
-              const limited = comments
+            function findLatestRateLimit(comments) {
+              return comments
                 .filter(c => c.user?.login === 'coderabbitai[bot]')
                 .map(c => {
                   const delayMs = parseRetryDelayMs(c.body || '');
@@ -88,7 +80,82 @@ jobs:
                     new Date(b.comment.updated_at).getTime() -
                     new Date(a.comment.updated_at).getTime()
                 )[0];
+            }
 
+            function stateMovedPastRateLimit(comments, limitedAt) {
+              const retryAlreadyPosted = comments.some(c =>
+                c.user?.login !== 'coderabbitai[bot]' &&
+                c.body?.trim() === '@coderabbitai review' &&
+                new Date(c.created_at).getTime() > limitedAt
+              );
+              if (retryAlreadyPosted) return true;
+
+              return comments.some(c =>
+                c.user?.login === 'coderabbitai[bot]' &&
+                new Date(c.updated_at).getTime() > limitedAt &&
+                !/Review rate limited|Review limit reached|Next included review available/i.test(
+                  c.body || ''
+                )
+              );
+            }
+
+            async function currentHeadHasGreenCi(pr) {
+              const runs = await github.paginate(
+                github.rest.actions.listWorkflowRunsForRepo,
+                {
+                  owner,
+                  repo,
+                  branch: pr.head.ref,
+                  event: 'pull_request',
+                  per_page: 100,
+                }
+              );
+
+              const currentHeadCi = runs
+                .filter(run => run.name === 'CI' && run.head_sha === pr.head.sha)
+                .sort(
+                  (a, b) =>
+                    new Date(b.created_at).getTime() -
+                    new Date(a.created_at).getTime()
+                )[0];
+
+              return Boolean(
+                currentHeadCi &&
+                currentHeadCi.status === 'completed' &&
+                currentHeadCi.conclusion === 'success'
+              );
+            }
+
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              owner, repo, state: 'open', per_page: 100,
+            });
+
+            for (const pr of pulls) {
+              if (pr.draft) continue;
+
+              // Never request a review while a synchronize/update is still being
+              // validated. remove-review-label.yml clears review-ready on every
+              // new head; add-review-label.yml restores it only after CI succeeds
+              // for that exact head SHA.
+              if (!hasReviewReadyLabel(pr)) {
+                core.info(
+                  `PR #${pr.number}: review-ready is absent; waiting for current-head CI.`
+                );
+                continue;
+              }
+
+              if (!(await currentHeadHasGreenCi(pr))) {
+                core.info(
+                  `PR #${pr.number}: review-ready exists but no successful CI was found for head ${pr.head.sha}; refusing to retry.`
+                );
+                continue;
+              }
+
+              let comments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number: pr.number, per_page: 100,
+              });
+
+              const limited = findLatestRateLimit(comments);
               if (!limited) continue;
 
               const limitedAt = new Date(limited.comment.updated_at).getTime();
@@ -97,27 +164,51 @@ jobs:
               const dueAt = limitedAt + limited.delayMs + 30_000;
               if (now < dueAt) continue;
 
-              // If somebody already requested a review after this exact
-              // rate-limit state, do not create another command. If that request
-              // is rate-limited again, CodeRabbit updates its status timestamp
-              // and the next cycle is calculated from the new state.
-              const retryAlreadyPosted = comments.some(c =>
-                c.user?.login !== 'coderabbitai[bot]' &&
-                c.body?.trim() === '@coderabbitai review' &&
-                new Date(c.created_at).getTime() > limitedAt
-              );
-              if (retryAlreadyPosted) continue;
+              if (stateMovedPastRateLimit(comments, limitedAt)) continue;
 
-              // A newer successful/in-progress CodeRabbit response means the
-              // rate-limit state is stale even if an older bot comment remains.
-              const newerRabbitActivity = comments.some(c =>
-                c.user?.login === 'coderabbitai[bot]' &&
-                new Date(c.updated_at).getTime() > limitedAt &&
-                !/Review rate limited|Review limit reached|Next included review available/i.test(
-                  c.body || ''
-                )
-              );
-              if (newerRabbitActivity) continue;
+              // Re-read both PR metadata and comments immediately before writing
+              // the command. This closes the race where main/HEAD changes after
+              // the first checks but before the review command is posted.
+              const { data: freshPr } = await github.rest.pulls.get({
+                owner, repo, pull_number: pr.number,
+              });
+
+              if (
+                freshPr.state !== 'open' ||
+                freshPr.draft ||
+                freshPr.head.sha !== pr.head.sha ||
+                !hasReviewReadyLabel(freshPr)
+              ) {
+                core.info(
+                  `PR #${pr.number}: PR/head/readiness changed during evaluation; retry cancelled.`
+                );
+                continue;
+              }
+
+              if (!(await currentHeadHasGreenCi(freshPr))) {
+                core.info(
+                  `PR #${pr.number}: current head lost green-CI eligibility; retry cancelled.`
+                );
+                continue;
+              }
+
+              comments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number: pr.number, per_page: 100,
+              });
+
+              const freshLimited = findLatestRateLimit(comments);
+              if (
+                !freshLimited ||
+                freshLimited.comment.id !== limited.comment.id ||
+                freshLimited.comment.updated_at !== limited.comment.updated_at
+              ) {
+                core.info(
+                  `PR #${pr.number}: CodeRabbit rate-limit state changed; retry cancelled.`
+                );
+                continue;
+              }
+
+              if (stateMovedPastRateLimit(comments, limitedAt)) continue;
 
               await github.rest.issues.createComment({
                 owner,
@@ -126,6 +217,6 @@ jobs:
                 body: '@coderabbitai review',
               });
               core.notice(
-                `Retried CodeRabbit review for PR #${pr.number} after its rate-limit window expired`
+                `Retried CodeRabbit review for PR #${pr.number} after quota reset, current-head CI success, and readiness revalidation.`
               );
             }
