@@ -3,14 +3,65 @@ name: CI
 on:
   push:
     branches: [main]
+    # A documentation-only merge does not need a macOS build on main.
+    paths-ignore:
+      - '*.md'
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
   pull_request:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
+  classify-changes:
+    name: Classify changes
+    runs-on: ubuntu-latest
+    outputs:
+      build_required: ${{ steps.classify.outputs.build_required }}
+    steps:
+      - name: Decide whether macOS build is required
+        id: classify
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            // Pushes that reach this workflow already passed paths-ignore above.
+            if (context.eventName !== 'pull_request') {
+              core.setOutput('build_required', 'true');
+              return;
+            }
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              per_page: 100,
+            });
+
+            // Keep this intentionally conservative: only documentation-only PRs
+            // skip the expensive macOS runner. Any non-documentation file means
+            // the normal build, lint, and test job still runs.
+            const isDocumentationOnlyPath = (path) =>
+              path.startsWith('docs/') ||
+              path.endsWith('.md') ||
+              path === 'LICENSE';
+
+            const docsOnly = files.length > 0 && files.every(({ filename }) =>
+              isDocumentationOnlyPath(filename)
+            );
+
+            core.info(`Changed files: ${files.map(({ filename }) => filename).join(', ')}`);
+            core.info(docsOnly
+              ? 'Documentation-only PR: skipping macOS build and tests.'
+              : 'Code or non-documentation change detected: macOS build and tests are required.');
+            core.setOutput('build_required', docsOnly ? 'false' : 'true');
+
   build-and-test:
     name: Build & Test (macOS)
+    needs: classify-changes
+    if: needs.classify-changes.outputs.build_required == 'true'
     # macos-latest tracks macOS 26 (Xcode 26, SDK 26.5), too new for any
     # current swift.org toolchain. macos-15 pins the macOS 15.5 SDK, which
     # the Swift 6.1 toolchain parses cleanly.
@@ -33,9 +84,8 @@ jobs:
           # 5.10.1 crashes its swift-frontend on the macOS 15.5 SDK.
           swift-version: "6.1"
 
-      # Форматтер — swift-format (Apple) из стандартного места установки, как
-      # локально: /usr/local/bin/swift-format (Homebrew). Без сборки
-      # из исходников и без файлов в /tmp.
+      # swift-format (Apple) is installed from its standard Homebrew location,
+      # matching the local development setup. No source build or /tmp files.
       - name: Install swift-format
         run: brew install swift-format
 
