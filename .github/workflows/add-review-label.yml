@@ -20,10 +20,11 @@ jobs:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
+            const repoFullName = `${owner}/${repo}`;
             const run = context.payload.workflow_run;
             const REQUESTED_LABEL = 'coderabbit-review-requested';
 
-            const prs = await github.rest.pulls.list({
+            const prs = await github.paginate(github.rest.pulls.list, {
               owner,
               repo,
               state: 'open',
@@ -32,10 +33,14 @@ jobs:
 
             // Match only a non-draft same-repository PR whose current head is
             // exactly the commit tested by this completed CI run.
-            const ours = prs.data.filter((pr) =>
+            const ours = prs.filter((pr) =>
               !pr.draft &&
               pr.head.sha === run.head_sha &&
-              pr.head.repo.full_name === context.repo.full_name
+              pr.head.repo.full_name === repoFullName
+            );
+
+            core.info(
+              `Matched ${ours.length} open same-repository PR(s) for CI head ${run.head_sha}.`
             );
 
             if (run.conclusion !== 'success') {
