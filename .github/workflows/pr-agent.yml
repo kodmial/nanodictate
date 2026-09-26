@@ -39,7 +39,7 @@ jobs:
           fi
 
       - name: Run PR-Agent
-        uses: the-pr-agent/pr-agent@0978e4336a090299859169cc20de1cf58ce4824e
+        uses: docker://pragent/pr-agent:github_action@sha256:65e5b196e38cecd7df8a71fe29942052e081a0c6645132c2ac874df60b1760c7 # 0.46.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GROQ.KEY: ${{ secrets.GROQ_API_KEY }}
