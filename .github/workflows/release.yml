@@ -649,6 +649,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # release-please labels the Release PR (autorelease: pending/tagged);
+      # this job transitions the merged Release PR to tagged after publication.
+      issues: write
+      pull-requests: write
     steps:
       - name: No-op — version already released / dry run
         if: ${{ needs.preflight.outputs.skip_release == 'true' }}
@@ -754,6 +758,29 @@ jobs:
             fi
             exit "$rc"
           fi
+
+      # release-please runs PR-only here (skip-github-release: true), so a
+      # merged Release PR keeps `autorelease: pending` and a later
+      # release-please run stops with "untagged, merged release PRs
+      # outstanding". release.yml owns tagging/publication, so transition
+      # already-merged pending PRs to `autorelease: tagged` once the release
+      # exists. No-op when nothing is pending (tag-push path, re-runs).
+      - name: Mark merged Release PR as tagged
+        if: ${{ needs.preflight.outputs.skip_release != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          PENDING=$(gh pr list --repo "$GH_REPO" --label "autorelease: pending" --state merged --limit 20 --json number --jq '.[].number' || true)
+          if [[ -z "${PENDING//[[:space:]]/}" ]]; then
+            echo "No merged Release PR labeled 'autorelease: pending' — nothing to mark tagged."
+            exit 0
+          fi
+          for PR in $PENDING; do
+            echo "Marking merged Release PR #$PR as tagged."
+            gh pr edit "$PR" --repo "$GH_REPO" --remove-label "autorelease: pending" --add-label "autorelease: tagged"
+          done
 
   # Post-release: regenerate the Homebrew formula + MacPorts Portfile from the
   # .tpl sources (real sha256 of the published tarballs), open a
@@ -1341,6 +1368,10 @@ jobs:
           cp packaging/homebrew/Casks/nanodictate.rb "$STASH/Casks-nanodictate.rb"
           cp packaging/macports/Portfile "$STASH/Portfile"
           cp nanodictate.rb "$STASH/root-nanodictate.rb"
+          # Drop the dirty generated copies so the branch switch below cannot
+          # refuse on a re-run (the target branch may already carry different
+          # manifest content, or origin/main may be newer than this checkout).
+          git -C "$GITHUB_WORKSPACE" checkout -- nanodictate.rb packaging/homebrew/nanodictate.rb packaging/homebrew/Casks/nanodictate.rb packaging/macports/Portfile
           git -C "$GITHUB_WORKSPACE" fetch origin main
           if git -C "$GITHUB_WORKSPACE" ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
             git -C "$GITHUB_WORKSPACE" checkout "$BRANCH"

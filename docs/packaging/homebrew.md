@@ -329,7 +329,7 @@ Release drill for a new version (details in
    workflow's `manifests` job does this automatically — it opens a
    `chore/release-manifests-v<version>` PR with the regenerated
    `packaging/homebrew/nanodictate.rb` and the cask
-   `packaging/homebrew/Casks/nanodictate.rb` and, on merge, copies
+   `packaging/homebrew/Casks/nanodictate.rb` and, in the same job, pushes
    them into the tap repo as `nanodictate.rb` (repo root, not `Formula/`) and
    `Casks/nanodictate.rb` when the `TAP_PAT` secret is configured. Manually,
    copy the generated files over `<tap>/nanodictate.rb` and

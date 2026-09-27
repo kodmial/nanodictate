@@ -107,6 +107,7 @@ jobs:
       - name: Reject hand-written version bumps
         env:
           HEAD_REF: ${{ github.head_ref }}
+          SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
@@ -116,6 +117,10 @@ jobs:
           CHANGED=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")
           echo "Changed files:"
           printf '%s\n' "$CHANGED" | sed 's/^/  /'
+          # A fork can name its branch like the Release PR branch, so the
+          # branch name alone must not confer trust — only a same-repo head
+          # counts as the Release PR.
+          if [[ "$SAME_REPO" != "true" ]]; then HEAD_REF="fork:${HEAD_REF}"; fi
           if policy_check_version_ownership "$HEAD_REF" "$CHANGED"; then
             echo "Version ownership ok — no hand-written version bump."
           elif policy_is_version_seeding \

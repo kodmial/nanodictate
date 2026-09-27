@@ -60,7 +60,7 @@ generated files get concrete values.
    - **Homebrew**: the release workflow's `manifests` job opens a
      `chore/release-manifests-v<version>` PR with
      `packaging/homebrew/nanodictate.rb` and
-     `packaging/homebrew/Casks/nanodictate.rb` and, on merge, copies them into
+     `packaging/homebrew/Casks/nanodictate.rb` and, in the same job, pushes them into
      the `kodmial/homebrew-nanodictate` tap as `nanodictate.rb` (repo root) and
      `Casks/nanodictate.rb` when `TAP_PAT` is set; manually, the same copies +
      push.
