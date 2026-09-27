@@ -1,42 +1,48 @@
 #!/usr/bin/env bash
-# Release policy for the automatic "merge -> bump -> release" chain
-# (.github/workflows/bump-version.yml).
+# Release policy for the automated Release PR flow
+# (.github/workflows/release-pr.yml).
 #
 # This file is a SOURCEABLE library, not an executable: the workflow does
 #   source scripts/release-policy.sh
-# so that every decision that answers "does this merge publish a NanoDictate
-# version?" is plain, testable shell instead of inline YAML. The test suite is
+# so that every decision that answers "does this merge need a Release PR
+# update?" is plain, testable shell instead of inline YAML. The test suite is
 # scripts/test-release-policy.sh (run by .github/workflows/ci.yml).
 #
 # Two INDEPENDENT gates decide the outcome, in this order:
 #
 #   1. policy_pr_has_label — the deliberate opt-out. A merged PR labelled
-#      `skip-release` is never bumped and never released, even when its file
+#      `skip-release` never triggers a Release PR update, even when its file
 #      paths would count as releasable. The label is read from the pull_request
 #      event payload (no API call), so this gate costs nothing.
 #   2. policy_releasable_paths — the path-based guard. A diff limited to
-#      Version.swift, CHANGELOG.md, README.md, SECURITY.md, LICENSE, docs/,
-#      .github/, .githooks/, the root meta-dotfiles and packaging files would
-#      publish an empty release, so it is classified non-releasable.
+#      Version.swift, the release-please config/manifest, CHANGELOG.md,
+#      README.md, SECURITY.md, LICENSE, docs/, .github/, .githooks/, the root
+#      meta-dotfiles and packaging files would publish an empty release, so it
+#      is classified non-releasable.
 #
 # The label is an OVERRIDE, not a replacement: the path guard keeps working for
 # unlabeled PRs, and unrelated labels (`chore`, `documentation`, `ci`, ...)
 # are deliberately NOT overloaded — the release decision stays explicit.
 #
-# Every no-release outcome is a GREEN no-op (exit 0, nothing written, nothing
-# pushed, no release dispatch). Only a broken policy/configuration input — a
+# Every no-release outcome is a GREEN no-op (exit 0, nothing written, no
+# release PR update). Only a broken policy/configuration input — a
 # version that cannot be parsed or a version outside the allowed series — is
 # allowed to fail the workflow, because a human error that must be
 # surfaced rather than silently swallowed.
 #
-# The RELEASE itself is also here, not in the workflow: policy_next_version
+# The CHANGELOG cut is also here, not in the workflow: policy_next_version
 # computes the bumped version and policy_changelog_cut_release cuts the matching
 # CHANGELOG section, so the Version.swift constant and the changelog a test
-# compares it against can never drift apart.
+# compares it against can never drift apart. The Release PR workflow applies
+# the cut on the release-please branch after release-please bumps Version.swift.
+#
+# Version ownership (policy_check_version_ownership) is enforced by CI: only
+# the automated Release PR branch may touch Version.swift or
+# .release-please-manifest.json. Ordinary PRs never reserve the next version.
 
 # Files whose diff alone must never publish a version. Full paths are anchored
 # on both ends; a bare `LICENSE` must not swallow `packaging/LICENSE.txt`.
-POLICY_EXCLUDED_PATH_RE='^(Sources/NanoDictateCore/Version\.swift|CHANGELOG\.md|README\.md|\.github/.*|\.githooks/.*|docs/.*|packaging/.*|nanodictate\.rb|config\.example\.toml|SECURITY\.md|CODE_OF_CONDUCT\.md|CONTRIBUTING\.md|LICENSE|\.gitignore|\.swift-format|\.swiftlint\.yml|\.coderabbit\.yaml)$'
+POLICY_EXCLUDED_PATH_RE='^(Sources/NanoDictateCore/Version\.swift|CHANGELOG\.md|README\.md|\.github/.*|\.githooks/.*|docs/.*|packaging/.*|nanodictate\.rb|config\.example\.toml|SECURITY\.md|CODE_OF_CONDUCT\.md|CONTRIBUTING\.md|LICENSE|\.gitignore|\.swift-format|\.swiftlint\.yml|\.coderabbit\.yaml|release-please-config\.json|\.release-please-manifest\.json)$'
 
 # The macports installer is pinned to the just-synced tree by a one-line PIN_REV
 # edit that the release workflow pushes to main after every tag. That generated
@@ -183,6 +189,101 @@ policy_next_version() {
   printf '%s.%s\n' "${version%.*}" "$(( 10#${version##*.} + 1 ))"
 }
 
+# The automated Release PR branch owned by release-please. Only commits on
+# this branch may touch the version-owned files below; every other branch is
+# an ordinary development branch and must leave the next version alone.
+POLICY_RELEASE_BRANCH='release-please--branches--main'
+
+# Files whose content is owned by the Release PR flow: the version constant
+# (bumped by release-please through its generic extra-files updater) and the
+# release-please manifest (rewritten by release-please on every Release PR
+# update). Ordinary PRs must not touch them solely to reserve the next version.
+POLICY_VERSION_OWNED_RE='^(Sources/NanoDictateCore/Version\.swift|\.release-please-manifest\.json)$'
+
+# policy_is_release_branch <branch>
+#
+# Exit 0 when <branch> is the automated Release PR branch, 1 otherwise.
+policy_is_release_branch() {
+  local branch=${1:-}
+  [[ "$branch" == "$POLICY_RELEASE_BRANCH" ]]
+}
+
+# policy_version_owned_touched <changed-paths>
+#
+# stdin alternative: newline-separated `git diff --name-only` paths are passed
+# as $1. stdout: the subset that is owned by the Release PR flow (possibly
+# empty). Always exits 0: "nothing owned touched" is a valid answer.
+policy_version_owned_touched() {
+  local all_changed=${1:-}
+  printf '%s\n' "$all_changed" | grep -E "$POLICY_VERSION_OWNED_RE" | grep -v '^$' || true
+}
+
+# policy_check_version_ownership <head-branch> <changed-paths>
+#
+# The single entry point CI calls. Prints exactly one decision and exits 0
+# when the change is allowed, 1 when an ordinary branch touches version-owned
+# files:
+#
+#   ok                  the Release PR branch, or no version-owned file touched
+#   version-ownership   an ordinary branch touches Version.swift or the manifest
+#
+# A non-zero exit is a deliberate policy error and DOES fail CI: reserving the
+# next version from a feature PR would race with the Release PR serialization.
+policy_check_version_ownership() {
+  local branch=${1:-} all_changed=${2:-}
+  local owned
+  owned=$(policy_version_owned_touched "$all_changed")
+  if [[ -z "${owned//[[:space:]]/}" ]]; then
+    printf 'ok\n'
+    return 0
+  fi
+  if policy_is_release_branch "$branch"; then
+    printf 'ok\n'
+    return 0
+  fi
+  printf 'version-ownership\n'
+  return 1
+}
+
+# policy_extract_version <content>
+#
+# stdout: the first `<major>.<minor>.<patch>` triple in <content> (possibly
+# empty). Always exits 0: "no version found" is a valid answer, not an error
+# (callers decide whether an empty version is a policy error). The same
+# extraction the workflows use on Version.swift
+# (`grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+'`).
+policy_extract_version() {
+  printf '%s' "${1:-}" | grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' || true
+}
+
+# policy_is_version_seeding <base-swift> <head-swift> <base-manifest> <head-manifest>
+#
+# Exit 0 only for the one-time release-please bootstrap: the manifest did not
+# exist at base (empty content), the head manifest is seeded at the current
+# Version.swift version, and Version.swift itself kept its version
+# (annotation-only change). Every other version-owned touch — a real bump of
+# Version.swift, a manifest rewrite to a different version, a manifest seeded
+# at the wrong version — exits 1.
+#
+# CI needs this because the PR that introduces the Release PR flow itself
+# touches both version-owned files without reserving a new version; the
+# version-ownership gate would otherwise fail its own bootstrap. After the
+# bootstrap the manifest exists at base, so this exemption never fires again
+# and ordinary PRs stay strictly barred from version-owned files.
+policy_is_version_seeding() {
+  local base_swift=${1:-} head_swift=${2:-} base_manifest=${3:-} head_manifest=${4:-}
+  [[ -z "${base_manifest//[[:space:]]/}" ]] || return 1
+  [[ -n "${head_manifest//[[:space:]]/}" ]] || return 1
+  local base_v head_v head_m
+  base_v=$(policy_extract_version "$base_swift")
+  head_v=$(policy_extract_version "$head_swift")
+  head_m=$(policy_extract_version "$head_manifest")
+  [[ -n "$base_v" && -n "$head_v" && -n "$head_m" ]] || return 1
+  [[ "$base_v" == "$head_v" ]] || return 1
+  [[ "$head_m" == "$head_v" ]] || return 1
+  return 0
+}
+
 # policy_changelog_cut_release <version> <date>
 #
 # stdin:  the whole CHANGELOG.md
@@ -191,7 +292,7 @@ policy_next_version() {
 #         `## [Unreleased]` reopened above it, and the compare links
 #         (`[Unreleased]`, `[<version>]`) refreshed.
 #
-# The bump step in .github/workflows/bump-version.yml calls this together with
+# The bump step in .github/workflows/release-pr.yml calls this together with
 # the Version.swift rewrite, because the two are one release: a version bump
 # without the matching changelog section is what makes
 # VersionTests.testVersionStringEqualsCurrentRelease fail — the test compares

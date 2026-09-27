@@ -210,9 +210,11 @@ block clears the attribute as part of the install.
 On CI the release workflow already does steps 1, 3 and 5 automatically on
 every release — this section is the manual drill that the workflow runs.
 
-1. **Tag and push** — `git tag v0.1.0 && git push origin v0.1.0` (the
-   Release workflow attaches the prebuilt binary tarballs the port
-   downloads).
+1. **Merge the Release PR** — the Release workflow attaches the prebuilt
+   binary tarballs the port downloads (manual equivalent:
+   `git tag v0.1.0 && git push origin v0.1.0`). The generated Portfile and the
+   installer pin arrive through the `chore/release-manifests-v<version>` PR;
+   the tree sync into `kodmial/macports-nanodictate` still runs automatically.
 
 2. **Set the maintainers handle** via env — `MAINTAINERS=@kodmial`
    (optionally `REVISION`, default `0`); the generator fills the
