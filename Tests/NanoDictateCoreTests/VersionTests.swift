@@ -54,4 +54,67 @@ final class VersionTests: XCTestCase {
         XCTAssertEqual(NanoDictateVersion.string, currentRelease,
                        "NanoDictateVersion.string (\(NanoDictateVersion.string)) рассинхронизирована с CHANGELOG.md (\(currentRelease)) — обнови их вместе")
     }
+
+    @objc func testDisplayString_HasVPrefixAndMatchesVersion() {
+        XCTAssertEqual(NanoDictateVersion.displayString, "v\(NanoDictateVersion.string)")
+        XCTAssertTrue(NanoDictateVersion.displayString.hasPrefix("v"))
+    }
+
+    @objc func testDisplayString_IsCompactSemver() {
+        let display = NanoDictateVersion.displayString
+        XCTAssertTrue(display.hasPrefix("v"), "header version must use compact `vX.Y.Z` format")
+        let bare = String(display.dropFirst())
+        let parts = bare.split(separator: ".")
+        XCTAssertEqual(parts.count, 3, "display version must stay major.minor.patch")
+        XCTAssertTrue(parts.allSatisfy { !$0.isEmpty && $0.allSatisfy { $0.isNumber } })
+    }
+
+    @objc func testOverlayHeader_UsesVersionSourceWithoutHardcodedDuplicate() {
+        guard let source = Self.overlayControllerSource() else {
+            XCTFail("Could not read Sources/NanoDictateCore/OverlayController.swift")
+            return
+        }
+        XCTAssertTrue(
+            source.contains("NanoDictateVersion.displayString"),
+            "overlay header must read NanoDictateVersion.displayString (single source of truth)"
+        )
+        // No separately hard-coded version literal in the header/view that can drift.
+        let pattern = "\"v[0-9]+\\.[0-9]+\\.[0-9]+\""
+        let foundHardcoded: Bool = {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { return false }
+            let range = NSRange(source.startIndex..., in: source)
+            return regex.firstMatch(in: source, range: range) != nil
+        }()
+        XCTAssertFalse(
+            foundHardcoded,
+            "overlay must not hard-code a version like \"v0.1.1\" — use NanoDictateVersion"
+        )
+        // Version sits after the Spacer in the same header HStack (far top-right).
+        if let spacer = source.range(of: "Spacer(minLength: 0)"),
+           let version = source.range(of: "NanoDictateVersion.displayString") {
+            XCTAssertTrue(
+                spacer.lowerBound < version.lowerBound,
+                "version label must follow the Spacer so it pins to the far top-right"
+            )
+        } else {
+            XCTFail("header HStack must contain both Spacer and NanoDictateVersion.displayString")
+        }
+    }
+
+    private static func overlayControllerSource() -> String? {
+        let fileDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let candidates = [
+            fileDir.deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/NanoDictateCore/OverlayController.swift"),
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("Sources/NanoDictateCore/OverlayController.swift"),
+        ]
+        guard let sourceURL = candidates.first(where: {
+            FileManager.default.fileExists(atPath: $0.path)
+        }) else {
+            return nil
+        }
+        return try? String(contentsOf: sourceURL, encoding: .utf8)
+    }
 }

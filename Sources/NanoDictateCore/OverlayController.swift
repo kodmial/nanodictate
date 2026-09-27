@@ -135,6 +135,17 @@ struct OverlayContentView: View {
             .lineLimit(1)
             .truncationMode(.middle)
           Spacer(minLength: 0)
+          // App version pinned to the far top-right of the header: sourced
+          // from NanoDictateVersion.displayString (single source of truth),
+          // so release bumps need no UI change. Compact tertiary caption
+          // keeps it unobtrusive; fixedSize prevents the provider label
+          // from squeezing it out at narrow panel widths.
+          Text(NanoDictateVersion.displayString)
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .accessibilityIdentifier("appVersion")
         }
         if !headerParts.model.isEmpty {
           Text(headerParts.model)
