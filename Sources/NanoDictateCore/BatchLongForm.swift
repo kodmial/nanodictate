@@ -115,29 +115,35 @@ public struct BatchStableMultipartFields: Equatable {
     return string
   }
 
-  /// Gate stable fields by provider; nil — prompt outside adapter's reach
-  /// (raw body / query-only). Support (2026-09):
-  /// openai/groq/openAICompatible — prompt + temperature, vad_filter groq only
-  /// (groq strict about unknown fields; openai lacks it in Create transcription);
-  /// whisper thresholds documented for whisper.cpp-class only — none in current
-  /// set, wiring whisper.cpp selfhost = three lines below;
-  /// cloudflare — raw WAV body, no multipart at all.
+  /// Gate stable fields by concrete model profile; nil — prompt outside
+  /// adapter's reach (raw body / query-only). Support (2026-09):
+  /// whisper-class openai — prompt + temperature; modern OpenAI models
+  /// (gpt-4o-transcribe family) — prompt only, no temperature; groq
+  /// whisper-class — prompt + temperature + vad_filter (groq strict about
+  /// unknown fields); openAICompatible (incl. airubiz/gigaam/selfhosted) —
+  /// prompt + temperature only; whisper thresholds documented for
+  /// whisper.cpp-class only — none in current set, wiring whisper.cpp
+  /// selfhost = three lines in STTModelRegistry plus threshold flags;
+  /// cloudflare — raw WAV body, no multipart at all (nil).
+  /// Unknown models fall back to the conservative family profile, so an
+  /// unsupported field is never sent merely because another model in the
+  /// same family supports it.
   public static func stableFields(
     for adapterID: String,
+    model: String = "",
     params: BatchSTTParams?
   ) -> BatchStableMultipartFields? {
     guard let params else { return nil }
-    switch STTAdapterID.from(adapterID) {
-    case .cloudflare:
-      return nil
-    case .openai, .groq, .openAICompatible:
-      return BatchStableMultipartFields(
-        temperature: params.temperature,
-        vadFilter: (STTAdapterID.from(adapterID) == .groq) ? params.vadFilter : nil,
-        noSpeechThreshold: nil,
-        compressionRatioThreshold: nil,
-        logprobThreshold: nil
-      )
-    }
+    let resolvedModel = ProviderRequestBuilder.resolveModel(model, for: adapterID)
+    let caps = STTModelRegistry.resolve(adapterID: adapterID, model: resolvedModel).capabilities
+    guard caps.transport == .batchMultipart else { return nil }
+    return BatchStableMultipartFields(
+      temperature: caps.supportsTemperature ? params.temperature : nil,
+      vadFilter: caps.supportsVadFilter ? params.vadFilter : nil,
+      noSpeechThreshold: caps.supportsNoSpeechThreshold ? params.noSpeechThreshold : nil,
+      compressionRatioThreshold: caps.supportsCompressionRatioThreshold
+        ? params.compressionRatioThreshold : nil,
+      logprobThreshold: caps.supportsLogprobThreshold ? params.logprobThreshold : nil
+    )
   }
 }
