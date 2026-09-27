@@ -240,6 +240,59 @@ jobs:
               return unresolved;
             }
 
+            async function requestCodeRabbitThreadVerification(pr, threads) {
+              if (!threads.length) return 0;
+
+              const comments = await github.paginate(
+                github.rest.pulls.listReviewComments,
+                {
+                  owner,
+                  repo,
+                  pull_number: pr.number,
+                  per_page: 100,
+                }
+              );
+
+              let requested = 0;
+              for (const thread of threads) {
+                if (!thread.commentId) continue;
+
+                const marker =
+                  `<!-- auto-merge-coderabbit-verification finding=${thread.commentId} head=${pr.head.sha} -->`;
+
+                const duplicate = comments.some(comment =>
+                  comment.in_reply_to_id === thread.commentId &&
+                  comment.body?.includes(marker)
+                );
+                if (duplicate) continue;
+
+                const body = [
+                  marker,
+                  '@coderabbitai Re-check this unresolved original finding against the current PR HEAD.',
+                  '',
+                  `Current PR HEAD: \`${pr.head.sha}\``,
+                  '',
+                  'Inspect the current code itself, not only the incremental diff.',
+                  'Resolve this thread only if the underlying issue is fully fixed.',
+                  'Otherwise explain exactly what remains unresolved.',
+                ].join('\n');
+
+                await github.request(
+                  'POST /repos/{owner}/{repo}/pulls/{pull_number}/comments/{comment_id}/replies',
+                  {
+                    owner,
+                    repo,
+                    pull_number: pr.number,
+                    comment_id: thread.commentId,
+                    body,
+                  }
+                );
+                requested += 1;
+              }
+
+              return requested;
+            }
+
             async function dispatchConflictRepair(pr, reason) {
               if (hasLabel(pr, CONFLICT_LOCK_LABEL)) {
                 core.info(
@@ -403,8 +456,12 @@ jobs:
               const unresolvedThreads =
                 await unresolvedCodeRabbitThreads(pr);
               if (unresolvedThreads.length > 0) {
+                const requested = await requestCodeRabbitThreadVerification(
+                  pr,
+                  unresolvedThreads
+                );
                 core.info(
-                  `PR #${pr.number}: waiting for ${unresolvedThreads.length} unresolved CodeRabbit thread(s): ` +
+                  `PR #${pr.number}: waiting for ${unresolvedThreads.length} unresolved CodeRabbit thread(s); requested ${requested} fresh verification(s) for head ${pr.head.sha}: ` +
                   unresolvedThreads
                     .map(thread =>
                       `#${thread.commentId || thread.id} ${thread.path}${thread.outdated ? ' (outdated)' : ''}`
