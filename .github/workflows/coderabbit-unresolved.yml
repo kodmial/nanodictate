@@ -1,0 +1,294 @@
+name: Retry unresolved CodeRabbit findings
+
+on:
+  pull_request_review_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  retry-unresolved:
+    if: >-
+      github.event.action == 'created' &&
+      github.event.comment.user.login == 'coderabbitai[bot]' &&
+      github.event.pull_request.state == 'open' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.comment.in_reply_to_id != null &&
+      contains(github.event.comment.body, 'UNRESOLVED')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      contents: write
+      pull-requests: write
+
+    concurrency:
+      group: coderabbit-unresolved-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Resolve verification context
+        id: context
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          github-token: ${{ secrets.TAP_PAT }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pullNumber = context.payload.pull_request.number;
+            const unresolved = context.payload.comment;
+
+            const comments = await github.paginate(
+              github.rest.pulls.listReviewComments,
+              {
+                owner,
+                repo,
+                pull_number: pullNumber,
+                per_page: 100,
+              }
+            );
+
+            const parent = comments.find(
+              (comment) => comment.id === unresolved.in_reply_to_id
+            );
+            const verificationPattern =
+              /<!-- opencode-coderabbit-verification review=(\d+) finding=(\d+) head=([0-9a-f]{40}) -->/;
+
+            let verification = null;
+            let match = parent?.body?.match(verificationPattern) ?? null;
+
+            if (match) {
+              verification = parent;
+            } else {
+              const rootId = parent?.in_reply_to_id ?? unresolved.in_reply_to_id;
+              const unresolvedTime = Date.parse(unresolved.created_at);
+
+              const candidates = comments
+                .filter(
+                  (comment) =>
+                    comment.id !== unresolved.id &&
+                    (comment.id === rootId || comment.in_reply_to_id === rootId) &&
+                    Date.parse(comment.created_at) <= unresolvedTime
+                )
+                .map((comment) => ({
+                  comment,
+                  match: comment.body?.match(verificationPattern) ?? null,
+                }))
+                .filter(
+                  (candidate) =>
+                    candidate.match &&
+                    Number(candidate.match[2]) === Number(rootId)
+                )
+                .sort((a, b) => b.comment.id - a.comment.id);
+
+              if (candidates.length > 0) {
+                verification = candidates[0].comment;
+                match = candidates[0].match;
+              }
+            }
+
+            if (!verification || !match) {
+              core.notice(
+                `Ignoring CodeRabbit UNRESOLVED comment ${unresolved.id}: no OpenCode verification marker was found for this thread.`
+              );
+              core.setOutput('should_run', 'false');
+              return;
+            }
+
+            const reviewId = Number(match[1]);
+            const findingId = Number(match[2]);
+            const verifiedHead = match[3];
+
+            const pr = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: pullNumber,
+            });
+
+            if (pr.data.head.sha !== verifiedHead) {
+              core.notice(
+                `Ignoring stale UNRESOLVED comment ${unresolved.id}: it verified ${verifiedHead}, while current HEAD is ${pr.data.head.sha}.`
+              );
+              core.setOutput('should_run', 'false');
+              return;
+            }
+
+            core.setOutput('should_run', 'true');
+            core.setOutput('pr_number', String(pullNumber));
+            core.setOutput('head_ref', pr.data.head.ref);
+            core.setOutput('review_id', String(reviewId));
+            core.setOutput('finding_id', String(findingId));
+            core.setOutput('unresolved_id', String(unresolved.id));
+            core.setOutput('source_head', verifiedHead);
+
+      - name: Checkout current PR branch
+        if: steps.context.outputs.should_run == 'true'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.TAP_PAT }}
+          persist-credentials: true
+          ref: ${{ steps.context.outputs.head_ref }}
+
+      - name: Configure Git identity
+        if: steps.context.outputs.should_run == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Install OpenCode CLI
+        if: steps.context.outputs.should_run == 'true'
+        run: |
+          set -euo pipefail
+          curl -fsSL https://opencode.ai/install | bash
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+
+      - name: Fix the unresolved finding
+        id: fix
+        if: steps.context.outputs.should_run == 'true'
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          OPENCODE_MODEL: ${{ vars.OPENCODE_MODEL || 'opencode/big-pickle' }}
+          GITHUB_TOKEN: ${{ secrets.TAP_PAT }}
+          GH_TOKEN: ${{ secrets.TAP_PAT }}
+          PR_NUMBER: ${{ steps.context.outputs.pr_number }}
+          HEAD_REF: ${{ steps.context.outputs.head_ref }}
+          REVIEW_ID: ${{ steps.context.outputs.review_id }}
+          FINDING_ID: ${{ steps.context.outputs.finding_id }}
+          UNRESOLVED_ID: ${{ steps.context.outputs.unresolved_id }}
+          SOURCE_HEAD: ${{ steps.context.outputs.source_head }}
+          OPENCODE_CONFIG_CONTENT: >-
+            {"permission":{"bash":{"*":"allow","git *":"deny","git status":"allow","git status *":"allow","git diff":"allow","git diff *":"allow","git log":"allow","git log *":"allow","git show":"allow","git show *":"allow","git rev-parse *":"allow","git ls-files":"allow","git ls-files *":"allow","git grep *":"allow","git blame *":"allow","git branch --show-current":"allow","git remote -v":"allow","git tag":"allow","git tag --list *":"allow","git tag -l *":"allow","git describe *":"allow"}}}
+        run: |
+          set -euo pipefail
+
+          CURRENT_HEAD="$(git rev-parse HEAD)"
+          if [[ "$CURRENT_HEAD" != "$SOURCE_HEAD" ]]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "PR HEAD advanced from $SOURCE_HEAD to $CURRENT_HEAD before repair; skipping stale UNRESOLVED response."
+            exit 0
+          fi
+
+          PROMPT=$(cat <<EOF
+          Fix the specific CodeRabbit finding that is still UNRESOLVED on pull request #${PR_NUMBER}.
+
+          Context:
+          - Original CodeRabbit review id: ${REVIEW_ID}
+          - Original finding review-comment id: ${FINDING_ID}
+          - Latest CodeRabbit UNRESOLVED reply id: ${UNRESOLVED_ID}
+          - Verified PR HEAD: ${SOURCE_HEAD}
+          - Current checked-out PR branch: ${HEAD_REF}
+
+          Inspect the original finding, the complete review thread, the UNRESOLVED reply,
+          the current code, and the current PR diff using GitHub CLI/API before editing.
+
+          Requirements:
+          - Fix exactly what CodeRabbit says remains unresolved in that thread.
+          - Keep the change scoped to this finding; do not make unrelated refactors.
+          - Run the relevant tests, linters, or validation for the files you change.
+          - Do not create or switch branches and do not create a new pull request.
+          - Do not resolve or dismiss the review thread yourself.
+          - Do not commit or push; the workflow will commit and push any resulting changes.
+          - If the finding is already fixed or CodeRabbit is incorrect, leave the code unchanged.
+          - Keep all comments and commit messages in English.
+          EOF
+          )
+
+          opencode run --auto --model "$OPENCODE_MODEL" "$PROMPT"
+
+          if [[ -z "$(git status --porcelain)" ]]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "OpenCode made no code change for UNRESOLVED comment $UNRESOLVED_ID."
+            exit 0
+          fi
+
+          git add -A
+          git commit -m "fix: address unresolved CodeRabbit finding"
+          git push origin "HEAD:${HEAD_REF}"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Ask CodeRabbit to verify the repaired finding
+        if: >-
+          steps.context.outputs.should_run == 'true' &&
+          steps.fix.outputs.changed == 'true'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          PR_NUMBER: ${{ steps.context.outputs.pr_number }}
+          REVIEW_ID: ${{ steps.context.outputs.review_id }}
+          FINDING_ID: ${{ steps.context.outputs.finding_id }}
+          SOURCE_HEAD: ${{ steps.context.outputs.source_head }}
+        with:
+          github-token: ${{ secrets.TAP_PAT }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pullNumber = Number(process.env.PR_NUMBER);
+            const reviewId = Number(process.env.REVIEW_ID);
+            const findingId = Number(process.env.FINDING_ID);
+            const sourceHead = process.env.SOURCE_HEAD;
+
+            const pr = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: pullNumber,
+            });
+            const headSha = pr.data.head.sha;
+
+            if (headSha === sourceHead) {
+              core.notice(
+                `No new PR HEAD was pushed after repairing finding ${findingId}; verification will not be requested again.`
+              );
+              return;
+            }
+
+            const comments = await github.paginate(
+              github.rest.pulls.listReviewComments,
+              {
+                owner,
+                repo,
+                pull_number: pullNumber,
+                per_page: 100,
+              }
+            );
+
+            const marker =
+              `<!-- opencode-coderabbit-verification review=${reviewId} finding=${findingId} head=${headSha} -->`;
+            const duplicate = comments.some(
+              (comment) =>
+                comment.in_reply_to_id === findingId &&
+                comment.body?.includes(marker)
+            );
+
+            if (duplicate) {
+              core.notice(
+                `Verification was already requested for finding ${findingId} at ${headSha}.`
+              );
+              return;
+            }
+
+            const body = [
+              marker,
+              '@coderabbitai Re-check this exact original finding after the OpenCode retry.',
+              '',
+              `Current PR HEAD: \`${headSha}\``,
+              '',
+              'Compare the original finding and your latest UNRESOLVED explanation with the current code itself.',
+              '',
+              'Reply with **RESOLVED** only if the underlying issue is fully fixed.',
+              'Otherwise reply with **UNRESOLVED** and state exactly what remains.',
+            ].join('\n');
+
+            await github.request(
+              'POST /repos/{owner}/{repo}/pulls/{pull_number}/comments/{comment_id}/replies',
+              {
+                owner,
+                repo,
+                pull_number: pullNumber,
+                comment_id: findingId,
+                body,
+              }
+            );
+
+            core.notice(
+              `Requested CodeRabbit verification for finding ${findingId} at new HEAD ${headSha}.`
+            );
