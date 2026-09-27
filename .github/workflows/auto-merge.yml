@@ -17,8 +17,11 @@ on:
 permissions: {}
 
 concurrency:
+  # This controller is a pure latest-state reconciler and revalidates every gate
+  # immediately before merging. A newer event makes an older queued/in-flight
+  # evaluation obsolete, so keep only the newest run.
   group: nanodictate-auto-merge
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   controller:
