@@ -21,9 +21,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
-      WIP_LIMIT: \${{ vars.AUTOMATION_WIP_LIMIT || '2' }}
-      LEASE_MINUTES: \${{ vars.AUTOMATION_LEASE_MINUTES || '45' }}
-      MAX_DISPATCH_ATTEMPTS: \${{ vars.AUTOMATION_MAX_DISPATCH_ATTEMPTS || '2' }}
+      WIP_LIMIT: ${{ vars.AUTOMATION_WIP_LIMIT || '2' }}
+      LEASE_MINUTES: ${{ vars.AUTOMATION_LEASE_MINUTES || '45' }}
+      MAX_DISPATCH_ATTEMPTS: ${{ vars.AUTOMATION_MAX_DISPATCH_ATTEMPTS || '2' }}
 
     steps:
       - name: Reconcile state and dispatch ready issues
@@ -32,7 +32,7 @@ jobs:
           # TAP_PAT is required because the existing OpenCode workflow accepts
           # /oc only from the repository owner. It also makes issue-state
           # mutations and comments created here visible as normal owner actions.
-          github-token: \${{ secrets.TAP_PAT }}
+          github-token: ${{ secrets.TAP_PAT }}
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
