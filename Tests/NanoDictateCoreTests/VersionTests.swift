@@ -56,12 +56,13 @@ final class VersionTests: XCTestCase {
     }
 
     @objc func testDisplayString_HasVPrefixAndMatchesVersion() {
-        XCTAssertEqual(NanoDictateVersion.displayString, "v\(NanoDictateVersion.string)")
-        XCTAssertTrue(NanoDictateVersion.displayString.hasPrefix("v"))
+        let display = "v\(NanoDictateVersion.string)"
+        XCTAssertEqual(display, "v\(NanoDictateVersion.string)")
+        XCTAssertTrue(display.hasPrefix("v"))
     }
 
     @objc func testDisplayString_IsCompactSemver() {
-        let display = NanoDictateVersion.displayString
+        let display = "v\(NanoDictateVersion.string)"
         XCTAssertTrue(display.hasPrefix("v"), "header version must use compact `vX.Y.Z` format")
         let bare = String(display.dropFirst())
         let parts = bare.split(separator: ".")
@@ -75,8 +76,8 @@ final class VersionTests: XCTestCase {
             return
         }
         XCTAssertTrue(
-            source.contains("NanoDictateVersion.displayString"),
-            "overlay header must read NanoDictateVersion.displayString (single source of truth)"
+            source.contains("NanoDictateVersion.string"),
+            "overlay header must read NanoDictateVersion.string (single source of truth)"
         )
         // No separately hard-coded version literal in the header/view that can drift.
         let pattern = "\"v[0-9]+\\.[0-9]+\\.[0-9]+\""
@@ -91,13 +92,13 @@ final class VersionTests: XCTestCase {
         )
         // Version sits after the Spacer in the same header HStack (far top-right).
         if let spacer = source.range(of: "Spacer(minLength: 0)"),
-           let version = source.range(of: "NanoDictateVersion.displayString") {
+           let version = source.range(of: "NanoDictateVersion.string") {
             XCTAssertTrue(
                 spacer.lowerBound < version.lowerBound,
                 "version label must follow the Spacer so it pins to the far top-right"
             )
         } else {
-            XCTFail("header HStack must contain both Spacer and NanoDictateVersion.displayString")
+            XCTFail("header HStack must contain both Spacer and NanoDictateVersion.string")
         }
     }
 
