@@ -763,22 +763,39 @@ jobs:
       # merged Release PR keeps `autorelease: pending` and a later
       # release-please run stops with "untagged, merged release PRs
       # outstanding". release.yml owns tagging/publication, so transition
-      # already-merged pending PRs to `autorelease: tagged` once the release
-      # exists. No-op when nothing is pending (tag-push path, re-runs).
+      # the merged Release PR that produced this version to
+      # `autorelease: tagged` once the release exists. Runs on fresh
+      # publishes and on re-runs where the release already exists
+      # (skip_release=true): a previous attempt may have published without
+      # flipping the label, and the retry must repair it. Skipped only for
+      # dry runs (no publication happened). No-op when nothing matches
+      # (tag-push path, manual versions, already repaired).
       - name: Mark merged Release PR as tagged
-        if: ${{ needs.preflight.outputs.skip_release != 'true' }}
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run == true) }}
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
         run: |
           set -euo pipefail
-          PENDING=$(gh pr list --repo "$GH_REPO" --label "autorelease: pending" --state merged --limit 20 --json number --jq '.[].number' || true)
-          if [[ -z "${PENDING//[[:space:]]/}" ]]; then
-            echo "No merged Release PR labeled 'autorelease: pending' — nothing to mark tagged."
+          if [[ -z "${RELEASE_VERSION:-}" ]]; then
+            echo "::error::preflight version is empty — cannot match the merged Release PR."
+            exit 1
+          fi
+          if ! gh release view "v$RELEASE_VERSION" --repo "$GH_REPO" >/dev/null; then
+            echo "Release v$RELEASE_VERSION does not exist yet — nothing to mark tagged."
             exit 0
           fi
-          for PR in $PENDING; do
-            echo "Marking merged Release PR #$PR as tagged."
+          # Lookup failures must fail the step (no `|| true`): an API error
+          # is not "nothing pending".
+          PENDING_JSON=$(gh pr list --repo "$GH_REPO" --label "autorelease: pending" --state merged --limit 20 --json number,title,body,headRefName)
+          MATCHED=$(jq -r --arg v "$RELEASE_VERSION" '.[] | select(.headRefName == "release-please--branches--main") | select(((.title // "") + "\n" + (.body // "")) | contains($v)) | .number' <<<"$PENDING_JSON")
+          if [[ -z "${MATCHED//[[:space:]]/}" ]]; then
+            echo "No merged Release PR labeled 'autorelease: pending' matches v$RELEASE_VERSION — nothing to mark tagged."
+            exit 0
+          fi
+          for PR in $MATCHED; do
+            echo "Marking merged Release PR #$PR (v$RELEASE_VERSION) as tagged."
             gh pr edit "$PR" --repo "$GH_REPO" --remove-label "autorelease: pending" --add-label "autorelease: tagged"
           done
 
