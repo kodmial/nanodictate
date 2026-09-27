@@ -81,6 +81,27 @@ final class AdaptiveVADTests: XCTestCase {
         XCTAssertTrue(ranges.isEmpty, "steady noise must not segment as speech")
     }
 
+    /// Sustained loud steady noise far above the initial floor must not latch
+    /// VAD in speech: the floor converges slowly (far-above slowdown) and the
+    /// same level eventually reads as silence. Regression for a room with
+    /// steady -35 dBFS noise (~25 dB above the -60 dBFS initial floor, beyond
+    /// maxUpGapDb): first buffers read as speech, sustained input returns to
+    /// silence.
+    @objc func testSustainedLoudNoiseConvergesToSilence() {
+        var vad = AdaptiveVAD()
+        let loudNoise: Float = 0.01778 // -35 dBFS
+        XCTAssertEqual(dbfs(loudNoise), -35, accuracy: 0.5)
+
+        XCTAssertTrue(vad.update(rms: loudNoise, duration: frameDuration), "precondition: loud noise initially reads as speech")
+
+        // Slow far-above adaptation (~15 s tau): 300 frames x 85 ms ~ 25.5 s
+        // converges the floor so the same level drops below enter.
+        for _ in 0..<300 {
+            _ = vad.update(rms: loudNoise, duration: frameDuration)
+        }
+        XCTAssertFalse(vad.update(rms: loudNoise, duration: frameDuration), "sustained -35 dBFS noise must converge to silence, not latch as speech")
+    }
+
     // MARK: - Changing noise floor
 
     /// Floor tracks down fast (quiet gap) and up slowly (speech barely moves

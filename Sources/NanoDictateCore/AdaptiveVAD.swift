@@ -22,13 +22,17 @@ public struct NoiseFloorTracker: Equatable {
   public let downTau: TimeInterval
   /// Time constant for upward adaptation (seconds).
   public let upTau: TimeInterval
-  /// Upward adaptation freezes when the observation sits more than this far
-  /// above the floor. Loud speech (tens of dB above noise) must not drag the
-  /// floor up — otherwise continuous loud speech raises enter/exit until
-  /// resampler ringing reads as silence and chunk cuts shift early. Steady
-  /// noise (~15 dB above a quiet floor) still adapts; clear speech (>20 dB
-  /// above) does not.
+  /// Observations more than this far above the floor adapt upward much more
+  /// slowly instead of freezing. Loud speech (tens of dB above noise) then
+  /// barely moves the floor during utterances, while a sustained loud noise
+  /// source (fan/HVAC) still converges within seconds instead of latching
+  /// VAD in speech forever. Steady noise (~15 dB above a quiet floor) adapts
+  /// at the normal rate; clear speech (>20 dB above) adapts at the slow rate.
   public static let maxUpGapDb: Float = 20
+  /// Slowdown factor for far-above-floor upward adaptation. With the default
+  /// upTau of 3 s the far-above tau is 15 s: short speech bursts barely move
+  /// the floor, sustained noise converges in tens of seconds.
+  public static let farAboveSlowdown: Double = 5
 
   public init(
     initialFloor: Float = 0.001,
@@ -50,9 +54,11 @@ public struct NoiseFloorTracker: Equatable {
   ///
   /// dB-domain one-pole: quiet gaps pull down fast, sustained moderate noise
   /// converges upward over seconds. Observations more than `maxUpGapDb` above
-  /// the floor (loud speech, resampler ringing) do not raise it, so long loud
-  /// utterances never drag thresholds up and ringing still reads as speech.
-  /// Down is fast (quiet gaps), up is slow and gated.
+  /// the floor (loud speech, sustained HVAC/fan noise) adapt upward much more
+  /// slowly instead of freezing, so long loud utterances barely drag
+  /// thresholds up while a steady loud noise source still converges and stops
+  /// reading as speech. Down is fast (quiet gaps), up is slow, far-above up
+  /// is slowest.
   @discardableResult
   public mutating func update(rms: Float, duration: TimeInterval) -> Float {
     let dt = max(0, duration)
@@ -60,12 +66,16 @@ public struct NoiseFloorTracker: Equatable {
     let cleanRms = min(max(rms, 0), 1)
     let floorDb = AudioMetrics.dbfs(floor)
     let rmsDb = AudioMetrics.dbfs(cleanRms)
-    // Loud speech far above the floor never raises it: freeze upward
-    // adaptation, keep downward adaptation for quiet gaps.
-    if rmsDb > floorDb + Self.maxUpGapDb {
-      return floor
+    // Far above the floor: adapt very slowly instead of freezing, so a
+    // sustained loud noise source still converges while speech bursts do not.
+    let tau: TimeInterval
+    if rmsDb < floorDb {
+      tau = downTau
+    } else if rmsDb > floorDb + Self.maxUpGapDb {
+      tau = upTau * Self.farAboveSlowdown
+    } else {
+      tau = upTau
     }
-    let tau = rmsDb < floorDb ? downTau : upTau
     let alpha = 1 - exp(-dt / tau)
     let newDb = floorDb + Float(alpha) * (rmsDb - floorDb)
     let newLinear = powf(10, newDb / 20)
