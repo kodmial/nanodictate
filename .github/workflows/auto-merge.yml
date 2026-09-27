@@ -1,9 +1,10 @@
 name: Auto-merge reviewed pull requests
 
 on:
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
+  # CI completion itself cannot make a PR mergeable: mark-ready-for-coderabbit
+  # requests a fresh post-CI CodeRabbit review, and the later CodeRabbit
+  # status/review event wakes this reconciler. Avoid workflow_run here so
+  # cancelling obsolete CI runs cannot create a controller restart storm.
   pull_request_review:
     types: [submitted, dismissed]
   status:
@@ -296,6 +297,61 @@ jobs:
               return requested;
             }
 
+            async function cancelObsoleteCiRuns(openPulls) {
+              const { data: mainBranch } = await github.rest.repos.getBranch({
+                owner,
+                repo,
+                branch: 'main',
+              });
+
+              const liveHeads = new Set([
+                mainBranch.commit.sha,
+                ...openPulls.map(pr => pr.head.sha),
+              ]);
+
+              const runs = await github.paginate(
+                github.rest.actions.listWorkflowRunsForRepo,
+                {
+                  owner,
+                  repo,
+                  per_page: 100,
+                }
+              );
+
+              let cancelled = 0;
+              for (const run of runs) {
+                if (
+                  run.name !== 'CI' ||
+                  !['queued', 'in_progress', 'waiting', 'pending', 'requested']
+                    .includes(run.status) ||
+                  liveHeads.has(run.head_sha)
+                ) {
+                  continue;
+                }
+
+                try {
+                  await github.rest.actions.cancelWorkflowRun({
+                    owner,
+                    repo,
+                    run_id: run.id,
+                  });
+                  cancelled += 1;
+                  core.notice(
+                    `Cancelled obsolete CI run ${run.id} for stale head ${run.head_sha}.`
+                  );
+                } catch (err) {
+                  // A run may finish or be cancelled by concurrency between the
+                  // list and the write; that race is harmless.
+                  if (![409, 422].includes(err.status)) throw err;
+                  core.info(
+                    `CI run ${run.id} changed state before cancellation: ${err.message}`
+                  );
+                }
+              }
+
+              return cancelled;
+            }
+
             async function dispatchConflictRepair(pr, reason) {
               if (hasLabel(pr, CONFLICT_LOCK_LABEL)) {
                 core.info(
@@ -393,6 +449,13 @@ jobs:
               base: 'main',
               per_page: 100,
             });
+
+            const cancelledCiRuns = await cancelObsoleteCiRuns(pulls);
+            if (cancelledCiRuns > 0) {
+              core.notice(
+                `Cancelled ${cancelledCiRuns} obsolete CI run(s) before reconciliation.`
+              );
+            }
 
             // Oldest first makes autonomous behavior deterministic.
             pulls.sort(
