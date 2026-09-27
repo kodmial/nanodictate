@@ -154,6 +154,36 @@ public func XCTAssertGreaterThanOrEqual<T: FloatingPoint>(
     }
 }
 
+public func XCTAssertLessThan<T: Comparable>(
+    _ a: @autoclosure () -> T,
+    _ b: @autoclosure () -> T,
+    _ message: String = "",
+    file: StaticString = #file,
+    line: UInt = #line
+) {
+    let (va, vb) = (a(), b())
+    if !(va < vb) {
+        XCTestCase.recordFailure(
+            "XCTAssertLessThan failed: \(va) >= \(vb) \(message)", file: file, line: line
+        )
+    }
+}
+
+public func XCTAssertGreaterThan<T: Comparable>(
+    _ a: @autoclosure () -> T,
+    _ b: @autoclosure () -> T,
+    _ message: String = "",
+    file: StaticString = #file,
+    line: UInt = #line
+) {
+    let (va, vb) = (a(), b())
+    if !(va > vb) {
+        XCTestCase.recordFailure(
+            "XCTAssertGreaterThan failed: \(va) <= \(vb) \(message)", file: file, line: line
+        )
+    }
+}
+
 public func XCTAssertLessThanOrEqual<T: Comparable>(
     _ a: @autoclosure () -> T,
     _ b: @autoclosure () -> T,
