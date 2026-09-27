@@ -141,15 +141,13 @@ jobs:
                 }
               );
 
-              // APPROVED/CHANGES_REQUESTED are durable PR decisions. CodeRabbit
-              // does not necessarily submit a duplicate APPROVED review after a
-              // later clean incremental review when the PR is already approved
-              // (observed on NanoDictate PR #7). Bind freshness to the exact-head
-              // "Review completed" status below, and use the newest decisive
-              // CodeRabbit review as the effective approval state.
+              // With request_changes_workflow enabled, CodeRabbit documents
+              // approval as a decision for the reviewed current HEAD. Never carry
+              // an older approval forward across a new commit.
               return reviews
                 .filter(review =>
                   review.user?.login?.startsWith('coderabbitai') &&
+                  review.commit_id === pr.head.sha &&
                   (review.state === 'APPROVED' ||
                    review.state === 'CHANGES_REQUESTED')
                 )
@@ -551,15 +549,13 @@ jobs:
                 continue;
               }
 
-              // The exact-head "Review completed" status above proves freshness.
-              // The durable GitHub-native review decision proves acceptance.
-              // Keep these as separate signals because CodeRabbit may retain an
-              // earlier APPROVED review instead of submitting a duplicate
-              // approval after a later clean incremental review.
+              // Require both machine-readable signals on this exact HEAD:
+              // completed full review status plus CodeRabbit's GitHub-native
+              // APPROVED decision.
               const decision = await latestCodeRabbitDecision(pr);
               if (!decision || decision.state !== 'APPROVED') {
                 core.info(
-                  `PR #${pr.number}: effective CodeRabbit decision is ${decision?.state || 'missing'}; not mergeable yet.`
+                  `PR #${pr.number}: current-head CodeRabbit decision is ${decision?.state || 'missing'}; not mergeable yet.`
                 );
                 continue;
               }
