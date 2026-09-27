@@ -75,6 +75,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          # This job runs scripts/test-release-policy.sh from the checked-out PR on
+          # pull_request events, so the token must not stay in .git/config where
+          # that code could reuse it (CWE-522).
+          persist-credentials: false
 
       - name: Test the release policy
         run: bash scripts/test-release-policy.sh
