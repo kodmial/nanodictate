@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Release automation follows the Release PR model: merges into `main` no
+  longer bump the version with a direct push. `release-pr.yml` (release-please
+  with `always-bump-patch`, `Version.swift` via the generic `extra-files`
+  updater) maintains the single Release PR from the merged history, cuts the
+  matching `CHANGELOG.md` section on that branch, and merging it publishes the
+  release through the unchanged `release.yml` pipeline. The post-release
+  manifests and the installer pin arrive through a
+  `chore/release-manifests-v<version>` PR instead of a direct push, so `main`
+  can require pull requests with no automation bypass. Feature PRs never touch
+  `Version.swift` or `.release-please-manifest.json` (enforced by the
+  `version-ownership` CI job); the `skip-release` label, the path-based guard
+  and the `0.0.100` automatic-bump cap keep working as before. Release PR
+  writes use `RELEASE_PR_TOKEN` (falling back to the existing `TAP_PAT`) so
+  required CI runs on them.
+
 ## [0.1.5] - 2026-09-27
 
 ## [0.1.4] - 2026-09-27

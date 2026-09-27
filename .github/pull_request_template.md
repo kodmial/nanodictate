@@ -18,6 +18,6 @@
 - [ ] Нет секретов/ключей в diff
 - [ ] TCC/Accessibility/микрофон не затронуты или подписано через MCP `dictation_deploy`
 - [ ] Доки/README обновлены, если менялось поведение
-- [ ] Release: this PR publishes a new version (default). If it must merge WITHOUT a version bump and release, add the `skip-release` label before merging (see `CONTRIBUTING.md` → Releases).
+- [ ] Release: this PR does NOT bump the version (the automated Release PR owns `Version.swift`; see `CONTRIBUTING.md` → Releases). If it must merge WITHOUT triggering a Release PR update, add the `skip-release` label before merging.
 
 Связанные issues: Closes #

@@ -21,7 +21,7 @@ npm test   # build + node --test
 
 ```sh
 swift run NanoDictateCoreTests   # не `swift test` — таргет исполняемый
-bash scripts/test-release-policy.sh   # политика релизов bump-version.yml (чистый bash, где угодно)
+bash scripts/test-release-policy.sh   # политика релизов release-pr.yml (чистый bash, где угодно)
 ```
 
 Тесты — исполняемый таргет `NanoDictateCoreTests`; раннер печатает сводку и возвращает ненулевой код при падениях. CI гоняет те же команды (`.github/workflows/ci.yml`, Swift 6.1, `macos-15`).
@@ -39,15 +39,19 @@ Conventional Commits с областью: `feat(agent): …`, `fix(agent): …`,
 
 ## Releases
 
-Every merge into `main` is evaluated by `.github/workflows/bump-version.yml` ("Bump version"), which decides whether the merge publishes a new NanoDictate version. The decision logic lives in `scripts/release-policy.sh` and is covered by `scripts/test-release-policy.sh`.
+Every merge into `main` is evaluated by `.github/workflows/release-pr.yml` ("Release PR"), which maintains the single automated Release PR from what has actually landed in `main`. The decision logic lives in `scripts/release-policy.sh` and is covered by `scripts/test-release-policy.sh`.
 
-- **Automatic bump** — a merge with real code changes that did not bump `Sources/NanoDictateCore/Version.swift` gets the patch version bumped (`0.0.N` → `0.0.(N+1)`) and the Release workflow is dispatched for the new version. Automatic bumps stop at `0.0.100`; the `0.1.x` series may grow past that. The same commit also cuts the matching `## [<version>]` section in `CHANGELOG.md` (reopening an empty `## [Unreleased]` above it and refreshing the compare links), because `VersionTests.testVersionStringEqualsCurrentRelease` requires the two files to agree: a PR that bumps `Version.swift` by hand must add the release section to `CHANGELOG.md` in the same change, or CI stays red.
-- **Path-based exclusions** — a diff limited to `Version.swift`, `CHANGELOG.md`, `README.md`, `SECURITY.md`, `LICENSE`, `docs/`, `.github/`, `.githooks/`, the root meta-dotfiles and packaging files is classified as non-releasable: no bump, no release. Such a merge would otherwise publish an empty release.
-- **`skip-release` label** — a PR that must merge without publishing a version gets the `skip-release` label ("Merge this PR without bumping or publishing a NanoDictate version."). It is an explicit override, checked before anything else: a labeled PR is never bumped, never committed to, and never dispatched to the Release workflow, whatever its file paths contain. Add the label **before** merging — it is read from the merge event payload, so removing it afterwards changes nothing.
+- **No version bumps in feature PRs** — ordinary PRs never touch `Sources/NanoDictateCore/Version.swift` or `.release-please-manifest.json`. The `version-ownership` CI job fails such PRs. The next version is chosen once, at release time, so concurrent PRs can merge in any order without racing or picking duplicate versions.
+- **Automatic Release PR** — a merge with real code changes makes release-please create or update the one Release PR (`release-please--branches--main`) with the next patch version (`0.0.N` → `0.0.(N+1)`, `0.1.x` likewise; `feat:` bumps the patch too, never the minor). The workflow then cuts the matching `## [<version>]` section in `CHANGELOG.md` on that branch (reopening an empty `## [Unreleased]` above it and refreshing the compare links), because `VersionTests.testVersionStringEqualsCurrentRelease` requires the two files to agree. Merging the Release PR publishes the release through `release.yml` (tag + GitHub Release + binaries); the post-release job opens a `chore/release-manifests-v<version>` PR with the regenerated Homebrew/MacPorts manifests and the installer pin. Nothing is ever pushed to `main` directly — every change arrives through a pull request.
+- **Path-based exclusions** — a diff limited to `Version.swift`, the release-please config/manifest, `CHANGELOG.md`, `README.md`, `SECURITY.md`, `LICENSE`, `docs/`, `.github/`, `.githooks/`, the root meta-dotfiles and packaging files is classified as non-releasable: no Release PR update. Such a merge would otherwise publish an empty release.
+- **`skip-release` label** — a PR that must merge without triggering a Release PR update gets the `skip-release` label ("Merge this PR without bumping or publishing a NanoDictate version."). It is an explicit override, checked before anything else: a labeled PR never triggers a Release PR update, whatever its file paths contain. Its changes still ride along with the next Release PR. Add the label **before** merging — it is read from the merge event payload, so removing it afterwards changes nothing.
+- **Automatic bump limit** — automatic bumps in the `0.0.x` series stop at `0.0.100`; the `0.1.x` series may grow past that. A future series (e.g. `0.1.x`) is started through the Release PR, not through a feature PR.
 
 Every no-release outcome finishes the workflow successfully (a green no-op, with the reason in the job summary). Only a broken version fails it: a `Version.swift` that cannot be parsed, or a version outside `0.0.x` / `0.1.x`. Unrelated labels (`chore`, `documentation`, `ci`, ...) never skip a release implicitly — the release decision stays explicit.
 
-One caveat: the merge itself also triggers the Release workflow through its own `push` trigger. That is harmless for a normal `skip-release` PR (the version is unchanged, so the Release workflow sees an already-published version and no-ops), but a PR that both bumps `Version.swift` and carries `skip-release` would still publish its own version. Use the label for merges that do not bump the version.
+Conventional Commits matter for versioning: release-please proposes the next version from the conventional commits (`feat:`, `fix:`, ...) merged since the last release, so keep the `type(scope): …` style. A merge with no conventional commits is a green no-op (no Release PR proposed).
+
+Branch protection: `main` requires a pull request before merging, and no automation needs a direct-push bypass. The Release PR and the manifests PR are ordinary PAT-authored PRs (`RELEASE_PR_TOKEN`, falling back to the existing `TAP_PAT` repo secret), so required CI runs on them before merge. Without either secret the automation falls back to `GITHUB_TOKEN` with a warning — the PRs are still created, but CI will not trigger on them.
 
 ## Issues
 

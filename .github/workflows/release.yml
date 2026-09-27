@@ -3,12 +3,13 @@ name: Release
 # Release triggers:
 #   1. push of a v* tag  — the classic path; the released version = the pushed
 #      tag (v-prefix stripped).
-#   2. push to main      — the merge path: a PR merged into main with a bumped
-#      Sources/NanoDictateCore/Version.swift automatically builds, publishes a
-#      GitHub Release (the workflow itself creates the tag v<version>) and
-#      regenerates the Homebrew/MacPorts manifests. A push to main that did NOT
-#      bump the version is a no-op: the preflight guard sees the release
-#      already exists and skips creation + manifests (green, not red).
+#   2. push to main      — the merge path: the automated Release PR (which is
+#      the only PR that bumps Sources/NanoDictateCore/Version.swift) merged
+#      into main automatically builds, publishes a GitHub Release (the workflow
+#      itself creates the tag v<version>) and opens the release-manifests PR
+#      with the regenerated Homebrew/MacPorts manifests. A push to main that
+#      did NOT bump the version is a no-op: the preflight guard sees the
+#      release already exists and skips creation + manifests (green, not red).
 #   3. workflow_dispatch — manual release: optional `version` input, else the
 #      value of Sources/NanoDictateCore/Version.swift. `dry_run` only prints
 #      the plan (build still runs, nothing is created).
@@ -160,7 +161,7 @@ jobs:
             echo "Would release: v$VERSION"
             echo "Would build tarballs: nanodictate-$VERSION-macos-x86_64.tar.gz and nanodictate-$VERSION-macos-arm64.tar.gz"
             echo "Would build app-bundle zips: nanodictate-$VERSION-macos-{x86_64,arm64}.zip (NanoDictate.app bundle — the cask asset)"
-            echo "Would create GitHub Release v$VERSION (workflow creates the tag), regenerate Homebrew formula + cask + MacPorts manifests, commit them to main and sync the kodmial/homebrew-nanodictate tap."
+            echo "Would create GitHub Release v$VERSION (workflow creates the tag), open the release-manifests PR with the regenerated Homebrew formula + cask + MacPorts manifests and sync the kodmial/homebrew-nanodictate tap."
             SKIP=true
             SKIP_MANIFESTS=true
           # Existence probe via the REST API: releases/tags/<tag> returns 200
@@ -648,6 +649,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # release-please labels the Release PR (autorelease: pending/tagged);
+      # this job transitions the merged Release PR to tagged after publication.
+      issues: write
+      pull-requests: write
     steps:
       - name: No-op — version already released / dry run
         if: ${{ needs.preflight.outputs.skip_release == 'true' }}
@@ -754,15 +759,61 @@ jobs:
             exit "$rc"
           fi
 
+      # release-please runs PR-only here (skip-github-release: true), so a
+      # merged Release PR keeps `autorelease: pending` and a later
+      # release-please run stops with "untagged, merged release PRs
+      # outstanding". release.yml owns tagging/publication, so transition
+      # the merged Release PR that produced this version to
+      # `autorelease: tagged` once the release exists. Runs on fresh
+      # publishes and on re-runs where the release already exists
+      # (skip_release=true): a previous attempt may have published without
+      # flipping the label, and the retry must repair it. Skipped only for
+      # dry runs (no publication happened). No-op when nothing matches
+      # (tag-push path, manual versions, already repaired).
+      - name: Mark merged Release PR as tagged
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run == true) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${RELEASE_VERSION:-}" ]]; then
+            echo "::error::preflight version is empty — cannot match the merged Release PR."
+            exit 1
+          fi
+          if ! gh release view "v$RELEASE_VERSION" --repo "$GH_REPO" >/dev/null; then
+            echo "Release v$RELEASE_VERSION does not exist yet — nothing to mark tagged."
+            exit 0
+          fi
+          # Lookup failures must fail the step (no `|| true`): an API error
+          # is not "nothing pending".
+          PENDING_JSON=$(gh pr list --repo "$GH_REPO" --label "autorelease: pending" --state merged --limit 1000 --json number,title,body,headRefName)
+          MATCHED=$(jq -r --arg v "$RELEASE_VERSION" '($v | gsub("\\."; "\\.")) as $re | .[] | select(.headRefName == "release-please--branches--main") | select(((.title // "") + "\n" + (.body // "")) | test("(^|[^0-9.])v?" + $re + "([^0-9.]|\\.[^0-9]|$)")) | .number' <<<"$PENDING_JSON")
+          if [[ -z "${MATCHED//[[:space:]]/}" ]]; then
+            echo "No merged Release PR labeled 'autorelease: pending' matches v$RELEASE_VERSION — nothing to mark tagged."
+            exit 0
+          fi
+          for PR in $MATCHED; do
+            echo "Marking merged Release PR #$PR (v$RELEASE_VERSION) as tagged."
+            gh pr edit "$PR" --repo "$GH_REPO" --remove-label "autorelease: pending" --add-label "autorelease: tagged"
+          done
+
   # Post-release: regenerate the Homebrew formula + MacPorts Portfile from the
-  # .tpl sources (real sha256 of the published tarballs), commit them to main
-  # and sync the formula into the kodmial/homebrew-nanodictate tap. Runs only
-  # after the release exists, so scripts/release-prep.rb can download both
-  # tarballs. Gated on preflight's skip_manifests flag (NOT skip_release):
-  # manifests stay off on a re-run whose committed manifests ALREADY match the
-  # version (the guard verified version + sha256) — regenerating identical
-  # manifests is pointless and a tag-HEAD push can hit the non-fast-forward
-  # guard; a STALE formula leaves skip_manifests=false and regenerates.
+  # .tpl sources (real sha256 of the published tarballs), open a
+  # `chore/release-manifests-v<version>` PR into main with them (plus the
+  # installer PIN_REV update below), and sync the formula into the
+  # kodmial/homebrew-nanodictate tap. Nothing is pushed to `main` directly:
+  # the manifests reach `main` only through a normal PR merge, so `main` can
+  # stay protected with "Require a pull request before merging" and no
+  # automation needs a direct-push bypass. Runs only after the release exists,
+  # so scripts/release-prep.rb can download both tarballs. Gated on
+  # preflight's skip_manifests flag (NOT skip_release): manifests stay off on
+  # a re-run whose committed manifests ALREADY match the version (the guard
+  # verified version + sha256) — regenerating identical manifests is pointless;
+  # a STALE formula leaves skip_manifests=false and regenerates. The tap and
+  # MacPorts-tree syncs push to those EXTERNAL repositories (not to this
+  # repo's `main`), so they are not direct pushes to the protected branch.
   manifests:
     name: Update release manifests
     needs: [release, preflight]
@@ -773,12 +824,11 @@ jobs:
     steps:
       - name: Checkout
         # Same pinned actions/checkout as the build job. On a tag push the
-        # default ref is the tagged commit (detached HEAD): the manifest
-        # commit below is committed on top of it and pushed to main. On a
-        # branch push / manual run the checkout is HEAD of the selected ref.
-        # fetch-depth: 0 pulls the full history so `git fetch origin main`
-        # in the commit step has a common base for the non-fast-forward
-        # protection (a shallow checkout has no origin/main ref at all).
+        # default ref is the tagged commit (detached HEAD); on a branch push /
+        # manual run the checkout is HEAD of the selected ref. fetch-depth: 0
+        # pulls the full history so the manifests PR branch below can be
+        # (re)created from origin/main (a shallow checkout has no origin/main
+        # ref at all).
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
@@ -1215,43 +1265,6 @@ jobs:
             echo "Uploaded packaging/macports/Portfile as nanodictate-$VERSION-Portfile to release v$VERSION"
           fi
 
-      - name: Commit manifests to main
-        env:
-          VERSION: ${{ needs.preflight.outputs.version }}
-        run: |
-          set -euo pipefail
-          git config user.name "kodmial"
-          git config user.email "kodmial@gmail.com"
-          # The manifest outputs are tracked in git (root nanodictate.rb plus
-          # packaging/homebrew/nanodictate.rb, packaging/homebrew/Casks/
-          # nanodictate.rb and packaging/macports/Portfile).
-          # The /packaging/... .gitignore entries would only filter untracked
-          # files, which these are not; `git add -f` force-adds them anyway
-          # (and would bring them back even if ever absent).
-          git add -f nanodictate.rb packaging/homebrew/nanodictate.rb packaging/homebrew/Casks/nanodictate.rb packaging/macports/Portfile
-          if git diff --cached --quiet; then
-            echo "Manifests unchanged since the last release — nothing to commit."
-          else
-            git commit -m "chore(release): update v$VERSION manifests"
-            # Non-fast-forward protection: the manifest commit is pushed onto
-            # the tag, which must sit on the tip of main. If main gained
-            # commits after the tag was pushed (a workflow racing this push),
-            # pushing HEAD:main would be refused anyway — fail fast with an
-            # actionable message instead of a bare non-fast-forward error.
-            # A `git pull --rebase` would silently rewrite the manifest
-            # commit onto the new main tip and needs an interactive conflict
-            # resolution below our control; the release manifests are
-            # deterministic (same tarball -> same file content), so the
-            # correct recovery is simply re-running the workflow once main is
-            # at the tag commit again.
-            git fetch origin main
-            git merge-base --is-ancestor origin/main HEAD || {
-              echo "::error::main has moved ahead of the tag — the manifest commit would not fast-forward. Reset main to the tag commit (or merge it) and re-run the workflow."
-              exit 1
-            }
-            git push origin HEAD:main
-          fi
-
       # Sync the generated Portfile + config into the kodmial/macports-nanodictate
       # git repo — the tree users clone and register as a file:// port source
       # (`sudo port selfupdate` then git-pulls it). The old tar-asset channel
@@ -1261,9 +1274,9 @@ jobs:
       # owned by kodmial). The secret is read through the env context, NOT the
       # `if:` condition (the secrets context is unavailable in `if:` and fails
       # workflow validation). Without TAP_PAT this step FAILS (exit 1) — the
-      # channel must not silently skip a version on a green run. The step is
-      # placed AFTER the manifests commit so a missing token can never block
-      # the in-repo manifest update.
+      # channel must not silently skip a version on a green run. This pushes to
+      # the EXTERNAL macports-nanodictate repo (its own `main`), never to this
+      # repo's protected `main`.
       - name: Sync MacPorts port tree (kodmial/macports-nanodictate)
         if: ${{ needs.preflight.outputs.skip_release != 'true' }}
         env:
@@ -1295,31 +1308,41 @@ jobs:
             git push origin main
           fi
 
-      # Pin the installer to the synchronized kodmial/macports-nanodictate tree
-      # revision: PIN_REV in scripts/install-macports.sh is the installer's
-      # exact-revision checkout of the tree — if it stays on an older commit,
-      # fresh installs check out a stale Portfile (not the one generated by
-      # this very workflow). A STANDALONE step, not part of the tree-sync step
-      # (which skip_release can gate off on a re-run): when a pin push failed
-      # after a successful tree sync, the re-run must still repair the pin —
-      # preflight's pin check keeps skip_manifests=false while the pinned
-      # revision differs from the tree HEAD, so this step, gated on
-      # skip_manifests like the rest of the job, runs exactly then. Runs on
-      # both paths (tree changed or not): TREE_SHA is the tree HEAD either way,
-      # and the installer commit is skipped when the pin is already current.
-      # The pin commit is based on freshly fetched origin/main, prepared in a
-      # separate temporary worktree: a re-run's checked-out release ref predates
-      # the previously pushed manifests and would fail the non-fast-forward guard
-      # below, and a detached checkout of origin/main in the main workspace would
-      # hand the following "Update tap repo" step origin/main's manifest bytes
-      # instead of the ones this job generated. Push mirrors the manifests
-      # step's non-fast-forward guard; the checkout's persisted GITHUB_TOKEN
-      # (contents: write) authenticates it — gh's TAP_PAT helper only ever
-      # serves the /tmp tree clone above, never this workspace push.
-      - name: Pin install-macports.sh to synced macports tree revision
+      # Open (or update) the `chore/release-manifests-v<version>` PR with the
+      # generated manifests plus the installer pin — the in-repo half of the
+      # post-release sync. Nothing here touches `main` directly: the manifests
+      # and the PIN_REV edit land on a feature branch and reach `main` only
+      # through a normal PR merge, so no branch-protection bypass is needed.
+      #
+      # Pin background: PIN_REV in scripts/install-macports.sh is the
+      # installer's exact-revision checkout of the tree — if it stays on an
+      # older commit, fresh installs check out a stale Portfile (not the one
+      # generated by this very workflow). A re-run whose committed manifests
+      # already match but whose pin is stale still reaches this step
+      # (preflight's pin check keeps skip_manifests=false while the pinned
+      # revision differs from the tree HEAD), so the pin repair rides along
+      # here. Runs on both paths (tree changed or not): TREE_SHA is the tree
+      # HEAD either way, and the installer edit is skipped when the pin is
+      # already current.
+      #
+      # The branch push and the PR creation authenticate with TAP_PAT (the same
+      # PAT the tree-sync step above already requires): a PR created with the
+      # default GITHUB_TOKEN would NOT trigger CI, and the manifests PR must
+      # pass required checks before merge like any other PR.
+      - name: Open release-manifests PR (manifests + installer pin)
         if: ${{ needs.preflight.outputs.skip_manifests != 'true' }}
+        env:
+          # NO GH_TOKEN here on purpose (same reason as the tree-sync step):
+          # TAP_PAT is used for every write below.
+          VERSION: ${{ needs.preflight.outputs.version }}
+          TAP_PAT: ${{ secrets.TAP_PAT }}
         run: |
           set -euo pipefail
+          if [[ -z "$TAP_PAT" ]]; then
+            echo "::error::TAP_PAT secret is not set — cannot open the release-manifests PR. To enable it, create a repo secret TAP_PAT holding a Personal Access Token (classic, 'repo' scope) owned by kodmial, then re-run the release workflow (the build/release jobs are idempotent)."
+            exit 1
+          fi
+          BRANCH="chore/release-manifests-v$VERSION"
           # The revision to pin: the HEAD the tree-sync step just pushed when it
           # ran (the /tmp clone is left in place), else the tree's live main tip
           # via ls-remote — the same probe preflight's pin check uses for a
@@ -1349,44 +1372,77 @@ jobs:
             echo "::error::macports-nanodictate remote main ($REMOTE_MAIN) no longer matches the revision this run synced ($TREE_SHA) — a concurrent release advanced the tree after the sync step. Do not pin a stale tree; re-run the workflow to pin the current tip."
             exit 1
           fi
-          # The pin is prepared in a temporary linked worktree at origin/main so
-          # the main workspace ($GITHUB_WORKSPACE) keeps its working tree — the
-          # packaging/homebrew manifests generated earlier in this job — intact
-          # for the "Update tap repo" step that copies them from there.
+          # Stash the generated manifests aside: the branch below is (re)based
+          # on origin/main, which on a tag-push re-run is NEWER than this
+          # checkout — switching branches with the generated files dirty in the
+          # tree could refuse the checkout. The scratch dir lives inside the
+          # worktree (never /tmp) and is removed before the step ends, so it is
+          # never committed.
+          STASH="$GITHUB_WORKSPACE/.opencode-tmp/release-manifests-$VERSION"
+          rm -rf "$STASH"
+          mkdir -p "$STASH"
+          cp packaging/homebrew/nanodictate.rb "$STASH/nanodictate.rb"
+          cp packaging/homebrew/Casks/nanodictate.rb "$STASH/Casks-nanodictate.rb"
+          cp packaging/macports/Portfile "$STASH/Portfile"
+          cp nanodictate.rb "$STASH/root-nanodictate.rb"
+          # Drop the dirty generated copies so the branch switch below cannot
+          # refuse on a re-run (the target branch may already carry different
+          # manifest content, or origin/main may be newer than this checkout).
+          git -C "$GITHUB_WORKSPACE" checkout -- nanodictate.rb packaging/homebrew/nanodictate.rb packaging/homebrew/Casks/nanodictate.rb packaging/macports/Portfile
           git -C "$GITHUB_WORKSPACE" fetch origin main
-          WS="$(mktemp -d)/pin"
-          git -C "$GITHUB_WORKSPACE" worktree add --detach "$WS" origin/main
-          sed -i "s/^PIN_REV=\"[^\"]*\"$/PIN_REV=\"$TREE_SHA\"/" "$WS/scripts/install-macports.sh"
-          if ! grep -qxF "PIN_REV=\"$TREE_SHA\"" "$WS/scripts/install-macports.sh"; then
+          if git -C "$GITHUB_WORKSPACE" ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            git -C "$GITHUB_WORKSPACE" checkout "$BRANCH"
+            git -C "$GITHUB_WORKSPACE" merge --ff-only "origin/$BRANCH"
+          else
+            git -C "$GITHUB_WORKSPACE" checkout -b "$BRANCH" origin/main
+          fi
+          cp "$STASH/nanodictate.rb" packaging/homebrew/nanodictate.rb
+          cp "$STASH/Casks-nanodictate.rb" packaging/homebrew/Casks/nanodictate.rb
+          cp "$STASH/Portfile" packaging/macports/Portfile
+          cp "$STASH/root-nanodictate.rb" nanodictate.rb
+          rm -rf "$STASH"
+          rmdir "$GITHUB_WORKSPACE/.opencode-tmp" 2>/dev/null || true
+          sed -i "s/^PIN_REV=\"[^\"]*\"$/PIN_REV=\"$TREE_SHA\"/" scripts/install-macports.sh
+          if ! grep -qxF "PIN_REV=\"$TREE_SHA\"" scripts/install-macports.sh; then
             echo "::error::PIN_REV in scripts/install-macports.sh was not updated to $TREE_SHA"
             exit 1
           fi
-          git -C "$WS" config user.name "kodmial"
-          git -C "$WS" config user.email "kodmial@gmail.com"
-          git -C "$WS" add scripts/install-macports.sh
-          if git -C "$WS" diff --cached --quiet; then
-            # Reached only when the stale-pin guard above passed (remote main
-            # still == TREE_SHA): a drifted remote would have failed the step
-            # even though the pin already matches — no silent no-op on a stale
-            # tree, and nothing to push here.
-            echo "install-macports.sh already pins the synced tree revision $TREE_SHA — nothing to commit."
+          git config user.name "kodmial"
+          git config user.email "kodmial@gmail.com"
+          # The manifest outputs are tracked in git (root nanodictate.rb plus
+          # packaging/homebrew/nanodictate.rb, packaging/homebrew/Casks/
+          # nanodictate.rb and packaging/macports/Portfile) together with the
+          # installer pin. The /packaging/... .gitignore entries would only
+          # filter untracked files, which these are not; `git add -f`
+          # force-adds them anyway (and would bring them back even if ever
+          # absent).
+          git add -f nanodictate.rb packaging/homebrew/nanodictate.rb packaging/homebrew/Casks/nanodictate.rb packaging/macports/Portfile scripts/install-macports.sh
+          if git diff --cached --quiet; then
+            echo "Manifests and installer pin already match v$VERSION — nothing to commit."
           else
-            git -C "$WS" commit -m "chore(release): pin install-macports.sh to macports tree $TREE_SHA"
-            # Race guard: main can move between the fetch above and this commit
-            # — re-check before push (a race after this loses only to the
-            # server's own non-fast-forward refusal).
-            git -C "$WS" fetch origin main
-            git -C "$WS" merge-base --is-ancestor origin/main HEAD || {
-              echo "::error::main has moved ahead of the pin commit — the PIN_REV commit would not fast-forward. Reset main to the current tip (or merge it) and re-run the workflow."
-              exit 1
-            }
-            git -C "$WS" push origin HEAD:main
-            echo "Pinned install-macports.sh PIN_REV to the synced tree revision $TREE_SHA"
+            git commit -m "chore(release): update v$VERSION manifests"
+            # PAT-authenticated push of the FEATURE branch (never `main`): a
+            # PAT push triggers the manifests PR's CI, a GITHUB_TOKEN push
+            # would suppress it. Pushing a feature branch is allowed under
+            # branch protection — only `main` requires a pull request. A
+            # non-fast-forward refusal means a concurrent run updated the
+            # branch first; re-run the workflow to retry on the new tip.
+            git remote set-url origin "https://x-access-token:${TAP_PAT}@github.com/${GITHUB_REPOSITORY}.git"
+            git push origin "HEAD:${BRANCH}"
+            echo "Pushed manifests + PIN_REV ($TREE_SHA) to ${BRANCH}."
           fi
-          # The pin revision is only consumed inside this step — drop the
-          # temporary worktree. The main workspace is left untouched, so the
-          # "Update tap repo" step still copies THIS job's generated manifests.
-          git -C "$GITHUB_WORKSPACE" worktree remove --force "$WS"
+          # Create the PR when there isn't one yet; an already-open PR for the
+          # branch only needs the push above. `gh pr view` probes without
+          # failing the step when no PR exists.
+          if GH_TOKEN="$TAP_PAT" gh pr view "$BRANCH" --json number --jq '.number' >/dev/null 2>&1; then
+            echo "PR for ${BRANCH} is already open — updated it with the push above."
+          else
+            GH_TOKEN="$TAP_PAT" gh pr create \
+              --base main --head "$BRANCH" \
+              --title "chore(release): update v$VERSION manifests" \
+              --body "Automated post-release sync for **v$VERSION**: generated Homebrew formula + cask, MacPorts Portfile (real sha256 of the published assets) and the installer PIN_REV pin to macports tree $TREE_SHA. Merging publishes no new version (packaging-only changes are non-releasable by policy)."
+            echo "Opened the release-manifests PR for v$VERSION."
+          fi
 
       # Sync the formula + cask into the kodmial/homebrew-nanodictate tap (optional,
       # needs the TAP_PAT repo secret — a Personal Access Token, classic
@@ -1422,12 +1478,14 @@ jobs:
             git push origin main
           fi
 
-      # The manifest and installer-pin commits above intentionally use the
-      # checkout's GITHUB_TOKEN so they do not recursively trigger every
-      # push-to-main workflow. That also means auto-merge.yml does not see those
-      # pushes. Explicitly wake its idempotent reconciler once the complete
-      # release synchronization has succeeded, so open PRs are immediately
-      # rebased onto the final post-release main tip and revalidated.
+      # The in-repo release writes above land on a feature branch (the
+      # release-manifests PR), and the tap/tree syncs push to EXTERNAL repos —
+      # none of them is a GITHUB_TOKEN push to this repo's `main`, so the push
+      # that merged the Release PR already fanned out normally. Still, wake the
+      # auto-merge reconciler explicitly once the complete release
+      # synchronization has succeeded, so the new manifests PR is picked up
+      # promptly and open PRs are immediately rebased onto the final
+      # post-release main tip and revalidated.
       - name: Wake auto-merge reconciler after release writes
         env:
           TAP_PAT: ${{ secrets.TAP_PAT }}
