@@ -189,9 +189,8 @@ jobs:
           git push -u origin "HEAD:$CURRENT_BRANCH"
 
           TITLE="$(git log -1 --format=%s)"
-          gh pr create             --repo "$GITHUB_REPOSITORY"             --base main             --head "$CURRENT_BRANCH"             --title "$TITLE"             --body "Recovered automatically after the OpenCode agent changed branches during issue #$ISSUE_NUMBER execution.
-
-Closes #$ISSUE_NUMBER"
+          BODY="$(printf 'Recovered automatically after the OpenCode agent changed branches during issue #%s execution.\n\nCloses #%s' "$ISSUE_NUMBER" "$ISSUE_NUMBER")"
+          gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$CURRENT_BRANCH" --title "$TITLE" --body "$BODY"
 
       - name: Fix CodeRabbit review findings
         if: github.event_name == 'workflow_dispatch' && inputs.mode == 'coderabbit-fix'
