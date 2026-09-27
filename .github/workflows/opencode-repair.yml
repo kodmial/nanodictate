@@ -4,8 +4,6 @@ on:
   # This trusted metadata workflow never checks out or executes PR code.
   pull_request_target:
     types: [opened, reopened, synchronize]
-  push:
-    branches: [main]
   workflow_run:
     workflows: ["CI"]
     types: [completed]
@@ -87,74 +85,6 @@ jobs:
             echo "::error::Failed to dispatch OpenCode conflict repair; lock cleared for retry."
             exit 1
           fi
-
-  sync-open-prs-after-main-update:
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    steps:
-      - name: Reconcile open OpenCode pull requests with main
-        env:
-          GH_TOKEN: ${{ secrets.TAP_PAT }}
-        run: |
-          set -euo pipefail
-
-          gh label create opencode-conflict-repair --repo "$GITHUB_REPOSITORY" --color B60205 \
-            --description "One automatic OpenCode conflict-repair attempt per conflict episode." \
-            --force >/dev/null
-
-          gh api --paginate "repos/$GITHUB_REPOSITORY/pulls?state=open&base=main&per_page=100" \
-            --jq '.[] | select(.head.repo.full_name == env.GITHUB_REPOSITORY) | select(.head.ref | startswith("opencode/")) | [.number, .head.ref, .head.sha] | @tsv' |
-          while IFS=$'\t' read -r pr head_ref head_sha; do
-            [[ -n "$pr" ]] || continue
-
-            behind=$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$head_sha" --jq '.behind_by')
-            if [[ "$behind" -eq 0 ]]; then
-              gh api --method DELETE \
-                "repos/$GITHUB_REPOSITORY/issues/$pr/labels/opencode-conflict-repair" \
-                >/dev/null 2>&1 || true
-              continue
-            fi
-
-            echo "PR #$pr ($head_ref) is $behind commit(s) behind main."
-            if output=$(gh api --method PUT \
-              "repos/$GITHUB_REPOSITORY/pulls/$pr/update-branch" \
-              -f "expected_head_sha=$head_sha" 2>&1); then
-              gh api --method DELETE \
-                "repos/$GITHUB_REPOSITORY/issues/$pr/labels/opencode-conflict-repair" \
-                >/dev/null 2>&1 || true
-              echo "$output"
-              continue
-            fi
-
-            echo "$output"
-            if ! grep -Eqi 'conflict|cannot be performed|not updateable' <<<"$output"; then
-              echo "::warning::Could not update PR #$pr; not dispatching an agent without a confirmed conflict."
-              continue
-            fi
-
-            if gh api "repos/$GITHUB_REPOSITORY/issues/$pr/labels" \
-              --jq '.[].name' | grep -Fxq opencode-conflict-repair; then
-              echo "PR #$pr already has the conflict-repair lock; skipping duplicate dispatch."
-              continue
-            fi
-
-            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$pr/labels" \
-              -f 'labels[]=opencode-conflict-repair' >/dev/null
-
-            if ! gh api --method POST \
-              "repos/$GITHUB_REPOSITORY/actions/workflows/opencode.yml/dispatches" \
-              -f ref=main \
-              -f "inputs[mode]=resolve-conflict" \
-              -f "inputs[pr_number]=$pr" \
-              -f "inputs[head_ref]=$head_ref"; then
-              gh api --method DELETE \
-                "repos/$GITHUB_REPOSITORY/issues/$pr/labels/opencode-conflict-repair" \
-                >/dev/null 2>&1 || true
-              echo "::warning::Failed to dispatch conflict repair for PR #$pr; lock cleared for retry."
-            fi
-          done
 
   ci-repair:
     if: >-
