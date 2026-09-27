@@ -95,7 +95,7 @@ jobs:
               return data;
             }
 
-            async function latestCurrentHeadCi(pr) {
+            async function latestCiForHead(pr, headSha) {
               const runs = await github.paginate(
                 github.rest.actions.listWorkflowRunsForRepo,
                 {
@@ -108,12 +108,16 @@ jobs:
               );
 
               return runs
-                .filter(run => run.name === 'CI' && run.head_sha === pr.head.sha)
+                .filter(run => run.name === 'CI' && run.head_sha === headSha)
                 .sort(
                   (a, b) =>
                     new Date(b.created_at).getTime() -
                     new Date(a.created_at).getTime()
                 )[0] || null;
+            }
+
+            async function latestCurrentHeadCi(pr) {
+              return latestCiForHead(pr, pr.head.sha);
             }
 
             async function latestCodeRabbitStatus(headSha) {
@@ -123,6 +127,24 @@ jobs:
 
               return (data.statuses || [])
                 .filter(status => status.context === 'CodeRabbit')
+                .sort(
+                  (a, b) =>
+                    new Date(b.updated_at || b.created_at).getTime() -
+                    new Date(a.updated_at || a.created_at).getTime()
+                )[0] || null;
+            }
+
+            async function completedCodeRabbitStatus(headSha) {
+              const { data } = await github.rest.repos.getCombinedStatusForRef({
+                owner, repo, ref: headSha,
+              });
+
+              return (data.statuses || [])
+                .filter(status =>
+                  status.context === 'CodeRabbit' &&
+                  status.state === 'success' &&
+                  /Review completed/i.test(status.description || '')
+                )
                 .sort(
                   (a, b) =>
                     new Date(b.updated_at || b.created_at).getTime() -
@@ -306,7 +328,7 @@ jobs:
               return true;
             }
 
-            async function latestCodeRabbitDecision(pr) {
+            async function latestCodeRabbitDecision(pr, headSha = pr.head.sha) {
               const reviews = await github.paginate(
                 github.rest.pulls.listReviews,
                 {
@@ -317,13 +339,10 @@ jobs:
                 }
               );
 
-              // With request_changes_workflow enabled, CodeRabbit documents
-              // approval as a decision for the reviewed current HEAD. Never carry
-              // an older approval forward across a new commit.
               return reviews
                 .filter(review =>
                   review.user?.login?.startsWith('coderabbitai') &&
-                  review.commit_id === pr.head.sha &&
+                  review.commit_id === headSha &&
                   (review.state === 'APPROVED' ||
                    review.state === 'CHANGES_REQUESTED')
                 )
@@ -336,7 +355,7 @@ jobs:
                 .at(-1) || null;
             }
 
-            async function currentHeadCodeRabbitNitpickReviews(pr) {
+            async function codeRabbitNitpickReviews(pr, headSha = pr.head.sha) {
               const reviews = await github.paginate(
                 github.rest.pulls.listReviews,
                 {
@@ -349,10 +368,119 @@ jobs:
 
               return reviews.filter(review =>
                 review.user?.login?.startsWith('coderabbitai') &&
-                review.commit_id === pr.head.sha &&
+                review.commit_id === headSha &&
                 review.state === 'COMMENTED' &&
                 /comments?\s*\(\s*[1-9]\d*\s*\)/i.test(review.body || '')
               );
+            }
+
+            async function directCodeRabbitReviewBasis(pr, headSha) {
+              const [ci, status, decision, nitpicks] = await Promise.all([
+                latestCiForHead(pr, headSha),
+                completedCodeRabbitStatus(headSha),
+                latestCodeRabbitDecision(pr, headSha),
+                codeRabbitNitpickReviews(pr, headSha),
+              ]);
+
+              if (
+                !ci ||
+                ci.status !== 'completed' ||
+                ci.conclusion !== 'success' ||
+                !status ||
+                !decision ||
+                decision.state !== 'APPROVED' ||
+                nitpicks.length !== 0
+              ) {
+                return null;
+              }
+
+              const ciCompletedAt =
+                new Date(ci.updated_at || ci.created_at).getTime();
+              const reviewCompletedAt =
+                new Date(status.updated_at || status.created_at).getTime();
+
+              if (reviewCompletedAt < ciCompletedAt) {
+                return null;
+              }
+
+              return {
+                sourceSha: headSha,
+                carried: false,
+                status,
+                decision,
+              };
+            }
+
+            async function carriedCodeRabbitReviewBasis(pr, headSha) {
+              const { data: commit } = await github.rest.repos.getCommit({
+                owner,
+                repo,
+                ref: headSha,
+              });
+              const parents = (commit.parents || []).map(parent =>
+                parent.sha.toLowerCase()
+              );
+              if (parents.length !== 2) return null;
+
+              const comments = await github.paginate(
+                github.rest.issues.listComments,
+                {
+                  owner,
+                  repo,
+                  issue_number: pr.number,
+                  per_page: 100,
+                }
+              );
+
+              const markerPattern =
+                /<!-- auto-main-sync head=([0-9a-f]{40}) from=([0-9a-f]{40}) main=([0-9a-f]{40}) carry=([0-9a-f]{40}) -->/i;
+
+              const marker = comments
+                .filter(comment => comment.user?.login === owner)
+                .map(comment => {
+                  const match = (comment.body || '').match(markerPattern);
+                  if (!match) return null;
+                  return {
+                    head: match[1].toLowerCase(),
+                    from: match[2].toLowerCase(),
+                    main: match[3].toLowerCase(),
+                    carry: match[4].toLowerCase(),
+                    createdAt: new Date(comment.created_at || 0).getTime(),
+                  };
+                })
+                .filter(Boolean)
+                .filter(item => item.head === headSha.toLowerCase())
+                .sort((a, b) => b.createdAt - a.createdAt)[0];
+
+              if (!marker) return null;
+
+              const parentSet = new Set(parents);
+              if (
+                !parentSet.has(marker.from) ||
+                !parentSet.has(marker.main)
+              ) {
+                return null;
+              }
+
+              const source = await directCodeRabbitReviewBasis(
+                pr,
+                marker.carry
+              );
+              if (!source) return null;
+
+              return {
+                ...source,
+                carried: true,
+                syncedHead: headSha,
+                fromHead: marker.from,
+                mainHead: marker.main,
+              };
+            }
+
+            async function codeRabbitReviewBasis(pr, headSha = pr.head.sha) {
+              const direct = await directCodeRabbitReviewBasis(pr, headSha);
+              if (direct) return direct;
+              return carriedCodeRabbitReviewBasis(pr, headSha);
             }
 
             async function unresolvedCodeRabbitThreads(pr) {
@@ -639,6 +767,25 @@ jobs:
             }
 
             async function updateFromMain(pr) {
+              const oldHead = pr.head.sha;
+              const { data: mainBranch } = await github.rest.repos.getBranch({
+                owner,
+                repo,
+                branch: 'main',
+              });
+              const mainHead = mainBranch.commit.sha;
+
+              // Carry is allowed only from a fully valid review basis and only
+              // when there are no unresolved CodeRabbit threads. If update-branch
+              // hits a conflict, no marker is ever written; OpenCode's conflict
+              // resolution therefore becomes an ordinary new commit that must be
+              // reviewed again.
+              const unresolvedBeforeSync =
+                await unresolvedCodeRabbitThreads(pr);
+              const reviewBasis = unresolvedBeforeSync.length === 0
+                ? await codeRabbitReviewBasis(pr, oldHead)
+                : null;
+
               try {
                 await github.request(
                   'PUT /repos/{owner}/{repo}/pulls/{pull_number}/update-branch',
@@ -646,11 +793,59 @@ jobs:
                     owner,
                     repo,
                     pull_number: pr.number,
-                    expected_head_sha: pr.head.sha,
+                    expected_head_sha: oldHead,
                   }
                 );
+
+                let fresh = null;
+                for (let attempt = 0; attempt < 6; attempt += 1) {
+                  fresh = await getPull(pr.number);
+                  if (fresh.head.sha !== oldHead) break;
+                  await new Promise(resolve => setTimeout(resolve, 1000));
+                }
+
+                let carried = false;
+                if (reviewBasis && fresh && fresh.head.sha !== oldHead) {
+                  const { data: newCommit } = await github.rest.repos.getCommit({
+                    owner,
+                    repo,
+                    ref: fresh.head.sha,
+                  });
+                  const parents = (newCommit.parents || []).map(parent =>
+                    parent.sha.toLowerCase()
+                  );
+                  const parentSet = new Set(parents);
+
+                  // The marker is written only after GitHub itself completed a
+                  // clean update-branch merge, and only when the resulting
+                  // commit has exactly the old PR head + the exact main head as
+                  // its two parents. A human/OpenCode conflict resolution can
+                  // never satisfy this path because update-branch failed before
+                  // any marker was emitted.
+                  if (
+                    parents.length === 2 &&
+                    parentSet.has(oldHead.toLowerCase()) &&
+                    parentSet.has(mainHead.toLowerCase())
+                  ) {
+                    const marker =
+                      `<!-- auto-main-sync head=${fresh.head.sha} from=${oldHead} main=${mainHead} carry=${reviewBasis.sourceSha} -->`;
+                    await github.rest.issues.createComment({
+                      owner,
+                      repo,
+                      issue_number: pr.number,
+                      body: marker,
+                    });
+                    carried = true;
+                    core.notice(
+                      `PR #${pr.number}: clean main sync ${oldHead} -> ${fresh.head.sha}; carrying CodeRabbit approval from ${reviewBasis.sourceSha}.`
+                    );
+                  }
+                }
+
                 core.notice(
-                  `PR #${pr.number}: updated from main; waiting for fresh CI and CodeRabbit review.`
+                  carried
+                    ? `PR #${pr.number}: updated from main; waiting for fresh CI only (CodeRabbit approval carried).`
+                    : `PR #${pr.number}: updated from main; waiting for fresh CI and a fresh CodeRabbit review.`
                 );
                 return true;
               } catch (err) {
@@ -660,9 +855,9 @@ jobs:
                 // a normal race with OpenCode/CI/main-sync, not a merge conflict.
                 // Re-read before deciding whether a repair agent is warranted.
                 const fresh = await getPull(pr.number);
-                if (fresh.head.sha !== pr.head.sha) {
+                if (fresh.head.sha !== oldHead) {
                   core.info(
-                    `PR #${pr.number}: head advanced from ${pr.head.sha} to ${fresh.head.sha} during update; no conflict repair needed.`
+                    `PR #${pr.number}: head advanced from ${oldHead} to ${fresh.head.sha} during update; no conflict repair needed.`
                   );
                   return false;
                 }
@@ -741,15 +936,18 @@ jobs:
                 continue;
               }
 
-              // CodeRabbit commit status proves the review job itself completed,
-              // but it does NOT prove acceptance: historical NanoDictate PRs show
-              // "Review completed" even alongside CHANGES_REQUESTED.
+              // A clean controller-generated merge of main can reuse a prior
+              // completed APPROVED review. Any other new HEAD must have its own
+              // CodeRabbit review.
+              const reviewBasis =
+                await codeRabbitReviewBasis(pr, pr.head.sha);
               const rabbitStatus = await latestCodeRabbitStatus(pr.head.sha);
 
-              // The same controller that already runs reliably every five minutes
-              // also owns CodeRabbit quota recovery. This avoids relying on a
-              // separate scheduled workflow whose cron may be delayed/disabled.
+              // Rate-limit recovery applies only when this HEAD still needs its
+              // own review. A safely carried approval must not burn another
+              // included CodeRabbit review merely because the merge SHA changed.
               if (
+                !reviewBasis &&
                 rabbitStatus &&
                 /Review rate limited|Review limit reached/i.test(
                   rabbitStatus.description || ''
@@ -760,12 +958,15 @@ jobs:
               }
 
               if (
-                !rabbitStatus ||
-                rabbitStatus.state !== 'success' ||
-                !/Review completed/i.test(rabbitStatus.description || '')
+                !reviewBasis &&
+                (
+                  !rabbitStatus ||
+                  rabbitStatus.state !== 'success' ||
+                  !/Review completed/i.test(rabbitStatus.description || '')
+                )
               ) {
                 core.info(
-                  `PR #${pr.number}: waiting for completed CodeRabbit status on current head.`
+                  `PR #${pr.number}: waiting for completed CodeRabbit review on current head.`
                 );
                 continue;
               }
@@ -791,13 +992,11 @@ jobs:
                 continue;
               }
 
-              // CodeRabbit may approve while also emitting non-blocking nitpicks in
-              // a COMMENTED review. The user policy is stricter: those findings
-              // must also be processed. If such feedback belongs to the current
-              // head, OpenCode gets a repair pass and merge stays blocked until a
-              // newer head receives a clean CodeRabbit review.
+              // If CodeRabbit happened to comment on the synchronized current
+              // head, do not ignore those findings merely because the approval
+              // basis came from an older cleanly-carried head.
               const currentHeadNitpicks =
-                await currentHeadCodeRabbitNitpickReviews(pr);
+                await codeRabbitNitpickReviews(pr);
               if (currentHeadNitpicks.length > 0) {
                 core.info(
                   `PR #${pr.number}: waiting for ${currentHeadNitpicks.length} current-head CodeRabbit nitpick review(s) to be addressed.`
@@ -805,28 +1004,18 @@ jobs:
                 continue;
               }
 
-              // Require both machine-readable signals on this exact HEAD:
-              // completed full review status plus CodeRabbit's GitHub-native
-              // APPROVED decision.
-              const decision = await latestCodeRabbitDecision(pr);
-              if (!decision || decision.state !== 'APPROVED') {
+              if (!reviewBasis) {
+                const decision = await latestCodeRabbitDecision(pr);
                 core.info(
                   `PR #${pr.number}: current-head CodeRabbit decision is ${decision?.state || 'missing'}; not mergeable yet.`
                 );
                 continue;
               }
 
-              // Enforce our intended ordering: CI first, then a completed
-              // CodeRabbit review of that exact current head.
-              const ciCompletedAt = new Date(ci.updated_at || ci.created_at).getTime();
-              const rabbitCompletedAt = new Date(
-                rabbitStatus.updated_at || rabbitStatus.created_at
-              ).getTime();
-              if (rabbitCompletedAt < ciCompletedAt) {
+              if (reviewBasis.carried) {
                 core.info(
-                  `PR #${pr.number}: current-head CodeRabbit completion predates CI; waiting for the post-CI review.`
+                  `PR #${pr.number}: using CodeRabbit approval from ${reviewBasis.sourceSha} for clean main-sync head ${pr.head.sha}; current-head CI remains mandatory.`
                 );
-                continue;
               }
 
               // Re-read every merge-critical fact immediately before the write.
@@ -847,42 +1036,23 @@ jobs:
               }
 
               const finalCi = await latestCurrentHeadCi(pr);
-              const finalRabbitStatus = await latestCodeRabbitStatus(pr.head.sha);
-              const finalDecision = await latestCodeRabbitDecision(pr);
+              const finalReviewBasis =
+                await codeRabbitReviewBasis(pr, pr.head.sha);
               const finalUnresolvedThreads =
                 await unresolvedCodeRabbitThreads(pr);
               const finalCurrentHeadNitpicks =
-                await currentHeadCodeRabbitNitpickReviews(pr);
+                await codeRabbitNitpickReviews(pr);
 
               if (
                 !finalCi ||
                 finalCi.status !== 'completed' ||
                 finalCi.conclusion !== 'success' ||
-                !finalRabbitStatus ||
-                finalRabbitStatus.state !== 'success' ||
-                !/Review completed/i.test(finalRabbitStatus.description || '') ||
-                !finalDecision ||
-                finalDecision.state !== 'APPROVED' ||
+                !finalReviewBasis ||
                 finalUnresolvedThreads.length !== 0 ||
                 finalCurrentHeadNitpicks.length !== 0
               ) {
                 core.info(
                   `PR #${pr.number}: gate changed during final revalidation; merge cancelled.`
-                );
-                continue;
-              }
-
-              const finalCiCompletedAt = new Date(
-                finalCi.updated_at || finalCi.created_at
-              ).getTime();
-              if (
-                new Date(
-                  finalRabbitStatus.updated_at ||
-                  finalRabbitStatus.created_at
-                ).getTime() < finalCiCompletedAt
-              ) {
-                core.info(
-                  `PR #${pr.number}: post-CI CodeRabbit ordering changed; merge cancelled.`
                 );
                 continue;
               }
@@ -917,11 +1087,12 @@ jobs:
               }
 
               core.notice(
-                `PR #${pr.number}: auto-merged at reviewed head ${pr.head.sha}; merge commit ${result.sha}.`
+                `PR #${pr.number}: auto-merged head ${pr.head.sha} using CodeRabbit approval from ${finalReviewBasis.sourceSha}; merge commit ${result.sha}.`
               );
 
               // Merge at most one PR per controller run. The main push triggers
               // a new run, which first refreshes every remaining branch from the
-              // new main and forces fresh CI + CodeRabbit review before merging.
+              // new main. Clean controller-generated syncs keep an already valid
+              // CodeRabbit approval; all other new commits require a fresh review.
               break;
             }
