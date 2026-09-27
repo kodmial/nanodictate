@@ -107,10 +107,8 @@ jobs:
 
             if (pr.data.head.sha !== verifiedHead) {
               core.notice(
-                `Ignoring stale UNRESOLVED comment ${unresolved.id}: it verified ${verifiedHead}, while current HEAD is ${pr.data.head.sha}.`
+                `UNRESOLVED comment ${unresolved.id} was created for ${verifiedHead}, while current HEAD is ${pr.data.head.sha}. It will be processed against the current code instead of being dropped.`
               );
-              core.setOutput('should_run', 'false');
-              return;
             }
 
             core.setOutput('should_run', 'true');
@@ -163,11 +161,7 @@ jobs:
           set -euo pipefail
 
           CURRENT_HEAD="$(git rev-parse HEAD)"
-          if [[ "$CURRENT_HEAD" != "$SOURCE_HEAD" ]]; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "PR HEAD advanced from $SOURCE_HEAD to $CURRENT_HEAD before repair; skipping stale UNRESOLVED response."
-            exit 0
-          fi
+          echo "started_head=$CURRENT_HEAD" >> "$GITHUB_OUTPUT"
 
           PROMPT=$(cat <<EOF
           Fix the specific CodeRabbit finding that is still UNRESOLVED on pull request #${PR_NUMBER}.
@@ -176,20 +170,24 @@ jobs:
           - Original CodeRabbit review id: ${REVIEW_ID}
           - Original finding review-comment id: ${FINDING_ID}
           - Latest CodeRabbit UNRESOLVED reply id: ${UNRESOLVED_ID}
-          - Verified PR HEAD: ${SOURCE_HEAD}
+          - PR HEAD that CodeRabbit evaluated for this UNRESOLVED reply: ${SOURCE_HEAD}
+          - Current checked-out PR HEAD: ${CURRENT_HEAD}
           - Current checked-out PR branch: ${HEAD_REF}
 
-          Inspect the original finding, the complete review thread, the UNRESOLVED reply,
-          the current code, and the current PR diff using GitHub CLI/API before editing.
+          The PR may have advanced since CodeRabbit produced this UNRESOLVED reply because
+          another unresolved finding was repaired first. Do not treat that as a reason to skip
+          this finding. Inspect the original finding, the complete review thread, the latest
+          UNRESOLVED reply, the current code, and the current PR diff using GitHub CLI/API.
 
           Requirements:
-          - Fix exactly what CodeRabbit says remains unresolved in that thread.
+          - Fix exactly what CodeRabbit says remains unresolved in that thread, against the current code.
+          - If another repair already fixed this finding, leave the code unchanged.
           - Keep the change scoped to this finding; do not make unrelated refactors.
           - Run the relevant tests, linters, or validation for the files you change.
           - Do not create or switch branches and do not create a new pull request.
           - Do not resolve or dismiss the review thread yourself.
           - Do not commit or push; the workflow will commit and push any resulting changes.
-          - If the finding is already fixed or CodeRabbit is incorrect, leave the code unchanged.
+          - If CodeRabbit is incorrect, leave the code unchanged.
           - Keep all comments and commit messages in English.
           EOF
           )
@@ -198,7 +196,13 @@ jobs:
 
           if [[ -z "$(git status --porcelain)" ]]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "OpenCode made no code change for UNRESOLVED comment $UNRESOLVED_ID."
+            if [[ "$CURRENT_HEAD" != "$SOURCE_HEAD" ]]; then
+              echo "verify=true" >> "$GITHUB_OUTPUT"
+              echo "OpenCode made no code change, but HEAD advanced from $SOURCE_HEAD to $CURRENT_HEAD; requesting CodeRabbit verification on the current code."
+            else
+              echo "verify=false" >> "$GITHUB_OUTPUT"
+              echo "OpenCode made no code change for UNRESOLVED comment $UNRESOLVED_ID on the same HEAD; not creating a same-state verification loop."
+            fi
             exit 0
           fi
 
@@ -206,11 +210,12 @@ jobs:
           git commit -m "fix: address unresolved CodeRabbit finding"
           git push origin "HEAD:${HEAD_REF}"
           echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "verify=true" >> "$GITHUB_OUTPUT"
 
-      - name: Ask CodeRabbit to verify the repaired finding
+      - name: Ask CodeRabbit to verify the finding on the current HEAD
         if: >-
           steps.context.outputs.should_run == 'true' &&
-          steps.fix.outputs.changed == 'true'
+          steps.fix.outputs.verify == 'true'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
           PR_NUMBER: ${{ steps.context.outputs.pr_number }}
@@ -233,13 +238,6 @@ jobs:
               pull_number: pullNumber,
             });
             const headSha = pr.data.head.sha;
-
-            if (headSha === sourceHead) {
-              core.notice(
-                `No new PR HEAD was pushed after repairing finding ${findingId}; verification will not be requested again.`
-              );
-              return;
-            }
 
             const comments = await github.paginate(
               github.rest.pulls.listReviewComments,
@@ -271,6 +269,7 @@ jobs:
               '@coderabbitai Re-check this exact original finding after the OpenCode retry.',
               '',
               `Current PR HEAD: \`${headSha}\``,
+              `Previous HEAD associated with the UNRESOLVED reply: \`${sourceHead}\``,
               '',
               'Compare the original finding and your latest UNRESOLVED explanation with the current code itself.',
               '',
@@ -290,5 +289,5 @@ jobs:
             );
 
             core.notice(
-              `Requested CodeRabbit verification for finding ${findingId} at new HEAD ${headSha}.`
+              `Requested CodeRabbit verification for finding ${findingId} at current HEAD ${headSha}.`
             );
