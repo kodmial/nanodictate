@@ -28,7 +28,7 @@ public struct NoiseFloorTracker: Equatable {
     minFloor: Float = 0.0001,
     maxFloor: Float = 0.02,
     downTau: TimeInterval = 0.4,
-    upTau: TimeInterval = 8.0
+    upTau: TimeInterval = 3.0
   ) {
     self.minFloor = minFloor
     self.maxFloor = maxFloor
@@ -155,12 +155,16 @@ public struct AdaptiveVAD: Equatable {
     let cleanRms = rms.isFinite ? min(max(rms, 0), 1) : 0
     let enter = enterThreshold
     let exit = exitThreshold
+    // Relative tolerance for the enter comparison: a level sitting exactly on
+    // the threshold (for example -52 dBFS speech vs a computed -52 dBFS enter)
+    // must read as speech despite Float rounding of 10^(db/20).
+    let enterWithTolerance = enter * 0.999
     if isSpeech {
       if cleanRms < exit {
         isSpeech = false
       }
     } else {
-      if cleanRms >= enter {
+      if cleanRms >= enterWithTolerance {
         isSpeech = true
       }
     }
