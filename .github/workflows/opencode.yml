@@ -38,7 +38,9 @@ jobs:
       github.event_name == 'pull_request_review' &&
       github.event.action == 'submitted' &&
       github.event.review.user.login == 'coderabbitai[bot]' &&
-      github.event.review.state == 'changes_requested' &&
+      (github.event.review.state == 'changes_requested' ||
+       (github.event.review.state == 'commented' &&
+        contains(github.event.review.body, 'Nitpick comments'))) &&
       github.event.pull_request.state == 'open' &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
@@ -49,7 +51,7 @@ jobs:
       contents: read
 
     steps:
-      - name: Dispatch OpenCode for CodeRabbit findings
+      - name: Dispatch OpenCode for all CodeRabbit findings
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -145,16 +147,17 @@ jobs:
         run: |
           set -euo pipefail
           PROMPT=$(cat <<EOF
-          Fix the actionable CodeRabbit review feedback on pull request #${PR_NUMBER}.
+          Fix every CodeRabbit review finding on pull request #${PR_NUMBER}.
 
           Context:
-          - CodeRabbit submitted review id ${REVIEW_ID} with CHANGES_REQUESTED.
+          - CodeRabbit submitted review id ${REVIEW_ID}.
           - The current checkout is the existing PR head branch: ${HEAD_REF}.
-          - Inspect that CodeRabbit review, its inline review comments, the PR conversation,
-            and the current diff using GitHub CLI/API as needed.
+          - Inspect that CodeRabbit review body, its inline review comments, the PR
+            conversation, and the current diff using GitHub CLI/API as needed.
 
           Requirements:
-          - Address every actionable finding from that CodeRabbit review.
+          - Address every finding from that CodeRabbit review, including non-blocking
+            nitpick feedback that CodeRabbit may submit as COMMENTED while also approving.
           - Keep fixes scoped to the review feedback; do not make unrelated refactors.
           - Run the relevant tests, linters, or validation for the files you change.
           - Work only in the current checked-out PR branch. Do not create or switch to
@@ -214,8 +217,8 @@ jobs:
             );
 
             if (findings.length === 0) {
-              core.setFailed(
-                `CodeRabbit review ${reviewId} has no inline findings to verify.`
+              core.notice(
+                `CodeRabbit review ${reviewId} has no inline threads; review-body feedback will be re-checked by the next current-head CodeRabbit review.`
               );
               return;
             }
