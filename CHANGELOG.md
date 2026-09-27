@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `skip-release` PR label — the explicit opt-out from release automation. A
+  merged PR carrying the label is a green no-op in `bump-version.yml`:
+  `Sources/NanoDictateCore/Version.swift` stays untouched, nothing is committed
+  or pushed, and `release.yml` is not dispatched, even when the PR's file paths
+  would count as releasable. The label is read straight from the
+  `pull_request` event payload (no extra API call) and checked before the
+  version comparison, the diff classification and any write. Documented in
+  `CONTRIBUTING.md` and in the PR template.
+- `scripts/release-policy.sh` — the release policy (`skip-release` gate,
+  path-based exclusions, macports `PIN_REV`-only installer diff, version shape
+  and the 0.0.x automatic-bump cap) extracted from the workflow so it can be
+  unit-tested, plus `scripts/test-release-policy.sh`, run by `ci.yml` on
+  `ubuntu-latest` against real `git diff` output.
+
+### Fixed
+
+- The automatic bump no longer leaves `CHANGELOG.md` behind `Version.swift`.
+  `bump-version.yml` bumped the version constant on every releasable merge but
+  never cut a matching release section, so the very first automatic bump
+  (v0.1.2) turned `VersionTests.testVersionStringEqualsCurrentRelease` red on
+  `main` and on every open PR. The bump step now cuts the `## [<version>]`
+  section, reopens an empty `## [Unreleased]` above it and refreshes the compare
+  links, through the tested `policy_changelog_cut_release` in
+  `scripts/release-policy.sh`. The missing v0.1.2 section is added below.
+- `bump-version.yml` no longer fails the run when a merge is correctly
+  classified as not releasable. The "no code changes" guard (docs-only,
+  `.github/`-only, packaging-only, `PIN_REV`-only changes) used to `exit 1`
+  after already refusing the bump, turning a green no-op into a red check on
+  the merge; it now finishes successfully, records the reason in the job
+  summary and leaves the version and the release workflow alone. Only a genuine
+  policy error — an unparsable `Version.swift` or a version outside
+  `0.0.x` / `0.1.x` — still fails the workflow.
+
 ## [0.1.2] - 2026-09-26
 
 ### Added
@@ -282,7 +317,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/kodmial/nanodictate/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/kodmial/nanodictate/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/kodmial/nanodictate/compare/v0.0.16...v0.1.0
 [0.0.16]: https://github.com/kodmial/nanodictate/compare/v0.0.13...v0.0.16
