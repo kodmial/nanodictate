@@ -47,6 +47,52 @@ jobs:
               per_page: 100,
             });
 
+            const pr = context.payload.pull_request;
+            const repoFullName = `${context.repo.owner}/${context.repo.repo}`;
+            const filenames = files.map(({ filename }) => filename);
+            const sameRepo = pr.head.repo?.full_name === repoFullName;
+            const labelNames = new Set((pr.labels || []).map(label => label.name));
+
+            // Generated release PRs are data-only changes. Do not spend a macOS
+            // runner rebuilding application code that did not change. The fast
+            // path is deliberately strict: same-repository automation branch,
+            // expected lifecycle marker (for release-please), and no file
+            // outside the generator-owned allow-list. Anything unexpected falls
+            // back to the normal full build instead of being trusted.
+            const releaseFiles = new Set([
+              '.release-please-manifest.json',
+              'CHANGELOG.md',
+              'Sources/NanoDictateCore/Version.swift',
+            ]);
+            const manifestFiles = new Set([
+              'nanodictate.rb',
+              'packaging/homebrew/nanodictate.rb',
+              'packaging/homebrew/Casks/nanodictate.rb',
+              'packaging/macports/Portfile',
+              'scripts/install-macports.sh',
+            ]);
+            const onlyAllowed = (allowed) =>
+              filenames.length > 0 && filenames.every(path => allowed.has(path));
+
+            const trustedReleasePr =
+              sameRepo &&
+              pr.head.ref === 'release-please--branches--main' &&
+              labelNames.has('autorelease: pending') &&
+              onlyAllowed(releaseFiles);
+            const trustedManifestPr =
+              sameRepo &&
+              pr.head.ref.startsWith('chore/release-manifests-v') &&
+              onlyAllowed(manifestFiles);
+
+            if (trustedReleasePr || trustedManifestPr) {
+              core.notice(
+                `Trusted generated ${trustedReleasePr ? 'Release' : 'manifest'} PR: skipping macOS build/tests; lightweight policy jobs remain required.`
+              );
+              core.info(`Changed files: ${filenames.join(', ')}`);
+              core.setOutput('build_required', 'false');
+              return;
+            }
+
             // Keep this intentionally conservative: only documentation-only PRs
             // skip the expensive macOS runner. Any non-documentation file means
             // the normal build, lint, and test job still runs.
@@ -59,7 +105,7 @@ jobs:
               isDocumentationOnlyPath(filename)
             );
 
-            core.info(`Changed files: ${files.map(({ filename }) => filename).join(', ')}`);
+            core.info(`Changed files: ${filenames.join(', ')}`);
             core.info(docsOnly
               ? 'Documentation-only PR: skipping macOS build and tests.'
               : 'Code or non-documentation change detected: macOS build and tests are required.');
