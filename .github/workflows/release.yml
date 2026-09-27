@@ -788,8 +788,8 @@ jobs:
           fi
           # Lookup failures must fail the step (no `|| true`): an API error
           # is not "nothing pending".
-          PENDING_JSON=$(gh pr list --repo "$GH_REPO" --label "autorelease: pending" --state merged --limit 20 --json number,title,body,headRefName)
-          MATCHED=$(jq -r --arg v "$RELEASE_VERSION" '.[] | select(.headRefName == "release-please--branches--main") | select(((.title // "") + "\n" + (.body // "")) | contains($v)) | .number' <<<"$PENDING_JSON")
+          PENDING_JSON=$(gh pr list --repo "$GH_REPO" --label "autorelease: pending" --state merged --limit 1000 --json number,title,body,headRefName)
+          MATCHED=$(jq -r --arg v "$RELEASE_VERSION" '($v | gsub("\\."; "\\.")) as $re | .[] | select(.headRefName == "release-please--branches--main") | select(((.title // "") + "\n" + (.body // "")) | test("(^|[^0-9.])v?" + $re + "([^0-9.]|\\.[^0-9]|$)")) | .number' <<<"$PENDING_JSON")
           if [[ -z "${MATCHED//[[:space:]]/}" ]]; then
             echo "No merged Release PR labeled 'autorelease: pending' matches v$RELEASE_VERSION — nothing to mark tagged."
             exit 0
