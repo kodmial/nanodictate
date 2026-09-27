@@ -601,6 +601,11 @@ public final class AudioService {
       let warmed = (warmedHWSignature == signature) ? warmedConverter : nil
       lock.unlock()
       if let warmed {
+        // AVAudioConverter is stateful (resample filter state): an instance
+        // used by a previous session must be reset before reuse, otherwise
+        // leftover state leaks into the next session (extra output samples,
+        // VAD ringing on silence after prior speech).
+        warmed.reset()
         capturedConverter = warmed
         reusedWarmedConverter = true
       } else {
@@ -1026,9 +1031,15 @@ public final class AudioService {
     guard setupError == nil, let hw = hwFormat else { return }
     let signature = Self.hwSignature(sampleRate: hw.sampleRate, channels: hw.channelCount)
     lock.lock()
-    let alreadyWarm = warmedHWSignature == signature && warmedConverter != nil
+    let cached = (warmedHWSignature == signature) ? warmedConverter : nil
     lock.unlock()
-    guard !alreadyWarm else { return }
+    // The cached instance may be the converter just used for live streaming
+    // (same object as the session converter): reset its filter state so the
+    // next start reuses a clean converter, identical to a fresh instance.
+    if let cached {
+      cached.reset()
+      return
+    }
     var converter: AVAudioConverter?
     let converterError = guardedEngineCall {
       converter = AVAudioConverter(from: hw, to: self.targetFormat)

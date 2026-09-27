@@ -2108,17 +2108,13 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       // abort the pending startup race-safely. The session token is
       // invalidated so a late engine-start completion only cancels its stray
       // engine and a late capture-ready never emits the success cue.
+      // Falls through to the shared terminal tail below (single hideAfter):
+      // bring-up cancel hides exactly like a regular cancel.
       guard isStarting else { return }
       startSession += 1
       isStarting = false
       audio.cancel()
       Logger.log("record start cancelled during bring-up")
-      enterSendLatch.cancel()
-      overlay.resetPhase()
-      overlay.setStatus(L10n.tr("overlay.cancelled"))
-      sounds.playCancel()
-      hideAfter(0.8, reason: "start cancelled")
-      return
     }
     // Spec: Esc extinguishes the synthetic-Enter latch — a cancelled
     // recording/recognition does not post Enter. In .idle we return above
