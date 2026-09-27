@@ -1,10 +1,8 @@
 name: Retry CodeRabbit after rate limit
 
 on:
-  schedule:
-    # GitHub's minimum schedule interval is 5 minutes. Avoid minute 0, where
-    # scheduled workflows are more likely to be delayed under high load.
-    - cron: '3,8,13,18,23,28,33,38,43,48,53,58 * * * *'
+  # Manual fallback only. Automatic rate-limit recovery is handled by
+  # auto-merge.yml, whose existing five-minute schedule is already proven active.
   workflow_dispatch:
 
 permissions:
