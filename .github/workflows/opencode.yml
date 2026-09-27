@@ -134,7 +134,7 @@ jobs:
           # state underneath that lifecycle. OpenCode evaluates explicit deny
           # rules even in auto mode; read-only Git inspection remains allowed.
           OPENCODE_CONFIG_CONTENT: >-
-            {"permission":{"bash":{"*":"allow","git *":"deny","git status":"allow","git status *":"allow","git diff":"allow","git diff *":"allow","git log":"allow","git log *":"allow","git show":"allow","git show *":"allow","git rev-parse *":"allow","git ls-files":"allow","git ls-files *":"allow","git grep *":"allow","git blame *":"allow","git branch --show-current":"allow","git remote -v":"allow","git tag":"allow","git tag *":"allow","git describe *":"allow"}}}
+            {"permission":{"bash":{"*":"allow","git *":"deny","git status":"allow","git status *":"allow","git diff":"allow","git diff *":"allow","git log":"allow","git log *":"allow","git show":"allow","git show *":"allow","git rev-parse *":"allow","git ls-files":"allow","git ls-files *":"allow","git grep *":"allow","git blame *":"allow","git branch --show-current":"allow","git remote -v":"allow","git tag":"allow","git tag --list *":"allow","git tag -l *":"allow","git describe *":"allow"}}}
         with:
           model: ${{ vars.OPENCODE_MODEL || 'opencode/big-pickle' }}
           use_github_token: true
