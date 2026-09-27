@@ -138,24 +138,47 @@ public enum ProviderRequestBuilder {
     // already non-empty values is a no-op — caller may resolve in advance.
     let resolvedBaseURL = resolveBaseURL(baseURL, for: adapterID)
     let resolvedModel = resolveModel(model, for: adapterID)
-    // Batch chaining prompt wins over explicit; stable fields gated per
-    // provider (cloudflare = nil).
-    let effectivePrompt = batchParams?.prompt ?? prompt
-    let stable = BatchStableMultipartFields.stableFields(for: adapterID, params: batchParams)
-    switch STTAdapterID.from(adapterID) {
-    case .cloudflare:
+    // Model-aware profile drives every parameter decision below: a parameter
+    // is sent only when the concrete (adapterID, model) profile supports it,
+    // never merely because the provider family supports it on another model.
+    let profile = STTModelRegistry.resolve(adapterID: adapterID, model: resolvedModel)
+    let caps = profile.capabilities
+    // Batch chaining prompt wins over explicit; gated by prompt support.
+    // Language hint gated by languageHint mode (none — never sent).
+    let effectivePrompt = caps.supportsPrompt ? (batchParams?.prompt ?? prompt) : nil
+    let effectiveLanguage = caps.languageHint == .none ? "" : language
+    let stable = BatchStableMultipartFields.stableFields(
+      for: adapterID, model: resolvedModel, params: batchParams)
+    switch caps.transport {
+    case .batchRawAudio:
       return planCloudflare(baseURL: resolvedBaseURL, apiKey: apiKey, wav: wav)
-    case .openai, .groq, .openAICompatible:
+    case .batchMultipart:
       return planOpenAICompatible(
         adapterID: adapterID,
         baseURL: resolvedBaseURL,
         model: resolvedModel,
         apiKey: apiKey,
-        language: language,
+        language: effectiveLanguage,
         wav: wav,
         filename: filename,
         prompt: effectivePrompt,
-        stable: stable
+        stable: stable,
+        capabilities: caps
+      )
+    case .streamingSession:
+      // Reserved for future WebSocket streaming (non-goal): no profile uses
+      // it yet; fall back to multipart so the request path stays total.
+      return planOpenAICompatible(
+        adapterID: adapterID,
+        baseURL: resolvedBaseURL,
+        model: resolvedModel,
+        apiKey: apiKey,
+        language: effectiveLanguage,
+        wav: wav,
+        filename: filename,
+        prompt: effectivePrompt,
+        stable: stable,
+        capabilities: caps
       )
     }
   }
@@ -172,6 +195,26 @@ public enum ProviderRequestBuilder {
       return model
     }
     return STTAdapterID.from(adapterID).defaultModel
+  }
+
+  /// Model-aware profile for a concrete (adapterID, model) pair.
+  /// Single entry point for request construction, stable-field gating and
+  /// audio preparation — callers never branch on provider/model themselves.
+  public static func profile(adapterID: String, model: String) -> STTModelProfile {
+    let resolvedModel = resolveModel(model, for: adapterID)
+    return STTModelRegistry.resolve(adapterID: adapterID, model: resolvedModel)
+  }
+
+  /// Model-aware capabilities for a concrete (adapterID, model) pair.
+  public static func capabilities(adapterID: String, model: String) -> STTCapabilities {
+    profile(adapterID: adapterID, model: model).capabilities
+  }
+
+  /// Model-specific audio requirements (sample rate / channels / format).
+  /// Audio preparation consults this instead of assuming the common batch
+  /// profile; all built-in models currently require 16 kHz mono WAV.
+  public static func audioProfile(adapterID: String, model: String) -> STTAudioProfile {
+    profile(adapterID: adapterID, model: model).audio
   }
 
   /// Transcript text from response body. path == nil → flat {"text": "…"}
@@ -359,6 +402,8 @@ extension ProviderRequestBuilder {
   // MARK: - Адаптеры
 
   /// OpenAI / Groq / openai-compatible: multipart + Bearer.
+  /// Parameter inclusion is driven by `capabilities` (model-aware profile),
+  /// never by the adapter id alone.
   // swiftlint:disable:next function_parameter_count
   private static func planOpenAICompatible(
     adapterID: String,
@@ -369,12 +414,15 @@ extension ProviderRequestBuilder {
     wav: Data,
     filename: String,
     prompt: String?,
-    stable: BatchStableMultipartFields? = nil
+    stable: BatchStableMultipartFields? = nil,
+    capabilities: STTCapabilities? = nil
   ) -> STTRequestSpec {
     let boundary = "Boundary-\(UUID().uuidString)"
-    // Word timestamps (verbose_json) — only where support is guaranteed.
-    let timestamps = supportsWordTimestamps(adapterID)
-    let verbose = supportsVerboseJSON(adapterID)
+    // Word timestamps (verbose_json) — only where the concrete model profile
+    // guarantees support.
+    let caps = capabilities ?? STTModelRegistry.resolve(adapterID: adapterID, model: model).capabilities
+    let timestamps = caps.supportsWordTimestamps
+    let verbose = caps.supportsVerboseJSON
     let multipart = multipartBody(
       wav: wav,
       filename: filename,
@@ -391,29 +439,6 @@ extension ProviderRequestBuilder {
       headers: [("Authorization", "Bearer \(apiKey)")],
       body: .multipart(data: multipart, contentType: "multipart/form-data; boundary=\(boundary)")
     )
-  }
-
-  /// Providers with word timestamps (verbose_json +
-  /// timestamp_granularities[]=word). Not cloudflare: raw WAV body
-  /// (see planCloudflare).
-  private static func supportsWordTimestamps(_ adapterID: String) -> Bool {
-    switch STTAdapterID.from(adapterID) {
-    case .openai: return true
-    // openAICompatible — произвольный сторонний endpoint: granularity не
-    // гарантирована, включаем только у guaranteed-совместимых.
-    case .openAICompatible, .groq, .cloudflare: return false
-    }
-  }
-
-  /// Providers asked for verbose_json. Groq formally supports it (word
-  /// timestamps in response) but rejects timestamp_granularities[] — HTTP
-  /// 400. So granularities stay separate.
-  private static func supportsVerboseJSON(_ adapterID: String) -> Bool {
-    switch STTAdapterID.from(adapterID) {
-    case .openai, .groq: return true
-    // openAICompatible не гарантирует verbose_json — не запрашиваем.
-    case .openAICompatible, .cloudflare: return false
-    }
   }
 
   /// Cloudflare Workers AI Whisper: body — raw WAV bytes (multipart
