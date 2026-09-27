@@ -158,6 +158,25 @@ jobs:
                 .at(-1) || null;
             }
 
+            async function currentHeadCodeRabbitNitpickReviews(pr) {
+              const reviews = await github.paginate(
+                github.rest.pulls.listReviews,
+                {
+                  owner,
+                  repo,
+                  pull_number: pr.number,
+                  per_page: 100,
+                }
+              );
+
+              return reviews.filter(review =>
+                review.user?.login?.startsWith('coderabbitai') &&
+                review.commit_id === pr.head.sha &&
+                review.state === 'COMMENTED' &&
+                /comments?\s*\(\s*[1-9]\d*\s*\)/i.test(review.body || '')
+              );
+            }
+
             async function unresolvedCodeRabbitThreads(pr) {
               const unresolved = [];
               let cursor = null;
@@ -395,6 +414,20 @@ jobs:
                 continue;
               }
 
+              // CodeRabbit may approve while also emitting non-blocking nitpicks in
+              // a COMMENTED review. The user policy is stricter: those findings
+              // must also be processed. If such feedback belongs to the current
+              // head, OpenCode gets a repair pass and merge stays blocked until a
+              // newer head receives a clean CodeRabbit review.
+              const currentHeadNitpicks =
+                await currentHeadCodeRabbitNitpickReviews(pr);
+              if (currentHeadNitpicks.length > 0) {
+                core.info(
+                  `PR #${pr.number}: waiting for ${currentHeadNitpicks.length} current-head CodeRabbit nitpick review(s) to be addressed.`
+                );
+                continue;
+              }
+
               // The exact-head "Review completed" status above proves freshness.
               // The durable GitHub-native review decision proves acceptance.
               // Keep these as separate signals because CodeRabbit may retain an
@@ -443,6 +476,8 @@ jobs:
               const finalDecision = await latestCodeRabbitDecision(pr);
               const finalUnresolvedThreads =
                 await unresolvedCodeRabbitThreads(pr);
+              const finalCurrentHeadNitpicks =
+                await currentHeadCodeRabbitNitpickReviews(pr);
 
               if (
                 !finalCi ||
@@ -453,7 +488,8 @@ jobs:
                 !/Review completed/i.test(finalRabbitStatus.description || '') ||
                 !finalDecision ||
                 finalDecision.state !== 'APPROVED' ||
-                finalUnresolvedThreads.length !== 0
+                finalUnresolvedThreads.length !== 0 ||
+                finalCurrentHeadNitpicks.length !== 0
               ) {
                 core.info(
                   `PR #${pr.number}: gate changed during final revalidation; merge cancelled.`
