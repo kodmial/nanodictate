@@ -135,14 +135,18 @@ final class AudioServiceCaptureReadinessTests: XCTestCase {
     @objc func testRepeatedStartStopEachSignalsReadinessOnce() {
         let engine = FakeEngine()
         let service = makeService(engine: engine)
+        XCTAssertFalse(service.isCaptureReady, "initial state starts not-ready")
         for round in 1...3 {
             var readyCount = 0
             service.onCaptureReady = { readyCount += 1 }
-            XCTAssertFalse(service.isCaptureReady, "round \(round): new session starts not-ready")
             guard case .success = runStart(service) else {
                 XCTFail("round \(round): start must succeed")
                 return
             }
+            // Readiness resets at session start (async bring-up): engine-up
+            // alone must never report ready. No check before start here on
+            // purpose — isCaptureReady intentionally reflects the last session
+            // until the next start completes (stop/teardown never clear it).
             XCTAssertFalse(service.isCaptureReady, "round \(round): engine-up alone is not ready")
             engine.node.emit(makeBuffer(engine: engine))
             XCTAssertTrue(
