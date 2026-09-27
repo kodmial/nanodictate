@@ -137,13 +137,17 @@ jobs:
                 }
               );
 
-              // Use the latest CodeRabbit review of ANY state on this exact SHA.
-              // This deliberately treats COMMENTED/DISMISSED after an approval as
-              // a blocker rather than accidentally falling back to an older APPROVED.
+              // APPROVED/CHANGES_REQUESTED are durable PR decisions. CodeRabbit
+              // does not necessarily submit a duplicate APPROVED review after a
+              // later clean incremental review when the PR is already approved
+              // (observed on NanoDictate PR #7). Bind freshness to the exact-head
+              // "Review completed" status below, and use the newest decisive
+              // CodeRabbit review as the effective approval state.
               return reviews
                 .filter(review =>
                   review.user?.login?.startsWith('coderabbitai') &&
-                  review.commit_id === pr.head.sha
+                  (review.state === 'APPROVED' ||
+                   review.state === 'CHANGES_REQUESTED')
                 )
                 .sort((a, b) => {
                   const time =
@@ -152,6 +156,69 @@ jobs:
                   return time || Number(a.id) - Number(b.id);
                 })
                 .at(-1) || null;
+            }
+
+            async function unresolvedCodeRabbitThreads(pr) {
+              const unresolved = [];
+              let cursor = null;
+
+              do {
+                const data = await github.graphql(
+                  `query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+                    repository(owner: $owner, name: $repo) {
+                      pullRequest(number: $number) {
+                        reviewThreads(first: 100, after: $cursor) {
+                          nodes {
+                            id
+                            isResolved
+                            isOutdated
+                            path
+                            comments(first: 1) {
+                              nodes {
+                                databaseId
+                                author { login }
+                              }
+                            }
+                          }
+                          pageInfo {
+                            hasNextPage
+                            endCursor
+                          }
+                        }
+                      }
+                    }
+                  }`,
+                  {
+                    owner,
+                    repo,
+                    number: pr.number,
+                    cursor,
+                  }
+                );
+
+                const connection =
+                  data.repository.pullRequest.reviewThreads;
+                for (const thread of connection.nodes || []) {
+                  const root = thread.comments?.nodes?.[0];
+                  if (
+                    root?.author?.login?.startsWith('coderabbitai') &&
+                    !thread.isResolved
+                  ) {
+                    unresolved.push({
+                      id: thread.id,
+                      commentId: root.databaseId,
+                      path: thread.path,
+                      outdated: thread.isOutdated,
+                    });
+                  }
+                }
+
+                cursor = connection.pageInfo.hasNextPage
+                  ? connection.pageInfo.endCursor
+                  : null;
+              } while (cursor);
+
+              return unresolved;
             }
 
             async function dispatchConflictRepair(pr, reason) {
@@ -311,31 +378,45 @@ jobs:
                 continue;
               }
 
-              // The authoritative acceptance signal is CodeRabbit's latest
-              // GitHub-native review on this exact SHA. With
-              // request_changes_workflow enabled, CodeRabbit requests changes for
-              // actionable findings and submits APPROVED once they are resolved.
-              // Any later non-APPROVED review blocks merging.
-              const decision = await latestCodeRabbitDecision(pr);
-              if (!decision || decision.state !== 'APPROVED') {
+              // Never lose an old CodeRabbit finding just because its diff is
+              // now outdated. Every CodeRabbit-authored inline thread must be
+              // resolved by CodeRabbit before merge.
+              const unresolvedThreads =
+                await unresolvedCodeRabbitThreads(pr);
+              if (unresolvedThreads.length > 0) {
                 core.info(
-                  `PR #${pr.number}: latest CodeRabbit decision for current head is ${decision?.state || 'missing'}; not mergeable yet.`
+                  `PR #${pr.number}: waiting for ${unresolvedThreads.length} unresolved CodeRabbit thread(s): ` +
+                  unresolvedThreads
+                    .map(thread =>
+                      `#${thread.commentId || thread.id} ${thread.path}${thread.outdated ? ' (outdated)' : ''}`
+                    )
+                    .join(', ')
                 );
                 continue;
               }
 
-              // Enforce our intended ordering: CI first, CodeRabbit review after.
+              // The exact-head "Review completed" status above proves freshness.
+              // The durable GitHub-native review decision proves acceptance.
+              // Keep these as separate signals because CodeRabbit may retain an
+              // earlier APPROVED review instead of submitting a duplicate
+              // approval after a later clean incremental review.
+              const decision = await latestCodeRabbitDecision(pr);
+              if (!decision || decision.state !== 'APPROVED') {
+                core.info(
+                  `PR #${pr.number}: effective CodeRabbit decision is ${decision?.state || 'missing'}; not mergeable yet.`
+                );
+                continue;
+              }
+
+              // Enforce our intended ordering: CI first, then a completed
+              // CodeRabbit review of that exact current head.
               const ciCompletedAt = new Date(ci.updated_at || ci.created_at).getTime();
-              const approvalAt = new Date(decision.submitted_at || 0).getTime();
               const rabbitCompletedAt = new Date(
                 rabbitStatus.updated_at || rabbitStatus.created_at
               ).getTime();
-              if (
-                approvalAt < ciCompletedAt ||
-                rabbitCompletedAt < ciCompletedAt
-              ) {
+              if (rabbitCompletedAt < ciCompletedAt) {
                 core.info(
-                  `PR #${pr.number}: CodeRabbit approval/status predates current-head CI; waiting for the post-CI review.`
+                  `PR #${pr.number}: current-head CodeRabbit completion predates CI; waiting for the post-CI review.`
                 );
                 continue;
               }
@@ -360,6 +441,8 @@ jobs:
               const finalCi = await latestCurrentHeadCi(pr);
               const finalRabbitStatus = await latestCodeRabbitStatus(pr.head.sha);
               const finalDecision = await latestCodeRabbitDecision(pr);
+              const finalUnresolvedThreads =
+                await unresolvedCodeRabbitThreads(pr);
 
               if (
                 !finalCi ||
@@ -369,7 +452,8 @@ jobs:
                 finalRabbitStatus.state !== 'success' ||
                 !/Review completed/i.test(finalRabbitStatus.description || '') ||
                 !finalDecision ||
-                finalDecision.state !== 'APPROVED'
+                finalDecision.state !== 'APPROVED' ||
+                finalUnresolvedThreads.length !== 0
               ) {
                 core.info(
                   `PR #${pr.number}: gate changed during final revalidation; merge cancelled.`
@@ -381,8 +465,6 @@ jobs:
                 finalCi.updated_at || finalCi.created_at
               ).getTime();
               if (
-                new Date(finalDecision.submitted_at || 0).getTime() <
-                  finalCiCompletedAt ||
                 new Date(
                   finalRabbitStatus.updated_at ||
                   finalRabbitStatus.created_at
