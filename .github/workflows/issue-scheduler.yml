@@ -1,0 +1,276 @@
+name: Issue scheduler
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/15 * * * *"
+  issues:
+    types: [opened, reopened, closed, labeled, unlabeled]
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue-scheduler
+  cancel-in-progress: false
+
+jobs:
+  schedule:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      WIP_LIMIT: ${{ vars.AUTOMATION_WIP_LIMIT || '2' }}
+
+    steps:
+      - name: Select and dispatch issues
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          # TAP_PAT is intentionally used here instead of github.token.
+          # The existing OpenCode workflow accepts /oc only from the repository
+          # owner, and events created with GITHUB_TOKEN would not start another
+          # workflow. TAP_PAT comments are authored by the owner and therefore
+          # enter the already-established OpenCode issue flow.
+          github-token: ${{ secrets.TAP_PAT }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const repoFullName = `${owner}/${repo}`;
+
+            const parsedLimit = Number.parseInt(process.env.WIP_LIMIT || '2', 10);
+            if (!Number.isInteger(parsedLimit) || parsedLimit < 1) {
+              core.setFailed(`Invalid WIP limit: ${process.env.WIP_LIMIT}`);
+              return;
+            }
+            const wipLimit = parsedLimit;
+
+            const priorityOrder = [
+              'priority:p0',
+              'priority:p1',
+              'priority:p2',
+              'priority:p3',
+            ];
+            const priorityRank = new Map(
+              priorityOrder.map((name, index) => [name, index])
+            );
+            const inProgressLabel = 'automation:in-progress';
+
+            const labelSpecs = [
+              {
+                name: 'priority:p0',
+                color: 'B60205',
+                description: 'P0 — critical work that should be handled immediately.',
+              },
+              {
+                name: 'priority:p1',
+                color: 'D93F0B',
+                description: 'P1 — high-priority planned work.',
+              },
+              {
+                name: 'priority:p2',
+                color: 'FBCA04',
+                description: 'P2 — normal planned work.',
+              },
+              {
+                name: 'priority:p3',
+                color: 'D4C5F9',
+                description: 'P3 — low-priority backlog / nice-to-have work.',
+              },
+              {
+                name: inProgressLabel,
+                color: '5319E7',
+                description: 'Reserved by the automatic issue scheduler for OpenCode execution.',
+              },
+            ];
+
+            for (const spec of labelSpecs) {
+              try {
+                await github.rest.issues.createLabel({
+                  owner,
+                  repo,
+                  ...spec,
+                });
+              } catch (err) {
+                if (err.status !== 422) throw err; // already exists
+              }
+            }
+
+            let issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100,
+            });
+            issues = issues.filter(issue => !issue.pull_request);
+
+            const labelNames = issue =>
+              (issue.labels || []).map(label =>
+                typeof label === 'string' ? label : label.name
+              );
+
+            // One-time compatibility migration for the current backlog.
+            // After this migration the scheduler never derives priority from
+            // issue title/body; the priority:* label is the source of truth.
+            for (const issue of issues) {
+              const currentPriorities = labelNames(issue).filter(name =>
+                priorityRank.has(name)
+              );
+              if (currentPriorities.length !== 0) continue;
+
+              const match = issue.title.match(/^P([0-3]):\s+/i);
+              if (!match) continue;
+
+              const priority = `priority:p${match[1]}`.toLowerCase();
+              const cleanTitle = issue.title.replace(/^P[0-3]:\s+/i, '');
+
+              await github.rest.issues.addLabels({
+                owner,
+                repo,
+                issue_number: issue.number,
+                labels: [priority],
+              });
+              if (cleanTitle !== issue.title) {
+                await github.rest.issues.update({
+                  owner,
+                  repo,
+                  issue_number: issue.number,
+                  title: cleanTitle,
+                });
+              }
+
+              issue.title = cleanTitle;
+              issue.labels = [...(issue.labels || []), { name: priority }];
+              core.notice(
+                `Migrated issue #${issue.number} to ${priority}: ${cleanTitle}`
+              );
+            }
+
+            const openPulls = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100,
+            });
+
+            // Count every open OpenCode issue PR, including work that predates
+            // this scheduler. This keeps the WIP cap correct on first rollout.
+            const activeIssueNumbers = new Set();
+            for (const pr of openPulls) {
+              if (pr.head?.repo?.full_name !== repoFullName) continue;
+              const match = (pr.head.ref || '').match(/^opencode\/issue(\d+)-/);
+              if (match) activeIssueNumbers.add(Number(match[1]));
+            }
+
+            // Reservation closes the race between dispatching /oc and OpenCode
+            // creating its branch/PR. Closed issues are not returned above, so
+            // merged work automatically stops consuming a slot.
+            for (const issue of issues) {
+              if (labelNames(issue).includes(inProgressLabel)) {
+                activeIssueNumbers.add(issue.number);
+              }
+            }
+
+            const freeSlots = Math.max(0, wipLimit - activeIssueNumbers.size);
+            core.notice(
+              `WIP: ${activeIssueNumbers.size}/${wipLimit}; free slots: ${freeSlots}; active issues: ${[...activeIssueNumbers].sort((a, b) => a - b).map(n => `#${n}`).join(', ') || 'none'}.`
+            );
+
+            if (freeSlots === 0) {
+              core.info('No free WIP slots; nothing will be dispatched.');
+              return;
+            }
+
+            const candidates = [];
+            for (const issue of issues) {
+              if (activeIssueNumbers.has(issue.number)) continue;
+
+              const priorities = labelNames(issue).filter(name =>
+                priorityRank.has(name)
+              );
+              if (priorities.length !== 1) {
+                core.info(
+                  `Skipping #${issue.number}: expected exactly one priority label, found ${priorities.length}.`
+                );
+                continue;
+              }
+
+              const blockers = await github.paginate(
+                'GET /repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by',
+                {
+                  owner,
+                  repo,
+                  issue_number: issue.number,
+                  per_page: 100,
+                  headers: {
+                    'X-GitHub-Api-Version': '2026-03-10',
+                  },
+                }
+              );
+              const openBlockers = blockers.filter(blocker => blocker.state === 'open');
+              if (openBlockers.length > 0) {
+                core.info(
+                  `Skipping #${issue.number}: blocked by ${openBlockers.map(b => `#${b.number}`).join(', ')}.`
+                );
+                continue;
+              }
+
+              candidates.push({
+                issue,
+                priority: priorities[0],
+              });
+            }
+
+            candidates.sort((a, b) =>
+              priorityRank.get(a.priority) - priorityRank.get(b.priority) ||
+              a.issue.number - b.issue.number
+            );
+
+            const selected = candidates.slice(0, freeSlots);
+            if (selected.length === 0) {
+              core.notice('No eligible prioritized and unblocked issues are ready.');
+              return;
+            }
+
+            core.notice(
+              `Selected: ${selected.map(item => `#${item.issue.number} (${item.priority})`).join(', ')}.`
+            );
+
+            for (const { issue, priority } of selected) {
+              // Reserve before posting /oc so concurrent scheduler wake-ups
+              // cannot dispatch the same issue twice.
+              await github.rest.issues.addLabels({
+                owner,
+                repo,
+                issue_number: issue.number,
+                labels: [inProgressLabel],
+              });
+
+              try {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: issue.number,
+                  body: [
+                    '/oc',
+                    '',
+                    '<!-- issue-scheduler-dispatch -->',
+                    `Automatically dispatched by the issue scheduler with ${priority}.`,
+                  ].join('\n'),
+                });
+              } catch (err) {
+                try {
+                  await github.rest.issues.removeLabel({
+                    owner,
+                    repo,
+                    issue_number: issue.number,
+                    name: inProgressLabel,
+                  });
+                } catch (_) {}
+                throw err;
+              }
+
+              core.notice(
+                `Dispatched issue #${issue.number} (${priority}) to OpenCode.`
+              );
+            }
