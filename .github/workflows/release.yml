@@ -330,6 +330,10 @@ jobs:
   build:
     name: Build & Package (${{ matrix.arch }})
     needs: preflight
+    # Main pushes for an already-published version are true no-ops: do not
+    # consume scarce macOS runners. Preserve the documented manual dry-run
+    # behavior, which intentionally performs the build without publishing.
+    if: ${{ needs.preflight.outputs.skip_release != 'true' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == true) }}
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -637,6 +641,10 @@ jobs:
   release:
     name: Create GitHub Release
     needs: [build, preflight]
+    # Run the no-op reporting path even when the build was intentionally
+    # skipped because this version was already published. Still block release
+    # creation if preflight or a required real build failed.
+    if: ${{ always() && needs.preflight.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
