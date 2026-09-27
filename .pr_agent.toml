@@ -7,8 +7,6 @@ ai_timeout = 180
 retry_same_model_on_timeout = false
 propagate_tool_errors = true
 repo_context_files = ["AGENTS.md"]
-enable_large_pr_chunking = true
-max_number_of_calls = 3
 
 [pr_reviewer]
 require_score_review = false
@@ -30,6 +28,8 @@ correctness, and test gaps. Verify findings against the actual diff and reposito
 context. Do not report cosmetic style preferences or speculative issues without a
 concrete failure scenario.
 """
+enable_large_pr_chunking = true
+max_number_of_calls = 3
 
 [pr_code_suggestions]
 focus_only_on_problems = true
