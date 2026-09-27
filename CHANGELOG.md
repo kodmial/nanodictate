@@ -7,19 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- The automatic bump no longer leaves `CHANGELOG.md` behind `Version.swift`.
-  `bump-version.yml` bumped the version constant on every releasable merge but
-  never cut a matching release section, so the very first automatic bump
-  (v0.1.2) turned `VersionTests.testVersionStringEqualsCurrentRelease` red on
-  `main` and on every open PR. The bump step now cuts the `## [<version>]`
-  section, reopens an empty `## [Unreleased]` above it and refreshes the compare
-  links, through the tested `policy_changelog_cut_release` in
-  `scripts/release-policy.sh`. The missing v0.1.2 section is added below.
-
-## [0.1.2] - 2026-09-26
-
 ### Added
 
 - `skip-release` PR label — the explicit opt-out from release automation. A
@@ -38,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The automatic bump no longer leaves `CHANGELOG.md` behind `Version.swift`.
+  `bump-version.yml` bumped the version constant on every releasable merge but
+  never cut a matching release section, so the very first automatic bump
+  (v0.1.2) turned `VersionTests.testVersionStringEqualsCurrentRelease` red on
+  `main` and on every open PR. The bump step now cuts the `## [<version>]`
+  section, reopens an empty `## [Unreleased]` above it and refreshes the compare
+  links, through the tested `policy_changelog_cut_release` in
+  `scripts/release-policy.sh`. The missing v0.1.2 section is added below.
 - `bump-version.yml` no longer fails the run when a merge is correctly
   classified as not releasable. The "no code changes" guard (docs-only,
   `.github/`-only, packaging-only, `PIN_REV`-only changes) used to `exit 1`
@@ -46,6 +41,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   summary and leaves the version and the release workflow alone. Only a genuine
   policy error — an unparsable `Version.swift` or a version outside
   `0.0.x` / `0.1.x` — still fails the workflow.
+
+## [0.1.2] - 2026-09-26
+
+### Added
+
+- Added the OpenCode GitHub Actions agent and automatic repair paths for
+  CodeRabbit findings, merge conflicts, and failed pull-request CI.
+- Added scheduled retry of CodeRabbit reviews after included-review rate limits.
+
+### Changed
+
+- CodeRabbit review requests are now gated on successful CI for the exact current
+  pull-request head, with per-head readiness/request locks reset on every new
+  commit so the review/fix loop is idempotent.
+- CI can skip the macOS build for documentation-only changes, and CodeRabbit
+  linked-issue assessment is enforced as a pre-merge check.
 
 ## [0.1.1] - 2026-09-26
 
