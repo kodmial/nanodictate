@@ -9,7 +9,6 @@ permissions:
   contents: read
   issues: write
   pull-requests: write
-  statuses: read
 
 jobs:
   add-label:
@@ -101,56 +100,10 @@ jobs:
                 continue;
               }
 
-              // A review that happened before CI is intentionally NOT enough:
-              // auto-merge requires a completed CodeRabbit review after the exact
-              // current-head CI run. Only suppress the request if that stronger
-              // condition is already true (for example after a manual post-CI run).
-              const { data: combinedStatus } =
-                await github.rest.repos.getCombinedStatusForRef({
-                  owner,
-                  repo,
-                  ref: pr.head.sha,
-                });
-
-              const latestRabbitStatus = (combinedStatus.statuses || [])
-                .filter(status => status.context === 'CodeRabbit')
-                .sort(
-                  (a, b) =>
-                    new Date(b.updated_at || b.created_at).getTime() -
-                    new Date(a.updated_at || a.created_at).getTime()
-                )[0] || null;
-
-              const ciCompletedAt = new Date(
-                run.updated_at || run.created_at
-              ).getTime();
-              const rabbitCompletedAt = latestRabbitStatus
-                ? new Date(
-                    latestRabbitStatus.updated_at ||
-                    latestRabbitStatus.created_at
-                  ).getTime()
-                : 0;
-
-              const alreadyReviewedAfterCi = Boolean(
-                latestRabbitStatus &&
-                latestRabbitStatus.state === 'success' &&
-                /Review completed/i.test(
-                  latestRabbitStatus.description || ''
-                ) &&
-                rabbitCompletedAt >= ciCompletedAt
-              );
-
-              if (alreadyReviewedAfterCi) {
-                await github.rest.issues.addLabels({
-                  owner,
-                  repo,
-                  issue_number: pr.number,
-                  labels: [REQUESTED_LABEL],
-                });
-                core.info(
-                  `PR #${pr.number}: current head ${pr.head.sha} already has a completed post-CI CodeRabbit review.`
-                );
-                continue;
-              }
+              // The lock is per HEAD and is cleared on every synchronize.
+              // Do not infer that an arbitrary post-CI "Review completed" status
+              // was our required full review; always issue the explicit command
+              // once for each green current head.
 
               // Acquire the lock before posting the command so concurrent/re-run
               // workflow executions cannot create duplicate review requests.
