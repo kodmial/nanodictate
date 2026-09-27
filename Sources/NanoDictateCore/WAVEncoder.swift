@@ -2,9 +2,10 @@ import Foundation
 
 /// Encode PCM Int16 samples to WAV (RIFF) format.
 public enum WAVEncoder {
-  /// Encode Int16 samples to WAV (mono, 16-bit, given sampleRate).
-  public static func encode(samples: [Int16], sampleRate: Int = 16000) -> Data {
-    let numChannels: Int16 = 1
+  /// Encode Int16 samples to WAV (16-bit, given sampleRate/channels).
+  /// Default is the historic batch profile: mono 16 kHz.
+  public static func encode(samples: [Int16], sampleRate: Int = 16000, channels: Int = 1) -> Data {
+    let numChannels = Int16(clamping: channels)
     let bitsPerSample: Int16 = 16
     let byteRate = Int32(sampleRate) * Int32(numChannels) * Int32(bitsPerSample / 8)
     let blockAlign = numChannels * (bitsPerSample / 8)
@@ -42,5 +43,19 @@ public enum WAVEncoder {
     }
 
     return data
+  }
+
+  /// Encode for a concrete STT model profile: sample rate/channels come from
+  /// the model audio requirements instead of a hard-coded batch assumption.
+  /// All built-in profiles currently require 16 kHz mono, so this is
+  /// byte-identical to `encode(samples:)` for them.
+  public static func encode(samples: [Int16], audioProfile: STTAudioProfile) -> Data {
+    encode(samples: samples, sampleRate: audioProfile.sampleRate, channels: audioProfile.channels)
+  }
+
+  /// Audio profile for a concrete (adapterID, model) pair — shorthand for
+  /// `ProviderRequestBuilder.audioProfile` at encode call sites.
+  public static func audioProfile(adapterID: String, model: String) -> STTAudioProfile {
+    ProviderRequestBuilder.audioProfile(adapterID: adapterID, model: model)
   }
 }
