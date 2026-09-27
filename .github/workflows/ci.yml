@@ -118,6 +118,12 @@ jobs:
           printf '%s\n' "$CHANGED" | sed 's/^/  /'
           if policy_check_version_ownership "$HEAD_REF" "$CHANGED"; then
             echo "Version ownership ok — no hand-written version bump."
+          elif policy_is_version_seeding \
+            "$(git show "$BASE_SHA:Sources/NanoDictateCore/Version.swift" 2>/dev/null || true)" \
+            "$(git show "$HEAD_SHA:Sources/NanoDictateCore/Version.swift" 2>/dev/null || true)" \
+            "$(git show "$BASE_SHA:.release-please-manifest.json" 2>/dev/null || true)" \
+            "$(git show "$HEAD_SHA:.release-please-manifest.json" 2>/dev/null || true)"; then
+            echo "Version ownership ok — one-time release-please bootstrap (manifest seeded at the current version, Version.swift version unchanged)."
           else
             echo "::error::PR '$HEAD_REF' touches Version.swift or .release-please-manifest.json. The next version is owned by the automated Release PR (release-pr.yml): remove the version bump from this PR and merge normally — the changes will ride along with the next Release PR."
             exit 1

@@ -284,6 +284,39 @@ assert_eq 'ownership: the violation names the decision' \
   'version-ownership' \
   "$(policy_check_version_ownership 'feature/my-change' 'Sources/NanoDictateCore/Version.swift' || true)"
 
+# --- 4a1. One-time release-please bootstrap seeding ---------------------------
+# The PR that introduces the Release PR flow touches both version-owned files
+# without reserving a new version (manifest seeded at the current Version.swift
+# version, Version.swift annotation-only). The version-ownership gate must allow
+# exactly that seeding, and nothing else.
+
+BASE_SWIFT='public enum NanoDictateVersion {
+  public static let string = "0.1.4"
+}'
+HEAD_SWIFT='public enum NanoDictateVersion {
+  public static let string = "0.1.4" // x-release-please-version
+}'
+HEAD_MANIFEST=$'{\n  ".": "0.1.4"\n}'
+
+assert_eq 'seeding: extracts the Version.swift triple' \
+  '0.1.4' "$(policy_extract_version "$HEAD_SWIFT")"
+assert_eq 'seeding: extracts the manifest triple' \
+  '0.1.4' "$(policy_extract_version "$HEAD_MANIFEST")"
+assert_eq 'seeding: empty content extracts nothing' \
+  '' "$(policy_extract_version '')"
+assert_ok 'seeding: the bootstrap (new manifest at current version, swift unchanged) is allowed' \
+  policy_is_version_seeding "$BASE_SWIFT" "$HEAD_SWIFT" '' "$HEAD_MANIFEST"
+assert_not_ok 'seeding: an existing manifest is not a seeding (strict gate resumes)' \
+  policy_is_version_seeding "$BASE_SWIFT" "$HEAD_SWIFT" "$HEAD_MANIFEST" "$HEAD_MANIFEST"
+assert_not_ok 'seeding: a Version.swift bump is not a seeding' \
+  policy_is_version_seeding "$BASE_SWIFT" "${HEAD_SWIFT/0.1.4/0.1.5}" '' "$HEAD_MANIFEST"
+assert_not_ok 'seeding: a manifest seeded at the wrong version is not a seeding' \
+  policy_is_version_seeding "$BASE_SWIFT" "$HEAD_SWIFT" '' $'{\n  ".": "0.1.5"\n}'
+assert_not_ok 'seeding: a missing head manifest is not a seeding' \
+  policy_is_version_seeding "$BASE_SWIFT" "$HEAD_SWIFT" '' ''
+assert_not_ok 'seeding: a missing head version is not a seeding' \
+  policy_is_version_seeding "$BASE_SWIFT" 'no version here' '' "$HEAD_MANIFEST"
+
 # --- 4b. The changelog cut a bump has to make ---------------------------------
 # The invariant VersionTests.testVersionStringEqualsCurrentRelease enforces on
 # macOS: Version.swift equals the first `## [<semver>]` header after

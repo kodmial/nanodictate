@@ -245,6 +245,45 @@ policy_check_version_ownership() {
   return 1
 }
 
+# policy_extract_version <content>
+#
+# stdout: the first `<major>.<minor>.<patch>` triple in <content> (possibly
+# empty). Always exits 0: "no version found" is a valid answer, not an error
+# (callers decide whether an empty version is a policy error). The same
+# extraction the workflows use on Version.swift
+# (`grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+'`).
+policy_extract_version() {
+  printf '%s' "${1:-}" | grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' || true
+}
+
+# policy_is_version_seeding <base-swift> <head-swift> <base-manifest> <head-manifest>
+#
+# Exit 0 only for the one-time release-please bootstrap: the manifest did not
+# exist at base (empty content), the head manifest is seeded at the current
+# Version.swift version, and Version.swift itself kept its version
+# (annotation-only change). Every other version-owned touch — a real bump of
+# Version.swift, a manifest rewrite to a different version, a manifest seeded
+# at the wrong version — exits 1.
+#
+# CI needs this because the PR that introduces the Release PR flow itself
+# touches both version-owned files without reserving a new version; the
+# version-ownership gate would otherwise fail its own bootstrap. After the
+# bootstrap the manifest exists at base, so this exemption never fires again
+# and ordinary PRs stay strictly barred from version-owned files.
+policy_is_version_seeding() {
+  local base_swift=${1:-} head_swift=${2:-} base_manifest=${3:-} head_manifest=${4:-}
+  [[ -z "${base_manifest//[[:space:]]/}" ]] || return 1
+  [[ -n "${head_manifest//[[:space:]]/}" ]] || return 1
+  local base_v head_v head_m
+  base_v=$(policy_extract_version "$base_swift")
+  head_v=$(policy_extract_version "$head_swift")
+  head_m=$(policy_extract_version "$head_manifest")
+  [[ -n "$base_v" && -n "$head_v" && -n "$head_m" ]] || return 1
+  [[ "$base_v" == "$head_v" ]] || return 1
+  [[ "$head_m" == "$head_v" ]] || return 1
+  return 0
+}
+
 # policy_changelog_cut_release <version> <date>
 #
 # stdin:  the whole CHANGELOG.md
