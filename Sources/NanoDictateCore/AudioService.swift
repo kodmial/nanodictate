@@ -1356,8 +1356,10 @@ public final class AudioService {
     // see AutoStopConfig.fromEnvironment) and the limit did not fire in this
     // buffer (limit wins — the recording ends either way, one finalization
     // type). The adaptive VAD speech flag opens the speech gate so raw quiet
-    // speech below the fixed speech threshold still arms auto-stop; silence
-    // accumulation stays on the raw RMS scale. Buffer duration — real:
+    // speech below the fixed speech threshold still arms auto-stop; VAD
+    // silence counts as silence even when raw RMS is loud, so steady noise
+    // converged to the adaptive floor does not block auto-stop (issue #21).
+    // Buffer duration — real:
     // converted frames / target rate 16 kHz.
     // Accumulation by audio time, not buffer count — callback frequency
     // tracks hardware sample rate (~85 ms @ 48 kHz, ~93 ms @ 44.1 kHz),

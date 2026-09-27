@@ -152,13 +152,17 @@ public struct AutoStopConfig: Equatable {
 /// @ 44.1 kHz, ~256 ms @ 16 kHz) — "3 seconds" measure by time, not buffers.
 ///
 /// Decision model (see AutoStopConfig):
-///   • SPEECH (RMS ≥ speech threshold): resets the silence accumulator,
-///     grows the speech run for the gate. One speech buffer breaks silence.
-///   • SILENCE (RMS < silence threshold): accumulates, but only outside
-///     grace and as a continuous run (any speech buffer resets — inter-word
-///     pauses don't sum).
-///   • GRAY ZONE (between thresholds): hysteresis — classification state
-///     unchanged (no accumulation, no reset).
+///   • SPEECH (RMS ≥ speech threshold, or adaptive VAD `isSpeech == true`):
+///     resets the silence accumulator, grows the speech run for the gate.
+///     One speech buffer breaks silence.
+///   • SILENCE (RMS < silence threshold, or adaptive VAD `isSpeech == false`):
+///     accumulates, but only outside grace and as a continuous run (any
+///     speech buffer resets — inter-word pauses don't sum). VAD silence
+///     counts even when raw RMS is loud: steady noise converged to the
+///     adaptive floor (issue #21) must not latch as speech merely because it
+///     crosses the fixed absolute threshold.
+///   • GRAY ZONE (between thresholds, `isSpeech == nil`): hysteresis —
+///     classification state unchanged (no accumulation, no reset).
 ///
 /// Result semantics: `feed` returns true when ALL conditions hold (speech
 /// gate passed + recording ≥ minRecordingDuration + accumulated CONTINUOUS
@@ -225,8 +229,12 @@ public struct SilenceAutoStopDetector {
   ///   - isSpeech: optional adaptive VAD decision for this buffer on the raw
   ///     signal (issue #21). When true, the buffer counts as speech even if
   ///     `rms` sits below `speechRMSThreshold` (quiet speech in the gray
-  ///     zone), so the speech gate can open on the raw scale. When false or
-  ///     nil, classification falls back to the RMS thresholds unchanged.
+  ///     zone), so the speech gate can open on the raw scale. When false,
+  ///     the buffer counts as silence even if `rms` sits above
+  ///     `speechRMSThreshold` (steady noise converged to the adaptive floor
+  ///     must not latch as speech), so auto-stop can fire in noisy rooms.
+  ///     When nil, classification falls back to the RMS thresholds unchanged
+  ///     (legacy behavior, preserves existing detector tests).
   /// - Returns: true when all stop conditions hold: speech gate passed,
   ///   recording ≥ `minRecordingDuration`, accumulated CONTINUOUS silence ≥
   ///   `requiredSilenceDuration`. Stays true on later quiet/neutral buffers
@@ -239,15 +247,16 @@ public struct SilenceAutoStopDetector {
     let bufferStartsInGrace = elapsed < gracePeriod
     elapsed += effectiveDuration
 
-    if isSpeech == true || rms >= speechRMSThreshold {
+    if isSpeech == true || (isSpeech == nil && rms >= speechRMSThreshold) {
       // Speech: silence continuity broken, accumulator reset; speech run grows,
-      // latches the gate at minSpeechRun.
+      // latches the gate at minSpeechRun. Explicit VAD silence never takes
+      // this branch, even when raw RMS is loud (steady noise, issue #21).
       speechRun += effectiveDuration
       if !speechGatePassed, speechRun >= minSpeechRun {
         speechGatePassed = true
       }
       silenceDuration = 0
-    } else if rms < silenceRMSThreshold {
+    } else if isSpeech == false || rms < silenceRMSThreshold {
       // Silence: speech continuity broken; accumulates only outside grace, as a
       // continuous run.
       speechRun = 0
