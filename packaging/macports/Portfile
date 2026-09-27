@@ -1,7 +1,7 @@
 # -*- coding: utf-8; mode: tcl; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- vim:fenc=utf-8:ft=tcl:et:sw=4:ts=4:sts=4
 
 # NanoDictate — macOS dictation (double-Alt, bilingual EN/RU, 4 STT providers).
-# Template: 0.1.4, 72f6835645da80ce76100b3c8ae1900c99207a9c2e26c4de9334a7ae6bbea2d6, a2c8ac1e942ca1630e368aee9f073910ac4f9bf4f1fb2cdd4da324cbcf458914, @kodmial
+# Template: 0.1.5, 349f88d8d0df40e825e073374bfbb8daaba5a330fafc2cf12c485bd044563cb8, 9e22c17fcd883c28bb7c9b3afd162fc8e0cb24c6683fb14ccab1134a51e4b24a, @kodmial
 # (env MAINTAINERS), 0 (env REVISION, default 0) are filled by
 # scripts/release-prep.rb — do not hand-edit the output.
 
@@ -11,16 +11,16 @@ PortGroup           github 1.0
 # Binary port (symmetry with the Homebrew formula): the prebuilt tarball
 # attached to the tag is installed as-is — NO Xcode / Swift toolchain needed
 # on the user's machine. Tarball name is arch-dependent
-# (nanodictate-0.1.4-macos-<arm64|x86_64>.tar.gz, built by
+# (nanodictate-0.1.5-macos-<arm64|x86_64>.tar.gz, built by
 # .github/workflows/release.yml), so distfile + checksum are chosen by
-# ${os.arch}; the download URL is derived from the tag v0.1.4.
+# ${os.arch}; the download URL is derived from the tag v0.1.5.
 # master_sites points at the GitHub release assets (needed to fetch the
 # arch-specific distfile itself, not just for livecheck); livecheck.type
 # github walks repo tags. The checksums are filled by scripts/release-prep.rb.
-github.setup        kodmial nanodictate 0.1.4 v
+github.setup        kodmial nanodictate 0.1.5 v
 revision            0
 
-master_sites        https://github.com/kodmial/nanodictate/releases/download/v0.1.4
+master_sites        https://github.com/kodmial/nanodictate/releases/download/v0.1.5
 
 # MacPorts ${os.arch} is NOT the Apple arch string: MacPorts base rewrites
 # tcl_platform(machine) to match `uname -p` (macports1.0/macports.tcl,
@@ -34,11 +34,11 @@ master_sites        https://github.com/kodmial/nanodictate/releases/download/v0.
 switch -- ${os.arch} {
     arm {
         set distfile_arch    arm64
-        set distfile_sha256  72f6835645da80ce76100b3c8ae1900c99207a9c2e26c4de9334a7ae6bbea2d6
+        set distfile_sha256  349f88d8d0df40e825e073374bfbb8daaba5a330fafc2cf12c485bd044563cb8
     }
     i386 {
         set distfile_arch    x86_64
-        set distfile_sha256  a2c8ac1e942ca1630e368aee9f073910ac4f9bf4f1fb2cdd4da324cbcf458914
+        set distfile_sha256  9e22c17fcd883c28bb7c9b3afd162fc8e0cb24c6683fb14ccab1134a51e4b24a
     }
     default {
         ui_error "nanodictate supports only Apple Silicon (arm64) and Intel (x86_64) macOS; this machine reports os.arch \"${os.arch}\"."
@@ -46,7 +46,7 @@ switch -- ${os.arch} {
     }
 }
 
-distfiles           nanodictate-0.1.4-macos-${distfile_arch}.tar.gz
+distfiles           nanodictate-0.1.5-macos-${distfile_arch}.tar.gz
 checksums           sha256  ${distfile_sha256}
 
 platforms           {darwin >= 21}
