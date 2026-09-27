@@ -1,8 +1,16 @@
 name: Retry CodeRabbit after rate limit
 
 on:
-  # Manual fallback only. Automatic rate-limit recovery is handled by
-  # auto-merge.yml, whose existing five-minute schedule is already proven active.
+  # Primary path: start a waiter immediately when CodeRabbit reports a rate
+  # limit. CodeRabbit may edit the same comment a few seconds later to add the
+  # exact countdown; the per-PR concurrency group cancels the older waiter and
+  # restarts it from the updated deadline.
+  issue_comment:
+    types: [created, edited]
+
+  # Manual fallback remains available. auto-merge.yml also keeps its scheduled
+  # retry logic as a best-effort safety net, but the normal path no longer waits
+  # for GitHub's scheduled-workflow delivery.
   workflow_dispatch:
 
 permissions:
@@ -10,37 +18,46 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
+  statuses: read
 
 concurrency:
-  group: coderabbit-rate-limit-retry
-  cancel-in-progress: false
+  group: coderabbit-rate-limit-${{ github.event.issue.number || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
-  retry:
+  wait-and-retry:
+    if: >-
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request != null &&
+      github.event.comment.user.login == 'coderabbitai[bot]' &&
+      (contains(github.event.comment.body, 'Review rate limited') ||
+       contains(github.event.comment.body, 'Review limit reached'))
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 360
+
     steps:
-      - name: Retry due CodeRabbit reviews
+      - name: Calculate retry deadline
+        id: prepare
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           github-token: ${{ secrets.TAP_PAT }}
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            const now = Date.now();
+            const prNumber = context.issue.number;
+            const comment = context.payload.comment;
 
             function parseRetryDelayMs(body = '') {
               const match = body.match(
                 /Next included review available in\s+([^\n<.]+)/i
               );
+
               if (!match) {
-                // CodeRabbit sometimes returns only "Review rate limited"
-                // without a countdown. Never let such a PR get stuck forever:
-                // use a conservative fallback beyond the hourly included-review cadence.
-                if (/Review rate limited|Review limit reached/i.test(body)) {
-                  return 65 * 60_000;
-                }
-                return null;
+                // CodeRabbit occasionally creates the rate-limit reply before
+                // adding a precise countdown. An edited event normally replaces
+                // this waiter within seconds; 65 minutes is the conservative
+                // fallback if that edit never arrives.
+                return 65 * 60_000;
               }
 
               if (/less than\s+(?:a|one)\s+minute/i.test(match[1])) {
@@ -49,11 +66,9 @@ jobs:
 
               let totalMs = 0;
               let found = false;
-              const parts = match[1].matchAll(
+              for (const part of match[1].matchAll(
                 /(\d+)\s*(hours?|hrs?|minutes?|mins?|seconds?|secs?)/gi
-              );
-
-              for (const part of parts) {
+              )) {
                 found = true;
                 const value = Number(part[1]);
                 const unit = part[2].toLowerCase();
@@ -67,43 +82,102 @@ jobs:
                 }
               }
 
-              return found ? totalMs : null;
+              return found ? totalMs : 65 * 60_000;
             }
 
-            function hasReviewReadyLabel(pr) {
-              return (pr.labels || []).some(label => label.name === 'review-ready');
-            }
+            const { data: pr } = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: prNumber,
+            });
 
-            function findLatestRateLimit(comments) {
-              return comments
-                .filter(c => c.user?.login === 'coderabbitai[bot]')
-                .map(c => {
-                  const delayMs = parseRetryDelayMs(c.body || '');
-                  return delayMs === null ? null : { comment: c, delayMs };
-                })
-                .filter(Boolean)
-                .sort(
-                  (a, b) =>
-                    new Date(b.comment.updated_at).getTime() -
-                    new Date(a.comment.updated_at).getTime()
-                )[0];
-            }
-
-            function stateMovedPastRateLimit(comments, limitedAt) {
-              const retryAlreadyPosted = comments.some(c =>
-                c.user?.login !== 'coderabbitai[bot]' &&
-                /^@coderabbitai\s+(?:full\s+)?review\s*$/i.test(c.body?.trim() || '') &&
-                new Date(c.created_at).getTime() > limitedAt
+            if (
+              pr.state !== 'open' ||
+              pr.draft ||
+              pr.head.repo?.full_name !== `${owner}/${repo}`
+            ) {
+              core.setOutput('eligible', 'false');
+              core.notice(
+                `PR #${prNumber}: no longer an eligible open same-repository PR.`
               );
-              if (retryAlreadyPosted) return true;
+              return;
+            }
 
-              return comments.some(c =>
-                c.user?.login === 'coderabbitai[bot]' &&
-                new Date(c.updated_at).getTime() > limitedAt &&
-                !/Review rate limited|Review limit reached|Next included review available/i.test(
-                  c.body || ''
-                )
+            const labels = new Set(
+              (pr.labels || []).map(label =>
+                typeof label === 'string' ? label : label.name
+              )
+            );
+            if (!labels.has('review-ready')) {
+              core.setOutput('eligible', 'false');
+              core.notice(
+                `PR #${prNumber}: review-ready is absent; not starting a rate-limit waiter.`
               );
+              return;
+            }
+
+            const delayMs = parseRetryDelayMs(comment.body || '');
+            const limitedAt = new Date(
+              comment.updated_at || comment.created_at
+            ).getTime();
+            const dueAt = limitedAt + delayMs + 30_000;
+            const waitSeconds = Math.max(
+              0,
+              Math.ceil((dueAt - Date.now()) / 1000)
+            );
+
+            // Leave a small margin under the six-hour job timeout.
+            if (waitSeconds > 5 * 60 * 60 + 45 * 60) {
+              core.setFailed(
+                `CodeRabbit retry delay ${waitSeconds}s exceeds the supported waiter window.`
+              );
+              return;
+            }
+
+            core.setOutput('eligible', 'true');
+            core.setOutput('pr_number', String(prNumber));
+            core.setOutput('head_sha', pr.head.sha);
+            core.setOutput('comment_id', String(comment.id));
+            core.setOutput(
+              'comment_updated_at',
+              comment.updated_at || comment.created_at
+            );
+            core.setOutput('wait_seconds', String(waitSeconds));
+
+            core.notice(
+              `PR #${prNumber}: CodeRabbit rate limit captured for head ${pr.head.sha}; waiter will re-check at ${new Date(dueAt).toISOString()}.`
+            );
+
+      - name: Wait for CodeRabbit quota
+        if: steps.prepare.outputs.eligible == 'true'
+        env:
+          WAIT_SECONDS: ${{ steps.prepare.outputs.wait_seconds }}
+        run: |
+          set -euo pipefail
+          echo "Waiting ${WAIT_SECONDS}s for CodeRabbit quota."
+          sleep "$WAIT_SECONDS"
+
+      - name: Revalidate and retry
+        if: steps.prepare.outputs.eligible == 'true'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          PR_NUMBER: ${{ steps.prepare.outputs.pr_number }}
+          EXPECTED_HEAD: ${{ steps.prepare.outputs.head_sha }}
+          RATE_LIMIT_COMMENT_ID: ${{ steps.prepare.outputs.comment_id }}
+          RATE_LIMIT_UPDATED_AT: ${{ steps.prepare.outputs.comment_updated_at }}
+        with:
+          github-token: ${{ secrets.TAP_PAT }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const repoFullName = `${owner}/${repo}`;
+            const prNumber = Number(process.env.PR_NUMBER);
+            const expectedHead = process.env.EXPECTED_HEAD;
+            const commentId = Number(process.env.RATE_LIMIT_COMMENT_ID);
+            const expectedUpdatedAt = process.env.RATE_LIMIT_UPDATED_AT;
+
+            function isRateLimit(body = '') {
+              return /Review rate limited|Review limit reached/i.test(body);
             }
 
             async function currentHeadHasGreenCi(pr) {
@@ -119,7 +193,10 @@ jobs:
               );
 
               const currentHeadCi = runs
-                .filter(run => run.name === 'CI' && run.head_sha === pr.head.sha)
+                .filter(run =>
+                  run.name === 'CI' &&
+                  run.head_sha === pr.head.sha
+                )
                 .sort(
                   (a, b) =>
                     new Date(b.created_at).getTime() -
@@ -133,89 +210,306 @@ jobs:
               );
             }
 
+            const { data: pr } = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: prNumber,
+            });
+
+            if (
+              pr.state !== 'open' ||
+              pr.draft ||
+              pr.head.sha !== expectedHead ||
+              pr.head.repo?.full_name !== repoFullName
+            ) {
+              core.notice(
+                `PR #${prNumber}: PR/head changed while waiting; retry cancelled.`
+              );
+              return;
+            }
+
+            const labels = new Set(
+              (pr.labels || []).map(label =>
+                typeof label === 'string' ? label : label.name
+              )
+            );
+            if (!labels.has('review-ready')) {
+              core.notice(
+                `PR #${prNumber}: review-ready disappeared while waiting; retry cancelled.`
+              );
+              return;
+            }
+
+            if (!(await currentHeadHasGreenCi(pr))) {
+              core.notice(
+                `PR #${prNumber}: current head no longer has green CI; retry cancelled.`
+              );
+              return;
+            }
+
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              {
+                owner,
+                repo,
+                issue_number: prNumber,
+                per_page: 100,
+              }
+            );
+
+            const source = comments.find(comment => comment.id === commentId);
+            if (
+              !source ||
+              source.user?.login !== 'coderabbitai[bot]' ||
+              !isRateLimit(source.body || '') ||
+              (source.updated_at || source.created_at) !== expectedUpdatedAt
+            ) {
+              core.notice(
+                `PR #${prNumber}: source rate-limit comment changed while waiting; retry cancelled.`
+              );
+              return;
+            }
+
+            const sourceAt = new Date(
+              source.updated_at || source.created_at
+            ).getTime();
+
+            const newerRateLimit = comments.some(comment =>
+              comment.id !== source.id &&
+              comment.user?.login === 'coderabbitai[bot]' &&
+              isRateLimit(comment.body || '') &&
+              new Date(
+                comment.updated_at || comment.created_at
+              ).getTime() > sourceAt
+            );
+            if (newerRateLimit) {
+              core.notice(
+                `PR #${prNumber}: a newer CodeRabbit rate-limit event exists; this waiter is obsolete.`
+              );
+              return;
+            }
+
+            const retryAlreadyPosted = comments.some(comment =>
+              comment.user?.login !== 'coderabbitai[bot]' &&
+              /^@coderabbitai\s+(?:full\s+)?review\s*$/i.test(
+                comment.body?.trim() || ''
+              ) &&
+              new Date(comment.created_at).getTime() > sourceAt
+            );
+            if (retryAlreadyPosted) {
+              core.notice(
+                `PR #${prNumber}: a review command was already posted after this rate-limit event.`
+              );
+              return;
+            }
+
+            const { data: combined } =
+              await github.rest.repos.getCombinedStatusForRef({
+                owner,
+                repo,
+                ref: pr.head.sha,
+              });
+
+            const rabbitStatus = (combined.statuses || [])
+              .filter(status => status.context === 'CodeRabbit')
+              .sort(
+                (a, b) =>
+                  new Date(b.updated_at || b.created_at).getTime() -
+                  new Date(a.updated_at || a.created_at).getTime()
+              )[0];
+
+            if (
+              !rabbitStatus ||
+              !isRateLimit(rabbitStatus.description || '')
+            ) {
+              core.notice(
+                `PR #${prNumber}: CodeRabbit status moved past rate-limit while waiting; no retry needed.`
+              );
+              return;
+            }
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: prNumber,
+              body: '@coderabbitai full review',
+            });
+
+            core.notice(
+              `PR #${prNumber}: retried full CodeRabbit review immediately after the captured quota window.`
+            );
+
+  manual-fallback:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Retry currently due CodeRabbit reviews
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          github-token: ${{ secrets.TAP_PAT }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const repoFullName = `${owner}/${repo}`;
+            const now = Date.now();
+
+            function parseRetryDelayMs(body = '') {
+              const match = body.match(
+                /Next included review available in\s+([^\n<.]+)/i
+              );
+              if (!match) {
+                return /Review rate limited|Review limit reached/i.test(body)
+                  ? 65 * 60_000
+                  : null;
+              }
+
+              if (/less than\s+(?:a|one)\s+minute/i.test(match[1])) {
+                return 60_000;
+              }
+
+              let totalMs = 0;
+              let found = false;
+              for (const part of match[1].matchAll(
+                /(\d+)\s*(hours?|hrs?|minutes?|mins?|seconds?|secs?)/gi
+              )) {
+                found = true;
+                const value = Number(part[1]);
+                const unit = part[2].toLowerCase();
+                if (unit.startsWith('hour') || unit.startsWith('hr')) {
+                  totalMs += value * 60 * 60_000;
+                } else if (unit.startsWith('minute') || unit.startsWith('min')) {
+                  totalMs += value * 60_000;
+                } else {
+                  totalMs += value * 1_000;
+                }
+              }
+              return found ? totalMs : null;
+            }
+
+            async function hasGreenCi(pr) {
+              const runs = await github.paginate(
+                github.rest.actions.listWorkflowRunsForRepo,
+                {
+                  owner,
+                  repo,
+                  branch: pr.head.ref,
+                  event: 'pull_request',
+                  per_page: 100,
+                }
+              );
+
+              const current = runs
+                .filter(run =>
+                  run.name === 'CI' &&
+                  run.head_sha === pr.head.sha
+                )
+                .sort(
+                  (a, b) =>
+                    new Date(b.created_at).getTime() -
+                    new Date(a.created_at).getTime()
+                )[0];
+
+              return Boolean(
+                current &&
+                current.status === 'completed' &&
+                current.conclusion === 'success'
+              );
+            }
+
             const pulls = await github.paginate(github.rest.pulls.list, {
-              owner, repo, state: 'open', per_page: 100,
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100,
             });
 
             for (const pr of pulls) {
-              if (pr.draft) continue;
-
-              // Never request a review while a synchronize/update is still being
-              // validated. remove-review-label.yml clears review-ready on every
-              // new head; add-review-label.yml restores it only after CI succeeds
-              // for that exact head SHA.
-              if (!hasReviewReadyLabel(pr)) {
-                core.info(
-                  `PR #${pr.number}: review-ready is absent; waiting for current-head CI.`
-                );
+              if (
+                pr.draft ||
+                pr.head.repo?.full_name !== repoFullName ||
+                !(pr.labels || []).some(label =>
+                  (typeof label === 'string' ? label : label.name) ===
+                  'review-ready'
+                ) ||
+                !(await hasGreenCi(pr))
+              ) {
                 continue;
               }
 
-              if (!(await currentHeadHasGreenCi(pr))) {
-                core.info(
-                  `PR #${pr.number}: review-ready exists but no successful CI was found for head ${pr.head.sha}; refusing to retry.`
-                );
-                continue;
-              }
+              const comments = await github.paginate(
+                github.rest.issues.listComments,
+                {
+                  owner,
+                  repo,
+                  issue_number: pr.number,
+                  per_page: 100,
+                }
+              );
 
-              let comments = await github.paginate(github.rest.issues.listComments, {
-                owner, repo, issue_number: pr.number, per_page: 100,
-              });
+              const limited = comments
+                .filter(comment =>
+                  comment.user?.login === 'coderabbitai[bot]'
+                )
+                .map(comment => {
+                  const delayMs = parseRetryDelayMs(comment.body || '');
+                  return delayMs === null
+                    ? null
+                    : { comment, delayMs };
+                })
+                .filter(Boolean)
+                .sort(
+                  (a, b) =>
+                    new Date(
+                      b.comment.updated_at || b.comment.created_at
+                    ).getTime() -
+                    new Date(
+                      a.comment.updated_at || a.comment.created_at
+                    ).getTime()
+                )[0];
 
-              const limited = findLatestRateLimit(comments);
               if (!limited) continue;
 
-              const limitedAt = new Date(limited.comment.updated_at).getTime();
-              // Small safety margin prevents a retry from landing a few seconds
-              // before CodeRabbit's own quota clock has actually reset.
-              const dueAt = limitedAt + limited.delayMs + 30_000;
-              if (now < dueAt) continue;
+              const limitedAt = new Date(
+                limited.comment.updated_at ||
+                limited.comment.created_at
+              ).getTime();
+              if (now < limitedAt + limited.delayMs + 30_000) {
+                continue;
+              }
 
-              if (stateMovedPastRateLimit(comments, limitedAt)) continue;
+              const retryAlreadyPosted = comments.some(comment =>
+                comment.user?.login !== 'coderabbitai[bot]' &&
+                /^@coderabbitai\s+(?:full\s+)?review\s*$/i.test(
+                  comment.body?.trim() || ''
+                ) &&
+                new Date(comment.created_at).getTime() > limitedAt
+              );
+              if (retryAlreadyPosted) continue;
 
-              // Re-read both PR metadata and comments immediately before writing
-              // the command. This closes the race where main/HEAD changes after
-              // the first checks but before the review command is posted.
-              const { data: freshPr } = await github.rest.pulls.get({
-                owner, repo, pull_number: pr.number,
-              });
+              const { data: combined } =
+                await github.rest.repos.getCombinedStatusForRef({
+                  owner,
+                  repo,
+                  ref: pr.head.sha,
+                });
+              const rabbitStatus = (combined.statuses || [])
+                .filter(status => status.context === 'CodeRabbit')
+                .sort(
+                  (a, b) =>
+                    new Date(b.updated_at || b.created_at).getTime() -
+                    new Date(a.updated_at || a.created_at).getTime()
+                )[0];
 
               if (
-                freshPr.state !== 'open' ||
-                freshPr.draft ||
-                freshPr.head.sha !== pr.head.sha ||
-                !hasReviewReadyLabel(freshPr)
+                !rabbitStatus ||
+                !/Review rate limited|Review limit reached/i.test(
+                  rabbitStatus.description || ''
+                )
               ) {
-                core.info(
-                  `PR #${pr.number}: PR/head/readiness changed during evaluation; retry cancelled.`
-                );
                 continue;
               }
-
-              if (!(await currentHeadHasGreenCi(freshPr))) {
-                core.info(
-                  `PR #${pr.number}: current head lost green-CI eligibility; retry cancelled.`
-                );
-                continue;
-              }
-
-              comments = await github.paginate(github.rest.issues.listComments, {
-                owner, repo, issue_number: pr.number, per_page: 100,
-              });
-
-              const freshLimited = findLatestRateLimit(comments);
-              if (
-                !freshLimited ||
-                freshLimited.comment.id !== limited.comment.id ||
-                freshLimited.comment.updated_at !== limited.comment.updated_at
-              ) {
-                core.info(
-                  `PR #${pr.number}: CodeRabbit rate-limit state changed; retry cancelled.`
-                );
-                continue;
-              }
-
-              if (stateMovedPastRateLimit(comments, limitedAt)) continue;
 
               await github.rest.issues.createComment({
                 owner,
@@ -223,7 +517,8 @@ jobs:
                 issue_number: pr.number,
                 body: '@coderabbitai full review',
               });
+
               core.notice(
-                `Retried full CodeRabbit review for PR #${pr.number} after quota reset, current-head CI success, and readiness revalidation.`
+                `Manual fallback retried full CodeRabbit review for PR #${pr.number}.`
               );
             }
