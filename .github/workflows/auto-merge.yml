@@ -1,9 +1,10 @@
 name: Auto-merge reviewed pull requests
 
 on:
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
+  # CI completion itself cannot make a PR mergeable: mark-ready-for-coderabbit
+  # requests a fresh post-CI CodeRabbit review, and the later CodeRabbit
+  # status/review event wakes this reconciler. Avoid workflow_run here so
+  # cancelling obsolete CI runs cannot create a controller restart storm.
   pull_request_review:
     types: [submitted, dismissed]
   status:
