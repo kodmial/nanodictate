@@ -1,26 +1,28 @@
 name: Auto-merge reviewed pull requests
 
 on:
-  # CI completion itself cannot make a PR mergeable: mark-ready-for-coderabbit
-  # requests a fresh post-CI CodeRabbit review, and the later CodeRabbit
-  # status/review event wakes this reconciler. Avoid workflow_run here so
-  # cancelling obsolete CI runs cannot create a controller restart storm.
+  # Successful PR CI explicitly dispatches this reconciler from
+  # mark-ready-for-coderabbit. CodeRabbit status/review and main pushes are
+  # additional event-driven wake-ups; no critical transition depends on cron.
   pull_request_review:
     types: [submitted, dismissed]
   status:
   push:
     branches: [main]
   schedule:
-    # Safety net for missed/delayed webhook events.
-    - cron: '1,6,11,16,21,26,31,36,41,46,51,56 * * * *'
+    # Best-effort safety net only. All normal transitions have event hooks.
+    # A scheduled run executes the exact same idempotent latest-state
+    # reconciler, so overlap with an event-driven wake-up is harmless.
+    - cron: '17,47 * * * *'
   workflow_dispatch:
 
 permissions: {}
 
 concurrency:
-  # This controller is a pure latest-state reconciler and revalidates every gate
-  # immediately before merging. A newer event makes an older queued/in-flight
-  # evaluation obsolete, so keep only the newest run.
+  # Every trigger (CI dispatch, CodeRabbit, push, manual, or cron) enters the
+  # same pure latest-state reconciler. It revalidates every gate immediately
+  # before each write. A newer wake-up makes an older queued/in-flight run
+  # obsolete, so at most one reconciliation owns side effects at a time.
   group: nanodictate-auto-merge
   cancel-in-progress: true
 
