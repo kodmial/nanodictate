@@ -43,25 +43,33 @@ jobs:
 
           ISSUES="$(gh api --paginate "repos/${REPOSITORY}/issues?state=open&per_page=100")"
 
-          # Pull requests are also returned by the Issues API; exclude them. Only
-          # explicitly prioritized issues participate. No default priority is added.
+          # Pull requests are also returned by the Issues API; exclude them.
+          # Ordering is deterministic:
+          #   P0 -> P1 -> P2 -> no priority -> P3
+          # and then by issue number within each group.
+          #
+          # Zero or one priority label is valid. Issues carrying multiple priority
+          # labels are excluded as ambiguous rather than guessed.
           mapfile -t CANDIDATES < <(
             jq -r '
               [ .[]
                 | select(.pull_request == null)
-                | . as $issue
                 | [(.labels[]?.name // empty) | select(test("^priority:[pP][0-3]$"))] as $priorities
-                | select(($priorities | length) == 1)
+                | select(($priorities | length) <= 1)
                 | {
                     number: .number,
-                    priority: ($priorities[0] | ascii_downcase)
+                    priority: (if ($priorities | length) == 1
+                               then ($priorities[0] | ascii_downcase)
+                               else null
+                               end)
                   }
               ]
               | sort_by(
                   (if .priority == "priority:p0" then 0
                    elif .priority == "priority:p1" then 1
                    elif .priority == "priority:p2" then 2
-                   else 3 end),
+                   elif .priority == null then 3
+                   else 4 end),
                   .number
                 )
               | .[].number
@@ -69,7 +77,7 @@ jobs:
           )
 
           if [[ ${#CANDIDATES[@]} -eq 0 ]]; then
-            echo "No open issue has exactly one priority:p0..priority:p3 label."
+            echo "No unambiguous open issue is available for scheduling."
             exit 0
           fi
 
