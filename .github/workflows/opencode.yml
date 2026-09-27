@@ -192,6 +192,14 @@ jobs:
               return;
             }
 
+            const sourceReview = await github.rest.pulls.getReview({
+              owner,
+              repo,
+              pull_number: pullNumber,
+              review_id: reviewId,
+            });
+            const reviewedSha = sourceReview.data.commit_id;
+
             const pr = await github.rest.pulls.get({
               owner,
               repo,
@@ -216,59 +224,91 @@ jobs:
                 !comment.in_reply_to_id
             );
 
+            let requested = 0;
             if (findings.length === 0) {
               core.notice(
-                `CodeRabbit review ${reviewId} has no inline threads; review-body feedback will be re-checked by the next current-head CodeRabbit review.`
+                `CodeRabbit review ${reviewId} has no inline threads; no thread replies are needed.`
               );
-              return;
-            }
+            } else {
+              for (const finding of findings) {
+                const marker =
+                  `<!-- opencode-coderabbit-verification review=${reviewId} finding=${finding.id} head=${headSha} -->`;
 
-            let requested = 0;
-            for (const finding of findings) {
-              const marker =
-                `<!-- opencode-coderabbit-verification review=${reviewId} finding=${finding.id} head=${headSha} -->`;
-
-              const duplicate = comments.some(
-                (comment) =>
-                  comment.in_reply_to_id === finding.id &&
-                  comment.body?.includes(marker)
-              );
-              if (duplicate) {
-                core.info(
-                  `Verification already requested for finding ${finding.id} at ${headSha}.`
+                const duplicate = comments.some(
+                  (comment) =>
+                    comment.in_reply_to_id === finding.id &&
+                    comment.body?.includes(marker)
                 );
-                continue;
+                if (duplicate) {
+                  core.info(
+                    `Verification already requested for finding ${finding.id} at ${headSha}.`
+                  );
+                  continue;
+                }
+
+                const body = [
+                  marker,
+                  '@coderabbitai Re-check this exact original finding after the OpenCode fixes.',
+                  '',
+                  `Current PR HEAD: \`${headSha}\``,
+                  '',
+                  'Compare the original finding in this thread with the current code itself,',
+                  'not merely with the latest incremental diff or the OpenCode report.',
+                  '',
+                  'Reply with **RESOLVED** only if the underlying issue is fully fixed.',
+                  'Otherwise reply with **UNRESOLVED** and state exactly what remains.',
+                ].join('\n');
+
+                await github.request(
+                  'POST /repos/{owner}/{repo}/pulls/{pull_number}/comments/{comment_id}/replies',
+                  {
+                    owner,
+                    repo,
+                    pull_number: pullNumber,
+                    comment_id: finding.id,
+                    body,
+                  }
+                );
+                requested += 1;
               }
 
-              const body = [
-                marker,
-                '@coderabbitai Re-check this exact original finding after the OpenCode fixes.',
-                '',
-                `Current PR HEAD: \`${headSha}\``,
-                '',
-                'Compare the original finding in this thread with the current code itself,',
-                'not merely with the latest incremental diff or the OpenCode report.',
-                '',
-                'Reply with **RESOLVED** only if the underlying issue is fully fixed.',
-                'Otherwise reply with **UNRESOLVED** and state exactly what remains.',
-              ].join('\n');
+              core.notice(
+                `Requested CodeRabbit verification for ${requested}/${findings.length} findings from review ${reviewId} at HEAD ${headSha}.`
+              );
+            }
 
-              await github.request(
-                'POST /repos/{owner}/{repo}/pulls/{pull_number}/comments/{comment_id}/replies',
+            // If OpenCode intentionally made no commit, a synchronize event will
+            // not create a new CI/review cycle. Force an independent complete
+            // CodeRabbit pass over the same HEAD instead of trusting the agent's
+            // decision or leaving a body-only nitpick permanently blocked.
+            if (reviewedSha && headSha === reviewedSha) {
+              const marker =
+                `<!-- opencode-coderabbit-full-rereview review=${reviewId} head=${headSha} -->`;
+              const issueComments = await github.paginate(
+                github.rest.issues.listComments,
                 {
                   owner,
                   repo,
-                  pull_number: pullNumber,
-                  comment_id: finding.id,
-                  body,
+                  issue_number: pullNumber,
+                  per_page: 100,
                 }
               );
-              requested += 1;
-            }
+              const duplicate = issueComments.some(comment =>
+                comment.body?.includes(marker)
+              );
 
-            core.notice(
-              `Requested CodeRabbit verification for ${requested}/${findings.length} findings from review ${reviewId} at HEAD ${headSha}.`
-            );
+              if (!duplicate) {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: pullNumber,
+                  body: `@coderabbitai full review\n\n${marker}`,
+                });
+                core.notice(
+                  `OpenCode left HEAD ${headSha} unchanged; requested a full CodeRabbit re-review.`
+                );
+              }
+            }
 
       - name: Resolve merge conflict with main
         if: github.event_name == 'workflow_dispatch' && inputs.mode == 'resolve-conflict'

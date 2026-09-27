@@ -93,7 +93,7 @@ jobs:
             function stateMovedPastRateLimit(comments, limitedAt) {
               const retryAlreadyPosted = comments.some(c =>
                 c.user?.login !== 'coderabbitai[bot]' &&
-                c.body?.trim() === '@coderabbitai review' &&
+                /^@coderabbitai\s+(?:full\s+)?review\s*$/i.test(c.body?.trim() || '') &&
                 new Date(c.created_at).getTime() > limitedAt
               );
               if (retryAlreadyPosted) return true;
@@ -222,9 +222,9 @@ jobs:
                 owner,
                 repo,
                 issue_number: pr.number,
-                body: '@coderabbitai review',
+                body: '@coderabbitai full review',
               });
               core.notice(
-                `Retried CodeRabbit review for PR #${pr.number} after quota reset, current-head CI success, and readiness revalidation.`
+                `Retried full CodeRabbit review for PR #${pr.number} after quota reset, current-head CI success, and readiness revalidation.`
               );
             }
