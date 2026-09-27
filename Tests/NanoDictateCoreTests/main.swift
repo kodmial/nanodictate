@@ -23,6 +23,7 @@ let suites: [XCTestCase.Type] = [
     AudioMetricsTests.self,
     AudioCaptureTests.self,
     AudioServiceLifecycleTests.self,
+    AudioServiceCaptureReadinessTests.self,
     AudioServiceWedgeTests.self,
     AudioServiceInstallTapWedgeTests.self,
     AudioServiceVADTests.self,

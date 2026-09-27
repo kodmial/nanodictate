@@ -160,7 +160,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   private var processingSession = 0
 
   /// Recording start "in flight" (engine boots asynchronously on AudioService's
-  /// background queue): repeated Alt+Alt in this window is ignored, not duplicated.
+  /// background queue AND the first microphone buffer is awaited): repeated
+  /// Alt+Alt in this window is ignored, not duplicated. Cleared only at
+  /// capture readiness (truthful ready point), startup failure, timeout, or
+  /// cancel — never at engine-start completion alone.
   private var isStarting = false
   /// Start session token: incremented on each new start and on boot watchdog
   /// firing — invalidates stale completion callbacks.
@@ -221,11 +224,14 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// micErrorCooldown: "empty dictation" ≠ "mic error".
   private var emptyResultCooldown = MicErrorCooldown(interval: 3.0)
 
-  /// Hard watchdog for audio engine boot: `engine.start()` can block (device
-  /// switch, init after TCC grant). Start runs on AudioService's background
-  /// queue — main thread never freezes, but without the watchdog a hung queue
-  /// would leave the "Recording…" overlay forever. On timeout — terminal error
-  /// (overlay goes out, next Alt+Alt works).
+  /// Hard watchdog for audio engine boot AND first-buffer delivery:
+  /// `engine.start()` can block (device switch, init after TCC grant) and the
+  /// first microphone buffer can stall behind it. Start runs on AudioService's
+  /// background queue — main thread never freezes, but without the watchdog a
+  /// hung queue would leave the "Starting…" overlay forever. `isStarting`
+  /// stays true until capture readiness (not just engine-start completion),
+  /// so the timeout covers the whole request -> ready window. On timeout —
+  /// terminal error (overlay goes out, next Alt+Alt works).
   private static let recordStartTimeout: TimeInterval = 10
   /// Watchdog for the system mic-access request: a bundle-less background agent
   /// may never show the TCC window, and the `requestAccess` callback never
@@ -409,6 +415,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
 
     audio.levelDelegate = self
     hotkeys.delegate = self
+
+    // Cold-start pre-warm (no capture): probe the input format and build the
+    // resample converter off the dictation hot path, so the first Alt+Alt
+    // pays less bring-up latency. Holds no microphone open — objects only.
+    audio.prewarm()
 
     // Forced stop on the hard limit (60 s) goes the same way as a normal stop:
     // samples → WAV → transcription.
@@ -770,36 +781,50 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     }
   }
 
-  /// Recording start logic: moves the agent to .recording.
-  /// Panel shows here and stays the WHOLE record/recognize loop; hide() is
-  /// called only from terminal points (stop/error/insert). Engine boot is
-  /// async (AudioService.start(completion:) on a background queue, completion
-  /// on main) + recordStartTimeout watchdog: a hung engine gives a terminal
-  /// error, not an endless overlay.
+  /// Recording start logic: moves the agent to .recording — but ONLY once the
+  /// microphone capture path is provably live (first valid buffer observed).
+  /// Engine boot is async (AudioService.start on a background queue,
+  /// completion on main) and capture readiness arrives separately via
+  /// `audio.onCaptureReady`. The normal start cue (sound + "Recording" UI +
+  /// timer) is emitted exactly once from the readiness handler — never from
+  /// engine-start completion alone, so speaking immediately after the cue
+  /// cannot lose the first word. While bringing the engine up the overlay
+  /// shows an explicit starting state with NO timer running.
+  /// `recordStartTimeout` watchdog covers the whole window (engine bring-up +
+  /// first buffer): a hung engine gives a terminal error, not an endless
+  /// overlay, and a late readiness after the timeout is ignored by session
+  /// token and never emits a false cue.
   private func startRecording() {
     guard !isStarting else {
-      Logger.log("record start ignored: already starting", level: "info")
+      Logger.log("record start ignored: already starting (waiting for capture readiness)", level: "info")
       return
     }
-    sounds.playStart()
+    // Monotonic request stamp shared end to end with AudioService startup-gap
+    // instrumentation (request -> engine-started -> first buffer).
+    let requestMonotonic = AudioService.monotonicNow()
+    Logger.log("record request: Alt+Alt trigger", level: "info")
     overlay.show()
     // Label "what recognition goes through" ("<provider> · <model>") — from
     // THE SAME resolved provider the session transcriber was built with in
     // init (resolvedConfig): single source of truth, config not re-read here.
     overlay.setSTTLabel(RecognitionLabel.forSession(resolvedConfig))
-    // "Recording" phase: mic + timer, start time fixed here.
-    overlay.setRecordingPhase()
-    overlay.setStatus(L10n.tr("overlay.recording"))
-    Logger.log("record start")
+    // Starting phase: explicit not-yet-ready state. The recording timer stays
+    // stopped — setRecordingPhase (timer start) happens only at capture
+    // readiness, so the UI never implies speech is captured before it is.
+    overlay.setStatus(L10n.tr("overlay.starting"))
+    Logger.log("record start: engine bring-up requested (waiting for capture readiness)")
 
     isStarting = true
     startSession += 1
     let session = startSession
+    // Exactly-once latch for the normal start cue of this session.
+    var didEmitReadyCue = false
 
-    // Engine boot watchdog: if the engine does not start within
-    // recordStartTimeout — terminal error (overlay goes out, next Alt+Alt
-    // works). startSession increments here too: a delayed start completion
-    // (engine did boot later) sees the token mismatch.
+    // Engine boot watchdog: if the engine does not start AND deliver its
+    // first buffer within recordStartTimeout — terminal error (overlay goes
+    // out, next Alt+Alt works). startSession increments here too: a delayed
+    // start completion or a late first buffer sees the token mismatch and
+    // never emits a ready cue.
     // audio.cancel() is intentionally NOT called here: its teardown would go
     // to the hung engine's queue (blocked forever), and a start that unlocked
     // AFTER the swap would run it WITHOUT a generation guard — setRecording(
@@ -813,6 +838,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       Logger.log("record start timed out after \(Int(Self.recordStartTimeout)) s", level: "error")
       self.startSession += 1
       self.isStarting = false
+      self.audio.onCaptureReady = nil
       // The wedged engine is replaced with a fresh one: engine.start() may
       // never have returned (HAL blocked by a device switch) — the old
       // instance is unusable, the next Alt+Alt starts from a clean engine.
@@ -821,35 +847,73 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       self.showMicrophoneError(L10n.tr("error.micNoResponse"))
     }
 
-    audio.start { [weak self] result in
+    // Capture-readiness handler BEFORE start: the first buffer can arrive
+    // immediately after the tap goes live, and the cue must not miss it.
+    // Exactly one normal start cue per successful session; stale sessions
+    // (timeout/cancel/new loop) never cue.
+    audio.onCaptureReady = { [weak self] in
+      guard let self else { return }
+      guard self.startSession == session, self.isStarting else { return }
+      guard !didEmitReadyCue else { return }
+      didEmitReadyCue = true
+      self.isStarting = false
+      let elapsed = AudioService.monotonicNow() - requestMonotonic
+      // The truthful ready point: capture path provably receives speech.
+      // Sound + Recording UI + timer start HERE and only here.
+      self.sounds.playStart()
+      self.overlay.setSTTLabel(RecognitionLabel.forSession(self.resolvedConfig))
+      // "Recording" phase: mic + timer, start time fixed here (not at the
+      // Alt+Alt trigger) — the timer measures captured speech, not bring-up.
+      self.overlay.setRecordingPhase()
+      self.overlay.setStatus(L10n.tr("overlay.recording"))
+      self.state = .recording
+      // Exact "record start" marker (suffix contract of AgentScreen.
+      // isRecordingActive — `nanodictate status` shows Recording: active).
+      // Logged HERE at capture readiness, not at the Alt+Alt trigger, so the
+      // status screen is truthful too: active means speech is captured.
+      Logger.log("record start")
+      Logger.log(
+        String(format: "record ready: capture path live (request->ready=%.3f s)", elapsed),
+        level: "info")
+      if self.chunked {
+        // Live dictation: each utterance (pause ≥ pauseDuration) is
+        // recognized and inserted on the fly; by the time of Alt+Alt the
+        // text is already partly in the input field.
+        self.subscribeLiveNanoDictate()
+      }
+      if self.isDebug {
+        Logger.log("record started: state = .recording", level: "debug")
+      }
+    }
+
+    audio.start(requestTime: requestMonotonic) { [weak self] result in
       guard let self else { return }
       guard self.startSession == session else {
         // Start finished after the watchdog (or a new loop began).
         // If the engine did boot — do not leave recording hanging.
-        // cancel() here runs ONLY when the engine that started recording is
-        // still current: starts that unlocked AFTER the wedge swap are
-        // flagged by AudioService itself (.failure(.engineSuperseded), see
-        // AudioService.startOnEngineQueue) and never reach .success —
-        // otherwise cancel() would kill a live new session on the fresh engine.
-        if case .success = result {
+        // cancel() here runs ONLY when no newer session owns the engine: a
+        // fresh start reuses the live engine via its own top-of-start
+        // teardown, and an unconditional cancel would kill it. Wedge-swapped
+        // starts never reach .success (AudioService returns
+        // .failure(.engineSuperseded)), so a stale .success always means the
+        // engine is still current.
+        if case .success = result, !self.isStarting {
           self.audio.cancel()
         }
         return
       }
-      self.isStarting = false
       switch result {
       case .success:
-        self.state = .recording
-        if self.chunked {
-          // Live dictation: each utterance (pause ≥ pauseDuration) is
-          // recognized and inserted on the fly; by the time of Alt+Alt the
-          // text is already partly in the input field.
-          self.subscribeLiveNanoDictate()
-        }
+        // Engine is up and the tap is live — capture NOT yet proven. The
+        // readiness handler above owns the cue and the .recording transition;
+        // isStarting stays true until it fires. (If the first buffer beat
+        // this completion, the handler already ran or is queued on main.)
         if self.isDebug {
-          Logger.log("record started: state = .recording", level: "debug")
+          Logger.log("record engine up: waiting for first buffer", level: "debug")
         }
       case .failure(let error):
+        self.isStarting = false
+        self.audio.onCaptureReady = nil
         Logger.log("microphone unavailable: \(error.localizedDescription)", level: "error")
         self.showMicrophoneError(L10n.tr("error.micEnableFailed"))
       }
@@ -1266,6 +1330,21 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// the live loop and end with an error status (the state must not stay
   /// .recording with a dead engine).
   private func handleDeviceChange(_ error: Error) {
+    // Device change during engine bring-up (state still .idle, isStarting):
+    // AudioService already stopped the engine, so capture readiness will
+    // never arrive — fail the pending startup explicitly instead of leaving
+    // it to the watchdog, and never emit the start cue.
+    if isStarting {
+      startSession += 1
+      isStarting = false
+      audio.onCaptureReady = nil
+      Logger.log("audio device changed during start: \(error.localizedDescription)", level: "warn")
+      liveSession += 1
+      liveRunState?.isCancelled = true
+      liveRunState = nil
+      failTranscription(error.localizedDescription, isNetworkFailure: false)
+      return
+    }
     guard state == .recording else { return }
     Logger.log("audio device changed: \(error.localizedDescription)", level: "warn")
     // Invalidate the live loop: a segment being recognized on liveExecutor
@@ -2014,7 +2093,22 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       // unprocessed inserts (handleLiveSegment's isCancelled/session guards).
       Logger.log("recognition cancelled by Esc")
     case .idle:
-      return
+      // Startup cancel: state never left .idle but an engine bring-up is in
+      // flight (isStarting). Invalidate the pending session so a late
+      // engine-start completion or a late first buffer can never transition
+      // to .recording or emit the start cue (stale callbacks check the
+      // bumped startSession). Otherwise Esc during bring-up is a no-op and
+      // the orphaned bring-up would still cue. Falls through to the common
+      // terminal tail below (cancel sound, status, hide).
+      guard isStarting else { return }
+      startSession += 1
+      isStarting = false
+      audio.onCaptureReady = nil
+      audio.cancel()
+      liveSession += 1
+      liveRunState?.isCancelled = true
+      liveRunState = nil
+      Logger.log("record start cancelled during bring-up")
     }
     // Spec: Esc extinguishes the synthetic-Enter latch — a cancelled
     // recording/recognition does not post Enter. In .idle we return above
