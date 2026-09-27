@@ -1,18 +1,20 @@
 import Foundation
 
-// MARK: - Цифровое усиление входного сигнала (AGC)
+// MARK: - Digital input gain (AGC)
 
 /// AGC input gain config.
 ///
-/// Speech sits at −55…−40 dBFS — 2–3× quieter than normal −25…−18 dBFS, so STT
-/// gets weak signal. AGC lifts current RMS toward `targetRmsDb`, capped by
-/// `maxGainDb`: gain = clamp(target − current, 0, max). Silence (≤ −50 dBFS)
-/// never amplified — mic noise must not confuse VAD/autostop.
+/// Quiet speech sits well below normal levels, so STT gets weak signal. AGC
+/// lifts current raw RMS toward `targetRmsDb`, capped by `maxGainDb`:
+/// gain = clamp(target − current, 0, max). Gating is adaptive (issue #21):
+/// only raw signal above the noise floor (+4 dB) and above -70 dBFS absolute
+/// is amplified — steady noise at the floor never climbs toward speech level.
 ///
-/// Applied to Float32 buffer AFTER 16 kHz/mono conversion, BEFORE Int16: all
-/// consumers (level meter, live-VAD, autostop, WAV) see amplified signal.
+/// Applied to Float32 buffer AFTER 16 kHz/mono conversion, BEFORE Int16: level
+/// meter and recording see the conditioned signal. VAD/autostop decisions use
+/// the raw/pre-gain RMS, never the amplified value.
 /// One-pole smoothing: fast attack (~25 ms) up, slow release (~300 ms) down;
-/// peaks clamped to [−1.0, 1.0] to avoid Int16 clipping.
+/// peaks pass a bounded soft limiter to avoid hard-clipped plateaus.
 public struct InputGainConfig: Equatable {
   /// Master switch; `false` passes buffer through untouched.
   /// Kill switch: NANODICTATE_GAIN_DISABLED=1. Default on per spec.
@@ -97,11 +99,15 @@ public struct InputGainConfig: Equatable {
 /// Input gain processor. Pure math over Float32 buffer, no audio hardware — fully unit-testable.
 ///
 /// `apply` semantics: target gain from CURRENT (unamplified) RMS — dB shortfall to
-/// `targetRmsDb`, capped by maxGainDb, zero at/below silence threshold (−50 dBFS).
+/// `targetRmsDb`, capped by maxGainDb. Gating is adaptive (issue #21): amplify only
+/// when raw RMS sits above the estimated noise floor (+4 dB) and above an absolute
+/// minimum (-70 dBFS). Steady noise at the floor is never amplified; quiet speech
+/// above the floor is, even when below the old fixed -50 dBFS threshold.
 /// Actual gain chases target via one-pole: each sample shifts `currentGainDb` by α
 /// of the gap (α from attack on rise, release on fall; τ in samples = seconds × sampleRate).
-/// Post-gain sample clamped to [−1.0, 1.0]. Returns RMS of AMPLIFIED buffer
-/// (post-clamp) — feeds level metric, live-VAD and autostop.
+/// Post-gain samples pass a bounded soft limiter (no hard-clipped plateaus).
+/// Returns RMS of AMPLIFIED buffer (post-limit) — feeds level metric and recording.
+/// VAD/autostop decisions use the raw/pre-gain RMS, never this amplified value.
 public final class InputGain {
   public let config: InputGainConfig
 
@@ -109,25 +115,46 @@ public final class InputGain {
   /// `apply`; exposed for diagnostics and tests.
   public private(set) var currentGainDb: Float = 0
 
+  /// Adaptive noise-floor estimate (raw RMS domain). Independent from the VAD
+  /// tracker on purpose: AGC conditioning and speech detection stay separate.
+  public private(set) var floorTracker = NoiseFloorTracker()
+
+  /// Absolute minimum raw level that may be amplified (-70 dBFS). Below is
+  /// digital silence, never amplified.
+  public static let absoluteMinDb: Float = -70
+
+  /// Gate margin above the noise floor in dB: raw must exceed floor by this.
+  public static let gateMarginDb: Float = 4
+
   public init(config: InputGainConfig = .defaults) {
     self.config = config
   }
 
-  /// Reset gain to zero (new recording session): first buffer must not start from
-  /// previous recording's residual gain.
+  /// Reset gain and floor estimate (new recording session).
   public func reset() {
     currentGainDb = 0
+    floorTracker.reset()
+  }
+
+  /// Current noise floor (linear RMS) for diagnostics.
+  public var noiseFloor: Float { floorTracker.floor }
+
+  /// Whether raw RMS passes the adaptive amplification gate.
+  public func shouldAmplify(rms: Float) -> Bool {
+    guard config.enabled else { return false }
+    let cleanRms = rms.isFinite ? min(max(rms, 0), 1) : 0
+    guard AudioMetrics.dbfs(cleanRms) > Self.absoluteMinDb else { return false }
+    let gate = floorTracker.floor * powf(10, Self.gateMarginDb / 20)
+    return cleanRms > gate
   }
 
   /// Target gain for current RMS (dB): shortfall to `targetRmsDb`, range 0…maxGainDb.
-  /// Silence (≤ −50 dBFS) or disabled switch give 0 — mic noise never amplified.
+  /// Returns 0 when disabled, below the absolute minimum, or at/below the
+  /// adaptive floor gate — mic noise never amplified.
   public func targetGainDb(forRms rms: Float) -> Float {
     guard config.enabled else { return 0 }
+    guard shouldAmplify(rms: rms) else { return 0 }
     let currentDb = AudioMetrics.dbfs(rms)
-    // Near-silence threshold — codebase-wide constant (−50 dBFS). Amplify only
-    // above it: else background noise would climb toward speech level and
-    // confuse VAD/autostop.
-    guard currentDb > AudioMetrics.dbfs(AudioMetrics.nearSilenceThreshold) else { return 0 }
     return min(max(config.targetRmsDb - currentDb, 0), config.maxGainDb)
   }
 
@@ -148,26 +175,27 @@ public final class InputGain {
     sampleRate: Int = 16000
   ) -> Float {
     guard config.enabled, frameLength > 0 else { return rms }
-    // Silence (≤ −50 dBFS) NEVER amplified: without this guard even smoothed gain
-    // would leak into silence via release tail (~0.3 s), lifting noise and confusing
-    // VAD/autostop. Silence = passthrough + gain reset: pause breaks context, next
-    // speech attacks from zero.
-    guard AudioMetrics.dbfs(rms) > AudioMetrics.dbfs(AudioMetrics.nearSilenceThreshold) else {
+    let rate = max(1, sampleRate)
+    let duration = TimeInterval(frameLength) / TimeInterval(rate)
+    // Adaptive gate on the raw/pre-gain RMS (decision and target with the prior
+    // floor, then adapt). Below gate: passthrough + gain reset so release tails
+    // never leak into silence/noise and lift it toward speech level.
+    let gated = shouldAmplify(rms: rms)
+    let target = gated ? targetGainDb(forRms: rms) : 0
+    floorTracker.update(rms: rms.isFinite ? min(max(rms, 0), 1) : 0, duration: duration)
+    guard gated else {
       currentGainDb = 0
       return rms
     }
-    let target = targetGainDb(forRms: rms)
     // One-pole α = 1 − e^(−dt/τ): τ seconds, dt samples → τ in samples = τ·sampleRate.
-    let rate = max(1, sampleRate)
     let attackAlpha = 1 - exp(-1 / max(1, config.attackTime * Double(rate)))
     let releaseAlpha = 1 - exp(-1 / max(1, config.releaseTime * Double(rate)))
 
-    // powf (транcцендент) выносится из per-sample цикла: коэффициент
-    // пересчитывается раз в `gainFactorRefreshSamples` сэмплов, между
-    // пересчётами плавающий gainDb догоняет его линейным one-pole — расхождение
-    // с точным per-sample вариантом ограничено ΔgainDb за ≤64 сэмпла (~4 мс
-    // на 16 кГц), на слух и для RMS-метрики неотличимо. Первый сэмпл считает
-    // коэффициент сразу (sinceUpdate == лимит) — стартовая амплитуда точная.
+    // powf (transcendental) stays out of the per-sample loop: the linear factor
+    // refreshes every `gainFactorRefreshSamples` samples while gainDb chases it
+    // with one-pole steps — divergence stays within ΔgainDb over ≤64 samples
+    // (~4 ms at 16 kHz), inaudible and invisible to RMS metrics. First sample
+    // computes the factor immediately for exact start amplitude.
     let gainFactorRefreshSamples = 64
 
     var sum: Float = 0
@@ -183,10 +211,11 @@ public final class InputGain {
       }
       sinceFactorUpdate += 1
       let amplified = channel[i] * factor
-      // Peak clamp: amplified sample stays in [−1.0, 1.0] — Int16 conversion below never clips.
-      let clamped = min(max(amplified, -1), 1)
-      channel[i] = clamped
-      sum += clamped * clamped
+      // Bounded soft limiter: compresses large transients toward ±1.0 instead
+      // of flattening them into hard-clipped plateaus. Int16 below never clips.
+      let limited = SoftLimiter.process(amplified)
+      channel[i] = limited
+      sum += limited * limited
     }
     return sqrt(sum / Float(frameLength))
   }

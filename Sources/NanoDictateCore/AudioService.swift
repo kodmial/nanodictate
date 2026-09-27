@@ -173,17 +173,25 @@ public final class AudioService {
   /// show whether real sound reached the engine after start.
   private var didLogFirstBuffer = false
   /// Digital input gain (AGC): applied to the Float32 buffer AFTER 16 kHz/mono
-  /// conversion and BEFORE Int16 conversion/level metering — all consumers
-  /// (level animation, live-VAD, auto-stop, recording) see the amplified
-  /// signal. Env config (`NANODICTATE_GAIN_*`); kill switch
+  /// conversion and BEFORE Int16 conversion/level metering — level animation
+  /// and recording see the conditioned signal. VAD and auto-stop decisions use
+  /// the raw/pre-gain RMS, never the amplified value (issue #21).
+  /// Env config (`NANODICTATE_GAIN_*`); kill switch
   /// `NANODICTATE_GAIN_DISABLED=1` passes the buffer unchanged.
   private let gain: InputGain
+  /// Adaptive speech detector on the raw/pre-gain signal (issue #21):
+  /// noise-floor tracker plus hysteresis. Independent from the AGC floor
+  /// tracker on purpose — level conditioning never drives speech decisions.
+  private var vad = AdaptiveVAD()
+  /// Last VAD speech state for debug transition logs (no raw audio logged).
+  private var lastVadSpeech = false
 
-  // MARK: - Live-VAD (пошаговая диктовка)
+  // MARK: - Live-VAD (stepwise dictation)
 
-  /// Live-VAD params — same as the offline segmenter: `silenceRMS` threshold
-  /// and the pause duration that closes an utterance.
-  private let liveSilenceRMS: Float
+  /// Live-VAD pause handling: `segmenterConfig.pauseDuration` closes an
+  /// utterance. Speech/silence classification itself is adaptive on the
+  /// raw signal (see `vad`); the fixed `segmenterConfig.silenceRMS` threshold
+  /// no longer drives live decisions (issue #21).
   /// Pause ≥ this many samples (16 kHz) closes an utterance.
   private let livePauseSamples: Int
   /// Pre-roll: speech samples (16 kHz) captured BEFORE the detected utterance
@@ -252,7 +260,8 @@ public final class AudioService {
     makeEngine: (() -> AudioEngineLike)? = nil,
     segmenterConfig: AudioSegmenterConfig = .defaults,
     autoStopConfig: AutoStopConfig = .defaults,
-    gainConfig: InputGainConfig = .fromEnvironment()
+    gainConfig: InputGainConfig = .fromEnvironment(),
+    vadConfig: AdaptiveVADConfig = .defaults
   ) {
     self.logLevel = logLevel
     // Engine factory: the initial instance (if not injected) and the wedge
@@ -267,6 +276,7 @@ public final class AudioService {
     engineQueue = DispatchQueue(label: "nanodictate.audio.engine", qos: .userInitiated)
     self.autoStopConfig = autoStopConfig
     gain = InputGain(config: gainConfig)
+    vad = AdaptiveVAD(config: vadConfig)
     autoStopDetector = SilenceAutoStopDetector(
       silenceRMSThreshold: autoStopConfig.silenceRMSThreshold,
       speechRMSThreshold: autoStopConfig.speechRMSThreshold,
@@ -275,9 +285,8 @@ public final class AudioService {
       minSpeechRun: autoStopConfig.minSpeechRun,
       minRecordingDuration: autoStopConfig.minRecordingDuration
     )
-    // Live-VAD lives on the same thresholds as offline recording segmentation:
-    // same `silenceRMS`, same `pauseDuration`.
-    liveSilenceRMS = segmenterConfig.silenceRMS
+    // Live-VAD pause handling reuses the offline pause duration; speech/silence
+    // classification is adaptive on the raw signal (issue #21).
     livePauseSamples = max(1, Int((segmenterConfig.pauseDuration * 16000).rounded()))
     // Pre-roll 0.5 s (8000 samples) and post-roll 0.25 s (4000 samples) at
     // 16 kHz — margin keeping word attack and tail uncut.
@@ -382,6 +391,8 @@ public final class AudioService {
       session.clearAutoStop()
       autoStopDetector.reset()
       gain.reset()  // new session — zero gain, no residue from the previous recording
+      vad.reset()
+      lastVadSpeech = false
       liveLastCutIndex = 0
       resetLiveVADLocked()
     }
@@ -765,6 +776,8 @@ public final class AudioService {
     liveLastCutIndex = 0
     session.clearAutoStop()
     autoStopDetector.reset()
+    vad.reset()
+    lastVadSpeech = false
     resetLiveVADLocked()
     lock.unlock()
   }
@@ -1155,18 +1168,30 @@ public final class AudioService {
     let converted = result.converted
     let frameLength = Int(converted.frameLength)
 
-    // RMS BEFORE gain — AGC input: "how many dB short of the target speech
-    // level" (raw-tap-signal metering).
+    // RMS BEFORE gain — raw/pre-gain signal. VAD and auto-stop decide on this
+    // raw value (issue #21); AGC conditions the buffer below without driving
+    // speech decisions.
     var sum: Float = 0
     for i in 0..<frameLength {
       let sample = channel[i]
       sum += sample * sample
     }
     let rms = frameLength > 0 ? sqrt(sum / Float(frameLength)) : 0
-    // Digital gain (AGC) here, mutating the buffer in place: all consumers
-    // below (level metric, live-VAD, auto-stop, Int16 recording) see the
-    // amplified signal. The metering level is recomputed from the amplified
-    // buffer (peak clamp accounted); with AGC off
+    let bufferDuration = frameLength > 0 ? Double(frameLength) / Double(targetFormat.sampleRate) : 0
+    // Adaptive speech decision on the raw signal (noise floor + hysteresis).
+    // Independent from the AGC floor tracker: gain never drives VAD.
+    // process() runs on the audio thread; vad state is confined here behind
+    // the session liveness checks (takeBufferedSnapshot + isRecordingLocked
+    // below). Teardown/start resets run under lock on other queues but only
+    // when not recording, so no concurrent mutation with live buffers.
+    vad.update(rms: rms, duration: bufferDuration)
+    let vadIsSpeech: Bool = vad.isSpeech
+    let vadFloor = vad.noiseFloor
+    let vadEnter = vad.enterThreshold
+    let vadExit = vad.exitThreshold
+    // Digital gain (AGC) here, mutating the buffer in place: level metric and
+    // Int16 recording see the conditioned signal. Metering recomputed from the
+    // amplified buffer (soft limiter accounted); with AGC off
     // (`NANODICTATE_GAIN_DISABLED=1`) the buffer passes unchanged, metric = rms.
     let meteredRms = gain.apply(
       to: channel,
@@ -1174,7 +1199,29 @@ public final class AudioService {
       rms: rms,
       sampleRate: Int(targetFormat.sampleRate)
     )
+    let appliedGainDb = gain.currentGainDb
     levelDelegate?.audioLevelChanged(rms: meteredRms)
+    // Debug diagnostics: raw level, floor, VAD state and gain. No raw audio.
+    if isDebug, vadIsSpeech != lastVadSpeech {
+      lastVadSpeech = vadIsSpeech
+      Logger.log(
+        String(
+          format:
+            "record vad: %@ raw=%.4f (%.1f dBFS) floor=%.4f (%.1f dBFS) enter=%.4f exit=%.4f gain=%+.1f dB",
+          vadIsSpeech ? "speech" : "silence",
+          Double(rms),
+          Double(AudioMetrics.dbfs(rms)),
+          Double(vadFloor),
+          Double(AudioMetrics.dbfs(vadFloor)),
+          Double(vadEnter),
+          Double(vadExit),
+          Double(appliedGainDb)
+        ),
+        level: "debug"
+      )
+    } else if isDebug {
+      lastVadSpeech = vadIsSpeech
+    }
 
     // All shared memory (isRecording, collectedSamples, rmsHistory, limit,
     // live-VAD) — under the lock: stop()/cancel() take a snapshot on main
@@ -1190,20 +1237,27 @@ public final class AudioService {
     rmsHistory.append(meteredRms)
 
     // First session buffer — proof sound really reached the engine (piece
-    // duration and energy; broken mic → rms ≈ 0).
+    // duration and energy; broken mic → rms ≈ 0). Includes raw level, adaptive
+    // floor, VAD state and applied gain for frontend diagnostics.
     if !didLogFirstBuffer {
       didLogFirstBuffer = true
       if isDebug {
         Logger.log(
           String(
             format:
-              "record first buffer: inFrames=%d (%.3f s @ %.0f Hz), outFrames=%d, rms=%.4f (%.1f dBFS)",
+              "record first buffer: inFrames=%d (%.3f s @ %.0f Hz), outFrames=%d, raw=%.4f (%.1f dBFS), floor=%.4f (%.1f dBFS), vad=%@, metered=%.4f (%.1f dBFS), gain=%+.1f dB",
             buffer.frameLength,
             Double(buffer.frameLength) / buffer.format.sampleRate,
             buffer.format.sampleRate,
             frameLength,
-            meteredRms,
-            AudioMetrics.dbfs(meteredRms)
+            Double(rms),
+            Double(AudioMetrics.dbfs(rms)),
+            Double(vadFloor),
+            Double(AudioMetrics.dbfs(vadFloor)),
+            vadIsSpeech ? "speech" : "silence",
+            Double(meteredRms),
+            Double(AudioMetrics.dbfs(meteredRms)),
+            Double(appliedGainDb)
           ),
           level: "debug"
         )
@@ -1229,14 +1283,15 @@ public final class AudioService {
     }
     let sampleEnd = collectedSamples.count
 
-    // Live-VAD over the just-computed RMS: continuous speech — one utterance; a
+    // Live-VAD on the raw/adaptive speech flag: continuous speech — one utterance; a
     // pause ≥ pauseDuration (in samples) closes it with a segment, and with
     // accumulated speech ≥ liveChunkWindowSamples the same segment is cut by
     // the micro-pause liveMicroPauseSamples — text flows while speaking, no
-    // long-pause wait. Same thresholds as the offline segmenter (silenceRMS,
-    // pauseDuration). Segment delivery — by COPY outside (onSpeechSegment
-    // AFTER unlock); collectedSamples itself untouched and keeps collecting
-    // the whole recording for the final pass.
+    // long-pause wait. Pause/sample accounting below is unchanged (issue #21
+    // only swaps the speech/silence classifier from fixed amplified threshold
+    // to adaptive raw detection). Segment delivery — by COPY outside
+    // (onSpeechSegment AFTER unlock); collectedSamples itself untouched and
+    // keeps collecting the whole recording for the final pass.
     //
     // Shared delivery code for both branches (full pause and chunk): post-roll
     // 0.25 s of silence after the last speech portion (index clamped by the
@@ -1257,7 +1312,7 @@ public final class AudioService {
       self.resetLiveVADLocked()
     }
 
-    if meteredRms < liveSilenceRMS {
+    if !vadIsSpeech {
       if liveUtteranceStart != nil {
         // Pause inside the utterance: opened. The utterance closes on a
         // FULL pause pauseDuration (as before) — or on the micro-pause
@@ -1295,19 +1350,26 @@ public final class AudioService {
     // same path as a user stop.
     let elapsed = CFAbsoluteTimeGetCurrent() - recordStartTime
     let shouldStop = limit.shouldStop(elapsed: elapsed, totalSamples: collectedSamples.count)
-    // Auto-stop on continuous silence (~3 s): the detector is fed ONLY
+    // Auto-stop on continuous silence (~3 s): fed with the raw/pre-gain RMS
+    // (issue #21 — VAD-side decision, never the amplified level), ONLY
     // when the feature is on (`autoStopConfig.enabled` — env kill switch,
     // see AutoStopConfig.fromEnvironment) and the limit did not fire in this
     // buffer (limit wins — the recording ends either way, one finalization
-    // type). Buffer duration — real: converted frames / target rate 16 kHz.
+    // type). The adaptive VAD speech flag opens the speech gate so raw quiet
+    // speech below the fixed speech threshold still arms auto-stop; VAD
+    // silence counts as silence even when raw RMS is loud, so steady noise
+    // converged to the adaptive floor does not block auto-stop (issue #21).
+    // Buffer duration — real:
+    // converted frames / target rate 16 kHz.
     // Accumulation by audio time, not buffer count — callback frequency
     // tracks hardware sample rate (~85 ms @ 48 kHz, ~93 ms @ 44.1 kHz),
     // "3 s of silence" measured by sound.
     let autoStopFired =
       autoStopConfig.enabled && !shouldStop
       && autoStopDetector.feed(
-        rms: meteredRms,
-        duration: Double(frameLength) / Double(targetFormat.sampleRate)
+        rms: rms,
+        duration: Double(frameLength) / Double(targetFormat.sampleRate),
+        isSpeech: vadIsSpeech
       )
     lock.unlock()
     if shouldStop {
@@ -1453,14 +1515,17 @@ public final class AudioService {
     Logger.log(
       String(
         format:
-          "record metering: rms min=%.4f (%.1f dBFS), avg=%.4f (%.1f dBFS), max=%.4f (%.1f dBFS), nearSilence=%@",
+          "record metering: rms min=%.4f (%.1f dBFS), avg=%.4f (%.1f dBFS), max=%.4f (%.1f dBFS), nearSilence=%@, vadFloor=%.4f (%.1f dBFS), gain=%+.1f dB",
         Double(summary.minRMS),
         Double(AudioMetrics.dbfs(summary.minRMS)),
         Double(summary.avgRMS),
         Double(AudioMetrics.dbfs(summary.avgRMS)),
         Double(summary.maxRMS),
         Double(AudioMetrics.dbfs(summary.maxRMS)),
-        summary.nearSilence ? "true" : "false"
+        summary.nearSilence ? "true" : "false",
+        Double(vad.noiseFloor),
+        Double(AudioMetrics.dbfs(vad.noiseFloor)),
+        Double(gain.currentGainDb)
       ),
       level: "debug"
     )

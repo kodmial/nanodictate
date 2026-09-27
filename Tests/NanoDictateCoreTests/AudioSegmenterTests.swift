@@ -96,6 +96,22 @@ final class AudioSegmenterTests: XCTestCase {
         XCTAssertTrue(ranges.isEmpty)
     }
 
+    /// Voiceless timeline below the adaptive enter threshold emits nothing —
+    /// neither via the hard cap nor via the trailing segment. Regression for
+    /// exit-threshold checks emitting `0..<3` for `[0.001, 0.002, 0.002]`
+    /// (enter ≈ 0.00251, exit ≈ 0.00158): hysteresis never enters speech.
+    @objc func testVoicelessTimelineBelowEnterYieldsNoSegments() {
+        let rms: [Float] = [0.001, 0.002, 0.002]
+        let hardCap = AudioSegmenter.splitRanges(
+            rms: rms, windowDuration: 1.0, config: cfg(pause: 1.0, min: 1.0, max: 3.0)
+        )
+        XCTAssertTrue(hardCap.isEmpty, "hard cap must not emit a voiceless segment")
+        let trailing = AudioSegmenter.splitRanges(
+            rms: rms, windowDuration: 1.0, config: cfg(pause: 1.0, min: 1.0, max: 45.0)
+        )
+        XCTAssertTrue(trailing.isEmpty, "trailing voiceless tail must not emit a segment")
+    }
+
     // MARK: - Сэмплы (16 кГц) + оверлэп
 
     private func makeSamples(_ blocks: [(amplitude: Float, seconds: Double)], sampleRate: Int = 16000) -> [Int16] {

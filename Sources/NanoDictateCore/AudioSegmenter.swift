@@ -1,19 +1,17 @@
 import Foundation
 
-// MARK: - VAD-сегментация записи (пошаговая диктовка)
+// MARK: - VAD segmentation (stepwise dictation)
 
-//
-// Pure audio split by voice pauses (RMS threshold, as in
-// AudioMetrics.nearSilenceThreshold). No I/O: works on RMS timeline
-// (AudioService.rmsHistory representation) or Int16 PCM samples.
-// Params: pause ≥ 0.8–1.5 s (default 1.0) — boundary; minSegment ~3 s
+// Pure audio split by voice pauses with adaptive speech detection (issue #21).
+// No I/O: works on RMS timeline or Int16 PCM samples.
+// Params: pause >= 0.8-1.5 s (default 1.0) — boundary; minSegment ~3 s
 // (tiny clips not cut); maxSegment 45 s (hard cap); overlap 1 s — last
 // second of PREVIOUS SPEECH BODY glued to next segment start (not pause
 // silence: pause longer than overlap drops out of both segments entirely)
 // so boundary words get context.
 
 public struct AudioSegmenterConfig: Equatable {
-  /// Continuous pause length (RMS below threshold) after which we cut.
+  /// Continuous pause length after which we cut.
   public var pauseDuration: TimeInterval
   /// Minimum segment length; shorter not cut (none — segment longer).
   public var minSegment: TimeInterval
@@ -21,21 +19,35 @@ public struct AudioSegmenterConfig: Equatable {
   public var maxSegment: TimeInterval
   /// Previous segment tail glued to next start.
   public var overlap: TimeInterval
-  /// RMS "silence" threshold (linear 0...1) — reuse AudioMetrics.
+  /// Legacy fixed RMS "silence" threshold (linear 0...1). Kept for config
+  /// compatibility; adaptive detection (issue #21) drives decisions by
+  /// default — see `useAdaptiveVAD`. Set `useAdaptiveVAD = false` to restore
+  /// the old fixed-threshold behavior.
   public var silenceRMS: Float
+  /// Adaptive speech detection on/off. Default true: noise-floor estimate
+  /// from the timeline plus hysteresis replaces the single fixed threshold,
+  /// so quiet speech below the old -50 dBFS boundary still counts as speech
+  /// while steady noise above it does not latch as speech.
+  public var useAdaptiveVAD: Bool
+  /// Adaptive margins/clamps (enter above floor, hysteresis, absolute bounds).
+  public var vadConfig: AdaptiveVADConfig
 
   public init(
     pauseDuration: TimeInterval = 1.0,
     minSegment: TimeInterval = 3.0,
     maxSegment: TimeInterval = 45.0,
     overlap: TimeInterval = 1.0,
-    silenceRMS: Float = AudioMetrics.nearSilenceThreshold
+    silenceRMS: Float = AudioMetrics.nearSilenceThreshold,
+    useAdaptiveVAD: Bool = true,
+    vadConfig: AdaptiveVADConfig = .defaults
   ) {
     self.pauseDuration = pauseDuration
     self.minSegment = minSegment
     self.maxSegment = maxSegment
     self.overlap = overlap
     self.silenceRMS = silenceRMS
+    self.useAdaptiveVAD = useAdaptiveVAD
+    self.vadConfig = vadConfig
   }
 
   public static let defaults = AudioSegmenterConfig()
@@ -71,16 +83,21 @@ public enum AudioSegmenter {
   /// (like AudioService.rmsHistory RMS buffers).
   public static let defaultWindowDuration: TimeInterval = 0.085
 
-  // MARK: - Разбиение по RMS-таймлайну
+  // MARK: - RMS timeline split
 
   /// Split RMS timeline (one value per window) into segment window ranges.
   ///
   /// Guarantees:
-  /// - boundary only after continuous pause length ≥ `pauseDuration`;
+  /// - boundary only after continuous pause length >= `pauseDuration`;
   /// - segment shorter than `minSegment` not cut (glued to next);
-  /// - `maxSegment` reached → forced boundary (even mid-speech — hard cap);
+  /// - `maxSegment` reached -> forced boundary (even mid-speech — hard cap);
   /// - junction silence enters no segment (cut at pause edges);
   /// - output segments cover recording with no gaps and no overlaps.
+  ///
+  /// Speech classification is adaptive by default (issue #21): the noise floor
+  /// is estimated from the timeline (low percentile, capped) and hysteresis
+  /// (enter above floor, exit below enter) replaces the single fixed
+  /// threshold. Set `config.useAdaptiveVAD = false` for legacy fixed behavior.
   static func splitRanges(
     rms: [Float],
     windowDuration: TimeInterval,
@@ -88,23 +105,46 @@ public enum AudioSegmenter {
   ) -> [Range<Int>] {
     guard !rms.isEmpty else { return [] }
     let pauseWindows = max(1, Int(round(config.pauseDuration / windowDuration)))
+    let (enter, exit) = thresholds(rms: rms, config: config)
 
     var segments: [Range<Int>] = []
     var segStart = 0
     var silenceStart: Int?
+    // Hysteresis state: inSpeech starts false; enter needs >= enter, exit
+    // needs < exit. Between thresholds state holds (no chatter).
+    var inSpeech = false
+    // Per-segment speech presence from the hysteresis classifier. Forced-cut
+    // and trailing decisions use this state so voiceless timelines never emit
+    // a segment merely because a sample crossed the lower exit threshold.
+    var hasSpeechInSegment = false
+
+    func isSpeech(_ value: Float) -> Bool {
+      if inSpeech {
+        if value < exit { inSpeech = false }
+      } else {
+        if value >= enter { inSpeech = true }
+      }
+      return inSpeech
+    }
 
     for i in 0..<rms.count {
+      let speech = isSpeech(rms[i])
+      if speech {
+        hasSpeechInSegment = true
+      }
+
       // Hard cap: cut on reaching max length.
       let segmentDuration = TimeInterval(i - segStart + 1) * windowDuration
       if segmentDuration >= config.maxSegment {
         appendSegmentIfHasSpeech(
-          rms: rms, range: segStart..<(i + 1), threshold: config.silenceRMS, to: &segments)
+          range: segStart..<(i + 1), hasSpeech: hasSpeechInSegment, to: &segments)
         segStart = i + 1
         silenceStart = nil
+        hasSpeechInSegment = false
         continue
       }
 
-      if rms[i] < config.silenceRMS {
+      if !speech {
         if silenceStart == nil {
           silenceStart = i
         }
@@ -122,21 +162,48 @@ public enum AudioSegmenter {
         guard duration >= config.minSegment else { continue }
         segments.append(segStart..<(boundary + 1))
         segStart = i
+        // New segment starts on the current speech sample.
+        hasSpeechInSegment = true
       }
     }
     appendTrailingSegment(
-      rms: rms, segStart: segStart, windowDuration: windowDuration, config: config, to: &segments)
+      rms: rms, segStart: segStart, windowDuration: windowDuration, config: config,
+      hasSpeech: hasSpeechInSegment, to: &segments)
     return segments
+  }
+
+  /// Adaptive thresholds (enter/exit) from the RMS timeline, or legacy fixed
+  /// pair when `useAdaptiveVAD` is false. Deterministic, no I/O.
+  static func thresholds(
+    rms: [Float],
+    config: AudioSegmenterConfig
+  ) -> (enter: Float, exit: Float) {
+    guard config.useAdaptiveVAD else {
+      return (config.silenceRMS, config.silenceRMS)
+    }
+    // Noise floor: low percentile of the timeline (robust to speech outliers),
+    // capped so all-loud timelines still read as speech and very quiet
+    // timelines stay sensitive. Absolute clamp keeps digital zeros sane.
+    let sorted = rms.sorted()
+    let idx = min(sorted.count - 1, Int(Double(sorted.count) * 0.2))
+    let low = sorted.isEmpty ? config.silenceRMS : sorted[max(0, idx)]
+    let floor = min(max(low, 0.0001), 0.01)
+    let floorDb = AudioMetrics.dbfs(floor)
+    var enterDb = floorDb + config.vadConfig.enterMarginDb
+    enterDb = min(max(enterDb, config.vadConfig.minEnterDb), config.vadConfig.maxEnterDb)
+    let exitDb = enterDb - config.vadConfig.hysteresisDb
+    let enter = min(max(powf(10, enterDb / 20), 0.00001), 1)
+    let exit = min(max(powf(10, exitDb / 20), 0.00001), 1)
+    return (enter, exit)
   }
 
   /// Append range to segments only if it has speech (not silence).
   private static func appendSegmentIfHasSpeech(
-    rms: [Float],
     range: Range<Int>,
-    threshold: Float,
+    hasSpeech: Bool,
     to segments: inout [Range<Int>]
   ) {
-    if (rms[range].max() ?? 0) >= threshold {
+    if hasSpeech {
       segments.append(range)
     }
   }
@@ -150,9 +217,10 @@ public enum AudioSegmenter {
     segStart: Int,
     windowDuration: TimeInterval,
     config: AudioSegmenterConfig,
+    hasSpeech: Bool,
     to segments: inout [Range<Int>]
   ) {
-    guard segStart < rms.count, (rms[segStart..<rms.count].max() ?? 0) >= config.silenceRMS else {
+    guard segStart < rms.count, hasSpeech else {
       return
     }
     let trail = segStart..<rms.count

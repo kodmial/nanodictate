@@ -362,6 +362,37 @@ final class AudioServiceVADTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(segmentDeliveries, 1, "уттеренс закрыт live-VAD по паузе ещё ДО автоостановки")
     }
 
+    /// Raw quiet speech below the fixed auto-stop speech threshold still arms
+    /// auto-stop via the adaptive VAD flag (issue #21): quiet buffers
+    /// (~-48 dBFS, gray zone for the fixed −45 dBFS gate) followed by real
+    /// silence trigger onAutoStop. Without the vadIsSpeech feed the gate would
+    /// never open and silence alone could not stop the recording.
+    @objc func testQuietSpeechFollowedBySilenceTriggersAutoStop() {
+        let engine = FakeEngine()
+        let service = makeLiveService(engine: engine)
+        let autoStopDone = expectation(description: "auto-stop after quiet speech")
+        var autoStopSamples: [Int16] = []
+        service.onAutoStop = { samples in
+            autoStopSamples = samples
+            autoStopDone.fulfill()
+        }
+
+        guard runStart(service) else {
+            XCTFail("старт должен пройти", file: #file, line: #line)
+            return
+        }
+
+        // Quiet speech 6 buffers (~0.6 s at −48 dBFS): below the fixed speech
+        // gate (−45 dBFS) but above the adaptive VAD enter threshold, so the
+        // VAD flag arms the gate. Then silence 60 buffers (~5.6 s): stop fires
+        // after grace (2 s) plus 3 s of continuous raw silence.
+        emit(engine, amplitude: 0.004, count: 6)
+        emit(engine, amplitude: 0.001, count: 60)
+        wait(for: [autoStopDone], timeout: 5)
+
+        XCTAssertTrue(autoStopSamples.count > 2000, "тихая речь + тишина останавливают запись")
+    }
+
     /// Pause shorter than 3 s does NOT stop: silence of 6 buffers (~0.5 s) stays
     /// below threshold and lies fully inside grace window 2.0 s (no
     /// accumulation at all), speech resumes after, and only explicit stop()

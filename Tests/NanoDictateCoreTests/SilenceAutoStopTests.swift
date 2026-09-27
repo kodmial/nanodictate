@@ -510,4 +510,65 @@ final class SilenceAutoStopTests: XCTestCase {
         XCTAssertFalse(detector.speechGatePassed, "reset отзывает и гейт")
         XCTAssertFalse(detector.feed(rms: 0.0001, duration: 3.0), "без новой речи тишина после reset не останавливает")
     }
+
+    /// Adaptive VAD flag opens the speech gate for raw quiet speech in the
+    /// gray zone (issue #21): `rms` 0.00251 alone never passes the fixed
+    /// speech threshold, but with `isSpeech: true` it arms the gate so later
+    /// real silence can stop the recording. Silence accumulation itself stays
+    /// on the raw RMS scale.
+    @objc func testVadSpeechFlagOpensGateForQuietSpeech() {
+        var detector = SilenceAutoStopDetector(
+            requiredSilenceDuration: 3.0,
+            gracePeriod: 0,
+            minSpeechRun: 0.3,
+            minRecordingDuration: 0
+        )
+        XCTAssertFalse(detector.feed(rms: 0.00251, duration: 0.2, isSpeech: true), "тихая речь не останавливает")
+        XCTAssertEqual(detector.speechRun, 0.2)
+        XCTAssertFalse(detector.speechGatePassed, "0.2 c < 0.3 c — гейт ещё не открыт")
+        XCTAssertFalse(detector.feed(rms: 0.00251, duration: 0.2, isSpeech: true), "тихая речь не останавливает")
+        XCTAssertTrue(detector.speechGatePassed, "0.2 + 0.2 = 0.4 ≥ 0.3 → гейт открыт VAD-флагом")
+        XCTAssertEqual(detector.silenceDuration, 0)
+        for _ in 0..<5 {
+            XCTAssertFalse(detector.feed(rms: 0.0001, duration: 0.5), "2.5 c тишины < 3.0 c")
+        }
+        XCTAssertTrue(detector.feed(rms: 0.0001, duration: 0.5), "ровно 3.0 c тишины после тихой речи → стоп")
+    }
+
+    /// Adaptive VAD silence overrides the fixed speech threshold for steady
+    /// loud noise (issue #21): raw -35 dBFS (0.01778) sits far above the fixed
+    /// -45 dBFS speech threshold, but with `isSpeech: false` (floor converged)
+    /// it accumulates as silence so auto-stop can fire. With `isSpeech: nil`
+    /// the same level keeps legacy behavior and counts as speech.
+    @objc func testVadSilenceFlagTreatsLoudSteadyNoiseAsSilence() {
+        var detector = SilenceAutoStopDetector(
+            requiredSilenceDuration: 3.0,
+            gracePeriod: 0,
+            minSpeechRun: 0.3,
+            minRecordingDuration: 0
+        )
+        let loudSteadyNoise: Float = 0.01778 // -35 dBFS, above fixed speech threshold
+        XCTAssertFalse(detector.feed(rms: 0.5, duration: 0.4), "речь: гейт")
+        XCTAssertTrue(detector.speechGatePassed)
+        // VAD-converged steady noise counts as silence even though raw RMS is loud.
+        for _ in 0..<5 {
+            XCTAssertFalse(
+                detector.feed(rms: loudSteadyNoise, duration: 0.5, isSpeech: false),
+                "steady noise with VAD silence accumulates, below required")
+        }
+        XCTAssertEqual(detector.silenceDuration, 2.5)
+        XCTAssertTrue(
+            detector.feed(rms: loudSteadyNoise, duration: 0.5, isSpeech: false),
+            "3.0 s of VAD-silence steady noise → stop")
+        // Legacy path unchanged: same loud level without a VAD flag is speech.
+        var legacy = SilenceAutoStopDetector(
+            requiredSilenceDuration: 3.0,
+            gracePeriod: 0,
+            minSpeechRun: 0.3,
+            minRecordingDuration: 0
+        )
+        XCTAssertFalse(legacy.feed(rms: 0.5, duration: 0.4))
+        XCTAssertFalse(legacy.feed(rms: loudSteadyNoise, duration: 0.5))
+        XCTAssertEqual(legacy.silenceDuration, 0, "without VAD flag loud noise stays speech")
+    }
 }
