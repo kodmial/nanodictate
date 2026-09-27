@@ -1073,11 +1073,20 @@ jobs:
                 continue;
               }
 
+              // release-please parses the squash commit on main, not the PR
+              // title separately. Keep PR titles human-friendly and normalize
+              // the generated squash commit here so contributors never need to
+              // write Conventional Commit prefixes themselves.
+              const conventionalTitle = /^(?:fix|feat|perf|refactor)(?:\([^)]*\))?!?:\s/i.test(pr.title)
+                ? pr.title
+                : `fix: ${pr.title}`;
+
               const { data: result } = await github.rest.pulls.merge({
                 owner,
                 repo,
                 pull_number: pr.number,
                 merge_method: 'squash',
+                commit_title: conventionalTitle,
                 sha: pr.head.sha,
               });
 
