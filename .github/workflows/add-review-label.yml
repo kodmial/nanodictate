@@ -6,6 +6,7 @@ on:
     types: [completed]
 
 permissions:
+  actions: write
   contents: read
   issues: write
   pull-requests: write
@@ -254,4 +255,21 @@ jobs:
                 } catch (_) {}
                 throw err;
               }
+            }
+
+            // CI completion is now the primary wake-up hook for the reconciler.
+            // Dispatch once per completed CI workflow (not once per PR). The
+            // auto-merge workflow is a latest-state reconciler with a single
+            // concurrency group and full pre-write revalidation, so duplicate
+            // wake-ups from status/review/push/cron remain harmless.
+            if (ours.length > 0) {
+              await github.rest.actions.createWorkflowDispatch({
+                owner,
+                repo,
+                workflow_id: 'auto-merge.yml',
+                ref: 'main',
+              });
+              core.notice(
+                `Dispatched auto-merge reconciliation after successful CI run ${run.id} for head ${run.head_sha}.`
+              );
             }
