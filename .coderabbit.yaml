@@ -7,8 +7,11 @@ reviews:
   high_level_summary: true
   poem: false
   review_status: true
-  # Auto-merge consumes this current-HEAD status in addition to the GitHub
-  # APPROVED/CHANGES_REQUESTED review verdict. Keep both signals explicit.
+  # Keep the machine-readable review gate on the legacy commit-status surface.
+  # CodeRabbit documents commit_status as the compatibility surface used when
+  # review_progress is disabled. auto-merge.yml consumes this exact current-HEAD
+  # status and rejects skipped, pending, failed, and rate-limited reviews.
+  review_progress: false
   commit_status: true
   fail_commit_status: true
   collapse_walkthrough: false
