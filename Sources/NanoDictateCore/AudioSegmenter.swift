@@ -113,6 +113,10 @@ public enum AudioSegmenter {
     // Hysteresis state: inSpeech starts false; enter needs >= enter, exit
     // needs < exit. Between thresholds state holds (no chatter).
     var inSpeech = false
+    // Per-segment speech presence from the hysteresis classifier. Forced-cut
+    // and trailing decisions use this state so voiceless timelines never emit
+    // a segment merely because a sample crossed the lower exit threshold.
+    var hasSpeechInSegment = false
 
     func isSpeech(_ value: Float) -> Bool {
       if inSpeech {
@@ -124,17 +128,23 @@ public enum AudioSegmenter {
     }
 
     for i in 0..<rms.count {
+      let speech = isSpeech(rms[i])
+      if speech {
+        hasSpeechInSegment = true
+      }
+
       // Hard cap: cut on reaching max length.
       let segmentDuration = TimeInterval(i - segStart + 1) * windowDuration
       if segmentDuration >= config.maxSegment {
         appendSegmentIfHasSpeech(
-          rms: rms, range: segStart..<(i + 1), threshold: exit, to: &segments)
+          range: segStart..<(i + 1), hasSpeech: hasSpeechInSegment, to: &segments)
         segStart = i + 1
         silenceStart = nil
+        hasSpeechInSegment = false
         continue
       }
 
-      if !isSpeech(rms[i]) {
+      if !speech {
         if silenceStart == nil {
           silenceStart = i
         }
@@ -152,11 +162,13 @@ public enum AudioSegmenter {
         guard duration >= config.minSegment else { continue }
         segments.append(segStart..<(boundary + 1))
         segStart = i
+        // New segment starts on the current speech sample.
+        hasSpeechInSegment = true
       }
     }
     appendTrailingSegment(
       rms: rms, segStart: segStart, windowDuration: windowDuration, config: config,
-      speechThreshold: exit, to: &segments)
+      hasSpeech: hasSpeechInSegment, to: &segments)
     return segments
   }
 
@@ -187,12 +199,11 @@ public enum AudioSegmenter {
 
   /// Append range to segments only if it has speech (not silence).
   private static func appendSegmentIfHasSpeech(
-    rms: [Float],
     range: Range<Int>,
-    threshold: Float,
+    hasSpeech: Bool,
     to segments: inout [Range<Int>]
   ) {
-    if (rms[range].max() ?? 0) >= threshold {
+    if hasSpeech {
       segments.append(range)
     }
   }
@@ -206,10 +217,10 @@ public enum AudioSegmenter {
     segStart: Int,
     windowDuration: TimeInterval,
     config: AudioSegmenterConfig,
-    speechThreshold: Float,
+    hasSpeech: Bool,
     to segments: inout [Range<Int>]
   ) {
-    guard segStart < rms.count, (rms[segStart..<rms.count].max() ?? 0) >= speechThreshold else {
+    guard segStart < rms.count, hasSpeech else {
       return
     }
     let trail = segStart..<rms.count

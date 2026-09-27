@@ -222,19 +222,24 @@ public struct SilenceAutoStopDetector {
   ///     state unchanged (hysteresis).
   ///   - duration: real buffer duration in seconds. Negative duration
   ///     clamps to 0 — accumulation never goes backward.
+  ///   - isSpeech: optional adaptive VAD decision for this buffer on the raw
+  ///     signal (issue #21). When true, the buffer counts as speech even if
+  ///     `rms` sits below `speechRMSThreshold` (quiet speech in the gray
+  ///     zone), so the speech gate can open on the raw scale. When false or
+  ///     nil, classification falls back to the RMS thresholds unchanged.
   /// - Returns: true when all stop conditions hold: speech gate passed,
   ///   recording ≥ `minRecordingDuration`, accumulated CONTINUOUS silence ≥
   ///   `requiredSilenceDuration`. Stays true on later quiet/neutral buffers
   ///   until speech or `reset()` resets the accumulator.
   @discardableResult
-  public mutating func feed(rms: Float, duration: TimeInterval) -> Bool {
+  public mutating func feed(rms: Float, duration: TimeInterval, isSpeech: Bool? = nil) -> Bool {
     let effectiveDuration = max(0, duration)
     // Buffer starting inside grace: no silence accumulation, but speech still
     // counts — the gate can pass within grace.
     let bufferStartsInGrace = elapsed < gracePeriod
     elapsed += effectiveDuration
 
-    if rms >= speechRMSThreshold {
+    if isSpeech == true || rms >= speechRMSThreshold {
       // Speech: silence continuity broken, accumulator reset; speech run grows,
       // latches the gate at minSpeechRun.
       speechRun += effectiveDuration

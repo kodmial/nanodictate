@@ -510,4 +510,28 @@ final class SilenceAutoStopTests: XCTestCase {
         XCTAssertFalse(detector.speechGatePassed, "reset отзывает и гейт")
         XCTAssertFalse(detector.feed(rms: 0.0001, duration: 3.0), "без новой речи тишина после reset не останавливает")
     }
+
+    /// Adaptive VAD flag opens the speech gate for raw quiet speech in the
+    /// gray zone (issue #21): `rms` 0.00251 alone never passes the fixed
+    /// speech threshold, but with `isSpeech: true` it arms the gate so later
+    /// real silence can stop the recording. Silence accumulation itself stays
+    /// on the raw RMS scale.
+    @objc func testVadSpeechFlagOpensGateForQuietSpeech() {
+        var detector = SilenceAutoStopDetector(
+            requiredSilenceDuration: 3.0,
+            gracePeriod: 0,
+            minSpeechRun: 0.3,
+            minRecordingDuration: 0
+        )
+        XCTAssertFalse(detector.feed(rms: 0.00251, duration: 0.2, isSpeech: true), "тихая речь не останавливает")
+        XCTAssertEqual(detector.speechRun, 0.2)
+        XCTAssertFalse(detector.speechGatePassed, "0.2 c < 0.3 c — гейт ещё не открыт")
+        XCTAssertFalse(detector.feed(rms: 0.00251, duration: 0.2, isSpeech: true), "тихая речь не останавливает")
+        XCTAssertTrue(detector.speechGatePassed, "0.2 + 0.2 = 0.4 ≥ 0.3 → гейт открыт VAD-флагом")
+        XCTAssertEqual(detector.silenceDuration, 0)
+        for _ in 0..<5 {
+            XCTAssertFalse(detector.feed(rms: 0.0001, duration: 0.5), "2.5 c тишины < 3.0 c")
+        }
+        XCTAssertTrue(detector.feed(rms: 0.0001, duration: 0.5), "ровно 3.0 c тишины после тихой речи → стоп")
+    }
 }
