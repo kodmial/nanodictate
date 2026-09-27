@@ -22,6 +22,13 @@ public struct NoiseFloorTracker: Equatable {
   public let downTau: TimeInterval
   /// Time constant for upward adaptation (seconds).
   public let upTau: TimeInterval
+  /// Upward adaptation freezes when the observation sits more than this far
+  /// above the floor. Loud speech (tens of dB above noise) must not drag the
+  /// floor up — otherwise continuous loud speech raises enter/exit until
+  /// resampler ringing reads as silence and chunk cuts shift early. Steady
+  /// noise (~15 dB above a quiet floor) still adapts; clear speech (>20 dB
+  /// above) does not.
+  public static let maxUpGapDb: Float = 20
 
   public init(
     initialFloor: Float = 0.001,
@@ -41,11 +48,11 @@ public struct NoiseFloorTracker: Equatable {
   /// Advances the floor estimate with one buffer RMS and its duration.
   /// Returns the new floor. Deterministic, no I/O.
   ///
-  /// dB-domain one-pole: loud speech bursts (tens of dB above the floor) move
-  /// the linear floor only slightly per buffer, so short utterances never drag
-  /// thresholds up (resampler ringing after speech still reads as speech);
-  /// sustained noise converges over seconds. Down is fast (quiet gaps), up is
-  /// slow (speech barely moves it).
+  /// dB-domain one-pole: quiet gaps pull down fast, sustained moderate noise
+  /// converges upward over seconds. Observations more than `maxUpGapDb` above
+  /// the floor (loud speech, resampler ringing) do not raise it, so long loud
+  /// utterances never drag thresholds up and ringing still reads as speech.
+  /// Down is fast (quiet gaps), up is slow and gated.
   @discardableResult
   public mutating func update(rms: Float, duration: TimeInterval) -> Float {
     let dt = max(0, duration)
@@ -53,6 +60,11 @@ public struct NoiseFloorTracker: Equatable {
     let cleanRms = min(max(rms, 0), 1)
     let floorDb = AudioMetrics.dbfs(floor)
     let rmsDb = AudioMetrics.dbfs(cleanRms)
+    // Loud speech far above the floor never raises it: freeze upward
+    // adaptation, keep downward adaptation for quiet gaps.
+    if rmsDb > floorDb + Self.maxUpGapDb {
+      return floor
+    }
     let tau = rmsDb < floorDb ? downTau : upTau
     let alpha = 1 - exp(-dt / tau)
     let newDb = floorDb + Float(alpha) * (rmsDb - floorDb)
