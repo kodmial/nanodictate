@@ -295,15 +295,16 @@ jobs:
               return requested;
             }
 
-            async function cancelObsoleteCiRuns(openPulls) {
+            async function cancelObsoleteRuns(openPulls) {
               const { data: mainBranch } = await github.rest.repos.getBranch({
                 owner,
                 repo,
                 branch: 'main',
               });
+              const mainSha = mainBranch.commit.sha;
 
               const liveHeads = new Set([
-                mainBranch.commit.sha,
+                mainSha,
                 ...openPulls.map(pr => pr.head.sha),
               ]);
 
@@ -316,38 +317,103 @@ jobs:
                 }
               );
 
-              let cancelled = 0;
-              for (const run of runs) {
-                if (
-                  run.name !== 'CI' ||
-                  !['queued', 'in_progress', 'waiting', 'pending', 'requested']
-                    .includes(run.status) ||
-                  liveHeads.has(run.head_sha)
-                ) {
-                  continue;
-                }
+              const activeStates =
+                ['queued', 'in_progress', 'waiting', 'pending', 'requested'];
+              let ci = 0;
+              let noopRelease = 0;
 
+              async function cancelRun(run, reason) {
                 try {
                   await github.rest.actions.cancelWorkflowRun({
                     owner,
                     repo,
                     run_id: run.id,
                   });
-                  cancelled += 1;
                   core.notice(
-                    `Cancelled obsolete CI run ${run.id} for stale head ${run.head_sha}.`
+                    `Cancelled ${reason} run ${run.id} for head ${run.head_sha}.`
                   );
+                  return true;
                 } catch (err) {
                   // A run may finish or be cancelled by concurrency between the
                   // list and the write; that race is harmless.
                   if (![409, 422].includes(err.status)) throw err;
                   core.info(
-                    `CI run ${run.id} changed state before cancellation: ${err.message}`
+                    `Run ${run.id} changed state before cancellation: ${err.message}`
                   );
+                  return false;
                 }
               }
 
-              return cancelled;
+              for (const run of runs) {
+                if (!activeStates.includes(run.status)) continue;
+
+                if (
+                  run.name === 'CI' &&
+                  !liveHeads.has(run.head_sha)
+                ) {
+                  if (await cancelRun(run, 'obsolete CI')) ci += 1;
+                  continue;
+                }
+
+                // Older push-to-main Release runs for a version that was already
+                // published before the run started are guaranteed preflight
+                // no-ops. They used to queue two unnecessary macOS builds.
+                // Never cancel the current-main Release run, and never cancel a
+                // run that may itself be publishing a new release.
+                if (
+                  run.name === 'Release' &&
+                  run.event === 'push' &&
+                  run.head_branch === 'main' &&
+                  run.head_sha !== mainSha
+                ) {
+                  try {
+                    const { data: versionFile } =
+                      await github.rest.repos.getContent({
+                        owner,
+                        repo,
+                        path: 'Sources/NanoDictateCore/Version.swift',
+                        ref: run.head_sha,
+                      });
+                    if (Array.isArray(versionFile) || !versionFile.content) {
+                      continue;
+                    }
+
+                    const source = Buffer.from(
+                      versionFile.content,
+                      'base64'
+                    ).toString('utf8');
+                    const match = source.match(/\b\d+\.\d+\.\d+\b/);
+                    if (!match) continue;
+
+                    const { data: release } =
+                      await github.rest.repos.getReleaseByTag({
+                        owner,
+                        repo,
+                        tag: `v${match[0]}`,
+                      });
+
+                    const publishedAt = new Date(
+                      release.published_at || release.created_at || 0
+                    ).getTime();
+                    const runCreatedAt = new Date(run.created_at || 0).getTime();
+
+                    if (
+                      publishedAt > 0 &&
+                      runCreatedAt > 0 &&
+                      publishedAt < runCreatedAt
+                    ) {
+                      if (await cancelRun(run, 'stale no-op Release')) {
+                        noopRelease += 1;
+                      }
+                    }
+                  } catch (err) {
+                    if (err.status !== 404) throw err;
+                    // No matching release existed: this may be a real release.
+                  }
+                }
+              }
+
+              return { ci, noopRelease };
             }
 
             async function dispatchConflictRepair(pr, reason) {
@@ -448,10 +514,10 @@ jobs:
               per_page: 100,
             });
 
-            const cancelledCiRuns = await cancelObsoleteCiRuns(pulls);
-            if (cancelledCiRuns > 0) {
+            const cancelledRuns = await cancelObsoleteRuns(pulls);
+            if (cancelledRuns.ci > 0 || cancelledRuns.noopRelease > 0) {
               core.notice(
-                `Cancelled ${cancelledCiRuns} obsolete CI run(s) before reconciliation.`
+                `Cancelled ${cancelledRuns.ci} obsolete CI run(s) and ${cancelledRuns.noopRelease} stale no-op Release run(s) before reconciliation.`
               );
             }
 
