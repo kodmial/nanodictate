@@ -15,6 +15,13 @@ permissions:
   contents: read
   pull-requests: read
 
+# Keep only the newest CI for each PR/branch. Automatic main synchronization can
+# create several short-lived heads in quick succession; stale macOS jobs must
+# not consume runner capacity ahead of the current head.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   classify-changes:
     name: Classify changes
