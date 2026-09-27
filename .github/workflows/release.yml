@@ -1421,3 +1421,25 @@ jobs:
             git commit -m "chore(release): update v$VERSION formula"
             git push origin main
           fi
+
+      # The manifest and installer-pin commits above intentionally use the
+      # checkout's GITHUB_TOKEN so they do not recursively trigger every
+      # push-to-main workflow. That also means auto-merge.yml does not see those
+      # pushes. Explicitly wake its idempotent reconciler once the complete
+      # release synchronization has succeeded, so open PRs are immediately
+      # rebased onto the final post-release main tip and revalidated.
+      - name: Wake auto-merge reconciler after release writes
+        env:
+          TAP_PAT: ${{ secrets.TAP_PAT }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$TAP_PAT" ]]; then
+            echo "::error::TAP_PAT secret is not set — cannot dispatch auto-merge reconciliation after release writes."
+            exit 1
+          fi
+          GH_TOKEN="$TAP_PAT" gh api \
+            --method POST \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/auto-merge.yml/dispatches" \
+            -f ref=main
+          echo "::notice::Dispatched auto-merge reconciliation after successful release writes."
+
