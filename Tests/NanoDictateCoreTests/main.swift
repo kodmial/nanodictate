@@ -19,6 +19,7 @@ typealias WithErrorFn = @convention(c) (AnyObject, Selector, AutoreleasingUnsafe
 let suites: [XCTestCase.Type] = [
     HotkeyServiceTests.self,
     InputGainTests.self,
+    AdaptiveVADTests.self,
     AudioMetricsTests.self,
     AudioCaptureTests.self,
     AudioServiceLifecycleTests.self,
