@@ -166,10 +166,10 @@ jobs:
                   owner,
                   repo,
                   issue_number: pr.number,
-                  body: '@coderabbitai review',
+                  body: '@coderabbitai full review',
                 });
                 core.notice(
-                  `Requested incremental CodeRabbit review for PR #${pr.number} at green head ${pr.head.sha}.`
+                  `Requested full CodeRabbit review for PR #${pr.number} at green head ${pr.head.sha}.`
                 );
               } catch (err) {
                 // A failed post must not permanently suppress the next workflow
