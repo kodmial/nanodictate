@@ -1,0 +1,42 @@
+name: Set OpenCode model variable
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  set-model:
+    if: >-
+      github.event.issue.number == 12 &&
+      github.actor == github.repository_owner &&
+      github.event.comment.body == '/set-muse-spark-1.3-free'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Set OPENCODE_MODEL
+        env:
+          GH_TOKEN: ${{ secrets.TAP_PAT }}
+        run: |
+          set -euo pipefail
+          VALUE="opencode/muse-spark-1.3-contributor-free"
+
+          if gh api \
+            --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/actions/variables/OPENCODE_MODEL" \
+            -f name=OPENCODE_MODEL \
+            -f value="$VALUE" \
+            >/dev/null 2>&1
+          then
+            echo "Updated repository variable OPENCODE_MODEL=$VALUE"
+          else
+            gh api \
+              --method POST \
+              "repos/${GITHUB_REPOSITORY}/actions/variables" \
+              -f name=OPENCODE_MODEL \
+              -f value="$VALUE" \
+              >/dev/null
+            echo "Created repository variable OPENCODE_MODEL=$VALUE"
+          fi
