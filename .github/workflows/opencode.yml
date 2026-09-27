@@ -129,10 +129,69 @@ jobs:
           # checkout credential so both gh calls and git push use TAP_PAT.
           GITHUB_TOKEN: ${{ secrets.TAP_PAT }}
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          # The GitHub integration owns the branch/commit/push/PR lifecycle for
+          # issue and PR-comment sessions. Prevent the LLM from changing Git
+          # state underneath that lifecycle. OpenCode evaluates explicit deny
+          # rules even in auto mode; read-only Git inspection remains allowed.
+          OPENCODE_CONFIG_CONTENT: >-
+            {"permission":{"bash":{"*":"allow","git *":"deny","git status":"allow","git status *":"allow","git diff":"allow","git diff *":"allow","git log":"allow","git log *":"allow","git show":"allow","git show *":"allow","git rev-parse *":"allow","git ls-files":"allow","git ls-files *":"allow","git grep *":"allow","git blame *":"allow","git branch --show-current":"allow","git remote -v":"allow","git tag":"allow","git tag *":"allow","git describe *":"allow"}}}
         with:
           model: ${{ vars.OPENCODE_MODEL || 'opencode/big-pickle' }}
           use_github_token: true
           share: false
+
+      # Upstream OpenCode deliberately skips its infrastructure push/PR when
+      # the agent leaves the branch that OpenCode created for an issue. The
+      # permission guard above prevents normal Git writes from the LLM, but
+      # this recovery path makes the workflow lossless if a future OpenCode
+      # version, shell indirection, or tool bypass still changes branches.
+      - name: Recover agent-managed issue branch
+        if: >-
+          github.event_name == 'issue_comment' &&
+          !github.event.issue.pull_request &&
+          github.actor == github.repository_owner &&
+          (contains(github.event.comment.body, '/oc') ||
+           contains(github.event.comment.body, '/opencode'))
+        env:
+          GH_TOKEN: ${{ secrets.TAP_PAT }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+
+          CURRENT_BRANCH="$(git branch --show-current)"
+          if [[ "$CURRENT_BRANCH" != opencode/* ]]; then
+            echo "Current branch '$CURRENT_BRANCH' is not an OpenCode issue branch; nothing to recover."
+            exit 0
+          fi
+
+          # Normal OpenCode completion already created a PR for the current
+          # branch. In that case this step is intentionally a no-op.
+          EXISTING_PR="$(gh pr list             --repo "$GITHUB_REPOSITORY"             --head "$CURRENT_BRANCH"             --state all             --json number             --jq '.[0].number // empty')"
+          if [[ -n "$EXISTING_PR" ]]; then
+            echo "PR #$EXISTING_PR already exists for '$CURRENT_BRANCH'; nothing to recover."
+            exit 0
+          fi
+
+          # If the agent switched branches before committing, preserve those
+          # edits rather than letting the runner discard them.
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git add -A
+            git commit -m "chore: recover OpenCode issue changes"
+          fi
+
+          git fetch origin main --quiet
+          AHEAD="$(git rev-list --count "origin/main..HEAD")"
+          if [[ "$AHEAD" -eq 0 ]]; then
+            echo "No commits ahead of main on '$CURRENT_BRANCH'; nothing to recover."
+            exit 0
+          fi
+
+          git push -u origin "HEAD:$CURRENT_BRANCH"
+
+          TITLE="$(git log -1 --format=%s)"
+          gh pr create             --repo "$GITHUB_REPOSITORY"             --base main             --head "$CURRENT_BRANCH"             --title "$TITLE"             --body "Recovered automatically after the OpenCode agent changed branches during issue #$ISSUE_NUMBER execution.
+
+Closes #$ISSUE_NUMBER"
 
       - name: Fix CodeRabbit review findings
         if: github.event_name == 'workflow_dispatch' && inputs.mode == 'coderabbit-fix'
