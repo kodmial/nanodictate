@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-09-26
+
+### Added
+
+- Added the OpenCode GitHub Actions agent and automatic repair paths for
+  CodeRabbit findings, merge conflicts, and failed pull-request CI.
+- Added scheduled retry of CodeRabbit reviews after included-review rate limits.
+
+### Changed
+
+- CodeRabbit review requests are now gated on successful CI for the exact current
+  pull-request head, with per-head readiness/request locks reset on every new
+  commit so the review/fix loop is idempotent.
+- CI can skip the macOS build for documentation-only changes, and CodeRabbit
+  linked-issue assessment is enforced as a pre-merge check.
+
 ## [0.1.1] - 2026-09-26
 
 ### Changed
