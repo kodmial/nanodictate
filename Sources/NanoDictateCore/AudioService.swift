@@ -135,6 +135,46 @@ public final class AudioService {
   /// finalization. nil-safe: recording still stops, samples dropped.
   public var onAutoStop: (([Int16]) -> Void)?
 
+  /// Capture-readiness signal: fired exactly once per successful session on
+  /// the main queue when the first valid microphone buffer has been appended
+  /// to the recording. This is the truthful "ready to receive speech" point:
+  /// `engine.start()` returning does NOT prove a microphone buffer reached
+  /// NanoDictate, so the normal start cue (sound + "Recording" UI) must be
+  /// gated on this callback, never on `start(completion:)` alone.
+  /// Startup failure/timeout paths never fire it (error path only).
+  public var onCaptureReady: ((CaptureReadyInfo) -> Void)?
+
+  /// Startup-to-first-buffer timing for one session (monotonic clock, no audio
+  /// content). All values in milliseconds.
+  public struct CaptureReadyInfo {
+    /// Alt+Alt trigger → `start` request entry. nil when the trigger stamp
+    /// was not provided (legacy `start(completion:)` callers, tests).
+    public let triggerToRequestMs: Double?
+    public let requestToEngineStartedMs: Double
+    public let engineStartedToFirstBufferMs: Double
+    public let requestToFirstBufferMs: Double
+    public init(
+      triggerToRequestMs: Double?,
+      requestToEngineStartedMs: Double,
+      engineStartedToFirstBufferMs: Double,
+      requestToFirstBufferMs: Double
+    ) {
+      self.triggerToRequestMs = triggerToRequestMs
+      self.requestToEngineStartedMs = requestToEngineStartedMs
+      self.engineStartedToFirstBufferMs = engineStartedToFirstBufferMs
+      self.requestToFirstBufferMs = requestToFirstBufferMs
+    }
+  }
+
+  /// True once the current session appended its first valid microphone buffer
+  /// (and the session is still live). False after `start` until that point,
+  /// and after `stop()`/`cancel()`/teardown/wedge. Read under lock.
+  public var isCaptureReady: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return captureReadyLive
+  }
+
   // var, not let: replaceEngineAfterWedge() swaps a "wedged" engine for a fresh
   // instance (recovery after a record-start timeout).
   private var engine: AudioEngineLike
@@ -172,6 +212,42 @@ public final class AudioService {
   /// First session buffer logged separately (debug): piece duration and energy
   /// show whether real sound reached the engine after start.
   private var didLogFirstBuffer = false
+  // MARK: - Capture-readiness + startup timing (P0 first-word clipping)
+
+  /// Monotonic-clock startup marks for the current session (DispatchTime
+  /// uptime nanoseconds — never wall-clock, never audio content).
+  private var startupTriggerNanos: UInt64?
+  private var startupRequestNanos: UInt64 = 0
+  private var startupQueueEntryNanos: UInt64 = 0
+  private var startupEngineStartedNanos: UInt64 = 0
+  /// Generation the marks above belong to; stale sessions never fire readiness.
+  private var startupGeneration: Int = -1
+  /// Exactly-once latch for `onCaptureReady` within one session.
+  private var captureReadyFired = false
+  /// Live readiness flag behind `isCaptureReady` (cleared on stop/cancel/
+  /// teardown/wedge/new-session reset).
+  private var captureReadyLive = false
+  /// Pre-warmed converter cache (no microphone capture): built by `prewarm()`
+  /// or refreshed after teardown, reused by the next `start` when the hardware
+  /// input format signature still matches. Cleared on wedge replacement.
+  private var warmedConverter: AVAudioConverter?
+  private var warmedHWSignature: String?
+
+  /// Monotonic now for startup timing (uptime nanoseconds).
+  private static func monotonicNanos() -> UInt64 {
+    DispatchTime.now().uptimeNanoseconds
+  }
+
+  private static func ms(fromNanos start: UInt64, to end: UInt64) -> Double {
+    Double(end >= start ? end - start : 0) / 1_000_000.0
+  }
+
+  /// Hardware input-format signature for converter-cache matching.
+  /// Sample rate + channel count identify the resample path; a device change
+  /// alters at least one of them, forcing a rebuild.
+  static func hwSignature(sampleRate: Double, channels: UInt32) -> String {
+    "\(Int(sampleRate))Hz-ch\(channels)"
+  }
   /// Digital input gain (AGC): applied to the Float32 buffer AFTER 16 kHz/mono
   /// conversion and BEFORE Int16 conversion/level metering — level animation
   /// and recording see the conditioned signal. VAD and auto-stop decisions use
@@ -317,7 +393,24 @@ public final class AudioService {
   /// Starts recording. Async: engine bring-up on the background queue
   /// (`engineQueue`), completion on main. Mic unavailable or engine failure —
   /// `.failure` (engine torn down, ready for restart, see `startOnEngineQueue`).
-  public func start(completion: @escaping (Result<Void, Error>) -> Void) {
+  ///
+  /// IMPORTANT: `.success` means only "engine started" — NOT "microphone
+  /// buffers are flowing". The truthful capture-ready signal is the separate
+  /// `onCaptureReady` callback (first valid buffer appended). Gate the normal
+  /// start cue (sound + "Recording" UI) on `onCaptureReady`, never on this
+  /// completion alone — otherwise speech begun immediately after the cue is
+  /// clipped (P0).
+  ///
+  /// - Parameter triggerUptimeNanos: monotonic trigger stamp (e.g. Alt+Alt
+  ///   dispatch, `DispatchTime.now().uptimeNanoseconds`) for startup-gap
+  ///   measurement. nil — trigger→request delay not measured.
+  public func start(
+    triggerUptimeNanos: UInt64? = nil,
+    completion: @escaping (Result<Void, Error>) -> Void
+  ) {
+    // Monotonic request stamp BEFORE dispatch: measures main-thread/hotkey
+    // delay (trigger → request) plus engine bring-up below.
+    let requestNanos = Self.monotonicNanos()
     // Pair snapshot (engine, queue, generation) under lock, BEFORE dispatch:
     // the block goes to THIS engine's queue and works with IT. A wedged start
     // blocks only its own pair — after the swap (replaceEngineAfterWedge) the
@@ -325,13 +418,65 @@ public final class AudioService {
     // captured here is the start "stamp": the tap block and terminal branches
     // verify against it that the engine is still current (see startOnEngineQueue).
     let slot = captureEngineSlot()
-    slot.queue.async { [weak self, engine = slot.engine, startGeneration = slot.generation] in
+    slot.queue.async {
+      [weak self, engine = slot.engine, startGeneration = slot.generation] in
       guard let self else {
         DispatchQueue.main.async { completion(.failure(AudioServiceError.engineGone)) }
         return
       }
-      let result = self.startOnEngineQueue(using: engine, startGeneration: startGeneration)
+      let result = self.startOnEngineQueue(
+        using: engine,
+        startGeneration: startGeneration,
+        triggerNanos: triggerUptimeNanos,
+        requestNanos: requestNanos
+      )
       DispatchQueue.main.async { completion(result) }
+    }
+  }
+
+  /// Safe pre-warm without microphone capture (no tap, no `engine.start()`,
+  /// no audio recording): resolves the input format and builds the
+  /// resample converter into the cache so the next `start` can reuse it when
+  /// the device format is unchanged. Best-effort and silent on failure.
+  /// No-op while recording (never disturbs the live converter) and on stale
+  /// generations. Never keeps the microphone active.
+  public func prewarm() {
+    let slot = captureEngineSlot()
+    slot.queue.async { [weak self, engine = slot.engine, generation = slot.generation] in
+      guard let self else { return }
+      self.prewarmOnEngineQueue(using: engine, generation: generation)
+    }
+  }
+
+  /// Pre-warm body — strictly on the given engine's queue.
+  private func prewarmOnEngineQueue(using engine: AudioEngineLike, generation: Int) {
+    guard !isRecordingLocked else { return }
+    guard isCurrentGeneration(generation) else { return }
+    var hwFormat: AVAudioFormat?
+    let setupError = guardedEngineCall {
+      hwFormat = engine.makeInputNode().outputFormat(forBus: 0)
+    }
+    guard setupError == nil, let hw = hwFormat else { return }
+    let signature = Self.hwSignature(sampleRate: hw.sampleRate, channels: hw.channelCount)
+    lock.lock()
+    let alreadyWarm = warmedHWSignature == signature && warmedConverter != nil
+    lock.unlock()
+    guard !alreadyWarm else { return }
+    var converter: AVAudioConverter?
+    let converterError = guardedEngineCall {
+      converter = AVAudioConverter(from: hw, to: self.targetFormat)
+    }
+    guard converterError == nil, let built = converter else { return }
+    lock.lock()
+    // Re-check under the same lock: a concurrent start may have advanced the
+    // session; only cache for the generation we warmed.
+    if isCurrentGeneration(generation) {
+      warmedConverter = built
+      warmedHWSignature = signature
+    }
+    lock.unlock()
+    if isDebug {
+      Logger.log("record prewarm: converter warmed (hw=\(Int(hw.sampleRate)) Hz)", level: "debug")
     }
   }
 
@@ -365,10 +510,20 @@ public final class AudioService {
   /// — slot generation at start dispatch: terminal branches tear the engine
   /// down and touch session state ONLY if the engine that started is still
   /// current (not wedge-swapped after the watchdog timeout).
+  ///
+  /// NOTE: success here means "engine started", NOT "capture ready". The
+  /// capture-ready signal fires later from `process()` on the first valid
+  /// buffer. Callers must gate the normal start cue on `onCaptureReady`.
   // swiftlint:disable:next cyclomatic_complexity function_body_length
-  private func startOnEngineQueue(using engine: AudioEngineLike, startGeneration: Int) -> Result<
-    Void, Error
-  > {
+  private func startOnEngineQueue(
+    using engine: AudioEngineLike,
+    startGeneration: Int,
+    triggerNanos: UInt64?,
+    requestNanos: UInt64
+  ) -> Result<Void, Error> {
+    // Queue-entry stamp: measures dispatch/queueing delay (request → engine
+    // queue entry) on the monotonic clock.
+    let queueEntryNanos = Self.monotonicNanos()
     // New session: clean buffers, clean limit (after forced stop or failure
     // branch). All state under lock — start runs on the engine queue,
     // process/stop may read in parallel. The WHOLE reset is gated by the
@@ -395,6 +550,15 @@ public final class AudioService {
       lastVadSpeech = false
       liveLastCutIndex = 0
       resetLiveVADLocked()
+      // Capture-readiness + timing reset for the new session: no ready cue
+      // may fire before the first valid buffer of THIS generation.
+      startupTriggerNanos = triggerNanos
+      startupRequestNanos = requestNanos
+      startupQueueEntryNanos = queueEntryNanos
+      startupEngineStartedNanos = 0
+      startupGeneration = startGeneration
+      captureReadyFired = false
+      captureReadyLive = false
     }
     lock.unlock()
 
@@ -426,9 +590,29 @@ public final class AudioService {
       capturedInput = engine.makeInputNode()
       capturedHWFormat = capturedInput?.outputFormat(forBus: 0)
     }
+    // Converter reuse: a pre-warmed converter for the SAME hardware format
+    // signature is reused instead of rebuilding expensive audio state on every
+    // dictation. A device change alters the signature → rebuild, preserving
+    // the device-change protection. No microphone capture involved.
+    var reusedWarmedConverter = false
     if setupFailure == nil, let fmt = capturedHWFormat {
-      setupFailure = guardedEngineCall {
-        capturedConverter = AVAudioConverter(from: fmt, to: self.targetFormat)
+      let signature = Self.hwSignature(sampleRate: fmt.sampleRate, channels: fmt.channelCount)
+      lock.lock()
+      let warmed = (warmedHWSignature == signature) ? warmedConverter : nil
+      lock.unlock()
+      if let warmed {
+        capturedConverter = warmed
+        reusedWarmedConverter = true
+      } else {
+        setupFailure = guardedEngineCall {
+          capturedConverter = AVAudioConverter(from: fmt, to: self.targetFormat)
+        }
+        if setupFailure == nil, let built = capturedConverter {
+          lock.lock()
+          warmedConverter = built
+          warmedHWSignature = signature
+          lock.unlock()
+        }
       }
     }
     if let setupFailure {
@@ -550,13 +734,20 @@ public final class AudioService {
       Logger.log("record engine: prepared, engine.start()…", level: "debug")
     }
     // isRecording set BEFORE engine.start(): the first buffer arriving right
-    // after the audio stream starts must not be dropped.
+    // after the audio stream starts must not be dropped. Capture readiness
+    // still fires only on the first valid buffer (see process()), never here:
+    // engine.start() success alone does not prove microphone data flows.
     if failure == nil {
       if isCurrentGeneration(startGeneration) {
         setRecording(true)
       }
       failure = guardedEngineCall {
         try engine.start()
+      }
+      if failure == nil, isCurrentGeneration(startGeneration) {
+        lock.lock()
+        startupEngineStartedNanos = Self.monotonicNanos()
+        lock.unlock()
       }
     }
     if let failure {
@@ -588,6 +779,24 @@ public final class AudioService {
     if isDebug {
       Logger.log("record engine: started OK", level: "debug")
     }
+    // Engine-started breadcrumb (monotonic): request → engine-started delay is
+    // now measurable even before the first buffer arrives. The full
+    // request → engine-started → first-buffer timeline completes in process()
+    // on capture readiness. No ready cue is emitted here by design.
+    lock.lock()
+    let reqNanos = startupRequestNanos
+    let engNanos = startupEngineStartedNanos
+    lock.unlock()
+    if engNanos > 0, engNanos >= reqNanos, reqNanos > 0 {
+      let ms = Self.ms(fromNanos: reqNanos, to: engNanos)
+      Logger.log(
+        String(format: "record startup: engine started in %.1f ms (capture pending)", ms),
+        level: "info"
+      )
+    }
+    if reusedWarmedConverter, isDebug {
+      Logger.log("record prewarm: warmed converter reused for start", level: "debug")
+    }
     return .success(())
   }
 
@@ -604,6 +813,9 @@ public final class AudioService {
     }
     let duration = CFAbsoluteTimeGetCurrent() - recordStartTime
     setRecording(false)
+    // Capture readiness ends with the session: the next start resets it, and
+    // no late buffer may re-fire it (process drops buffers once !isRecording).
+    captureReadyLive = false
     // "Tail" (open utterance) taken in the same snapshot, under the same
     // lock — VAD state and recording buffer stay consistent.
     let tail = takeLiveTailLocked()
@@ -646,6 +858,10 @@ public final class AudioService {
     let duration = CFAbsoluteTimeGetCurrent() - recordStartTime
     let frames = collectedSamples.count
     setRecording(false)
+    // Cancel aborts a pending capture-ready wait too: the session never
+    // becomes ready, and the ready cue must never fire for it.
+    captureReadyLive = false
+    captureReadyFired = true
     collectedSamples = []
     // Cancel discards EVERYTHING, including the open utterance: no
     // onSpeechSegment callback (Esc = no delivery).
@@ -713,6 +929,15 @@ public final class AudioService {
     // them from scratch (repeat installTap on a busy bus = NSException).
     tapInstalled = false
     converter = nil
+    // Warmed converter belonged to the old engine/format path — drop it; the
+    // next start (or prewarm) rebuilds for the fresh engine. A pending
+    // capture-ready wait is invalidated with the generation: the ready cue
+    // must never fire for the discarded session.
+    warmedConverter = nil
+    warmedHWSignature = nil
+    captureReadyFired = true
+    captureReadyLive = false
+    startupGeneration = -1
     lock.unlock()
     // Device-change subscription belonged to the OLD engine: its
     // configuration-change must not stop recording on the fresh pair.
@@ -779,6 +1004,39 @@ public final class AudioService {
     vad.reset()
     lastVadSpeech = false
     resetLiveVADLocked()
+    // Session ended: capture readiness lapses with it (next start resets).
+    // The warmed converter cache is KEPT — it holds no microphone state and
+    // makes the next start cheaper (reused when the format matches).
+    captureReadyLive = false
+    lock.unlock()
+    // Best-effort re-warm for the next dictation (still on this engine's
+    // queue, no capture): keeps cold-start latency low without an always-on
+    // microphone. Failures are silent — the next start rebuilds as before.
+    refreshWarmedConverterBestEffort(using: engine)
+  }
+
+  /// Best-effort converter re-warm after teardown (engine queue only).
+  /// Queries the current input format and caches a fresh converter when the
+  /// cached signature no longer matches. Never touches session state.
+  private func refreshWarmedConverterBestEffort(using engine: AudioEngineLike) {
+    var hwFormat: AVAudioFormat?
+    let setupError = guardedEngineCall {
+      hwFormat = engine.makeInputNode().outputFormat(forBus: 0)
+    }
+    guard setupError == nil, let hw = hwFormat else { return }
+    let signature = Self.hwSignature(sampleRate: hw.sampleRate, channels: hw.channelCount)
+    lock.lock()
+    let alreadyWarm = warmedHWSignature == signature && warmedConverter != nil
+    lock.unlock()
+    guard !alreadyWarm else { return }
+    var converter: AVAudioConverter?
+    let converterError = guardedEngineCall {
+      converter = AVAudioConverter(from: hw, to: self.targetFormat)
+    }
+    guard converterError == nil, let built = converter else { return }
+    lock.lock()
+    warmedConverter = built
+    warmedHWSignature = signature
     lock.unlock()
   }
 
@@ -1283,6 +1541,40 @@ public final class AudioService {
     }
     let sampleEnd = collectedSamples.count
 
+    // Capture readiness (P0 first-word clipping): the first valid appended
+    // buffer proves microphone data actually flows. It is retained
+    // unconditionally above regardless of VAD classification — the live
+    // pre-roll below stays segmentation-only and never gates retention, and no
+    // VAD/AGC rule may discard this initial attack from the full recording.
+    // Exactly once per session generation; startup failure/timeout/cancel
+    // paths never fire (error path only, no false ready cue).
+    var pendingCaptureInfo: CaptureReadyInfo?
+    if appendCount > 0, !captureReadyFired, startupGeneration >= 0,
+      isCurrentGeneration(startupGeneration)
+    {
+      let firstNanos = Self.monotonicNanos()
+      if startupEngineStartedNanos == 0 {
+        // Rare race: the tap delivered before the engineQueue stamped
+        // engine.start() completion. Stamp now so readiness still fires on
+        // the true first buffer (engine→first delay reads 0).
+        startupEngineStartedNanos = firstNanos
+      }
+      if startupEngineStartedNanos > 0 {
+        captureReadyFired = true
+        captureReadyLive = true
+        pendingCaptureInfo = CaptureReadyInfo(
+          triggerToRequestMs: startupTriggerNanos.map {
+            Self.ms(fromNanos: $0, to: startupRequestNanos)
+          },
+          requestToEngineStartedMs: Self.ms(
+            fromNanos: startupRequestNanos, to: startupEngineStartedNanos),
+          engineStartedToFirstBufferMs: Self.ms(
+            fromNanos: startupEngineStartedNanos, to: firstNanos),
+          requestToFirstBufferMs: Self.ms(fromNanos: startupRequestNanos, to: firstNanos)
+        )
+      }
+    }
+
     // Live-VAD on the raw/adaptive speech flag: continuous speech — one utterance; a
     // pause ≥ pauseDuration (in samples) closes it with a segment, and with
     // accumulated speech ≥ liveChunkWindowSamples the same segment is cut by
@@ -1372,6 +1664,38 @@ public final class AudioService {
         isSpeech: vadIsSpeech
       )
     lock.unlock()
+    // Capture-ready delivery (outside the state lock): measurable startup
+    // timeline + the truthful ready signal. Exactly once per session, on main
+    // like the other session callbacks. No raw audio logged.
+    if let info = pendingCaptureInfo {
+      if let trigToReq = info.triggerToRequestMs {
+        Logger.log(
+          String(
+            format:
+              "record startup timing: trigger->request=%.1f ms request->engineStarted=%.1f ms engineStarted->firstBuffer=%.1f ms request->firstBuffer=%.1f ms",
+            trigToReq,
+            info.requestToEngineStartedMs,
+            info.engineStartedToFirstBufferMs,
+            info.requestToFirstBufferMs
+          ),
+          level: "info"
+        )
+      } else {
+        Logger.log(
+          String(
+            format:
+              "record startup timing: request->engineStarted=%.1f ms engineStarted->firstBuffer=%.1f ms request->firstBuffer=%.1f ms",
+            info.requestToEngineStartedMs,
+            info.engineStartedToFirstBufferMs,
+            info.requestToFirstBufferMs
+          ),
+          level: "info"
+        )
+      }
+      DispatchQueue.main.async { [weak self] in
+        self?.onCaptureReady?(info)
+      }
+    }
     if shouldStop {
       scheduleLimitStop()
     } else if autoStopFired {
@@ -1455,6 +1779,8 @@ public final class AudioService {
     }
     let duration = CFAbsoluteTimeGetCurrent() - recordStartTime
     setRecording(false)
+    // Session ended: capture readiness lapses with it (as in stop()).
+    captureReadyLive = false
     let rms = rmsHistory
     rmsHistory = []
     let tail = takeLiveTailLocked()
