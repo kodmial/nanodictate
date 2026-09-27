@@ -70,8 +70,11 @@ final class InputGainTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(dbfs(outRms), dbfs(inRms) + 20)
     }
 
-    /// Input at exactly silence threshold (−50 dBFS): gain still 0 (threshold
-    /// strictly below — "not silence" starts above); one step up (−49) works.
+    /// Input at the old fixed threshold (-50 dBFS) with a quiet floor: adaptive
+    /// gate (issue #21) amplifies it when above the noise floor. Before: gain 0
+    /// solely because absolute RMS sat at -50 dBFS. After: raw 0.00316 vs floor
+    /// 0.001 (+10 dB above) passes the +4 dB gate, so speech near the boundary
+    /// is conditioned instead of discarded.
     @objc func testQuietAtSilenceThresholdGainZero() {
         let gain = InputGain()
         var buffer = constantBuffer(AudioMetrics.nearSilenceThreshold, frames: sampleRate)
@@ -79,8 +82,8 @@ final class InputGainTests: XCTestCase {
 
         let outRms = gain.apply(to: &buffer, rms: AudioMetrics.nearSilenceThreshold, sampleRate: sampleRate)
 
-        XCTAssertEqual(gain.currentGainDb, 0, accuracy: 0.000001, "ровно на пороге тишины — gain 0 (порог строго ниже)")
-        XCTAssertEqual(outRms, AudioMetrics.nearSilenceThreshold, accuracy: 0.000001, "буфер не тронут")
+        XCTAssertTrue((gain.currentGainDb) > (10), "at old -50 dBFS boundary with quiet floor — gain applied (adaptive gate)")
+        XCTAssertTrue((dbfs(outRms)) > (dbfs(AudioMetrics.nearSilenceThreshold) + 10), "buffer lifted toward target, not passed through")
     }
 
     // MARK: - (б) громкий вход не усиливается
