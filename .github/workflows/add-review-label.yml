@@ -25,6 +25,47 @@ jobs:
             const repoFullName = `${owner}/${repo}`;
             const run = context.payload.workflow_run;
             const REQUESTED_LABEL = 'coderabbit-review-requested';
+            const RELEASE_FILES = new Set([
+              '.release-please-manifest.json',
+              'CHANGELOG.md',
+              'Sources/NanoDictateCore/Version.swift',
+            ]);
+            const MANIFEST_FILES = new Set([
+              'nanodictate.rb',
+              'packaging/homebrew/nanodictate.rb',
+              'packaging/homebrew/Casks/nanodictate.rb',
+              'packaging/macports/Portfile',
+              'scripts/install-macports.sh',
+            ]);
+
+            async function trustedReleaseAutomation(pr) {
+              if (
+                pr.base.ref !== 'main' ||
+                pr.head.repo?.full_name !== repoFullName
+              ) {
+                return false;
+              }
+
+              const files = await github.paginate(github.rest.pulls.listFiles, {
+                owner,
+                repo,
+                pull_number: pr.number,
+                per_page: 100,
+              });
+              const names = files.map(file => file.filename);
+              const onlyAllowed = allowed =>
+                names.length > 0 && names.every(name => allowed.has(name));
+
+              if (pr.head.ref === 'release-please--branches--main') {
+                const labels = new Set((pr.labels || []).map(label => label.name));
+                return labels.has('autorelease: pending') && onlyAllowed(RELEASE_FILES);
+              }
+
+              return (
+                pr.head.ref.startsWith('chore/release-manifests-v') &&
+                onlyAllowed(MANIFEST_FILES)
+              );
+            }
 
             async function carriedApprovalSource(pr) {
               const { data: commit } = await github.rest.repos.getCommit({
@@ -135,14 +176,24 @@ jobs:
 
             // Match only a non-draft same-repository PR whose current head is
             // exactly the commit tested by this completed CI run.
-            const ours = prs.filter((pr) =>
+            const matched = prs.filter((pr) =>
               !pr.draft &&
               pr.head.sha === run.head_sha &&
               pr.head.repo.full_name === repoFullName
             );
+            const ours = [];
+            for (const pr of matched) {
+              if (await trustedReleaseAutomation(pr)) {
+                core.notice(
+                  `PR #${pr.number}: trusted generated release automation; CodeRabbit review intentionally skipped.`
+                );
+                continue;
+              }
+              ours.push(pr);
+            }
 
             core.info(
-              `Matched ${ours.length} open same-repository PR(s) for CI head ${run.head_sha}.`
+              `Matched ${ours.length} ordinary open same-repository PR(s) for CI head ${run.head_sha}; ${matched.length - ours.length} trusted automation PR(s) bypass CodeRabbit.`
             );
 
             if (run.conclusion !== 'success') {
