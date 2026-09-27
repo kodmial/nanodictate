@@ -65,8 +65,8 @@ jobs:
               : 'Code or non-documentation change detected: macOS build and tests are required.');
             core.setOutput('build_required', docsOnly ? 'false' : 'true');
 
-  # The release policy that decides whether a merge into main publishes a
-  # version lives in scripts/release-policy.sh (used by bump-version.yml). It is
+  # The release policy that decides whether a merge into main needs a Release
+  # PR update lives in scripts/release-policy.sh (used by release-pr.yml). It is
   # plain bash, so it is tested on Linux against real git diff output.
   release-policy:
     name: Release policy
@@ -83,6 +83,45 @@ jobs:
 
       - name: Test the release policy
         run: bash scripts/test-release-policy.sh
+
+  # Version ownership: only the automated Release PR branch may touch
+  # Sources/NanoDictateCore/Version.swift or .release-please-manifest.json.
+  # Ordinary PRs never reserve the next version, so concurrent merges cannot
+  # race or pick duplicate versions — version selection is serialized in the
+  # Release PR at release time (issue #10). Runs on pull_request only: pushes
+  # to main are merges that already passed this gate as PRs.
+  version-ownership:
+    name: Version ownership
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          # The checked-out PR code is only diffed here, so the token must not
+          # stay in .git/config where that code could reuse it (CWE-522).
+          persist-credentials: false
+
+      - name: Reject hand-written version bumps
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/release-policy.sh
+          source scripts/release-policy.sh
+          CHANGED=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")
+          echo "Changed files:"
+          printf '%s\n' "$CHANGED" | sed 's/^/  /'
+          if policy_check_version_ownership "$HEAD_REF" "$CHANGED"; then
+            echo "Version ownership ok — no hand-written version bump."
+          else
+            echo "::error::PR '$HEAD_REF' touches Version.swift or .release-please-manifest.json. The next version is owned by the automated Release PR (release-pr.yml): remove the version bump from this PR and merge normally — the changes will ride along with the next Release PR."
+            exit 1
+          fi
 
   build-and-test:
     name: Build & Test (macOS)

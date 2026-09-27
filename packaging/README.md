@@ -48,19 +48,28 @@ generated files get concrete values.
 
 ## Releasing a new version
 
-1. Tag and push: `git tag v0.1.0 && git push origin v0.1.0`
-2. Generate: `MAINTAINERS=@kodmial ruby scripts/release-prep.rb v0.1.0`
-3. Publish:
-   - **Homebrew**: the release workflow's `manifests` job copies
-     `packaging/homebrew/nanodictate.rb` into the `kodmial/homebrew-nanodictate`
-     tap as `nanodictate.rb` (repo root) and
-     `packaging/homebrew/Casks/nanodictate.rb` as `Casks/nanodictate.rb` when
-     `TAP_PAT` is set; manually, the same copies + push.
+1. Merge the feature PRs normally — never bump the version in them. The
+   Release PR workflow proposes the next version on
+   `release-please--branches--main` (see `CONTRIBUTING.md` → Releases).
+2. Merge the Release PR: the release workflow builds both tarballs and both
+   app-bundle zips and attaches them to the GitHub Release automatically.
+   (Manual equivalent: `git tag v0.1.0 && git push origin v0.1.0`.)
+3. Generate (manual equivalent only — the workflow does this itself):
+   `MAINTAINERS=@kodmial ruby scripts/release-prep.rb v0.1.0`
+4. Publish:
+   - **Homebrew**: the release workflow's `manifests` job opens a
+     `chore/release-manifests-v<version>` PR with
+     `packaging/homebrew/nanodictate.rb` and
+     `packaging/homebrew/Casks/nanodictate.rb` and, on merge, copies them into
+     the `kodmial/homebrew-nanodictate` tap as `nanodictate.rb` (repo root) and
+     `Casks/nanodictate.rb` when `TAP_PAT` is set; manually, the same copies +
+     push.
    - **MacPorts**: the release workflow's `manifests` job syncs
      `packaging/macports/Portfile` into the `kodmial/macports-nanodictate`
      repo — the git port source users clone — when `TAP_PAT` is set;
-     manually, the same commit + push.
-4. Verify before release: `brew audit --strict --new nanodictate`,
+     manually, the same commit + push. The installer pin (`PIN_REV` in
+     `scripts/install-macports.sh`) rides along in the same manifests PR.
+5. Verify before release: `brew audit --strict --new nanodictate`,
    `brew audit --cask --strict nanodictate`, `port lint`, and a clean
    `brew install nanodictate` / `brew install --cask nanodictate` /
    `port install` (all binary — no build) on a fresh machine.

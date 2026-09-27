@@ -301,8 +301,10 @@ brew reinstall --cask kodmial/nanodictate/nanodictate
 Release drill for a new version (details in
 [packaging/README.md](../../packaging/README.md)):
 
-1. **Tag and push** — the GitHub Release workflow (`v*`) builds both tarballs
-   and attaches them to the Release automatically:
+1. **Merge the Release PR** — the GitHub Release workflow (`v*`) builds both tarballs
+   and both app-bundle zips and attaches them to the Release automatically
+   (the Release PR is what bumps the version; see
+   `CONTRIBUTING.md` → Releases). Manual equivalent:
 
    ```sh
    git tag v0.1.0 && git push origin v0.1.0
@@ -324,9 +326,10 @@ Release drill for a new version (details in
    only the generated files get concrete values.
 
 3. **Publish to the tap** (`kodmial/homebrew-nanodictate`). The release
-   workflow's `manifests` job does this automatically — it regenerates
+   workflow's `manifests` job does this automatically — it opens a
+   `chore/release-manifests-v<version>` PR with the regenerated
    `packaging/homebrew/nanodictate.rb` and the cask
-   `packaging/homebrew/Casks/nanodictate.rb`, commits them to main and copies
+   `packaging/homebrew/Casks/nanodictate.rb` and, on merge, copies
    them into the tap repo as `nanodictate.rb` (repo root, not `Formula/`) and
    `Casks/nanodictate.rb` when the `TAP_PAT` secret is configured. Manually,
    copy the generated files over `<tap>/nanodictate.rb` and

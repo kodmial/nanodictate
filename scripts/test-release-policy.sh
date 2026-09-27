@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
 # Test suite for scripts/release-policy.sh — the release policy used by
-# .github/workflows/bump-version.yml to decide whether a merge into main
-# publishes a NanoDictate version.
+# .github/workflows/release-pr.yml to decide whether a merge into main
+# needs a Release PR update.
 #
 # Runs on any bash + git host (CI runs it on ubuntu-latest in .github/workflows/ci.yml):
 #
 #   bash scripts/test-release-policy.sh
 #
-# Exits 0 when every case passes, 1 otherwise. The suite covers both halves of
-# the policy that the workflow depends on:
+# Exits 0 when every case passes, 1 otherwise. The suite covers the parts of
+# the policy that the workflows depend on:
 #   * the explicit `skip-release` label (present -> green no-op, absent -> the
-#     existing automatic policy applies), and
+#     existing automatic policy applies),
 #   * the path-based guard, asserted against REAL `git diff` output from a
-#     throwaway repository so a broken grep cannot pass the pure-function cases.
+#     throwaway repository so a broken grep cannot pass the pure-function cases,
+#   * version ownership (only the Release PR branch may touch Version.swift or
+#     the release-please manifest), and
+#   * the changelog cut that keeps Version.swift and CHANGELOG.md in agreement.
 #
 # Temporary fixtures live in a per-run directory under .opencode-tmp/ inside the
 # worktree (never in /tmp) and are removed on exit.
@@ -156,7 +159,7 @@ assert_eq 'decide: null labels fall through to the automatic policy' \
 
 assert_eq 'paths: only excluded paths are non-releasable' \
   'non-releasable' \
-  "$(policy_decide "$EMPTY" $'CHANGELOG.md\nREADME.md\ndocs/packaging/homebrew.md\n.github/workflows/ci.yml\n.githooks/pre-commit\npackaging/homebrew/nanodictate.rb\nnanodictate.rb\nconfig.example.toml\nSECURITY.md\nCODE_OF_CONDUCT.md\nCONTRIBUTING.md\nLICENSE\n.gitignore\n.swift-format\n.swiftlint.yml\n.coderabbit.yaml\nSources/NanoDictateCore/Version.swift' '')"
+  "$(policy_decide "$EMPTY" $'CHANGELOG.md\nREADME.md\ndocs/packaging/homebrew.md\n.github/workflows/ci.yml\n.githooks/pre-commit\npackaging/homebrew/nanodictate.rb\nnanodictate.rb\nconfig.example.toml\nSECURITY.md\nCODE_OF_CONDUCT.md\nCONTRIBUTING.md\nLICENSE\n.gitignore\n.swift-format\n.swiftlint.yml\n.coderabbit.yaml\nrelease-please-config.json\n.release-please-manifest.json\nSources/NanoDictateCore/Version.swift' '')"
 assert_eq 'paths: a single source change is releasable' \
   'releasable' \
   "$(policy_decide "$EMPTY" 'Sources/NanoDictateCore/Transcriber.swift' '')"
@@ -168,7 +171,7 @@ assert_eq 'paths: the new policy script itself counts as a code change' \
   "$(policy_decide "$EMPTY" $'scripts/release-policy.sh\nscripts/test-release-policy.sh' '')"
 assert_eq 'paths: .github is excluded, not a prefix-free match' \
   'non-releasable' \
-  "$(policy_decide "$EMPTY" '.github/workflows/bump-version.yml' '')"
+  "$(policy_decide "$EMPTY" '.github/workflows/release-pr.yml' '')"
 assert_eq 'paths: an unrelated nested file is not excluded' \
   'releasable' \
   "$(policy_decide "$EMPTY" 'Sources/NanoDictateCoreSupport/Helper.swift' '')"
@@ -228,6 +231,58 @@ assert_eq 'next version: 0.0.9 -> 0.0.10' \
   '0.0.10' "$(policy_next_version '0.0.9')"
 assert_eq 'next version: 0.1.12 keeps its minor series' \
   '0.1.13' "$(policy_next_version '0.1.12')"
+
+# --- 4a. Version ownership ---------------------------------------------------
+# Only the automated Release PR branch may touch Version.swift or the
+# release-please manifest. Ordinary PRs never reserve the next version, so
+# concurrent merges cannot race or pick duplicate versions.
+
+RELEASE_BRANCH='release-please--branches--main'
+
+assert_ok 'ownership: the Release PR branch is recognised' \
+  policy_is_release_branch "$RELEASE_BRANCH"
+assert_not_ok 'ownership: a feature branch is not the Release PR branch' \
+  policy_is_release_branch 'feature/my-change'
+assert_not_ok 'ownership: an empty branch is not the Release PR branch' \
+  policy_is_release_branch ''
+assert_not_ok 'ownership: a prefix match is not the Release PR branch' \
+  policy_is_release_branch 'release-please--branches--main-extra'
+
+assert_eq 'ownership: Version.swift is version-owned' \
+  'Sources/NanoDictateCore/Version.swift' \
+  "$(policy_version_owned_touched 'Sources/NanoDictateCore/Version.swift')"
+assert_eq 'ownership: the manifest is version-owned' \
+  '.release-please-manifest.json' \
+  "$(policy_version_owned_touched '.release-please-manifest.json')"
+assert_eq 'ownership: a mix keeps only the version-owned paths' \
+  $'Sources/NanoDictateCore/Version.swift\n.release-please-manifest.json' \
+  "$(policy_version_owned_touched $'Sources/NanoDictateCore/Transcriber.swift\nSources/NanoDictateCore/Version.swift\n.release-please-manifest.json')"
+assert_eq 'ownership: source-only changes touch nothing owned' \
+  '' "$(policy_version_owned_touched 'Sources/NanoDictateCore/Transcriber.swift')"
+assert_eq 'ownership: CHANGELOG.md is not version-owned (notes stay editable)' \
+  '' "$(policy_version_owned_touched 'CHANGELOG.md')"
+assert_eq 'ownership: an empty diff touches nothing owned' \
+  '' "$(policy_version_owned_touched '')"
+
+assert_eq 'ownership: the Release PR branch may touch Version.swift' \
+  'ok' "$(policy_check_version_ownership "$RELEASE_BRANCH" 'Sources/NanoDictateCore/Version.swift')"
+assert_eq 'ownership: the Release PR branch may touch the manifest' \
+  'ok' "$(policy_check_version_ownership "$RELEASE_BRANCH" '.release-please-manifest.json')"
+assert_eq 'ownership: an ordinary PR with source changes is allowed' \
+  'ok' "$(policy_check_version_ownership 'feature/my-change' 'Sources/NanoDictateCore/Transcriber.swift')"
+assert_eq 'ownership: an ordinary PR with changelog notes is allowed' \
+  'ok' "$(policy_check_version_ownership 'feature/my-change' $'Sources/NanoDictateCore/Transcriber.swift\nCHANGELOG.md')"
+assert_ok 'ownership: the Release PR branch check exits 0' \
+  policy_check_version_ownership "$RELEASE_BRANCH" 'Sources/NanoDictateCore/Version.swift'
+assert_not_ok 'ownership: an ordinary PR touching Version.swift fails' \
+  policy_check_version_ownership 'feature/my-change' 'Sources/NanoDictateCore/Version.swift'
+assert_not_ok 'ownership: an ordinary PR touching the manifest fails' \
+  policy_check_version_ownership 'feature/my-change' '.release-please-manifest.json'
+assert_not_ok 'ownership: a version bump hidden among source changes still fails' \
+  policy_check_version_ownership 'feature/my-change' $'Sources/NanoDictateCore/Transcriber.swift\nSources/NanoDictateCore/Version.swift'
+assert_eq 'ownership: the violation names the decision' \
+  'version-ownership' \
+  "$(policy_check_version_ownership 'feature/my-change' 'Sources/NanoDictateCore/Version.swift' || true)"
 
 # --- 4b. The changelog cut a bump has to make ---------------------------------
 # The invariant VersionTests.testVersionStringEqualsCurrentRelease enforces on
