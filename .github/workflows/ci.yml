@@ -65,6 +65,25 @@ jobs:
               : 'Code or non-documentation change detected: macOS build and tests are required.');
             core.setOutput('build_required', docsOnly ? 'false' : 'true');
 
+  # The release policy that decides whether a merge into main publishes a
+  # version lives in scripts/release-policy.sh (used by bump-version.yml). It is
+  # plain bash, so it is tested on Linux against real git diff output.
+  release-policy:
+    name: Release policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          # This job runs scripts/test-release-policy.sh from the checked-out PR on
+          # pull_request events, so the token must not stay in .git/config where
+          # that code could reuse it (CWE-522).
+          persist-credentials: false
+
+      - name: Test the release policy
+        run: bash scripts/test-release-policy.sh
+
   build-and-test:
     name: Build & Test (macOS)
     needs: classify-changes
