@@ -45,7 +45,7 @@ jobs:
 
           # Pull requests are also returned by the Issues API; exclude them.
           # Ordering is deterministic:
-          #   P0 -> P1 -> P2 -> no priority -> P3
+          #   P0 -> P1 -> P2 -> no priority
           # and then by issue number within each group.
           #
           # Zero or one priority label is valid. Issues carrying multiple priority
@@ -54,7 +54,7 @@ jobs:
             jq -r '
               [ .[]
                 | select(.pull_request == null)
-                | [(.labels[]?.name // empty) | select(test("^priority:[pP][0-3]$"))] as $priorities
+                | [(.labels[]?.name // empty) | select(test("^priority:[pP][0-2]$"))] as $priorities
                 | select(($priorities | length) <= 1)
                 | {
                     number: .number,
@@ -68,8 +68,7 @@ jobs:
                   (if .priority == "priority:p0" then 0
                    elif .priority == "priority:p1" then 1
                    elif .priority == "priority:p2" then 2
-                   elif .priority == null then 3
-                   else 4 end),
+                   else 3 end),
                   .number
                 )
               | .[].number
