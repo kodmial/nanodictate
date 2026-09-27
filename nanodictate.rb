@@ -1,5 +1,5 @@
 # Homebrew formula template for NanoDictate (binary install from GitHub Releases).
-# Placeholders 0.1.3, 8a4c3117e4f861c0ae68876577ddbeae325a572a8889bf4d8b56c01dfaf96e90, f63bdd681835478561329ee7028584a8cd83c2890073f7d584dfa4e1349fe04f are filled by
+# Placeholders 0.1.4, 72f6835645da80ce76100b3c8ae1900c99207a9c2e26c4de9334a7ae6bbea2d6, a2c8ac1e942ca1630e368aee9f073910ac4f9bf4f1fb2cdd4da324cbcf458914 are filled by
 # scripts/release-prep.rb — do not hand-edit the generated nanodictate.rb.
 # This is a binary formula: Homebrew downloads the prebuilt tarball attached
 # to the GitHub Release (built by .github/workflows/release.yml) and installs
@@ -9,21 +9,21 @@ class Nanodictate < Formula
   desc "macOS dictation via double-Alt: bilingual EN/RU, 4 STT providers"
   homepage "https://github.com/kodmial/nanodictate"
   # Explicit version: the tarball name carries the version but the arch suffix
-  # (nanodictate-0.1.3-macos-<arch>.tar.gz) would confuse homebrew's
+  # (nanodictate-0.1.4-macos-<arch>.tar.gz) would confuse homebrew's
   # version-from-filename inference.
-  version "0.1.3"
+  version "0.1.4"
   license "MIT"
 
   depends_on macos: :monterey
 
-  # Release tarballs are attached to the tag v0.1.3 (the tag keeps the
+  # Release tarballs are attached to the tag v0.1.4 (the tag keeps the
   # "v" prefix; the archive filename does not — see .github/workflows/release.yml).
   if Hardware::CPU.arm?
-    url "https://github.com/kodmial/nanodictate/releases/download/v0.1.3/nanodictate-0.1.3-macos-arm64.tar.gz"
-    sha256 "8a4c3117e4f861c0ae68876577ddbeae325a572a8889bf4d8b56c01dfaf96e90"
+    url "https://github.com/kodmial/nanodictate/releases/download/v0.1.4/nanodictate-0.1.4-macos-arm64.tar.gz"
+    sha256 "72f6835645da80ce76100b3c8ae1900c99207a9c2e26c4de9334a7ae6bbea2d6"
   else
-    url "https://github.com/kodmial/nanodictate/releases/download/v0.1.3/nanodictate-0.1.3-macos-x86_64.tar.gz"
-    sha256 "f63bdd681835478561329ee7028584a8cd83c2890073f7d584dfa4e1349fe04f"
+    url "https://github.com/kodmial/nanodictate/releases/download/v0.1.4/nanodictate-0.1.4-macos-x86_64.tar.gz"
+    sha256 "a2c8ac1e942ca1630e368aee9f073910ac4f9bf4f1fb2cdd4da324cbcf458914"
   end
 
   def install
