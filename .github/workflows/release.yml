@@ -92,6 +92,15 @@ jobs:
               if [[ "${{ github.ref_type }}" == "tag" ]]; then
                 VERSION="${{ github.ref_name }}"
                 VERSION="${VERSION#v}"
+                # The tag version must equal Version.swift: the bundle's
+                # CFBundleShortVersionString would say v$VERSION while the
+                # overlay header prints the Version.swift value — refuse
+                # instead of publishing a release that disagrees with itself.
+                FILE_VERSION=$(grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' Sources/NanoDictateCore/Version.swift)
+                if [[ "$VERSION" != "$FILE_VERSION" ]]; then
+                  echo "::error::Tag version $VERSION does not match Sources/NanoDictateCore/Version.swift ($FILE_VERSION) — the release tag would say v$VERSION while the binary prints $FILE_VERSION. Push a tag matching Version.swift instead."
+                  exit 1
+                fi
               else
                 VERSION=$(grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' Sources/NanoDictateCore/Version.swift)
               fi
