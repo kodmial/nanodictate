@@ -467,6 +467,15 @@ def list_unresolved_thread_comment_ids(pr_number):
                 "/graphql",
                 {"query": query, "variables": {"owner": owner, "name": name, "pr": pr_number, "after": after}},
             )
+            if resp.get("errors") or not (
+                ((resp.get("data") or {}).get("repository") or {}).get("pullRequest")
+            ):
+                print(
+                    f"Warning: reviewThreads lookup returned errors, keeping all inline threads: "
+                    f"{json.dumps(resp.get('errors'))[:500]}",
+                    file=sys.stderr,
+                )
+                return None
             threads = (
                 ((resp.get("data") or {}).get("repository") or {}).get("pullRequest") or {}
             ).get("reviewThreads") or {}
@@ -872,7 +881,10 @@ def submit_verdict(
 ):
     owner, name = repo()
     open_findings = [f for f in findings if f.get("status") in ("open", "still-open", "reopened")]
-    event = "CHANGES_REQUESTED" if open_findings else "APPROVE"
+    # GitHub review events accept REQUEST_CHANGES, not CHANGES_REQUESTED
+    # (which is the resulting review state). The printed/returned verdict
+    # keeps the CHANGES_REQUESTED label.
+    event = "REQUEST_CHANGES" if open_findings else "APPROVE"
     linked = linked_issue_numbers(pr.get("body", ""))
     files = files_override if files_override is not None else list_pr_files(pr_number)
     total_add = sum(f.get("additions", 0) for f in files)
@@ -928,8 +940,9 @@ def submit_verdict(
             print(f"Submitted COMMENT (APPROVE fallback) for PR #{pr_number} HEAD {head_sha}")
             return "COMMENT"
         raise
-    print(f"Submitted {event} for PR #{pr_number} HEAD {head_sha} with {len(open_findings)} open findings")
-    return event
+    verdict = "CHANGES_REQUESTED" if event == "REQUEST_CHANGES" else event
+    print(f"Submitted {verdict} for PR #{pr_number} HEAD {head_sha} with {len(open_findings)} open findings")
+    return verdict
 
 
 def cmd_gate(pr_number, head_sha=None):
