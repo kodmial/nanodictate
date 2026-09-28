@@ -32,6 +32,15 @@ public enum OverlayTimeFormat {
   }
 }
 
+/// Compact version-badge formatting for the overlay header (`0.1.5` → `v0.1.5`).
+/// Pure function outside SwiftUI so the badge contract stays unit-testable
+/// without rendering the view (AppKit/SwiftUI are unavailable on Linux CI).
+public enum OverlayVersion {
+  public static func displayString(for version: String = NanoDictateVersion.string) -> String {
+    "v\(version)"
+  }
+}
+
 /// Bridges AppKit calls (updateLevel/setStatus) into SwiftUI reactivity.
 final class OverlayState: ObservableObject {
   @Published var level: Float = 0
@@ -130,7 +139,8 @@ struct OverlayContentView: View {
       // текущего; провайдер — secondary, модель — tertiary (иерархия
       // «кто распознаёт»). Hairline-разделитель под шапкой УБРАН:
       // у macOS-панелей внутренних разделителей нет. При обработке
-      // шапка притухает — статус-точки ниже говорят сами за себя.
+      // провайдер/модель притухают (opacity 0.3) — статус-точки ниже
+      // говорят сами за себя; бейдж версии остаётся читаемым.
       VStack(alignment: .leading, spacing: 2) {
         HStack(spacing: 6) {
           // Фикс-слот под REC-точку (видна только при записи): пустой
@@ -147,7 +157,19 @@ struct OverlayContentView: View {
             .foregroundStyle(.secondary)
             .lineLimit(1)
             .truncationMode(.middle)
+            .opacity(state.phase == .processing ? 0.3 : 1)
           Spacer(minLength: 0)
+          // App version pinned to the far top-right of the header: derived
+          // from NanoDictateVersion.string (single source of truth) via
+          // OverlayVersion.displayString, so release bumps need no UI change.
+          // Compact tertiary caption keeps it unobtrusive; fixedSize prevents
+          // the provider label from squeezing it out at narrow panel widths.
+          Text(OverlayVersion.displayString())
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .accessibilityIdentifier("appVersion")
         }
         if !headerParts.model.isEmpty {
           Text(headerParts.model)
@@ -155,9 +177,9 @@ struct OverlayContentView: View {
             .foregroundStyle(.tertiary)  // иерархия: модель ступенью ниже
             .lineLimit(2)
             .truncationMode(.middle)
+            .opacity(state.phase == .processing ? 0.3 : 1)
         }
       }
-      .opacity(state.phase == .processing ? 0.3 : 1)
 
       ZStack {
         if state.phase == .processing {
