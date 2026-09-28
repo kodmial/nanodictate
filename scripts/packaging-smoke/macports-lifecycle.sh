@@ -107,8 +107,8 @@ if [ "$MODE" = "production" ]; then
   smoke_set_check "documented project installer path (curl install-macports.sh | bash)"
   TMP_INSTALLER="$(mktemp /tmp/install-macports.XXXXXX)"
   curl -fsSL https://raw.githubusercontent.com/kodmial/nanodictate/main/scripts/install-macports.sh -o "$TMP_INSTALLER"
-  bash "$TMP_INSTALLER"
-  RC=$?
+  RC=0
+  bash "$TMP_INSTALLER" || RC=$?
   rm -f "$TMP_INSTALLER"
   [ "$RC" -eq 0 ] || smoke_fail "install-macports.sh exited $RC"
 else

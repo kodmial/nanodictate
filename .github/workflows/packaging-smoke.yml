@@ -110,8 +110,7 @@ jobs:
               }
               // A dry-run manual Release must not page the production channel.
               if (run && run.event === 'workflow_dispatch') {
-                core.notice('Release was a manual dispatch; still verifying the published channel.');
-                runProduction = 'true';
+                core.notice('Release was a manual dispatch; skipping production smoke.');
               }
             } else if (event === 'workflow_dispatch') {
               const mode = (context.payload.inputs && context.payload.inputs.mode) || 'both';
