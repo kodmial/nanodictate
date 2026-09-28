@@ -52,6 +52,7 @@ extension L10n {
     "menu.quit": "Quit",
     // overlay.*
     "overlay.recording": "Recording...",
+    "overlay.starting": "Starting microphone...",
     "overlay.recognizing": "Recognizing...",
     "overlay.recognizingPart": "Recognizing... (part {n})",
     "overlay.finalProcessing": "Final processing...",
@@ -311,6 +312,7 @@ extension L10n {
     "menu.quit": "Выход",
     // overlay.*
     "overlay.recording": "Записываю…",
+    "overlay.starting": "Включаю микрофон…",
     "overlay.recognizing": "Распознаю…",
     "overlay.recognizingPart": "Распознаю… (часть {n})",
     "overlay.finalProcessing": "Финальная обработка…",
