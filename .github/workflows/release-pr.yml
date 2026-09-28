@@ -344,11 +344,48 @@ jobs:
             exit 0
           fi
 
-          if ! policy_changelog_cut_release "$PROPOSED" "$(date -u +%F)" < CHANGELOG.md > CHANGELOG.md.new; then
-            rm -f CHANGELOG.md.new
+          # release-please is intentionally configured with skip-changelog=true so
+          # NanoDictate can preserve its existing Keep a Changelog layout. Pull
+          # the generated notes from the Release PR body and seed them into the
+          # Unreleased block before cutting that block into the new release.
+          # This keeps the detailed release notes instead of creating an empty
+          # version header (the v0.1.7 failure mode).
+          PR_BODY=$(GH_TOKEN="$RELEASE_TOKEN" gh pr view "$BRANCH" --repo "$REPO" --json body --jq '.body // ""')
+          NOTES=$(printf '%s\n' "$PR_BODY" | awk -v version="$PROPOSED" '
+            index($0, "## [" version "]") == 1 { capture = 1; next }
+            capture && /^---$/ { exit }
+            capture { print }
+          ')
+          if [[ -z "${NOTES//[[:space:]]/}" ]]; then
+            echo "::error::Release PR contains no generated notes for v$PROPOSED — refusing to cut an empty CHANGELOG section."
+            exit 1
+          fi
+          NOTES_FILE=$(mktemp)
+          printf '%s\n' "$NOTES" > "$NOTES_FILE"
+          awk -v notes_file="$NOTES_FILE" '
+            /^## \[Unreleased\]$/ && !inserted {
+              print
+              print ""
+              while ((getline line < notes_file) > 0) print line
+              close(notes_file)
+              inserted = 1
+              next
+            }
+            { print }
+            END { if (!inserted) exit 2 }
+          ' CHANGELOG.md > CHANGELOG.md.with-notes || {
+            rm -f "$NOTES_FILE" CHANGELOG.md.with-notes
+            echo "::error::Could not seed generated release notes under ## [Unreleased]."
+            exit 1
+          }
+          rm -f "$NOTES_FILE"
+
+          if ! policy_changelog_cut_release "$PROPOSED" "$(date -u +%F)" < CHANGELOG.md.with-notes > CHANGELOG.md.new; then
+            rm -f CHANGELOG.md.new CHANGELOG.md.with-notes
             echo "::error::Failed to cut a '## [$PROPOSED]' release section in CHANGELOG.md — is the '## [Unreleased]' header present?"
             exit 1
           fi
+          rm -f CHANGELOG.md.with-notes
           mv CHANGELOG.md.new CHANGELOG.md
           echo "Cut the CHANGELOG.md release section: ## [$PROPOSED] - $(date -u +%F)"
 

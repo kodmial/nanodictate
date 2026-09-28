@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.7] - 2026-09-27
 
+### Bug Fixes
+
+- Model-aware STT capabilities added ([883e723](https://github.com/kodmial/nanodictate/commit/883e723c52316f9ca1d1482dff60828a59899e04)).
+
 ## [0.1.6] - 2026-09-27
 
 ### Changed
