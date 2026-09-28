@@ -333,6 +333,11 @@ def _select_current_summary_comments(pr_agent_comments, current_head, since):
         if headed:
             return headed
     if since is not None:
+        # Inclusive bound (>=) keeps the current-HEAD summary in scope on
+        # same-HEAD gate re-runs (the tracker PATCH must not hide it).
+        # Reopening a /verify resolution still requires strictly fresh
+        # output: upsert_tracker only reopens when the finding's
+        # source_created is strictly after the persisted marker.
         fresh = [c for c in pr_agent_comments if (_comment_created(c) or since) >= since]
         if fresh:
             return fresh
@@ -444,7 +449,14 @@ def extract_findings(pr_number, issue_comments, review_comments, current_head=No
     only from actionable finding sections, so historical summaries and
     Reviewer Guide boilerplate never reopen resolved findings.
 
-    Returns a list of dicts: {id, file, line, title, source}.
+    Each finding carries source_created (ISO-8601 creation time of the
+    PR-Agent comment or inline thread that produced it). upsert_tracker
+    reopens a /verify resolution only when that timestamp is strictly after
+    the persisted last-/review marker, so re-running the gate or pushing a
+    new commit without fresh PR-Agent output never flips resolved to
+    reopened.
+
+    Returns a list of dicts: {id, file, line, title, source, source_created}.
     """
     findings = {}
     bullet_re = re.compile(r"(?:^|\n)\s*(?:\d+[.)]|[-*])\s+(.{10,300})", re.M)
@@ -463,18 +475,39 @@ def extract_findings(pr_number, issue_comments, review_comments, current_head=No
         # Reviewer Guide bullets describe files/effort, not findings; only
         # actionable finding sections are parsed.
         body = _select_finding_text(body)
+        created_iso = _format_github_time(_comment_created(comment))
         for match in bullet_re.finditer(body):
             title = re.sub(r"\s+", " ", match.group(1)).strip()[:160]
             if len(title) < 10 or _is_boilerplate_title(title):
                 continue
             fid = stable_id("PR", 0, title)
-            findings.setdefault(fid, {"id": fid, "file": "", "line": 0, "title": title, "source": "summary"})
+            findings.setdefault(
+                fid,
+                {
+                    "id": fid,
+                    "file": "",
+                    "line": 0,
+                    "title": title,
+                    "source": "summary",
+                    "source_created": created_iso,
+                },
+            )
         for match in inline_num_re.finditer(body):
             title = re.sub(r"\s+", " ", match.group(1)).strip()[:160]
             if len(title) < 10 or _is_boilerplate_title(title):
                 continue
             fid = stable_id("PR", 0, title)
-            findings.setdefault(fid, {"id": fid, "file": "", "line": 0, "title": title, "source": "summary"})
+            findings.setdefault(
+                fid,
+                {
+                    "id": fid,
+                    "file": "",
+                    "line": 0,
+                    "title": title,
+                    "source": "summary",
+                    "source_created": created_iso,
+                },
+            )
     unresolved_ids = list_unresolved_thread_comment_ids(pr_number)
     for comment in review_comments:
         body = comment.get("body", "") or ""
@@ -496,16 +529,19 @@ def extract_findings(pr_number, issue_comments, review_comments, current_head=No
         # A stale inline thread anchored to an older HEAD must not reopen a
         # resolved finding. When the current HEAD is known, require the
         # thread to be anchored to it (commit_id/original_commit_id) or to
-        # be newer than the tracker resolution; otherwise skip it.
+        # be strictly newer than the persisted last-/review marker;
+        # otherwise skip it. The marker check applies even when commit IDs
+        # are absent, so an old thread without anchoring info cannot reopen
+        # a /verify resolution without fresh output.
         if current_head:
             commit_id = comment.get("commit_id") or ""
             original_commit_id = comment.get("original_commit_id") or ""
             anchored = current_head in (commit_id, original_commit_id)
-            if not anchored and (commit_id or original_commit_id):
+            if not anchored:
                 if since is None:
                     continue
                 ts = _comment_created(comment)
-                if ts is None or ts < since:
+                if ts is None or ts <= since:
                     continue
         title = re.sub(r"\s+", " ", body).strip()[:160]
         if len(title) < 10 or _is_boilerplate_title(title):
@@ -517,7 +553,17 @@ def extract_findings(pr_number, issue_comments, review_comments, current_head=No
         except (TypeError, ValueError):
             line = 0
         fid = stable_id(path or "PR", line, title)
-        findings.setdefault(fid, {"id": fid, "file": path, "line": line, "title": title, "source": "inline"})
+        findings.setdefault(
+            fid,
+            {
+                "id": fid,
+                "file": path,
+                "line": line,
+                "title": title,
+                "source": "inline",
+                "source_created": _format_github_time(_comment_created(comment)),
+            },
+        )
     return sorted(findings.values(), key=lambda f: f["id"])
 
 
@@ -596,11 +642,16 @@ def write_tracker(pr_number, head_sha, findings, last_review_at=None):
 def upsert_tracker(pr_number, head_sha, current, previous_state, last_review_at=None):
     prev = {f.get("id"): f for f in previous_state.get("findings", [])}
     prev_head = previous_state.get("head", "")
-    # A reappearance is new evidence only because extract_findings already
-    # limits summaries to the current-HEAD report (HEAD mention, else newer
-    # than the persisted last-/review marker) and inline threads to
-    # current-HEAD anchors (or newer than the marker). Historical output can
-    # therefore not flip a /verify resolution back to reopened.
+    previous_marker = (previous_state or {}).get("last_review_at")
+    since_dt = _parse_github_time(previous_marker) if previous_marker else None
+    # A reappearance is new evidence only when its source comment was
+    # created strictly after the persisted last-/review marker. The summary
+    # selector is inclusive (>=) so same-HEAD re-runs keep the current
+    # report in scope instead of hiding it, but reopening here requires
+    # strict freshness: re-selecting the same summary (created == marker)
+    # after /verify, or keeping a stale inline thread, must not flip a
+    # resolved finding back to reopened. A HEAD change alone is never
+    # sufficient without fresh PR-Agent output for the current HEAD.
     merged = []
     for finding in current:
         old = prev.get(finding["id"])
@@ -608,13 +659,18 @@ def upsert_tracker(pr_number, head_sha, current, previous_state, last_review_at=
             status = "open"
         elif old.get("status") in ("resolved", "fixed"):
             # Preserve a /verify resolution unless fresh PR-Agent output for
-            # the current HEAD reports the finding again. extract_findings
-            # only returns current-HEAD summaries and current-HEAD inline
-            # threads, so a reappearance here is new evidence and reopens;
-            # on the same HEAD it is the stale thread that /verify just
-            # closed, so keep it resolved.
+            # the current HEAD reports the finding again with a source
+            # created after the stored marker. Without a marker (first run)
+            # fall back to HEAD-change reopening; with a marker, unknown
+            # source times never reopen.
+            source_dt = _parse_github_time(finding.get("source_created"))
             if prev_head and head_sha != prev_head:
-                status = "reopened"
+                if since_dt is None:
+                    status = "reopened"
+                elif source_dt is not None and source_dt > since_dt:
+                    status = "reopened"
+                else:
+                    status = "resolved"
             else:
                 status = "resolved"
         else:
@@ -657,6 +713,32 @@ CHUNK_FILE_BUDGET = 5
 CHUNK_CHURN_BUDGET = 15000
 CLIP_FILE_CHURN_BUDGET = 10000
 
+# A clean APPROVE is only safe without positive coverage evidence when the
+# diff trivially fits in one chunk. Chunking is token-based, not file-based,
+# so a PR with few files but large or dense files can still exceed
+# max_number_of_calls=5 chunks, and large_patch_policy=clip can omit part of
+# a patch below the heuristic clip budget without any explicit notice.
+SAFE_APPROVE_MAX_FILES = 1
+SAFE_APPROVE_MAX_CHURN = 2000
+
+# Phrases where PR-Agent explicitly confirms the whole diff was reviewed.
+# Matched case-insensitively; only trusted when no gap phrase is present.
+FULL_COVERAGE_PHRASES = (
+    "all files reviewed",
+    "all files were reviewed",
+    "reviewed all files",
+    "reviewed all ",
+    "full coverage",
+    "100% coverage",
+    "complete coverage",
+    "fully reviewed",
+    "no remaining files",
+    "no unreviewed",
+    "all chunks reviewed",
+    "review complete",
+    "review is complete",
+)
+
 
 def detect_coverage_gap(issue_comments, files):
     """Detect when chunk limits or patch clipping may leave code unreviewed.
@@ -664,7 +746,12 @@ def detect_coverage_gap(issue_comments, files):
     Returns a warning string when coverage is incomplete, else None. Checks
     PR-Agent output for explicit truncation notices, the file count against
     the max_number_of_calls chunk budget, and per-file churn against the
-    large_patch_policy clip budget.
+    large_patch_policy clip budget. Because chunking is token-based, small
+    file counts and churn below the heuristic budgets cannot prove complete
+    coverage on their own: when the diff is non-trivial and PR-Agent output
+    contains no explicit full-coverage confirmation, coverage is treated as
+    unestablished and a gap is reported so a zero-finding run withholds a
+    clean APPROVE instead of reporting a complete review.
     """
     bodies = []
     for comment in issue_comments or []:
@@ -709,6 +796,24 @@ def detect_coverage_gap(issue_comments, files):
             f"PR churn (+{total} lines) exceeds the {CHUNK_CHURN_BUDGET}-line "
             "chunking budget; some chunks may not have been reviewed."
         )
+    # Silent gaps: few files can still need more than max_number_of_calls
+    # chunks, and clip can omit content below the heuristic budget without
+    # any explicit notice. Only a trivially small diff, or explicit
+    # full-coverage confirmation from the review run, establishes complete
+    # coverage. Otherwise withhold a clean verdict.
+    if files:
+        has_full_confirmation = any(p in haystack for p in FULL_COVERAGE_PHRASES)
+        if not has_full_confirmation and (
+            len(files) > SAFE_APPROVE_MAX_FILES or total > SAFE_APPROVE_MAX_CHURN
+        ):
+            return (
+                f"PR touches {len(files)} file(s) with +{total} changed lines; "
+                "chunking is token-based, so max_number_of_calls=5 chunks and "
+                "large_patch_policy=clip may leave content unreviewed even "
+                "below the heuristic budgets, and the review output contains "
+                "no explicit full-coverage confirmation. Zero findings cannot "
+                "be treated as a clean full-PR review."
+            )
     return None
 
 
