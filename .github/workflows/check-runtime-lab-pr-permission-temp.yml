@@ -1,0 +1,21 @@
+name: Check runtime-lab Actions PR permission
+
+on:
+  push:
+    paths:
+      - '.github/workflows/check-runtime-lab-pr-permission-temp.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.TAP_PAT }}
+    steps:
+      - name: Read runtime-lab workflow permissions
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api repos/kodmial/runtime-lab/actions/permissions/workflow             --jq '{default_workflow_permissions,can_approve_pull_request_reviews}'
