@@ -1,4 +1,4 @@
-name: Check runtime-lab Actions PR permission
+name: Configure runtime-lab Actions PR permission
 
 on:
   push:
@@ -9,13 +9,20 @@ permissions:
   contents: read
 
 jobs:
-  check:
+  configure:
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.TAP_PAT }}
     steps:
-      - name: Read runtime-lab workflow permissions
+      - name: Enable repository Actions PR permission
         shell: bash
         run: |
           set -euo pipefail
-          gh api repos/kodmial/runtime-lab/actions/permissions/workflow             --jq '{default_workflow_permissions,can_approve_pull_request_reviews}'
+          gh api --method PUT repos/kodmial/runtime-lab/actions/permissions/workflow \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            -f default_workflow_permissions=read \
+            -F can_approve_pull_request_reviews=true >/dev/null
+
+          gh api repos/kodmial/runtime-lab/actions/permissions/workflow \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            --jq '{default_workflow_permissions,can_approve_pull_request_reviews}'
