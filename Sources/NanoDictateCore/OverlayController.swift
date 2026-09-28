@@ -117,7 +117,8 @@ struct OverlayContentView: View {
       // текущего; провайдер — secondary, модель — tertiary (иерархия
       // «кто распознаёт»). Hairline-разделитель под шапкой УБРАН:
       // у macOS-панелей внутренних разделителей нет. При обработке
-      // шапка притухает — статус-точки ниже говорят сами за себя.
+      // провайдер/модель притухают (opacity 0.3) — статус-точки ниже
+      // говорят сами за себя; бейдж версии остаётся читаемым.
       VStack(alignment: .leading, spacing: 2) {
         HStack(spacing: 6) {
           // Фикс-слот под REC-точку (видна только при записи): пустой
@@ -134,6 +135,7 @@ struct OverlayContentView: View {
             .foregroundStyle(.secondary)
             .lineLimit(1)
             .truncationMode(.middle)
+            .opacity(state.phase == .processing ? 0.3 : 1)
           Spacer(minLength: 0)
           // App version pinned to the far top-right of the header: derived
           // from NanoDictateVersion.string (single source of truth),
@@ -153,9 +155,9 @@ struct OverlayContentView: View {
             .foregroundStyle(.tertiary)  // иерархия: модель ступенью ниже
             .lineLimit(2)
             .truncationMode(.middle)
+            .opacity(state.phase == .processing ? 0.3 : 1)
         }
       }
-      .opacity(state.phase == .processing ? 0.3 : 1)
 
       ZStack {
         if state.phase == .processing {
