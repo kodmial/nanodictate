@@ -198,6 +198,26 @@ BOILERPLATE_TITLE_PHRASES = (
     "to review this",
 )
 
+# Headings whose markdown section may hold actionable findings. Summary
+# bullets are only extracted from these sections so Reviewer Guide text,
+# file listings, and general summaries never become findings.
+FINDING_SECTION_HEADINGS = (
+    "key issue",
+    "key finding",
+    "finding",
+    "actionable",
+    "inline issue",
+    "inline finding",
+    "issue to",
+    "issues to",
+    "problem",
+    "concern",
+    "bug",
+    "vulnerability",
+    "weakness",
+    "risk",
+)
+
 _HEADING_RE = re.compile(r"(?m)^\s*#{1,6}\s+(.*)\s*$")
 
 
@@ -222,6 +242,84 @@ def _drop_boilerplate_sections(body):
 def _is_boilerplate_title(title):
     lowered = (title or "").lower()
     return any(s in lowered for s in BOILERPLATE_TITLE_PHRASES)
+
+
+def _select_finding_text(body):
+    """Keep only markdown sections that can hold actionable findings.
+
+    Text before the first heading is a high-level summary, not a finding
+    list, so it is dropped when headings exist. When no headings exist,
+    the whole body is returned as a fallback so heading-free reviews
+    still produce findings.
+    """
+    text = _drop_boilerplate_sections(body or "")
+    matches = list(_HEADING_RE.finditer(text))
+    if not matches:
+        return text
+    kept = []
+    for i, match in enumerate(matches):
+        heading = (match.group(1) or "").lower()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        section = text[match.start() : end]
+        if any(h in heading for h in FINDING_SECTION_HEADINGS):
+            kept.append(section)
+    return "".join(kept)
+
+
+def _parse_github_time(value):
+    from datetime import datetime, timezone
+
+    if not value:
+        return None
+    try:
+        text = str(value).strip().replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    except (ValueError, TypeError):
+        return None
+
+
+def _comment_time(comment):
+    return _parse_github_time(comment.get("updated_at")) or _parse_github_time(
+        comment.get("created_at")
+    )
+
+
+def _select_current_summary_comments(pr_agent_comments, current_head, since):
+    """Return only summary comments that can describe the current HEAD.
+
+    Historical PR-Agent summaries must not reopen findings that /verify
+    already resolved. Preference order: comments that mention the current
+    HEAD SHA, then comments newer than the tracker resolution (fresh
+    output from the latest /review run). When neither exists, return an
+    empty list instead of re-reading stale output.
+    """
+    if not pr_agent_comments:
+        return []
+    if current_head:
+        headed = [
+            c
+            for c in pr_agent_comments
+            if current_head in (c.get("body") or "")
+            or current_head[:7] in (c.get("body") or "")
+        ]
+        if headed:
+            return headed
+    if since is not None:
+        fresh = [c for c in pr_agent_comments if (_comment_time(c) or since) >= since]
+        if fresh:
+            return fresh
+        return []
+    latest = None
+    for c in pr_agent_comments:
+        ts = _comment_time(c)
+        if ts is not None and (latest is None or ts > latest):
+            latest = ts
+    if latest is None:
+        return pr_agent_comments
+    return [c for c in pr_agent_comments if _comment_time(c) == latest]
 
 
 def list_unresolved_thread_comment_ids(pr_number):
@@ -277,18 +375,22 @@ def list_unresolved_thread_comment_ids(pr_number):
     return unresolved_ids
 
 
-def extract_findings(pr_number, issue_comments, review_comments):
+def extract_findings(pr_number, issue_comments, review_comments, current_head=None, since=None):
     """Derive findings from PR-Agent output plus inline threads.
 
     Only unresolved, non-outdated review threads count, resolved via the
-    GraphQL reviewThreads isResolved/isOutdated fields. Summary bullets from
-    Reviewer Guide boilerplate sections are excluded.
+    GraphQL reviewThreads isResolved/isOutdated fields. Summary bullets are
+    taken only from the current-HEAD report (comments mentioning
+    current_head, else comments newer than since, else the latest batch) and
+    only from actionable finding sections, so historical summaries and
+    Reviewer Guide boilerplate never reopen resolved findings.
 
     Returns a list of dicts: {id, file, line, title, source}.
     """
     findings = {}
     bullet_re = re.compile(r"(?:^|\n)\s*(?:\d+[.)]|[-*])\s+(.{10,300})", re.M)
     inline_num_re = re.compile(r"(?:^|[;:\n])\s*\d+[.)]\s+([A-Z].{10,200})")
+    pr_agent_comments = []
     for comment in issue_comments:
         if not is_pr_agent_comment(comment):
             continue
@@ -296,8 +398,12 @@ def extract_findings(pr_number, issue_comments, review_comments):
         # Skip our own tracker/verdict comments.
         if TRACKER_MARKER in body or body.startswith(BOT_PREFIX):
             continue
-        # Reviewer Guide bullets describe files/effort, not findings.
-        body = _drop_boilerplate_sections(body)
+        pr_agent_comments.append(comment)
+    for comment in _select_current_summary_comments(pr_agent_comments, current_head, since):
+        body = comment.get("body", "") or ""
+        # Reviewer Guide bullets describe files/effort, not findings; only
+        # actionable finding sections are parsed.
+        body = _select_finding_text(body)
         for match in bullet_re.finditer(body):
             title = re.sub(r"\s+", " ", match.group(1)).strip()[:160]
             if len(title) < 10 or _is_boilerplate_title(title):
@@ -328,6 +434,20 @@ def extract_findings(pr_number, issue_comments, review_comments):
             # only skip when we positively know the thread is settled.
             if comment.get("id") is not None:
                 continue
+        # A stale inline thread anchored to an older HEAD must not reopen a
+        # resolved finding. When the current HEAD is known, require the
+        # thread to be anchored to it (commit_id/original_commit_id) or to
+        # be newer than the tracker resolution; otherwise skip it.
+        if current_head:
+            commit_id = comment.get("commit_id") or ""
+            original_commit_id = comment.get("original_commit_id") or ""
+            anchored = current_head in (commit_id, original_commit_id)
+            if not anchored and (commit_id or original_commit_id):
+                if since is None:
+                    continue
+                ts = _comment_time(comment)
+                if ts is None or ts < since:
+                    continue
         title = re.sub(r"\s+", " ", body).strip()[:160]
         if len(title) < 10 or _is_boilerplate_title(title):
             continue
@@ -415,11 +535,12 @@ def upsert_tracker(pr_number, head_sha, current, previous_state):
         if old is None:
             status = "open"
         elif old.get("status") in ("resolved", "fixed"):
-            # Preserve a /verify resolution unless PR-Agent reports the finding
-            # again for the current HEAD. extract_findings already drops
-            # resolved/outdated threads, so a reappearance on a newer HEAD is
-            # fresh evidence and reopens; on the same HEAD it is the stale
-            # thread that /verify just closed, so keep it resolved.
+            # Preserve a /verify resolution unless fresh PR-Agent output for
+            # the current HEAD reports the finding again. extract_findings
+            # only returns current-HEAD summaries and current-HEAD inline
+            # threads, so a reappearance here is new evidence and reopens;
+            # on the same HEAD it is the stale thread that /verify just
+            # closed, so keep it resolved.
             if prev_head and head_sha != prev_head:
                 status = "reopened"
             else:
@@ -492,8 +613,9 @@ def cmd_gate(pr_number, head_sha=None):
     head = head_sha or pr["head"]["sha"]
     issue_comments = list_issue_comments(pr_number)
     review_comments = list_review_comments(pr_number)
-    current = extract_findings(pr_number, issue_comments, review_comments)
-    _, previous = load_tracker(issue_comments)
+    tracker_comment, previous = load_tracker(issue_comments)
+    since = _comment_time(tracker_comment) if tracker_comment else None
+    current = extract_findings(pr_number, issue_comments, review_comments, current_head=head, since=since)
     merged = upsert_tracker(pr_number, head, current, previous)
     return submit_verdict(pr_number, head, merged, pr)
 
@@ -570,7 +692,9 @@ def cmd_verify(pr_number, finding_id, head_sha=None):
     if target is None:
         # Fall back to deriving the ID space from current PR-Agent output so a
         # finding posted before the tracker existed can still be verified.
-        for f in extract_findings(pr_number, issue_comments, review_comments):
+        for f in extract_findings(
+            pr_number, issue_comments, review_comments, current_head=head
+        ):
             if f["id"].upper() == finding_id.upper():
                 target = {**f, "status": "open"}
                 break
