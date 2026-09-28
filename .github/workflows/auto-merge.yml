@@ -1154,6 +1154,24 @@ jobs:
                 await codeRabbitReviewBasis(pr, pr.head.sha);
               const rabbitStatus = await latestCodeRabbitStatus(pr.head.sha);
 
+              // Any green current HEAD that still lacks a valid CodeRabbit
+              // approval belongs to the global serialized review queue. Wake
+              // that controller even when CodeRabbit reports "review skipped",
+              // a stale success status, or no status at all. The controller
+              // owns quota timing and de-duplicates in-flight commands.
+              if (!reviewBasis && !codeRabbitRetryControllerDispatched) {
+                await github.rest.actions.createWorkflowDispatch({
+                  owner,
+                  repo,
+                  workflow_id: 'coderabbit-retry.yml',
+                  ref: 'main',
+                });
+                codeRabbitRetryControllerDispatched = true;
+                core.notice(
+                  `PR #${pr.number}: missing a valid CodeRabbit approval; dispatched the global review controller.`
+                );
+              }
+
               // Rate-limit recovery applies only when this HEAD still needs its
               // own review. A safely carried approval must not burn another
               // included CodeRabbit review merely because the merge SHA changed.
