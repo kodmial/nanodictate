@@ -242,7 +242,14 @@ jobs:
                 ['packaging/homebrew/Casks/nanodictate.rb', cask],
                 ['packaging/macports/Portfile', portfile],
               ]) {
-                if (/__VERSION__|__SHA256_|__ZIP_SHA256_|__MAINTAINERS__|__REVISION__/.test(source)) {
+                // Generated files intentionally keep explanatory comments that
+                // mention placeholder names. Only executable/configuration
+                // lines can represent an actually unfilled template token.
+                const activeSource = source
+                  .split('\n')
+                  .filter(line => !line.trimStart().startsWith('#'))
+                  .join('\n');
+                if (/__VERSION__|__SHA256_|__ZIP_SHA256_|__MAINTAINERS__|__REVISION__/.test(activeSource)) {
                   throw new Error(`PR #${pr.number}: unfilled template placeholder remains in ${name}.`);
                 }
               }
