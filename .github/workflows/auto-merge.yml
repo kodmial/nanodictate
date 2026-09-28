@@ -154,24 +154,26 @@ jobs:
                 )[0] || null;
             }
 
-            function parseCodeRabbitRetryDelayMs(body = '') {
-              const match = body.match(
-                /Next included review available in\s+([^\n<.]+)/i
-              );
-              if (!match) {
-                if (/Review rate limited|Review limit reached/i.test(body)) {
-                  return 65 * 60_000;
-                }
-                return null;
+            function retryWindowText(body = '') {
+              const patterns = [
+                /next\s+(?:included\s+)?review\b[^\n<.]{0,120}?\bavailable\b[^\n<.]{0,40}?\b(?:in|after)\s+([^\n<.]+)/i,
+                /(?:try|retry)\s+again\b[^\n<.]{0,40}?\b(?:in|after)\s+([^\n<.]+)/i,
+              ];
+              for (const pattern of patterns) {
+                const match = body.match(pattern);
+                if (match) return match[1];
               }
+              return null;
+            }
 
-              if (/less than\s+(?:a|one)\s+minute/i.test(match[1])) {
+            function parseDurationMs(text = '') {
+              if (/less than\s+(?:a|one)\s+minute/i.test(text)) {
                 return 60_000;
               }
 
               let totalMs = 0;
               let found = false;
-              for (const part of match[1].matchAll(
+              for (const part of text.matchAll(
                 /(\d+)\s*(hours?|hrs?|minutes?|mins?|seconds?|secs?)/gi
               )) {
                 found = true;
@@ -185,8 +187,50 @@ jobs:
                   totalMs += value * 1_000;
                 }
               }
-
               return found ? totalMs : null;
+            }
+
+            function parseCodeRabbitRetryDelayMs(body = '') {
+              const windowText = retryWindowText(body);
+              const parsed = windowText === null
+                ? null
+                : parseDurationMs(windowText);
+              if (parsed !== null) return parsed;
+
+              if (/Review rate limited|Review limit reached/i.test(body)) {
+                core.warning(
+                  'Could not parse CodeRabbit quota countdown; using 65-minute fallback.'
+                );
+                return 65 * 60_000;
+              }
+              return null;
+            }
+
+            const retryParserCases = [
+              [
+                'Review rate limited. Next included review available in 13 minutes.',
+                13 * 60_000,
+              ],
+              [
+                'Review rate limited. Your next included review will be available in 13 minutes.',
+                13 * 60_000,
+              ],
+              [
+                'Review limit reached. Your next review is available after 1 hour 5 minutes.',
+                65 * 60_000,
+              ],
+              [
+                'Review rate limited. Try again in less than a minute.',
+                60_000,
+              ],
+            ];
+            for (const [sample, expected] of retryParserCases) {
+              const actual = parseCodeRabbitRetryDelayMs(sample);
+              if (actual !== expected) {
+                throw new Error(
+                  `CodeRabbit retry parser regression: expected ${expected}, got ${actual} for "${sample}"`
+                );
+              }
             }
 
             function latestCodeRabbitRateLimit(comments) {
