@@ -106,6 +106,33 @@ jobs:
               return 65 * 60_000;
             }
 
+            const retryParserCases = [
+              [
+                'Review rate limited. Next included review available in 13 minutes.',
+                13 * 60_000,
+              ],
+              [
+                'Review rate limited. Your next included review will be available in 13 minutes.',
+                13 * 60_000,
+              ],
+              [
+                'Review limit reached. Your next review is available after 1 hour 5 minutes.',
+                65 * 60_000,
+              ],
+              [
+                'Review rate limited. Try again in less than a minute.',
+                60_000,
+              ],
+            ];
+            for (const [sample, expected] of retryParserCases) {
+              const actual = parseRetryDelayMs(sample);
+              if (actual !== expected) {
+                throw new Error(
+                  `CodeRabbit retry parser regression: expected ${expected}, got ${actual} for "${sample}"`
+                );
+              }
+            }
+
             const { data: pr } = await github.rest.pulls.get({
               owner,
               repo,
@@ -426,6 +453,33 @@ jobs:
                 return 65 * 60_000;
               }
               return null;
+            }
+
+            const retryParserCases = [
+              [
+                'Review rate limited. Next included review available in 13 minutes.',
+                13 * 60_000,
+              ],
+              [
+                'Review rate limited. Your next included review will be available in 13 minutes.',
+                13 * 60_000,
+              ],
+              [
+                'Review limit reached. Your next review is available after 1 hour 5 minutes.',
+                65 * 60_000,
+              ],
+              [
+                'Review rate limited. Try again in less than a minute.',
+                60_000,
+              ],
+            ];
+            for (const [sample, expected] of retryParserCases) {
+              const actual = parseRetryDelayMs(sample);
+              if (actual !== expected) {
+                throw new Error(
+                  `CodeRabbit retry parser regression: expected ${expected}, got ${actual} for "${sample}"`
+                );
+              }
             }
 
             async function hasGreenCi(pr) {
