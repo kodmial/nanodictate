@@ -302,6 +302,13 @@ jobs:
                   }
                 );
 
+                const carriedApprovalMarker = comments.some(comment =>
+                  comment.user?.login === owner &&
+                  (comment.body || '').includes(
+                    `<!-- auto-main-sync head=${pr.head.sha}`
+                  )
+                );
+
                 // A repository-wide review slot remains occupied from the
                 // instant the controller posts a full-review command until
                 // CodeRabbit either rejects it with a rate-limit response or
@@ -445,7 +452,30 @@ jobs:
                   // Initial full reviews are also globally serialized. The
                   // requested label is acquired only by this controller when it
                   // actually emits the command for the current head.
-                  if (requested) continue;
+                  if (requested) {
+                    // A carried approval intentionally has the requested label
+                    // without a new CodeRabbit command for this HEAD.
+                    if (carriedApprovalMarker) continue;
+
+                    // The requested label is a lock, not a permanent terminal
+                    // state. If CodeRabbit never produced a full review or a
+                    // rate-limit response, retry the current head after the
+                    // in-flight timeout. This recovers from terminal command
+                    // failures such as "Pull request base or head changed" and
+                    // from lost webhook/status wake-ups.
+                    const latestCommand = commands[0] || null;
+                    if (latestCommand) {
+                      dueAt =
+                        new Date(latestCommand.created_at).getTime() +
+                        IN_FLIGHT_TIMEOUT_MS;
+                      kind = 'stale-retry';
+                    } else {
+                      // Defensive recovery for a lock label left behind without
+                      // any matching review command.
+                      dueAt = 0;
+                      kind = 'orphan-lock-retry';
+                    }
+                  }
                 }
 
                 const priority = await sourcePriority(pr);

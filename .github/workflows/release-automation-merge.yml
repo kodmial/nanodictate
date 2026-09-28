@@ -4,6 +4,8 @@ on:
   workflow_run:
     workflows: ["CI"]
     types: [completed]
+  push:
+    branches: [main]
   workflow_dispatch:
 
 # This workflow is deliberately privileged but never checks out or executes PR
@@ -222,7 +224,12 @@ jobs:
                   throw new Error(`PR #${pr.number}: ${name} does not pin version ${version}.`);
                 }
               }
-              if (!portfile.includes(`github.setup kodmial nanodictate ${version}`)) {
+              const escapedVersion = version.replace(/\./g, '\\.');
+              const portVersionLine = new RegExp(
+                `^\\s*github\\.setup\\s+kodmial\\s+nanodictate\\s+${escapedVersion}\\s+v\\s*$`,
+                'm'
+              );
+              if (!portVersionLine.test(portfile)) {
                 throw new Error(`PR #${pr.number}: Portfile does not pin version ${version}.`);
               }
               if (!/^PIN_REV="[0-9a-f]{40}"$/m.test(installer)) {
@@ -235,7 +242,14 @@ jobs:
                 ['packaging/homebrew/Casks/nanodictate.rb', cask],
                 ['packaging/macports/Portfile', portfile],
               ]) {
-                if (/__VERSION__|__SHA256_|__ZIP_SHA256_|__MAINTAINERS__|__REVISION__/.test(source)) {
+                // Generated files intentionally keep explanatory comments that
+                // mention placeholder names. Only executable/configuration
+                // lines can represent an actually unfilled template token.
+                const activeSource = source
+                  .split('\n')
+                  .filter(line => !line.trimStart().startsWith('#'))
+                  .join('\n');
+                if (/__VERSION__|__SHA256_|__ZIP_SHA256_|__MAINTAINERS__|__REVISION__/.test(activeSource)) {
                   throw new Error(`PR #${pr.number}: unfilled template placeholder remains in ${name}.`);
                 }
               }
