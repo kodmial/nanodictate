@@ -78,7 +78,14 @@ on_failure() {
     echo "- Run: ${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-<repo>}/actions/runs/${GITHUB_RUN_ID:-<id>}"
   } > "$SMOKE_RESULT_DIR/failure-summary.md"
 }
-trap on_failure ERR
+on_exit() {
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    on_failure || true
+  fi
+  exit "$rc"
+}
+trap on_exit EXIT
 
 # --- 1. Precondition: fresh runner has no NanoDictate state -------------------
 smoke_phase "precondition"
@@ -225,6 +232,5 @@ if [ -f "$USER_PLIST" ] && grep -q "NanoDictate" "$USER_PLIST" 2>/dev/null; then
 fi
 smoke_log "cleanup ok; user config/logs under ~/.config and ~/Library/Logs were preserved (never deleted)"
 
-trap - ERR
 smoke_write_metadata "$MODE" "homebrew" "$EXPECTED" "success" ""
 smoke_log "HOMEBREW LIFECYCLE GREEN ($MODE, expected $EXPECTED)"

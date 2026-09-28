@@ -79,7 +79,16 @@ on_failure() {
     echo "- Run: ${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-<repo>}/actions/runs/${GITHUB_RUN_ID:-<id>}"
   } > "$SMOKE_RESULT_DIR/failure-summary.md"
 }
-trap on_failure ERR
+
+on_exit() {
+  local rc=$?
+  restore_sources || true
+  if [ "$rc" -ne 0 ]; then
+    on_failure || true
+  fi
+  exit "$rc"
+}
+trap on_exit EXIT
 
 restore_sources() {
   if [ -n "$SOURCES_BACKUP" ] && [ -f "$SOURCES_BACKUP" ]; then
@@ -149,7 +158,6 @@ EOF
   # `Port nanodictate not found`.
   SOURCES_BACKUP="$(mktemp /tmp/sources.conf.XXXXXX)"
   sudo cp "$SOURCES_CONF" "$SOURCES_BACKUP"
-  trap 'restore_sources; on_failure' ERR
   if ! grep -qxF "$CANDIDATE_SOURCE" "$SOURCES_CONF" 2>/dev/null; then
     if grep -qE '^[^#].*\[default\]' "$SOURCES_CONF" 2>/dev/null; then
       sudo sed -i "" "/^[^#].*\[default\]/i\\
@@ -232,7 +240,6 @@ smoke_set_check "sudo port uninstall nanodictate"
 sudo port uninstall nanodictate || smoke_fail "port uninstall failed"
 restore_sources
 cleanup_staging
-trap on_failure ERR
 
 # --- 6. Cleanup verification ------------------------------------------------------
 smoke_phase "verify-cleanup"
@@ -248,6 +255,5 @@ smoke_set_check "package-owned global plist absent"
 smoke_assert_no_job "$LABEL"
 smoke_log "cleanup ok; per-user config/logs were preserved (never deleted)"
 
-trap - ERR
 smoke_write_metadata "$MODE" "macports" "$EXPECTED" "success" ""
 smoke_log "MACPORTS LIFECYCLE GREEN ($MODE, expected $EXPECTED)"

@@ -41,9 +41,17 @@ echo "[smoke] Downloading pinned MacPorts $MACPORTS_VERSION ($PKG_URL)"
 curl -fsSL "$PKG_URL" -o "$PKG_PATH"
 
 echo "[smoke] Verifying installer signature"
-SIGNATURE="$(pkgutil --check-signature "$PKG_PATH" 2>&1 || true)"
+SIGNATURE="$(pkgutil --check-signature "$PKG_PATH" 2>&1)" || {
+  echo "$SIGNATURE" >&2
+  echo "[smoke] pkgutil rejected the MacPorts pkg signature" >&2
+  exit 1
+}
 echo "$SIGNATURE"
-echo "$SIGNATURE" | grep -q -i "macports" || {
+echo "$SIGNATURE" | grep -q 'Status: signed by a developer certificate issued by Apple' || {
+  echo "[smoke] MacPorts pkg is not signed by a trusted Apple developer certificate; refusing to install" >&2
+  exit 1
+}
+echo "$SIGNATURE" | grep -q 'Developer ID Installer: .*MacPorts' || {
   echo "[smoke] MacPorts pkg signature does not reference MacPorts; refusing to install" >&2
   exit 1
 }
