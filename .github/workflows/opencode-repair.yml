@@ -5,7 +5,7 @@ on:
   pull_request_target:
     types: [opened, reopened, synchronize]
   workflow_run:
-    workflows: ["CI"]
+    workflows: ["CI", "Packaging smoke"]
     types: [completed]
 
 permissions: {}
@@ -97,20 +97,36 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - name: Dispatch one automatic OpenCode fix for failed CI
+      - name: Dispatch one automatic OpenCode fix for failed blocking workflow
         env:
           GH_TOKEN: ${{ secrets.TAP_PAT }}
           RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_NAME: ${{ github.event.workflow_run.name }}
           RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           CONCLUSION: ${{ github.event.workflow_run.conclusion }}
         run: |
           set -euo pipefail
 
+          case "$RUN_NAME" in
+            CI)
+              lock_label="opencode-ci-repair"
+              lock_description="One automatic OpenCode CI repair attempt per failing PR head."
+              ;;
+            "Packaging smoke")
+              lock_label="opencode-packaging-smoke-repair"
+              lock_description="One automatic OpenCode packaging-smoke repair attempt per failing PR head."
+              ;;
+            *)
+              echo "Unsupported workflow '$RUN_NAME'; nothing to repair."
+              exit 0
+              ;;
+          esac
+
           pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$RUN_HEAD_SHA/pulls" \
             -H "Accept: application/vnd.github+json" \
             --jq '[.[] | select(.state == "open") | select(.base.ref == "main")][0].number // empty')
           [[ -n "$pr" ]] || {
-            echo "No open PR found for CI head $RUN_HEAD_SHA; nothing to repair."
+            echo "No open PR found for $RUN_NAME head $RUN_HEAD_SHA; nothing to repair."
             exit 0
           }
 
@@ -125,30 +141,30 @@ jobs:
           fi
 
           if [[ "$head_sha" != "$RUN_HEAD_SHA" ]]; then
-            echo "CI run $RUN_ID is stale; PR #$pr has already advanced to $head_sha."
+            echo "$RUN_NAME run $RUN_ID is stale; PR #$pr has already advanced to $head_sha."
             exit 0
           fi
 
-          gh label create opencode-ci-repair --repo "$GITHUB_REPOSITORY" --color FBCA04 \
-            --description "One automatic OpenCode CI repair attempt per failing PR head." \
+          gh label create "$lock_label" --repo "$GITHUB_REPOSITORY" --color FBCA04 \
+            --description "$lock_description" \
             --force >/dev/null
 
           if [[ "$CONCLUSION" == "success" ]]; then
             gh api --method DELETE \
-              "repos/$GITHUB_REPOSITORY/issues/$pr/labels/opencode-ci-repair" \
+              "repos/$GITHUB_REPOSITORY/issues/$pr/labels/$lock_label" \
               >/dev/null 2>&1 || true
-            echo "CI passed; automatic CI-repair lock cleared."
+            echo "$RUN_NAME passed; automatic repair lock '$lock_label' cleared."
             exit 0
           fi
 
           if gh api "repos/$GITHUB_REPOSITORY/issues/$pr/labels" \
-            --jq '.[].name' | grep -Fxq opencode-ci-repair; then
-            echo "An automatic CI repair was already attempted for this exact PR head; waiting for a new head or a successful rerun."
+            --jq '.[].name' | grep -Fxq "$lock_label"; then
+            echo "An automatic $RUN_NAME repair was already attempted for this exact PR head; waiting for a new head or a successful rerun."
             exit 0
           fi
 
           gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$pr/labels" \
-            -f 'labels[]=opencode-ci-repair' >/dev/null
+            -f "labels[]=$lock_label" >/dev/null
 
           if ! gh api --method POST \
             "repos/$GITHUB_REPOSITORY/actions/workflows/opencode.yml/dispatches" \
@@ -158,8 +174,8 @@ jobs:
             -f "inputs[head_ref]=$head_ref" \
             -f "inputs[run_id]=$RUN_ID"; then
             gh api --method DELETE \
-              "repos/$GITHUB_REPOSITORY/issues/$pr/labels/opencode-ci-repair" \
+              "repos/$GITHUB_REPOSITORY/issues/$pr/labels/$lock_label" \
               >/dev/null 2>&1 || true
-            echo "::error::Failed to dispatch OpenCode CI repair; lock cleared for retry."
+            echo "::error::Failed to dispatch OpenCode repair for $RUN_NAME; lock cleared for retry."
             exit 1
           fi
