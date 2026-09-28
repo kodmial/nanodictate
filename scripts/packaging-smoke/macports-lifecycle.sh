@@ -105,10 +105,9 @@ if [ "$MODE" = "production" ]; then
 else
   smoke_set_check "temporary local ports tree with the production Portfile logic"
   [ -f "$PORTS_DIR/audio/nanodictate/Portfile" ] || smoke_fail "candidate Portfile missing in $PORTS_DIR"
-  (cd "$PORTS_DIR" && portindex) || smoke_fail "portindex failed on the candidate tree"
-  smoke_set_check "port lint --nitpick on the candidate Portfile"
-  port lint --nitpick nanodictate 2>&1 | tee "$SMOKE_RESULT_DIR/port-lint.log" || \
-    smoke_fail "port lint --nitpick failed"
+  # The candidate file:// source must be registered BEFORE lint/test/install:
+  # MacPorts resolves `nanodictate` through sources.conf, otherwise it reports
+  # `Port nanodictate not found`.
   SOURCES_BACKUP="$(mktemp /tmp/sources.conf.XXXXXX)"
   sudo cp "$SOURCES_CONF" "$SOURCES_BACKUP"
   trap 'restore_sources; on_failure' ERR
@@ -121,6 +120,11 @@ $CANDIDATE_SOURCE
       echo "$CANDIDATE_SOURCE" | sudo tee -a "$SOURCES_CONF" >/dev/null
     fi
   fi
+  smoke_set_check "PortIndex for the candidate tree"
+  (cd "$PORTS_DIR" && portindex) || smoke_fail "portindex failed on the candidate tree"
+  smoke_set_check "port lint --nitpick on the candidate Portfile"
+  port lint --nitpick nanodictate 2>&1 | tee "$SMOKE_RESULT_DIR/port-lint.log" || \
+    smoke_fail "port lint --nitpick failed"
   smoke_set_check "sudo port install nanodictate from the candidate tree"
   sudo port install nanodictate || smoke_fail "port install nanodictate failed"
   smoke_set_check "port test nanodictate (existing test phase)"

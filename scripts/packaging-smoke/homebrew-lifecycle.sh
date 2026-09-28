@@ -52,8 +52,17 @@ export NANODICTATE_BIN SMOKE_RESULT_DIR
 APP_PATH="/Applications/NanoDictate.app"
 USER_PLIST="$HOME/Library/LaunchAgents/com.nanodictate.agent.plist"
 LABEL="com.nanodictate.agent"
+# Temporary local tap for candidate mode. Current Homebrew rejects arbitrary
+# cask file paths (`brew install --cask <path-to-rb>`), so the exact candidate
+# bytes are placed in a real tap and installed by token.
+CANDIDATE_TAP="nanodictate-candidate/smoke"
+
+cleanup_candidate_tap() {
+  brew untap "$CANDIDATE_TAP" >/dev/null 2>&1 || true
+}
 
 on_failure() {
+  cleanup_candidate_tap || true
   smoke_collect_diagnostics
   smoke_write_metadata "$MODE" "homebrew" "$EXPECTED" "failure" "$SMOKE_PHASE"
   {
@@ -92,8 +101,18 @@ if [ "$MODE" = "production" ]; then
   smoke_set_check "brew install --cask kodmial/nanodictate/nanodictate"
   brew install --cask kodmial/nanodictate/nanodictate
 else
-  smoke_set_check "brew install --cask $CASK_FILE"
-  brew install --cask "$CASK_FILE"
+  smoke_set_check "temporary local tap carrying the exact candidate cask bytes"
+  [ -f "$CASK_FILE" ] || smoke_fail "candidate cask file missing: $CASK_FILE"
+  # A fresh runner never carries the throwaway tap; drop it first so a retry
+  # on a reused machine starts clean.
+  brew untap "$CANDIDATE_TAP" >/dev/null 2>&1 || true
+  brew tap-new "$CANDIDATE_TAP" >/dev/null || smoke_fail "brew tap-new $CANDIDATE_TAP failed"
+  TAP_PATH="$(brew --repo "$CANDIDATE_TAP")" || smoke_fail "brew --repo $CANDIDATE_TAP failed"
+  mkdir -p "$TAP_PATH/Casks" || smoke_fail "could not create $TAP_PATH/Casks"
+  # Preserve the exact candidate bytes: copy only, never regenerate or edit.
+  cp "$CASK_FILE" "$TAP_PATH/Casks/nanodictate.rb" || smoke_fail "could not stage the candidate cask in $TAP_PATH/Casks"
+  smoke_set_check "brew install --cask $CANDIDATE_TAP/nanodictate"
+  brew install --cask "$CANDIDATE_TAP/nanodictate"
 fi
 
 # --- 3. Package verification ---------------------------------------------------
@@ -177,6 +196,11 @@ if [ -f "$USER_PLIST" ]; then
     rm -f "$USER_PLIST"
     smoke_log "removed stale package-owned LaunchAgent plist $USER_PLIST"
   fi
+fi
+if [ "$MODE" = "candidate" ]; then
+  smoke_set_check "remove the temporary local tap"
+  cleanup_candidate_tap
+  smoke_log "temporary candidate tap removed"
 fi
 
 # --- 8. Package-owned cleanup verification --------------------------------------
