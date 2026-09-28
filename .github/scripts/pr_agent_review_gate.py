@@ -282,15 +282,17 @@ def _parse_github_time(value):
 
 
 def _comment_created(comment):
-    """Creation time of a comment, preferred for review ordering.
+    """Freshness time of a comment, preferred for review ordering.
 
-    Uses created_at first so later tracker PATCHes (which bump updated_at)
-    never move the last-/review marker forward on their own.
+    Uses updated_at first so edits to the persistent PR-Agent summary
+    (persistent_comment = true edits the same comment in place) count as
+    new review activity. Tracker comments are excluded from the summary
+    set by the callers, so their PATCH bumps never move the marker.
     """
     if comment is None:
         return None
-    return _parse_github_time(comment.get("created_at")) or _parse_github_time(
-        comment.get("updated_at")
+    return _parse_github_time(comment.get("updated_at")) or _parse_github_time(
+        comment.get("created_at")
     )
 
 
@@ -985,29 +987,55 @@ def cmd_verify(pr_number, finding_id, head_sha=None):
                 hi = min(len(lines), line_no + 30)
                 snippet = "\n".join(f"{i + 1}:{lines[i]}" for i in range(lo, hi))
             else:
-                snippet = "\n".join(f"{i + 1}:{l}" for i, l in enumerate(lines[:120]))
-    prompt = (
-        f"Re-check finding {target['id']} against the current PR HEAD.\n"
-        f"Finding title: {target['title']}\n"
-        f"File: {target.get('file') or 'general'} Line: {target.get('line') or 0}\n"
-        f"PR HEAD: {head}\n\n"
-        f"Current code around the finding:\n{snippet[:6000] or '(no file context; judge from the finding title)'}\n\n"
-        "Reply with exactly one machine-detectable first line: either RESOLVED "
-        "when the underlying problem is fully fixed, or UNRESOLVED when it still "
-        "exists. After that line, explain the precise remaining problem or why it "
-        "is fixed. Do not report a new finding ID."
-    )
-    answer = openai_chat(prompt).strip()
-    first = answer.splitlines()[0].strip().upper() if answer else ""
-    if first.startswith("RESOLVED"):
-        verdict = "RESOLVED"
-    elif first.startswith("UNRESOLVED"):
+                snippet = "\n".join(f"{i + 1}:{line_text}" for i, line_text in enumerate(lines[:120]))
+    if not snippet:
+        # Summary findings carry no file/line, so verify them against the
+        # current PR diff instead of asking the model to guess from the title.
+        try:
+            diff_parts = []
+            budget = 6000
+            for pr_file in list_pr_files(pr_number):
+                patch = pr_file.get("patch") or ""
+                if not patch:
+                    continue
+                chunk = f"--- {pr_file.get('filename', '?')}\n{patch}"
+                if len(chunk) > budget - sum(len(p) for p in diff_parts) - len(diff_parts):
+                    remaining = budget - sum(len(p) for p in diff_parts) - len(diff_parts)
+                    if remaining <= 0:
+                        break
+                    chunk = chunk[:remaining]
+                diff_parts.append(chunk)
+                if sum(len(p) for p in diff_parts) + len(diff_parts) >= budget:
+                    break
+            snippet = "\n\n".join(diff_parts)[:6000]
+        except Exception:
+            snippet = ""
+    if not snippet:
         verdict = "UNRESOLVED"
+        answer = "UNRESOLVED — no current-HEAD code context was available to verify this finding."
     else:
-        # Force machine-detectability: treat unparseable answers as unresolved
-        # but keep the model text for human inspection.
-        verdict = "UNRESOLVED"
-        answer = "UNRESOLVED — verifier returned a non-conforming first line.\n\n" + answer
+        prompt = (
+            f"Re-check finding {target['id']} against the current PR HEAD.\n"
+            f"Finding title: {target['title']}\n"
+            f"File: {target.get('file') or 'general'} Line: {target.get('line') or 0}\n"
+            f"PR HEAD: {head}\n\n"
+            f"Current code around the finding:\n{snippet[:6000]}\n\n"
+            "Reply with exactly one machine-detectable first line: either RESOLVED "
+            "when the underlying problem is fully fixed, or UNRESOLVED when it still "
+            "exists. After that line, explain the precise remaining problem or why it "
+            "is fixed. Do not report a new finding ID."
+        )
+        answer = openai_chat(prompt).strip()
+        first = answer.splitlines()[0].strip().upper() if answer else ""
+        if first.startswith("RESOLVED"):
+            verdict = "RESOLVED"
+        elif first.startswith("UNRESOLVED"):
+            verdict = "UNRESOLVED"
+        else:
+            # Force machine-detectability: treat unparseable answers as unresolved
+            # but keep the model text for human inspection.
+            verdict = "UNRESOLVED"
+            answer = "UNRESOLVED — verifier returned a non-conforming first line.\n\n" + answer
     owner, name = repo()
     body = (
         f"{BOT_PREFIX} `/verify {target['id']}` against HEAD `{head}`\n\n"

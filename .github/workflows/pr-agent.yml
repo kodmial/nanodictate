@@ -23,9 +23,8 @@ permissions:
   issues: write
   pull-requests: write
 
-concurrency:
-  group: pr-agent-standalone-${{ github.event.issue.number }}
-  cancel-in-progress: false
+# Concurrency is set per command job so unrelated comments never
+# enter the group and cancel a pending owner command.
 
 jobs:
   parse:
@@ -78,6 +77,9 @@ jobs:
   review:
     needs: parse
     if: needs.parse.outputs.command == 'review' || needs.parse.outputs.command == 'improve' || needs.parse.outputs.command == 'describe' || needs.parse.outputs.command == 'ask'
+    concurrency:
+      group: pr-agent-standalone-${{ github.event.issue.number }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -162,6 +164,9 @@ jobs:
   verify:
     needs: parse
     if: needs.parse.outputs.command == 'verify'
+    concurrency:
+      group: pr-agent-standalone-${{ github.event.issue.number }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -176,13 +181,14 @@ jobs:
           PR_AGENT_API_BASE: ${{ vars.PR_AGENT_API_BASE }}
           PR_AGENT_MODEL: ${{ vars.PR_AGENT_MODEL }}
           PR_AGENT_API_KEY: ${{ secrets.PR_AGENT_API_KEY }}
+          FINDING: ${{ needs.parse.outputs.finding }}
         run: |
           set -euo pipefail
           if [[ -z "${PR_AGENT_API_BASE:-}" || -z "${PR_AGENT_MODEL:-}" || -z "${PR_AGENT_API_KEY:-}" ]]; then
             echo "::error::PR-Agent provider is not configured. Set PR_AGENT_API_BASE, PR_AGENT_MODEL (variables) and PR_AGENT_API_KEY (secret)."
             exit 1
           fi
-          finding="${{ needs.parse.outputs.finding }}"
+          finding="$FINDING"
           if [[ ! "$finding" =~ ^PRA-[0-9A-Fa-f]{8}$ ]]; then
             echo "::error::Usage: /verify <finding-id> (e.g. /verify PRA-1A2B3C4D). Got: '$finding'"
             exit 1
@@ -196,8 +202,10 @@ jobs:
           PR_AGENT_API_KEY: ${{ secrets.PR_AGENT_API_KEY }}
           PR_AGENT_MODEL: ${{ vars.PR_AGENT_MODEL }}
           PR_AGENT_MAX_TOKENS: ${{ vars.PR_AGENT_MAX_TOKENS }}
+          FINDING: ${{ needs.parse.outputs.finding }}
+          PR_NUMBER: ${{ github.event.issue.number }}
         run: |
           set -euo pipefail
           python3 .github/scripts/pr_agent_review_gate.py verify \
-            --pr "${{ github.event.issue.number }}" \
-            --finding "${{ needs.parse.outputs.finding }}"
+            --pr "$PR_NUMBER" \
+            --finding "$FINDING"
