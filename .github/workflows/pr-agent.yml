@@ -145,10 +145,12 @@ jobs:
           OPENAI_API_BASE: ${{ vars.PR_AGENT_API_BASE }}
           CONFIG.MODEL: ${{ steps.model.outputs.model }}
           CONFIG.FALLBACK_MODELS: "[]"
+          CONFIG.MAX_OUTPUT_TOKENS: ${{ vars.PR_AGENT_MAX_TOKENS }}
           LITELLM__MAX_TOKENS: ${{ vars.PR_AGENT_MAX_TOKENS }}
           LITELLM.MAX_TOKENS: ${{ vars.PR_AGENT_MAX_TOKENS }}
 
       - name: Enforce review contract (tracker + verdict)
+        if: needs.parse.outputs.command == 'review'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}

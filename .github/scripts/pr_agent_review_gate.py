@@ -282,9 +282,34 @@ def _parse_github_time(value):
 
 
 def _comment_time(comment):
+    if comment is None:
+        return None
     return _parse_github_time(comment.get("updated_at")) or _parse_github_time(
         comment.get("created_at")
     )
+
+
+def _comment_created(comment):
+    """Creation time of a comment, preferred for review ordering.
+
+    Uses created_at first so later tracker PATCHes (which bump updated_at)
+    never move the last-/review marker forward on their own.
+    """
+    if comment is None:
+        return None
+    return _parse_github_time(comment.get("created_at")) or _parse_github_time(
+        comment.get("updated_at")
+    )
+
+
+def _format_github_time(value):
+    from datetime import timezone
+
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _select_current_summary_comments(pr_agent_comments, current_head, since):
@@ -308,18 +333,52 @@ def _select_current_summary_comments(pr_agent_comments, current_head, since):
         if headed:
             return headed
     if since is not None:
-        fresh = [c for c in pr_agent_comments if (_comment_time(c) or since) >= since]
+        fresh = [c for c in pr_agent_comments if (_comment_created(c) or since) >= since]
         if fresh:
             return fresh
         return []
     latest = None
     for c in pr_agent_comments:
-        ts = _comment_time(c)
+        ts = _comment_created(c)
         if ts is not None and (latest is None or ts > latest):
             latest = ts
     if latest is None:
         return pr_agent_comments
-    return [c for c in pr_agent_comments if _comment_time(c) == latest]
+    return [c for c in pr_agent_comments if _comment_created(c) == latest]
+
+
+def _current_review_marker(pr_agent_comments, current_head, since, previous_marker):
+    """Persisted last-/review marker: newest selected summary creation time.
+
+    Falls back to the stored marker (or the newest PR-Agent comment when no
+    marker exists) so re-running the gate on the same HEAD keeps the same
+    summary in scope instead of hiding it after the tracker PATCH.
+    """
+    selected = _select_current_summary_comments(pr_agent_comments, current_head, since)
+    times = [_comment_created(c) for c in selected]
+    times = [t for t in times if t is not None]
+    if times:
+        return _format_github_time(max(times)), selected
+    if previous_marker:
+        return previous_marker, selected
+    all_times = [_comment_created(c) for c in pr_agent_comments]
+    all_times = [t for t in all_times if t is not None]
+    if all_times:
+        return _format_github_time(max(all_times)), selected
+    return None, selected
+
+
+def _collect_pr_agent_comments(issue_comments):
+    """PR-Agent summary comments, excluding our own tracker/verdict comments."""
+    collected = []
+    for comment in issue_comments or []:
+        if not is_pr_agent_comment(comment):
+            continue
+        body = comment.get("body", "") or ""
+        if TRACKER_MARKER in body or body.startswith(BOT_PREFIX):
+            continue
+        collected.append(comment)
+    return collected
 
 
 def list_unresolved_thread_comment_ids(pr_number):
@@ -445,7 +504,7 @@ def extract_findings(pr_number, issue_comments, review_comments, current_head=No
             if not anchored and (commit_id or original_commit_id):
                 if since is None:
                     continue
-                ts = _comment_time(comment)
+                ts = _comment_created(comment)
                 if ts is None or ts < since:
                     continue
         title = re.sub(r"\s+", " ", body).strip()[:160]
@@ -471,13 +530,17 @@ def load_tracker(issue_comments):
         if not m:
             continue
         try:
-            return comment, json.loads(m.group(1))
+            state = json.loads(m.group(1))
+            state.setdefault("findings", [])
+            state.setdefault("head", "")
+            state.setdefault("last_review_at", None)
+            return comment, state
         except json.JSONDecodeError:
             continue
-    return None, {"findings": []}
+    return None, {"findings": [], "head": "", "last_review_at": None}
 
 
-def render_tracker(head_sha, findings):
+def render_tracker(head_sha, findings, last_review_at=None):
     lines = [
         f"{BOT_PREFIX} Review tracker for HEAD `{head_sha}`",
         "",
@@ -497,7 +560,7 @@ def render_tracker(head_sha, findings):
         "<details><summary>Machine-readable state</summary>",
         "",
         "```json",
-        json.dumps({"head": head_sha, "findings": findings}, indent=2),
+        json.dumps({"head": head_sha, "findings": findings, "last_review_at": last_review_at}, indent=2),
         "```",
         "",
         "</details>",
@@ -507,10 +570,14 @@ def render_tracker(head_sha, findings):
     return "\n".join(lines)
 
 
-def write_tracker(pr_number, head_sha, findings):
+def write_tracker(pr_number, head_sha, findings, last_review_at=None):
     owner, name = repo()
-    body = render_tracker(head_sha, findings)
-    existing, _ = load_tracker(list_issue_comments(pr_number))
+    existing, previous_state = load_tracker(list_issue_comments(pr_number))
+    # Preserve the persisted last-/review marker across tracker rewrites
+    # (including /verify) unless the caller supplies a newer one.
+    if last_review_at is None:
+        last_review_at = (previous_state or {}).get("last_review_at")
+    body = render_tracker(head_sha, findings, last_review_at)
     if existing:
         gh_request(
             "PATCH",
@@ -526,9 +593,14 @@ def write_tracker(pr_number, head_sha, findings):
     return findings
 
 
-def upsert_tracker(pr_number, head_sha, current, previous_state):
+def upsert_tracker(pr_number, head_sha, current, previous_state, last_review_at=None):
     prev = {f.get("id"): f for f in previous_state.get("findings", [])}
     prev_head = previous_state.get("head", "")
+    # A reappearance is new evidence only because extract_findings already
+    # limits summaries to the current-HEAD report (HEAD mention, else newer
+    # than the persisted last-/review marker) and inline threads to
+    # current-HEAD anchors (or newer than the marker). Historical output can
+    # therefore not flip a /verify resolution back to reopened.
     merged = []
     for finding in current:
         old = prev.get(finding["id"])
@@ -555,17 +627,100 @@ def upsert_tracker(pr_number, head_sha, current, previous_state):
                 entry["status"] = "resolved"
             merged.append(entry)
     merged.sort(key=lambda f: f["id"])
-    return write_tracker(pr_number, head_sha, merged)
+    marker = last_review_at if last_review_at is not None else previous_state.get("last_review_at")
+    return write_tracker(pr_number, head_sha, merged, marker)
 
 
-def submit_verdict(pr_number, head_sha, findings, pr):
+# Phrases in PR-Agent output suggesting chunk limits or large-patch clipping
+# left part of the diff unreviewed. Matched case-insensitively.
+COVERAGE_GAP_PHRASES = (
+    "remaining files",
+    "not reviewed",
+    "unreviewed",
+    "truncated",
+    "clipped",
+    "clip",
+    "chunk limit",
+    "max_number_of_calls",
+    "max number of calls",
+    "partial review",
+    "incomplete coverage",
+    "coverage gap",
+    "not covered",
+    "omitted files",
+    "skipped files",
+)
+
+# Heuristic budget matching .pr_agent.toml chunking. Beyond this the pinned
+# packer (max_number_of_calls) or large_patch_policy=clip may omit content.
+CHUNK_FILE_BUDGET = 5
+CHUNK_CHURN_BUDGET = 15000
+CLIP_FILE_CHURN_BUDGET = 10000
+
+
+def detect_coverage_gap(issue_comments, files):
+    """Detect when chunk limits or patch clipping may leave code unreviewed.
+
+    Returns a warning string when coverage is incomplete, else None. Checks
+    PR-Agent output for explicit truncation notices, the file count against
+    the max_number_of_calls chunk budget, and per-file churn against the
+    large_patch_policy clip budget.
+    """
+    bodies = []
+    for comment in issue_comments or []:
+        if not is_pr_agent_comment(comment):
+            continue
+        body = comment.get("body", "") or ""
+        if TRACKER_MARKER in body or body.startswith(BOT_PREFIX):
+            continue
+        bodies.append(body)
+    haystack = "\n".join(bodies).lower()
+    for phrase in COVERAGE_GAP_PHRASES:
+        if phrase in haystack:
+            return (
+                f"PR-Agent output mentions {phrase!r}, so chunk limits or "
+                "large-patch clipping may have left content unreviewed."
+            )
+    files = files or []
+    if len(files) > CHUNK_FILE_BUDGET:
+        largest = sorted(
+            files, key=lambda f: f.get("additions", 0) + f.get("deletions", 0), reverse=True
+        )[:3]
+        names = ", ".join(f.get("filename", "?") for f in largest)
+        return (
+            f"PR touches {len(files)} files, exceeding the "
+            f"max_number_of_calls={CHUNK_FILE_BUDGET} chunk budget; "
+            f"remaining files may not have been reviewed (largest: {names})."
+        )
+    clipped = [
+        f
+        for f in files
+        if f.get("additions", 0) + f.get("deletions", 0) > CLIP_FILE_CHURN_BUDGET
+    ]
+    if clipped:
+        names = ", ".join(f.get("filename", "?") for f in clipped[:3])
+        return (
+            f"Oversized patch(es) ({names}) exceed the large_patch_policy "
+            "clip budget and part of the diff may have been omitted."
+        )
+    total = sum(f.get("additions", 0) + f.get("deletions", 0) for f in files)
+    if total > CHUNK_CHURN_BUDGET:
+        return (
+            f"PR churn (+{total} lines) exceeds the {CHUNK_CHURN_BUDGET}-line "
+            "chunking budget; some chunks may not have been reviewed."
+        )
+    return None
+
+
+def submit_verdict(pr_number, head_sha, findings, pr, issue_comments=None, files_override=None):
     owner, name = repo()
     open_findings = [f for f in findings if f.get("status") in ("open", "still-open", "reopened")]
     event = "CHANGES_REQUESTED" if open_findings else "APPROVE"
     linked = linked_issue_numbers(pr.get("body", ""))
-    files = list_pr_files(pr_number)
+    files = files_override if files_override is not None else list_pr_files(pr_number)
     total_add = sum(f.get("additions", 0) for f in files)
     total_del = sum(f.get("deletions", 0) for f in files)
+    coverage_gap = detect_coverage_gap(issue_comments or [], files)
     summary = [
         f"{BOT_PREFIX} Full review of HEAD `{head_sha}`: {len(files)} file(s), +{total_add}/-{total_del}.",
         "",
@@ -575,7 +730,19 @@ def submit_verdict(pr_number, head_sha, findings, pr):
         loc = f"{f['file']}:{f['line']}" if f.get("file") else "general"
         summary.append(f"- `{f['id']}` {loc} — {f['title'][:160]}")
     if not open_findings:
-        summary.append("No actionable findings remain on this HEAD.")
+        if coverage_gap:
+            # Do not report a clean full-PR verdict when chunk limits or
+            # large-patch clipping may have left content unreviewed.
+            event = "COMMENT"
+            summary.append(
+                "Coverage incomplete: zero findings cannot be treated as a "
+                f"clean full-PR review. {coverage_gap} Re-run /review after "
+                "narrowing the diff or raising the chunk budget."
+            )
+        else:
+            summary.append("No actionable findings remain on this HEAD.")
+    elif coverage_gap:
+        summary.append(f"Coverage note: {coverage_gap}")
     summary += [
         "",
         "Coverage: summary, inline file/line threads where applicable, linked-issue "
@@ -613,11 +780,16 @@ def cmd_gate(pr_number, head_sha=None):
     head = head_sha or pr["head"]["sha"]
     issue_comments = list_issue_comments(pr_number)
     review_comments = list_review_comments(pr_number)
-    tracker_comment, previous = load_tracker(issue_comments)
-    since = _comment_time(tracker_comment) if tracker_comment else None
+    _, previous = load_tracker(issue_comments)
+    # Use the persisted last-/review marker, not the tracker comment's
+    # updated_at (which moves on every PATCH, including /verify updates).
+    previous_marker = (previous or {}).get("last_review_at")
+    since = _parse_github_time(previous_marker) if previous_marker else None
     current = extract_findings(pr_number, issue_comments, review_comments, current_head=head, since=since)
-    merged = upsert_tracker(pr_number, head, current, previous)
-    return submit_verdict(pr_number, head, merged, pr)
+    pr_agent_comments = _collect_pr_agent_comments(issue_comments)
+    new_marker, _ = _current_review_marker(pr_agent_comments, head, since, previous_marker)
+    merged = upsert_tracker(pr_number, head, current, previous, new_marker)
+    return submit_verdict(pr_number, head, merged, pr, issue_comments, None)
 
 
 def openai_chat(prompt, system="You are a precise code-review verifier."):
@@ -749,7 +921,9 @@ def cmd_verify(pr_number, finding_id, head_sha=None):
     for f in findings:
         if f.get("id", "").upper() == target["id"].upper():
             f["status"] = "resolved" if verdict == "RESOLVED" else "still-open"
-    write_tracker(pr_number, head, sorted(findings, key=lambda f: f["id"]))
+    # Preserve the persisted last-/review marker: /verify must not move it,
+    # otherwise the next gate run would treat old summaries as fresh output.
+    write_tracker(pr_number, head, sorted(findings, key=lambda f: f["id"]), state.get("last_review_at"))
     print(f"{verdict} for {target['id']}")
     return verdict
 
