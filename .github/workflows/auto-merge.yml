@@ -217,24 +217,6 @@ jobs:
                 )[0] || null;
             }
 
-            async function completedCodeRabbitStatus(headSha) {
-              const { data } = await github.rest.repos.getCombinedStatusForRef({
-                owner, repo, ref: headSha,
-              });
-
-              return (data.statuses || [])
-                .filter(status =>
-                  status.context === 'CodeRabbit' &&
-                  status.state === 'success' &&
-                  /Review completed/i.test(status.description || '')
-                )
-                .sort(
-                  (a, b) =>
-                    new Date(b.updated_at || b.created_at).getTime() -
-                    new Date(a.updated_at || a.created_at).getTime()
-                )[0] || null;
-            }
-
             function retryWindowText(body = '') {
               const patterns = [
                 /next\s+(?:included\s+)?review\b[^\n<.]{0,120}?\bavailable\b[^\n<.]{0,40}?\b(?:in|after)\s+([^\n<.]+)/i,
@@ -493,47 +475,71 @@ jobs:
                 }
               );
 
-              return reviews.filter(review =>
+              const headReviews = reviews.filter(review =>
                 review.user?.login?.startsWith('coderabbitai') &&
-                review.commit_id === headSha &&
+                review.commit_id === headSha
+              );
+
+              // A later decisive CodeRabbit review supersedes earlier advisory
+              // nitpick-only COMMENTED reviews on the exact same head. Without
+              // this, an APPROVED review can never clear an older nitpick review
+              // because GitHub keeps both review records forever.
+              const latestDecision = headReviews
+                .filter(review =>
+                  review.state === 'APPROVED' ||
+                  review.state === 'CHANGES_REQUESTED'
+                )
+                .sort((a, b) => {
+                  const time =
+                    new Date(a.submitted_at || 0).getTime() -
+                    new Date(b.submitted_at || 0).getTime();
+                  return time || Number(a.id) - Number(b.id);
+                })
+                .at(-1) || null;
+              const decisionAt = latestDecision
+                ? new Date(latestDecision.submitted_at || 0).getTime()
+                : 0;
+
+              return headReviews.filter(review =>
                 review.state === 'COMMENTED' &&
-                /comments?\s*\(\s*[1-9]\d*\s*\)/i.test(review.body || '')
+                /comments?\s*\(\s*[1-9]\d*\s*\)/i.test(review.body || '') &&
+                (
+                  !latestDecision ||
+                  new Date(review.submitted_at || 0).getTime() > decisionAt
+                )
               );
             }
 
             async function directCodeRabbitReviewBasis(pr, headSha) {
-              const [ci, status, decision, nitpicks] = await Promise.all([
+              const [ci, decision] = await Promise.all([
                 latestCiForHead(pr, headSha),
-                completedCodeRabbitStatus(headSha),
                 latestCodeRabbitDecision(pr, headSha),
-                codeRabbitNitpickReviews(pr, headSha),
               ]);
 
               if (
                 !ci ||
                 ci.status !== 'completed' ||
                 ci.conclusion !== 'success' ||
-                !status ||
                 !decision ||
-                decision.state !== 'APPROVED' ||
-                nitpicks.length !== 0
+                decision.state !== 'APPROVED'
               ) {
                 return null;
               }
 
-              const ciCompletedAt =
-                new Date(ci.updated_at || ci.created_at).getTime();
-              const reviewCompletedAt =
-                new Date(status.updated_at || status.created_at).getTime();
-
-              if (reviewCompletedAt < ciCompletedAt) {
+              const nitpicks = await codeRabbitNitpickReviews(pr, headSha);
+              if (nitpicks.length !== 0) {
                 return null;
               }
 
+              // Bind both gates to the exact same immutable head SHA. Their
+              // relative timestamps do not add safety: a later CI rerun does not
+              // change the reviewed code. CodeRabbit's commit status is kept for
+              // operational state/rate-limit recovery, but it is not merge
+              // evidence because auto-review-disabled events can overwrite a
+              // prior "Review completed" status with "Review skipped".
               return {
                 sourceSha: headSha,
                 carried: false,
-                status,
                 decision,
               };
             }
@@ -610,6 +616,14 @@ jobs:
               return carriedCodeRabbitReviewBasis(pr, headSha);
             }
 
+            function codeRabbitExplicitlyResolved(body = '') {
+              if (/\bUNRESOLVED\b/i.test(body)) return false;
+              return (
+                /\*\*RESOLVED(?:\.|\*\*)/i.test(body) ||
+                /✅\s*Review thread resolved\.?/i.test(body)
+              );
+            }
+
             async function unresolvedCodeRabbitThreads(pr) {
               const unresolved = [];
               let cursor = null;
@@ -625,9 +639,10 @@ jobs:
                             isResolved
                             isOutdated
                             path
-                            comments(first: 1) {
+                            comments(first: 100) {
                               nodes {
                                 databaseId
+                                body
                                 author { login }
                               }
                             }
@@ -651,18 +666,56 @@ jobs:
                 const connection =
                   data.repository.pullRequest.reviewThreads;
                 for (const thread of connection.nodes || []) {
-                  const root = thread.comments?.nodes?.[0];
-                  if (
-                    root?.author?.login?.startsWith('coderabbitai') &&
-                    !thread.isResolved
-                  ) {
-                    unresolved.push({
-                      id: thread.id,
-                      commentId: root.databaseId,
-                      path: thread.path,
-                      outdated: thread.isOutdated,
-                    });
+                  const comments = thread.comments?.nodes || [];
+                  const root = comments[0];
+                  if (!root?.author?.login?.startsWith('coderabbitai')) {
+                    continue;
                   }
+
+                  if (thread.isResolved) {
+                    continue;
+                  }
+
+                  // CodeRabbit can explicitly answer RESOLVED without flipping
+                  // GitHub's review-thread isResolved bit. Treat the bot's latest
+                  // reply as the semantic verdict and normalize GitHub state with
+                  // our own write-capable token. UNRESOLVED always wins.
+                  const latestRabbitReply = comments
+                    .slice(1)
+                    .filter(comment =>
+                      comment.author?.login?.startsWith('coderabbitai')
+                    )
+                    .at(-1);
+                  if (
+                    latestRabbitReply &&
+                    codeRabbitExplicitlyResolved(latestRabbitReply.body || '')
+                  ) {
+                    try {
+                      await github.graphql(
+                        `mutation($threadId: ID!) {
+                          resolveReviewThread(input: {threadId: $threadId}) {
+                            thread { id isResolved }
+                          }
+                        }`,
+                        { threadId: thread.id }
+                      );
+                      core.notice(
+                        `PR #${pr.number}: normalized CodeRabbit RESOLVED reply into GitHub thread resolution for ${thread.id} (${thread.path}).`
+                      );
+                      continue;
+                    } catch (err) {
+                      core.warning(
+                        `PR #${pr.number}: CodeRabbit marked ${thread.id} resolved, but GitHub thread resolution failed: ${err.message}`
+                      );
+                    }
+                  }
+
+                  unresolved.push({
+                    id: thread.id,
+                    commentId: root.databaseId,
+                    path: thread.path,
+                    outdated: thread.isOutdated,
+                  });
                 }
 
                 cursor = connection.pageInfo.hasNextPage
