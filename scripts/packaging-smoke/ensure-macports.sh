@@ -12,7 +12,7 @@ set -euo pipefail
 
 # Pinned MacPorts version. Bump deliberately after checking
 # https://www.macports.org/install.php and the macports-base releases.
-DEFAULT_MACPORTS_VERSION="2.10.5"
+DEFAULT_MACPORTS_VERSION="2.12.6"
 MACPORTS_VERSION="${MACPORTS_VERSION:-$DEFAULT_MACPORTS_VERSION}"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -28,6 +28,7 @@ fi
 
 MACOS_MAJOR="$(/usr/bin/sw_vers -productVersion | cut -d. -f1)"
 case "$MACOS_MAJOR" in
+  26) DARWIN_TAG="Tahoe" ;;
   15) DARWIN_TAG="Sequoia" ;;
   14) DARWIN_TAG="Sonoma" ;;
   13) DARWIN_TAG="Ventura" ;;
