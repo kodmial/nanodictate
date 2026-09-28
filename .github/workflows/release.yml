@@ -794,6 +794,15 @@ jobs:
             echo "No merged Release PR labeled 'autorelease: pending' matches v$RELEASE_VERSION — nothing to mark tagged."
             exit 0
           fi
+          # release-please may not have created this label yet (v0.1.7
+          # published successfully but the workflow failed here because the
+          # label was missing). Upsert it before applying it so housekeeping can
+          # never block post-release manifest synchronization again.
+          gh label create "autorelease: tagged" --repo "$GH_REPO" \
+            --color "0E8A16" \
+            --description "Release PR has been published and tagged." \
+            --force
+
           for PR in $MATCHED; do
             echo "Marking merged Release PR #$PR (v$RELEASE_VERSION) as tagged."
             gh pr edit "$PR" --repo "$GH_REPO" --remove-label "autorelease: pending" --add-label "autorelease: tagged"
