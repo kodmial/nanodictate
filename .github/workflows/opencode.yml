@@ -26,7 +26,7 @@ on:
         required: false
         type: string
       run_id:
-        description: "Source CI workflow run id"
+        description: "Source failed workflow run id"
         required: false
         type: string
 
@@ -401,7 +401,7 @@ jobs:
           )
           opencode run --auto --model "$OPENCODE_MODEL" "$PROMPT"
 
-      - name: Fix failed CI
+      - name: Fix failed blocking workflow
         if: github.event_name == 'workflow_dispatch' && inputs.mode == 'ci-fix'
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
@@ -414,15 +414,15 @@ jobs:
         run: |
           set -euo pipefail
           PROMPT=$(cat <<EOF
-          Fix the failed CI for pull request #${PR_NUMBER}.
+          Fix the failed blocking workflow for pull request #${PR_NUMBER}.
 
           Context:
           - The current checkout is the existing PR head branch: ${HEAD_REF}.
-          - The failed CI workflow run id is ${RUN_ID}.
-          - Inspect that run, its failed jobs and logs using GitHub CLI/API before changing code.
+          - The failed workflow run id is ${RUN_ID}.
+          - Inspect that run, its workflow name, failed jobs and logs using GitHub CLI/API before changing code.
 
           Requirements:
-          - Identify the concrete CI failure from the workflow logs and fix its root cause.
+          - Identify the concrete workflow failure from the logs and fix its root cause.
           - Keep the change scoped to the failure; do not make unrelated refactors.
           - If the failure is clearly transient or external infrastructure, do not make a
             speculative code change; explain the reason in the existing PR conversation.
@@ -443,7 +443,7 @@ jobs:
           # opencode-ci-repair lock remains set, so a repeatedly failing rerun
           # cannot create an unbounded same-head loop.
           if [[ "$AFTER_SHA" == "$BEFORE_SHA" ]]; then
-            echo "OpenCode produced no new commit; rerunning failed CI jobs once."
+            echo "OpenCode produced no new commit; rerunning failed workflow jobs once."
             gh run rerun "$RUN_ID" --failed
           fi
 

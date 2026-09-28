@@ -97,7 +97,7 @@ jobs:
               return data;
             }
 
-            async function latestCiForHead(pr, headSha) {
+            async function latestWorkflowForHead(pr, headSha, workflowName) {
               const runs = await github.paginate(
                 github.rest.actions.listWorkflowRunsForRepo,
                 {
@@ -110,7 +110,10 @@ jobs:
               );
 
               return runs
-                .filter(run => run.name === 'CI' && run.head_sha === headSha)
+                .filter(run =>
+                  run.name === workflowName &&
+                  run.head_sha === headSha
+                )
                 .sort(
                   (a, b) =>
                     new Date(b.created_at).getTime() -
@@ -118,8 +121,16 @@ jobs:
                 )[0] || null;
             }
 
+            async function latestCiForHead(pr, headSha) {
+              return latestWorkflowForHead(pr, headSha, 'CI');
+            }
+
             async function latestCurrentHeadCi(pr) {
               return latestCiForHead(pr, pr.head.sha);
+            }
+
+            async function latestCurrentHeadPackagingSmoke(pr) {
+              return latestWorkflowForHead(pr, pr.head.sha, 'Packaging smoke');
             }
 
             async function latestCodeRabbitStatus(headSha) {
@@ -982,6 +993,22 @@ jobs:
                 continue;
               }
 
+              // Packaging smoke is conditional/path-filtered. If this HEAD has
+              // a Packaging smoke run, it is a blocking quality gate just like
+              // CI; an absent run means the workflow was not applicable.
+              const packagingSmoke =
+                await latestCurrentHeadPackagingSmoke(pr);
+              if (
+                packagingSmoke &&
+                (packagingSmoke.status !== 'completed' ||
+                 packagingSmoke.conclusion !== 'success')
+              ) {
+                core.info(
+                  `PR #${pr.number}: waiting for successful Packaging smoke on head ${pr.head.sha}; current state=${packagingSmoke.status}/${packagingSmoke.conclusion || 'pending'}.`
+                );
+                continue;
+              }
+
               // A clean controller-generated merge of main can reuse a prior
               // completed APPROVED review. Any other new HEAD must have its own
               // CodeRabbit review.
@@ -1082,6 +1109,8 @@ jobs:
               }
 
               const finalCi = await latestCurrentHeadCi(pr);
+              const finalPackagingSmoke =
+                await latestCurrentHeadPackagingSmoke(pr);
               const finalReviewBasis =
                 await codeRabbitReviewBasis(pr, pr.head.sha);
               const finalUnresolvedThreads =
@@ -1093,6 +1122,9 @@ jobs:
                 !finalCi ||
                 finalCi.status !== 'completed' ||
                 finalCi.conclusion !== 'success' ||
+                (finalPackagingSmoke &&
+                 (finalPackagingSmoke.status !== 'completed' ||
+                  finalPackagingSmoke.conclusion !== 'success')) ||
                 !finalReviewBasis ||
                 finalUnresolvedThreads.length !== 0 ||
                 finalCurrentHeadNitpicks.length !== 0
