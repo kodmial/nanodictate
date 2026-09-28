@@ -210,6 +210,11 @@ brew list --cask nanodictate >/dev/null 2>&1 && smoke_fail "cask still reported 
 smoke_set_check "app removed"
 [ ! -d "$APP_PATH" ] || smoke_fail "$APP_PATH still exists after uninstall"
 smoke_set_check "CLI link removed"
+# Bash hashes command locations: after `brew uninstall` removes the binary
+# symlink, `command -v` still reports the stale hashed path until the table
+# is cleared (reproduced locally). Drop the hash so the check probes the
+# real PATH instead of failing on a removed link.
+hash -r 2>/dev/null || true
 if command -v nanodictate >/dev/null 2>&1; then
   smoke_fail "nanodictate still on PATH after uninstall: $(command -v nanodictate)"
 fi

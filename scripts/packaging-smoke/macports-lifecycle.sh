@@ -60,8 +60,10 @@ LABEL="com.nanodictate.agent"
 SOURCES_CONF="$PREFIX/etc/macports/sources.conf"
 CANDIDATE_SOURCE="file://$PORTS_DIR"
 SOURCES_BACKUP=""
+STAGE_BASE=""
 
 on_failure() {
+  cleanup_staging || true
   smoke_collect_diagnostics
   smoke_write_metadata "$MODE" "macports" "$EXPECTED" "failure" "$SMOKE_PHASE"
   {
@@ -86,6 +88,13 @@ restore_sources() {
   fi
 }
 
+cleanup_staging() {
+  if [ -n "$STAGE_BASE" ] && [ -d "$STAGE_BASE" ]; then
+    rm -rf "$STAGE_BASE"
+    smoke_log "removed candidate staging $STAGE_BASE"
+  fi
+}
+
 # --- 0. Supported MacPorts distribution from the official source ---------------
 smoke_phase "macports-base"
 smoke_set_check "supported MacPorts installed (pinned, signature-verified)"
@@ -105,6 +114,36 @@ if [ "$MODE" = "production" ]; then
 else
   smoke_set_check "temporary local ports tree with the production Portfile logic"
   [ -f "$PORTS_DIR/audio/nanodictate/Portfile" ] || smoke_fail "candidate Portfile missing in $PORTS_DIR"
+  # Stage the candidate tree and tarballs outside the runner home. `sudo port`
+  # drops privileges to the `macports` user while reading the Portfile and
+  # fetching the file:// distfiles, and that user cannot read back into a
+  # home directory current runner images lock down: arm64 `macos-15` fails
+  # with `Permission denied` opening the Portfile while the older Intel
+  # image happens to allow it. /tmp stays traversable for every user.
+  STAGE_BASE="$(mktemp -d /tmp/nanodictate-smoke.XXXXXX)"
+  STAGE_PORTS="$STAGE_BASE/ports"
+  STAGE_DIST="$STAGE_BASE/dist"
+  mkdir -p "$STAGE_PORTS" "$STAGE_DIST"
+  cp -R "$PORTS_DIR/." "$STAGE_PORTS/"
+  cp "$DIST_DIR"/nanodictate-*.tar.gz "$STAGE_DIST/"
+  # The staged Portfile baked a file:// master_sites pointing at the original
+  # dist dir; repoint the staged copy at the staged dist dir.
+  python3 - "$STAGE_PORTS/audio/nanodictate/Portfile" "$STAGE_DIST" <<'EOF'
+import sys
+path, dist = sys.argv[1], sys.argv[2]
+lines = open(path).read().splitlines(keepends=True)
+for i, line in enumerate(lines):
+    if line.split()[:1] == ['master_sites']:
+        lines[i] = 'master_sites        file://' + dist + '\n'
+        break
+else:
+    raise SystemExit("staged Portfile lost its master_sites line")
+open(path, 'w').write(''.join(lines))
+EOF
+  chmod -R a+rX "$STAGE_BASE"
+  PORTS_DIR="$STAGE_PORTS"
+  DIST_DIR="$STAGE_DIST"
+  CANDIDATE_SOURCE="file://$PORTS_DIR"
   # The candidate file:// source must be registered BEFORE lint/test/install:
   # MacPorts resolves `nanodictate` through sources.conf, otherwise it reports
   # `Port nanodictate not found`.
@@ -192,6 +231,7 @@ smoke_phase "uninstall"
 smoke_set_check "sudo port uninstall nanodictate"
 sudo port uninstall nanodictate || smoke_fail "port uninstall failed"
 restore_sources
+cleanup_staging
 trap on_failure ERR
 
 # --- 6. Cleanup verification ------------------------------------------------------
