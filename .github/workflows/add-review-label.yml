@@ -228,6 +228,8 @@ jobs:
               if (err.status !== 422) throw err; // already exists
             }
 
+            let queuedForCodeRabbit = false;
+
             for (const pr of ours) {
               await github.rest.issues.addLabels({
                 owner,
@@ -258,8 +260,6 @@ jobs:
               // accepted only when this exact HEAD is a two-parent merge of the
               // recorded old PR head and recorded main SHA, and the carried SHA
               // still has a completed APPROVED review with no nitpick review.
-              // Any ordinary commit or conflict-repair commit has no valid
-              // marker and therefore receives a fresh full review below.
               const carriedSource = await carriedApprovalSource(pr);
               if (carriedSource) {
                 await github.rest.issues.addLabels({
@@ -274,38 +274,25 @@ jobs:
                 continue;
               }
 
-              // Acquire the lock before posting the command so concurrent/re-run
-              // workflow executions cannot create duplicate review requests.
-              await github.rest.issues.addLabels({
+              // Do not post CodeRabbit commands here. The included-review quota
+              // is repository-wide, so all initial reviews and retries must go
+              // through the single priority controller.
+              queuedForCodeRabbit = true;
+              core.notice(
+                `PR #${pr.number}: green head ${pr.head.sha} queued for the global CodeRabbit priority controller.`
+              );
+            }
+
+            if (queuedForCodeRabbit) {
+              await github.rest.actions.createWorkflowDispatch({
                 owner,
                 repo,
-                issue_number: pr.number,
-                labels: [REQUESTED_LABEL],
+                workflow_id: 'coderabbit-retry.yml',
+                ref: 'main',
               });
-
-              try {
-                await github.rest.issues.createComment({
-                  owner,
-                  repo,
-                  issue_number: pr.number,
-                  body: '@coderabbitai full review',
-                });
-                core.notice(
-                  `Requested full CodeRabbit review for PR #${pr.number} at green head ${pr.head.sha}.`
-                );
-              } catch (err) {
-                // A failed post must not permanently suppress the next workflow
-                // attempt for this unchanged head.
-                try {
-                  await github.rest.issues.removeLabel({
-                    owner,
-                    repo,
-                    issue_number: pr.number,
-                    name: REQUESTED_LABEL,
-                  });
-                } catch (_) {}
-                throw err;
-              }
+              core.notice(
+                `Dispatched the global CodeRabbit priority controller after CI run ${run.id}.`
+              );
             }
 
             // CI completion is now the primary wake-up hook for the reconciler.
