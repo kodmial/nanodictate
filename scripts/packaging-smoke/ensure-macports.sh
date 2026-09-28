@@ -51,8 +51,10 @@ echo "$SIGNATURE" | grep -q 'Status: signed by a developer certificate issued by
   echo "[smoke] MacPorts pkg is not signed by a trusted Apple developer certificate; refusing to install" >&2
   exit 1
 }
-echo "$SIGNATURE" | grep -q 'Developer ID Installer: .*MacPorts' || {
-  echo "[smoke] MacPorts pkg signature does not reference MacPorts; refusing to install" >&2
+# Official MacPorts .pkg releases are signed "Developer ID Installer: Joshua Root"
+# (the MacPorts lead maintainer) — the identity string does not contain "MacPorts".
+echo "$SIGNATURE" | grep -q -E 'Developer ID Installer: .*(MacPorts|Joshua Root)' || {
+  echo "[smoke] MacPorts pkg signature does not reference the expected MacPorts signer; refusing to install" >&2
   exit 1
 }
 
