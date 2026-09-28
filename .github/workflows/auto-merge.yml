@@ -956,6 +956,8 @@ jobs:
                 new Date(b.created_at).getTime()
             );
 
+            let codeRabbitRetryControllerDispatched = false;
+
             for (const listed of pulls) {
               let pr = await getPull(listed.number);
 
@@ -1026,7 +1028,22 @@ jobs:
                   rabbitStatus.description || ''
                 )
               ) {
-                await retryRateLimitedCodeRabbit(pr, ci, rabbitStatus);
+                // Full-review quota is shared across PRs. Delegate selection to
+                // the global CodeRabbit retry controller, which ranks the
+                // source issues P0 -> P1 -> P2 and emits at most one review
+                // command for the next legal quota slot.
+                if (!codeRabbitRetryControllerDispatched) {
+                  await github.rest.actions.createWorkflowDispatch({
+                    owner,
+                    repo,
+                    workflow_id: 'coderabbit-retry.yml',
+                    ref: 'main',
+                  });
+                  codeRabbitRetryControllerDispatched = true;
+                  core.notice(
+                    'Delegated rate-limited CodeRabbit reviews to the global priority controller.'
+                  );
+                }
                 continue;
               }
 
