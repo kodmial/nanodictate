@@ -39,6 +39,19 @@ BOT_PREFIX = "[pr-agent-standalone]"
 API = "https://api.github.com"
 
 
+class GitHubApiError(SystemExit):
+    """GitHub API failure with the HTTP status preserved.
+
+    Subclasses SystemExit so existing callers that expect a hard failure
+    keep working, while submit_verdict can catch a 422 APPROVE rejection
+    and retry the same review as COMMENT.
+    """
+
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
+
+
 def gh_token():
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN", "")
     if not token:
@@ -75,7 +88,7 @@ def gh_request(method, path, body=None, preview=None):
             return json.loads(payload) if payload else {}
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:2000]
-        raise SystemExit(f"GitHub API {method} {path} failed: {exc.code} {detail}")
+        raise GitHubApiError(f"GitHub API {method} {path} failed: {exc.code} {detail}", status=exc.code)
 
 
 def gh_paginate(path):
@@ -108,7 +121,7 @@ def gh_paginate(path):
                 url = nxt
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")[:2000]
-            raise SystemExit(f"GitHub API GET {url} failed: {exc.code} {detail}")
+            raise GitHubApiError(f"GitHub API GET {url} failed: {exc.code} {detail}", status=exc.code)
     return items
 
 
@@ -152,8 +165,124 @@ def is_pr_agent_comment(comment):
     return False
 
 
+# Boilerplate headings whose whole markdown section must not produce findings.
+# The PR-Agent Reviewer Guide lists relevant files and review effort; those
+# bullets describe the diff instead of reporting actionable problems.
+BOILERPLATE_SECTION_HEADINGS = (
+    "reviewer guide",
+    "relevant file",
+    "relevant files",
+    "general comment",
+    "general comments",
+    "estimated effort",
+    "effort to review",
+)
+
+# Boilerplate phrases inside a single bullet title. Anything containing one
+# of these is guide text, a file listing, or a no-op summary, not a finding.
+BOILERPLATE_TITLE_PHRASES = (
+    "pr reviewer guide",
+    "reviewer guide",
+    "relevant file",
+    "relevant files",
+    "no actionable",
+    "no major issues",
+    "looks good",
+    "lgtm",
+    "general comment",
+    "general comments",
+    "estimated effort",
+    "effort to review",
+    "pay attention",
+    "focus on",
+    "to review this",
+)
+
+_HEADING_RE = re.compile(r"(?m)^\s*#{1,6}\s+(.*)\s*$")
+
+
+def _drop_boilerplate_sections(body):
+    """Remove Reviewer Guide / file-listing sections before bullet parsing."""
+    matches = list(_HEADING_RE.finditer(body or ""))
+    if not matches:
+        return body or ""
+    kept = []
+    # Text before the first heading is kept; it usually holds the summary.
+    kept.append(body[: matches[0].start()])
+    for i, match in enumerate(matches):
+        heading = (match.group(1) or "").lower()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
+        section = body[match.start() : end]
+        if any(h in heading for h in BOILERPLATE_SECTION_HEADINGS):
+            continue
+        kept.append(section)
+    return "".join(kept)
+
+
+def _is_boilerplate_title(title):
+    lowered = (title or "").lower()
+    return any(s in lowered for s in BOILERPLATE_TITLE_PHRASES)
+
+
+def list_unresolved_thread_comment_ids(pr_number):
+    """Return IDs of inline comments in unresolved, non-outdated threads.
+
+    Uses the GraphQL reviewThreads fields isResolved and isOutdated. Returns
+    None when the thread status cannot be determined so callers can fall back
+    to the previous behavior instead of silently dropping findings.
+    """
+    owner, name = repo()
+    query = (
+        "query($owner: String!, $name: String!, $pr: Int!, $after: String) {"
+        " repository(owner: $owner, name: $name) {"
+        "  pullRequest(number: $pr) {"
+        "   reviewThreads(first: 100, after: $after) {"
+        "    nodes { isResolved isOutdated"
+        "     comments(first: 50) { nodes { databaseId } }"
+        "    }"
+        "    pageInfo { hasNextPage endCursor }"
+        "   }"
+        "  }"
+        " }"
+        "}"
+    )
+    unresolved_ids = set()
+    after = None
+    try:
+        while True:
+            resp = gh_request(
+                "POST",
+                "/graphql",
+                {"query": query, "variables": {"owner": owner, "name": name, "pr": pr_number, "after": after}},
+            )
+            threads = (
+                ((resp.get("data") or {}).get("repository") or {}).get("pullRequest") or {}
+            ).get("reviewThreads") or {}
+            for node in threads.get("nodes") or []:
+                if node.get("isResolved") or node.get("isOutdated"):
+                    continue
+                comments = (node.get("comments") or {}).get("nodes") or []
+                for c in comments:
+                    if c.get("databaseId") is not None:
+                        unresolved_ids.add(c["databaseId"])
+            page = threads.get("pageInfo") or {}
+            if not page.get("hasNextPage"):
+                break
+            after = page.get("endCursor")
+            if not after:
+                break
+    except GitHubApiError as exc:
+        print(f"Warning: reviewThreads lookup failed, keeping all inline threads: {exc}", file=sys.stderr)
+        return None
+    return unresolved_ids
+
+
 def extract_findings(pr_number, issue_comments, review_comments):
     """Derive findings from PR-Agent output plus inline threads.
+
+    Only unresolved, non-outdated review threads count, resolved via the
+    GraphQL reviewThreads isResolved/isOutdated fields. Summary bullets from
+    Reviewer Guide boilerplate sections are excluded.
 
     Returns a list of dicts: {id, file, line, title, source}.
     """
@@ -167,31 +296,21 @@ def extract_findings(pr_number, issue_comments, review_comments):
         # Skip our own tracker/verdict comments.
         if TRACKER_MARKER in body or body.startswith(BOT_PREFIX):
             continue
+        # Reviewer Guide bullets describe files/effort, not findings.
+        body = _drop_boilerplate_sections(body)
         for match in bullet_re.finditer(body):
             title = re.sub(r"\s+", " ", match.group(1)).strip()[:160]
-            if len(title) < 10:
-                continue
-            lowered = title.lower()
-            if any(
-                s in lowered
-                for s in (
-                    "pr reviewer guide",
-                    "relevant file",
-                    "no actionable",
-                    "looks good",
-                    "lgtm",
-                    "general comments",
-                )
-            ):
+            if len(title) < 10 or _is_boilerplate_title(title):
                 continue
             fid = stable_id("PR", 0, title)
             findings.setdefault(fid, {"id": fid, "file": "", "line": 0, "title": title, "source": "summary"})
         for match in inline_num_re.finditer(body):
             title = re.sub(r"\s+", " ", match.group(1)).strip()[:160]
-            if len(title) < 10:
+            if len(title) < 10 or _is_boilerplate_title(title):
                 continue
             fid = stable_id("PR", 0, title)
             findings.setdefault(fid, {"id": fid, "file": "", "line": 0, "title": title, "source": "summary"})
+    unresolved_ids = list_unresolved_thread_comment_ids(pr_number)
     for comment in review_comments:
         body = comment.get("body", "") or ""
         user = (comment.get("user") or {}).get("login", "")
@@ -202,8 +321,15 @@ def extract_findings(pr_number, issue_comments, review_comments):
         # and github-actions threads that look like review findings.
         if user not in ("github-actions[bot]", "github-actions", "pr-agent[bot]"):
             continue
+        # Skip threads that GitHub marks resolved or outdated for the current
+        # HEAD. Unknown IDs are kept so a GraphQL gap never hides a finding.
+        if unresolved_ids is not None and comment.get("id") not in unresolved_ids:
+            # Fall back to path/line matching when the REST id is missing:
+            # only skip when we positively know the thread is settled.
+            if comment.get("id") is not None:
+                continue
         title = re.sub(r"\s+", " ", body).strip()[:160]
-        if len(title) < 10:
+        if len(title) < 10 or _is_boilerplate_title(title):
             continue
         path = comment.get("path", "") or ""
         line = comment.get("line") or comment.get("original_line") or 0
@@ -281,16 +407,23 @@ def write_tracker(pr_number, head_sha, findings):
 
 
 def upsert_tracker(pr_number, head_sha, current, previous_state):
-    owner, name = repo()
     prev = {f.get("id"): f for f in previous_state.get("findings", [])}
+    prev_head = previous_state.get("head", "")
     merged = []
     for finding in current:
         old = prev.get(finding["id"])
         if old is None:
             status = "open"
         elif old.get("status") in ("resolved", "fixed"):
-            # A previously resolved finding that reappears is reopened.
-            status = "reopened"
+            # Preserve a /verify resolution unless PR-Agent reports the finding
+            # again for the current HEAD. extract_findings already drops
+            # resolved/outdated threads, so a reappearance on a newer HEAD is
+            # fresh evidence and reopens; on the same HEAD it is the stale
+            # thread that /verify just closed, so keep it resolved.
+            if prev_head and head_sha != prev_head:
+                status = "reopened"
+            else:
+                status = "resolved"
         else:
             status = "still-open"
         merged.append({**finding, "status": status})
@@ -331,11 +464,25 @@ def submit_verdict(pr_number, head_sha, findings, pr):
         "",
         "This standalone review is advisory only and is not a merge gate.",
     ]
-    gh_request(
-        "POST",
-        f"/repos/{owner}/{name}/pulls/{pr_number}/reviews",
-        {"commit_id": head_sha, "body": "\n".join(summary), "event": event},
-    )
+    try:
+        gh_request(
+            "POST",
+            f"/repos/{owner}/{name}/pulls/{pr_number}/reviews",
+            {"commit_id": head_sha, "body": "\n".join(summary), "event": event},
+        )
+    except GitHubApiError as exc:
+        # When Actions cannot approve PRs, GitHub rejects APPROVE with 422.
+        # Record the same verdict as a COMMENT so the run still reports.
+        if event == "APPROVE" and exc.status == 422:
+            print(f"APPROVE rejected (422); retrying as COMMENT: {exc}", file=sys.stderr)
+            gh_request(
+                "POST",
+                f"/repos/{owner}/{name}/pulls/{pr_number}/reviews",
+                {"commit_id": head_sha, "body": "\n".join(summary), "event": "COMMENT"},
+            )
+            print(f"Submitted COMMENT (APPROVE fallback) for PR #{pr_number} HEAD {head_sha}")
+            return "COMMENT"
+        raise
     print(f"Submitted {event} for PR #{pr_number} HEAD {head_sha} with {len(open_findings)} open findings")
     return event
 
