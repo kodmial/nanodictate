@@ -281,14 +281,6 @@ def _parse_github_time(value):
         return None
 
 
-def _comment_time(comment):
-    if comment is None:
-        return None
-    return _parse_github_time(comment.get("updated_at")) or _parse_github_time(
-        comment.get("created_at")
-    )
-
-
 def _comment_created(comment):
     """Creation time of a comment, preferred for review ordering.
 
@@ -452,9 +444,9 @@ def extract_findings(pr_number, issue_comments, review_comments, current_head=No
     Each finding carries source_created (ISO-8601 creation time of the
     PR-Agent comment or inline thread that produced it). upsert_tracker
     reopens a /verify resolution only when that timestamp is strictly after
-    the persisted last-/review marker, so re-running the gate or pushing a
-    new commit without fresh PR-Agent output never flips resolved to
-    reopened.
+    both the persisted last-/review marker and the finding-level resolved_at
+    set by cmd_verify, so re-running the gate or pushing a new commit
+    without fresh PR-Agent output never flips resolved to reopened.
 
     Returns a list of dicts: {id, file, line, title, source, source_created}.
     """
@@ -645,42 +637,57 @@ def upsert_tracker(pr_number, head_sha, current, previous_state, last_review_at=
     previous_marker = (previous_state or {}).get("last_review_at")
     since_dt = _parse_github_time(previous_marker) if previous_marker else None
     # A reappearance is new evidence only when its source comment was
-    # created strictly after the persisted last-/review marker. The summary
-    # selector is inclusive (>=) so same-HEAD re-runs keep the current
-    # report in scope instead of hiding it, but reopening here requires
-    # strict freshness: re-selecting the same summary (created == marker)
-    # after /verify, or keeping a stale inline thread, must not flip a
-    # resolved finding back to reopened. A HEAD change alone is never
-    # sufficient without fresh PR-Agent output for the current HEAD.
+    # created strictly after both the persisted last-/review marker and the
+    # finding-level /verify resolution time. The summary selector is
+    # inclusive (>=) so same-HEAD re-runs keep the current report in scope
+    # instead of hiding it, but reopening here requires strict freshness:
+    # re-selecting the same summary (created == marker) after /verify, or
+    # keeping a stale inline thread, must not flip a resolved finding back
+    # to reopened. In particular, an inline comment posted after the review
+    # summary but before /verify has a creation time after the marker, so
+    # the marker alone cannot distinguish it from fresh output; the
+    # per-finding resolved_at set by cmd_verify provides the review-run
+    # boundary. A HEAD change alone is never sufficient without fresh
+    # PR-Agent output for the current HEAD.
     merged = []
     for finding in current:
         old = prev.get(finding["id"])
         if old is None:
-            status = "open"
+            entry = {**finding, "status": "open"}
+            entry.pop("resolved_at", None)
         elif old.get("status") in ("resolved", "fixed"):
             # Preserve a /verify resolution unless fresh PR-Agent output for
             # the current HEAD reports the finding again with a source
-            # created after the stored marker. Without a marker (first run)
-            # fall back to HEAD-change reopening; with a marker, unknown
-            # source times never reopen.
+            # created after the stored marker and after the verify time.
+            # Without any boundary (first run) fall back to HEAD-change
+            # reopening; with a boundary, unknown source times never reopen.
             source_dt = _parse_github_time(finding.get("source_created"))
+            resolved_dt = _parse_github_time(old.get("resolved_at"))
+            bounds = [d for d in (since_dt, resolved_dt) if d is not None]
             if prev_head and head_sha != prev_head:
-                if since_dt is None:
-                    status = "reopened"
-                elif source_dt is not None and source_dt > since_dt:
-                    status = "reopened"
+                if not bounds:
+                    entry = {**finding, "status": "reopened"}
+                elif source_dt is not None and source_dt > max(bounds):
+                    entry = {**finding, "status": "reopened"}
+                    entry.pop("resolved_at", None)
                 else:
-                    status = "resolved"
+                    entry = {**finding, "status": "resolved"}
+                    if old.get("resolved_at"):
+                        entry["resolved_at"] = old["resolved_at"]
             else:
-                status = "resolved"
+                entry = {**finding, "status": "resolved"}
+                if old.get("resolved_at"):
+                    entry["resolved_at"] = old["resolved_at"]
         else:
-            status = "still-open"
-        merged.append({**finding, "status": status})
+            entry = {**finding, "status": "still-open"}
+            entry.pop("resolved_at", None)
+        merged.append(entry)
     for fid, old in sorted(prev.items()):
         if fid not in {f["id"] for f in current}:
             entry = dict(old)
             if entry.get("status") in ("open", "still-open", "reopened"):
                 entry["status"] = "resolved"
+                entry.pop("resolved_at", None)
             merged.append(entry)
     merged.sort(key=lambda f: f["id"])
     marker = last_review_at if last_review_at is not None else previous_state.get("last_review_at")
@@ -1010,12 +1017,22 @@ def cmd_verify(pr_number, finding_id, head_sha=None):
     # Reply without duplicating the finding: post one issue comment (not a new
     # review thread) and update the tracker status in place.
     gh_request("POST", f"/repos/{owner}/{name}/issues/{pr_number}/comments", {"body": body})
+    from datetime import datetime, timezone
+
+    verify_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     findings = state.get("findings", [])
     if not any(f.get("id", "").upper() == target["id"].upper() for f in findings):
-        findings.append({**target, "status": "resolved" if verdict == "RESOLVED" else "still-open"})
+        entry = {**target, "status": "resolved" if verdict == "RESOLVED" else "still-open"}
+        if verdict == "RESOLVED":
+            entry["resolved_at"] = verify_at
+        findings.append(entry)
     for f in findings:
         if f.get("id", "").upper() == target["id"].upper():
             f["status"] = "resolved" if verdict == "RESOLVED" else "still-open"
+            if verdict == "RESOLVED":
+                f["resolved_at"] = verify_at
+            else:
+                f.pop("resolved_at", None)
     # Preserve the persisted last-/review marker: /verify must not move it,
     # otherwise the next gate run would treat old summaries as fresh output.
     write_tracker(pr_number, head, sorted(findings, key=lambda f: f["id"]), state.get("last_review_at"))
