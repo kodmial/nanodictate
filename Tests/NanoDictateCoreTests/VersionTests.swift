@@ -56,13 +56,16 @@ final class VersionTests: XCTestCase {
     }
 
     @objc func testDisplayString_HasVPrefixAndMatchesVersion() {
-        let display = "v\(NanoDictateVersion.string)"
+        // Exercise the production badge formatter, not a locally rebuilt string,
+        // so dropping the `v` prefix in production fails this test.
+        let display = OverlayVersion.displayString()
         XCTAssertEqual(display, "v\(NanoDictateVersion.string)")
         XCTAssertTrue(display.hasPrefix("v"))
+        XCTAssertEqual(OverlayVersion.displayString(for: "1.2.3"), "v1.2.3")
     }
 
     @objc func testDisplayString_IsCompactSemver() {
-        let display = "v\(NanoDictateVersion.string)"
+        let display = OverlayVersion.displayString()
         XCTAssertTrue(display.hasPrefix("v"), "header version must use compact `vX.Y.Z` format")
         let bare = String(display.dropFirst())
         let parts = bare.split(separator: ".")
@@ -76,8 +79,16 @@ final class VersionTests: XCTestCase {
             return
         }
         XCTAssertTrue(
+            source.contains("OverlayVersion.displayString()"),
+            "overlay header must read OverlayVersion.displayString() (single source of truth)"
+        )
+        XCTAssertTrue(
             source.contains("NanoDictateVersion.string"),
-            "overlay header must read NanoDictateVersion.string (single source of truth)"
+            "version badge must derive from NanoDictateVersion.string (single source of truth)"
+        )
+        XCTAssertFalse(
+            source.contains("Text(NanoDictateVersion.string)"),
+            "overlay must keep the `v` prefix — Text(NanoDictateVersion.string) without the badge formatter would drop it"
         )
         // No separately hard-coded version literal in the header/view that can drift.
         let pattern = "\"v[0-9]+\\.[0-9]+\\.[0-9]+\""
@@ -92,13 +103,13 @@ final class VersionTests: XCTestCase {
         )
         // Version sits after the Spacer in the same header HStack (far top-right).
         if let spacer = source.range(of: "Spacer(minLength: 0)"),
-           let version = source.range(of: "NanoDictateVersion.string") {
+           let version = source.range(of: "OverlayVersion.displayString()") {
             XCTAssertTrue(
                 spacer.lowerBound < version.lowerBound,
                 "version label must follow the Spacer so it pins to the far top-right"
             )
         } else {
-            XCTFail("header HStack must contain both Spacer and NanoDictateVersion.string")
+            XCTFail("header HStack must contain both Spacer and OverlayVersion.displayString()")
         }
     }
 
