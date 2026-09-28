@@ -1,4 +1,4 @@
-name: Bootstrap repository
+name: Bootstrap runtime-lab issue metadata
 
 on:
   issues:
@@ -8,21 +8,48 @@ permissions:
   contents: read
 
 jobs:
-  create:
-    if: github.event.issue.title == '[bootstrap] create runtime-lab'
+  configure:
+    if: github.event.issue.title == '[bootstrap] configure runtime-lab issues'
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.TAP_PAT }}
     steps:
-      - name: Create public repository
+      - name: Configure labels and dependencies
         shell: bash
         run: |
           set -euo pipefail
-          gh api repos/kodmial/runtime-lab >/dev/null 2>&1 && exit 0
-          gh api --method POST user/repos \
-            -f name='runtime-lab' \
-            -F private=false \
-            -F has_issues=true \
-            -F has_projects=false \
-            -F has_wiki=false \
-            -F auto_init=true
+
+          create_label() {
+            local name="$1" color="$2" description="$3"
+            gh api --method POST repos/kodmial/runtime-lab/labels \
+              -f name="$name" -f color="$color" -f description="$description" >/dev/null 2>&1 || true
+          }
+
+          add_label() {
+            local issue="$1" label="$2"
+            printf '{"labels":["%s"]}' "$label" | \
+              gh api --method POST "repos/kodmial/runtime-lab/issues/$issue/labels" \
+                --input - >/dev/null
+          }
+
+          add_blocker() {
+            local issue="$1" blocker_id="$2"
+            printf '{"issue_id":%s}' "$blocker_id" | \
+              gh api --method POST "repos/kodmial/runtime-lab/issues/$issue/dependencies/blocked_by" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                --input - >/dev/null 2>&1 || true
+          }
+
+          create_label "priority:p0" "B60205" "P0 — critical work that should be handled immediately."
+          create_label "priority:p1" "D93F0B" "P1 — high-priority planned work."
+
+          for n in 1 2 3 4 5 6; do add_label "$n" "priority:p0"; done
+          add_label 7 "priority:p1"
+
+          add_blocker 2 5608547281
+          add_blocker 3 5608547465
+          add_blocker 4 5608547281
+          add_blocker 5 5608547647
+          add_blocker 5 5608547951
+          add_blocker 6 5608548158
+          add_blocker 7 5608548349
