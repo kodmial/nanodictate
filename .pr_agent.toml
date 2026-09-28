@@ -27,12 +27,12 @@ large_patch_policy = "clip"
 output_run_details = true
 output_run_cost = false
 # Completion limit read by PR-Agent (config.max_output_tokens). The workflow
-# overrides this via CONFIG.MAX_OUTPUT_TOKENS from PR_AGENT_MAX_TOKENS.
+# overrides this via CONFIG.MAX_OUTPUT_TOKENS, falling back to 16000 when the
+# optional PR_AGENT_MAX_TOKENS variable is unset.
 max_output_tokens = 16000
 
 [litellm]
-# Optional override. The workflow sets CONFIG.MAX_OUTPUT_TOKENS from
-# PR_AGENT_MAX_TOKENS when that variable is defined.
+# No max_tokens here: the pinned completion path reads config.max_output_tokens.
 timeout = 180
 
 [pr_reviewer]

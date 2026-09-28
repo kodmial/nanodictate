@@ -145,9 +145,10 @@ jobs:
           OPENAI_API_BASE: ${{ vars.PR_AGENT_API_BASE }}
           CONFIG.MODEL: ${{ steps.model.outputs.model }}
           CONFIG.FALLBACK_MODELS: "[]"
-          CONFIG.MAX_OUTPUT_TOKENS: ${{ vars.PR_AGENT_MAX_TOKENS }}
-          LITELLM__MAX_TOKENS: ${{ vars.PR_AGENT_MAX_TOKENS }}
-          LITELLM.MAX_TOKENS: ${{ vars.PR_AGENT_MAX_TOKENS }}
+          # Effective completion limit (PR-Agent reads config.max_output_tokens).
+          # Fall back to 16000 when the optional variable is unset so an empty
+          # value never overrides the TOML default with 0 (no limit).
+          CONFIG.MAX_OUTPUT_TOKENS: ${{ vars.PR_AGENT_MAX_TOKENS || '16000' }}
 
       - name: Enforce review contract (tracker + verdict)
         if: needs.parse.outputs.command == 'review'
