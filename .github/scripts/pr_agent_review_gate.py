@@ -717,49 +717,39 @@ CLIP_FILE_CHURN_BUDGET = 10000
 # diff trivially fits in one chunk. Chunking is token-based, not file-based,
 # so a PR with few files but large or dense files can still exceed
 # max_number_of_calls=5 chunks, and large_patch_policy=clip can omit part of
-# a patch below the heuristic clip budget without any explicit notice.
+# a patch without any explicit notice. Generic summary phrases such as
+# "review complete" are not reliable coverage evidence: they are not tied to
+# the current HEAD run or to the content processed by the packer, so they
+# never justify a clean full-PR verdict on their own.
 SAFE_APPROVE_MAX_FILES = 1
-SAFE_APPROVE_MAX_CHURN = 2000
+SAFE_APPROVE_MAX_CHURN = 500
 
-# Phrases where PR-Agent explicitly confirms the whole diff was reviewed.
-# Matched case-insensitively; only trusted when no gap phrase is present.
-FULL_COVERAGE_PHRASES = (
-    "all files reviewed",
-    "all files were reviewed",
-    "reviewed all files",
-    "reviewed all ",
-    "full coverage",
-    "100% coverage",
-    "complete coverage",
-    "fully reviewed",
-    "no remaining files",
-    "no unreviewed",
-    "all chunks reviewed",
-    "review complete",
-    "review is complete",
-)
-
-
-def detect_coverage_gap(issue_comments, files):
+def detect_coverage_gap(issue_comments, files, current_head=None, since=None):
     """Detect when chunk limits or patch clipping may leave code unreviewed.
 
-    Returns a warning string when coverage is incomplete, else None. Checks
-    PR-Agent output for explicit truncation notices, the file count against
-    the max_number_of_calls chunk budget, and per-file churn against the
-    large_patch_policy clip budget. Because chunking is token-based, small
-    file counts and churn below the heuristic budgets cannot prove complete
-    coverage on their own: when the diff is non-trivial and PR-Agent output
-    contains no explicit full-coverage confirmation, coverage is treated as
-    unestablished and a gap is reported so a zero-finding run withholds a
-    clean APPROVE instead of reporting a complete review.
+    Returns a warning string when coverage is incomplete, else None. Only
+    PR-Agent output selected for the current HEAD run counts as evidence
+    (comments mentioning current_head, else comments newer than the persisted
+    last-/review marker, else the latest batch). Historical summaries and
+    generic full-coverage phrases never establish complete coverage on their
+    own: chunking is token-based and large_patch_policy=clip can omit content
+    without any explicit notice, so any non-trivial diff withholds a clean
+    APPROVE until reliable per-run coverage evidence exists.
     """
+    pr_agent_comments = _collect_pr_agent_comments(issue_comments)
+    selected = _select_current_summary_comments(pr_agent_comments, current_head, since)
+    # No PR-Agent output for the current HEAD run means coverage cannot be
+    # established for this HEAD, even if an older run claimed completeness.
+    if current_head and files and not selected:
+        return (
+            "No PR-Agent review output was found for the current HEAD, so "
+            "chunk limits or large-patch clipping may have left content "
+            "unreviewed. Zero findings cannot be treated as a clean "
+            "full-PR review."
+        )
     bodies = []
-    for comment in issue_comments or []:
-        if not is_pr_agent_comment(comment):
-            continue
+    for comment in selected:
         body = comment.get("body", "") or ""
-        if TRACKER_MARKER in body or body.startswith(BOT_PREFIX):
-            continue
         bodies.append(body)
     haystack = "\n".join(bodies).lower()
     for phrase in COVERAGE_GAP_PHRASES:
@@ -797,27 +787,27 @@ def detect_coverage_gap(issue_comments, files):
             "chunking budget; some chunks may not have been reviewed."
         )
     # Silent gaps: few files can still need more than max_number_of_calls
-    # chunks, and clip can omit content below the heuristic budget without
-    # any explicit notice. Only a trivially small diff, or explicit
-    # full-coverage confirmation from the review run, establishes complete
-    # coverage. Otherwise withhold a clean verdict.
+    # chunks, and clip can omit content below the heuristic budgets without
+    # any explicit notice. Generic full-coverage phrases are not tied to the
+    # packer output and never establish coverage, so any diff beyond a
+    # trivially small single-file change withholds a clean verdict.
     if files:
-        has_full_confirmation = any(p in haystack for p in FULL_COVERAGE_PHRASES)
-        if not has_full_confirmation and (
-            len(files) > SAFE_APPROVE_MAX_FILES or total > SAFE_APPROVE_MAX_CHURN
-        ):
+        if len(files) > SAFE_APPROVE_MAX_FILES or total > SAFE_APPROVE_MAX_CHURN:
             return (
                 f"PR touches {len(files)} file(s) with +{total} changed lines; "
                 "chunking is token-based, so max_number_of_calls=5 chunks and "
                 "large_patch_policy=clip may leave content unreviewed even "
-                "below the heuristic budgets, and the review output contains "
-                "no explicit full-coverage confirmation. Zero findings cannot "
-                "be treated as a clean full-PR review."
+                "below the heuristic budgets. Generic full-coverage phrases "
+                "in the review output are not tied to the current HEAD run "
+                "or the packer content and cannot prove complete coverage. "
+                "Zero findings cannot be treated as a clean full-PR review."
             )
     return None
 
 
-def submit_verdict(pr_number, head_sha, findings, pr, issue_comments=None, files_override=None):
+def submit_verdict(
+    pr_number, head_sha, findings, pr, issue_comments=None, files_override=None, since=None
+):
     owner, name = repo()
     open_findings = [f for f in findings if f.get("status") in ("open", "still-open", "reopened")]
     event = "CHANGES_REQUESTED" if open_findings else "APPROVE"
@@ -825,7 +815,7 @@ def submit_verdict(pr_number, head_sha, findings, pr, issue_comments=None, files
     files = files_override if files_override is not None else list_pr_files(pr_number)
     total_add = sum(f.get("additions", 0) for f in files)
     total_del = sum(f.get("deletions", 0) for f in files)
-    coverage_gap = detect_coverage_gap(issue_comments or [], files)
+    coverage_gap = detect_coverage_gap(issue_comments or [], files, head_sha, since)
     summary = [
         f"{BOT_PREFIX} Full review of HEAD `{head_sha}`: {len(files)} file(s), +{total_add}/-{total_del}.",
         "",
@@ -894,7 +884,7 @@ def cmd_gate(pr_number, head_sha=None):
     pr_agent_comments = _collect_pr_agent_comments(issue_comments)
     new_marker, _ = _current_review_marker(pr_agent_comments, head, since, previous_marker)
     merged = upsert_tracker(pr_number, head, current, previous, new_marker)
-    return submit_verdict(pr_number, head, merged, pr, issue_comments, None)
+    return submit_verdict(pr_number, head, merged, pr, issue_comments, None, since)
 
 
 def openai_chat(prompt, system="You are a precise code-review verifier."):

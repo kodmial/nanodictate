@@ -48,6 +48,10 @@ inline_key_issues = true
 num_max_findings = 8
 enable_review_coverage_footer = true
 # Chunk large diffs so the whole PR is covered instead of only a prefix.
+# Chunking is token-based and large_patch_policy=clip can still omit content
+# when max_number_of_calls=5 chunks are exhausted or a patch is oversized;
+# the review gate withholds a clean APPROVE verdict in that case instead of
+# reporting a complete review.
 enable_large_pr_chunking = true
 max_number_of_calls = 5
 extra_instructions = """\
