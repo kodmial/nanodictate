@@ -13,6 +13,12 @@ import SwiftUI
 /// STT-запрос).
 enum OverlayPhase: Equatable {
   case idle
+  /// Engine bring-up: overlay visible with a not-yet-ready status, but the
+  /// recording timer is NOT running — speech is not yet being captured.
+  /// The truthful "Recording" phase (timer) starts only on capture readiness
+  /// (first microphone buffer), so the user is never led to believe speech is
+  /// captured before the capture path is ready (P0 first-word clipping).
+  case starting
   case recording
   case processing
 }
@@ -64,6 +70,13 @@ final class OverlayState: ObservableObject {
   func setRecordingPhase(startedAt: Date = Date()) {
     recordingStart = startedAt
     phase = .recording
+  }
+
+  func setStartingPhase() {
+    // No recordingStart: the timer view only runs in .recording, so no timer
+    // implies no capture before readiness.
+    recordingStart = nil
+    phase = .starting
   }
 
   func setProcessingPhase() {
@@ -741,6 +754,15 @@ public final class OverlayController: NSObject {
     resizePanelForCurrentPhase()
   }
 
+  /// Фаза «запуск»: движок поднимается, захват ещё не готов. Панель видна с
+  /// неготовым статусом, таймер НЕ идёт — пользователь не вводится в
+  /// заблуждение, будто речь уже пишется (P0). Вызывать до capture-ready;
+  /// по готовности — setRecordingPhase (таймер стартует с этого момента).
+  public func setStartingPhase() {
+    state.setStartingPhase()
+    resizePanelForCurrentPhase()
+  }
+
   /// Фаза «обработка»: три точки вместо иконки, пока идёт STT-запрос.
   public func setProcessingPhase() {
     state.setProcessingPhase()
@@ -768,7 +790,7 @@ public final class OverlayController: NSObject {
   private func desiredPanelHeight() -> CGFloat {
     switch state.phase {
     case .recording: return 178
-    case .idle, .processing: return 150
+    case .idle, .starting, .processing: return 150
     }
   }
 
