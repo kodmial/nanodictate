@@ -71,6 +71,7 @@ jobs:
             const REVIEW_COOLDOWN_MS = 60 * 60_000;
             const SAFETY_MARGIN_MS = 30_000;
             const MAX_WAIT_MS = 5 * 60 * 60_000 + 45 * 60_000;
+            const IN_FLIGHT_TIMEOUT_MS = 30 * 60_000;
 
             function retryWindowText(body = '') {
               const patterns = [
@@ -263,6 +264,7 @@ jobs:
               });
 
               let latestCompletedReviewAt = 0;
+              let latestInFlightCommand = null;
               const candidates = [];
 
               for (const listed of pulls) {
@@ -289,6 +291,77 @@ jobs:
                     per_page: 100,
                   }
                 );
+
+                const comments = await github.paginate(
+                  github.rest.issues.listComments,
+                  {
+                    owner,
+                    repo,
+                    issue_number: pr.number,
+                    per_page: 100,
+                  }
+                );
+
+                // A repository-wide review slot remains occupied from the
+                // instant the controller posts a full-review command until
+                // CodeRabbit either rejects it with a rate-limit response or
+                // submits a full review decision. This closes the race where
+                // several controller wake-ups could spend the same shared slot
+                // before CodeRabbit had time to respond to the first command.
+                const commands = comments
+                  .filter(comment =>
+                    comment.user?.login !== 'coderabbitai[bot]' &&
+                    FULL_REVIEW_COMMAND_RE.test(comment.body?.trim() || '')
+                  )
+                  .sort(
+                    (a, b) =>
+                      new Date(b.created_at).getTime() -
+                      new Date(a.created_at).getTime()
+                  );
+
+                for (const command of commands) {
+                  const commandAt = new Date(command.created_at).getTime();
+                  const rateLimitedAfter = comments.some(comment =>
+                    comment.user?.login === 'coderabbitai[bot]' &&
+                    RATE_LIMIT_RE.test(comment.body || '') &&
+                    new Date(
+                      comment.updated_at || comment.created_at
+                    ).getTime() > commandAt
+                  );
+                  const reviewedAfter = reviews.some(review => {
+                    if (
+                      !review.user?.login?.startsWith('coderabbitai') ||
+                      !review.submitted_at
+                    ) {
+                      return false;
+                    }
+                    const fullReview =
+                      review.state === 'APPROVED' ||
+                      review.state === 'CHANGES_REQUESTED' ||
+                      (
+                        review.state === 'COMMENTED' &&
+                        Boolean((review.body || '').trim())
+                      );
+                    return (
+                      fullReview &&
+                      new Date(review.submitted_at).getTime() > commandAt
+                    );
+                  });
+
+                  if (!rateLimitedAfter && !reviewedAfter) {
+                    if (
+                      !latestInFlightCommand ||
+                      commandAt > latestInFlightCommand.at
+                    ) {
+                      latestInFlightCommand = {
+                        prNumber: pr.number,
+                        at: commandAt,
+                        headSha: pr.head.sha,
+                      };
+                    }
+                    break;
+                  }
+                }
 
                 for (const review of reviews) {
                   if (
@@ -327,16 +400,6 @@ jobs:
 
                 const requested = labels.has(REQUESTED_LABEL);
                 const rabbitStatus = await latestCodeRabbitStatus(pr);
-
-                const comments = await github.paginate(
-                  github.rest.issues.listComments,
-                  {
-                    owner,
-                    repo,
-                    issue_number: pr.number,
-                    per_page: 100,
-                  }
-                );
 
                 let dueAt = 0;
                 let kind = 'initial';
@@ -412,6 +475,7 @@ jobs:
                 candidates,
                 latestCompletedReviewAt,
                 globalNotBefore,
+                latestInFlightCommand,
               };
             }
 
@@ -465,11 +529,38 @@ jobs:
             // Reconcile, wait for the earliest legal shared-quota slot if
             // necessary, then rebuild state before making exactly one write.
             let state = await collectState();
+
+            if (state.latestInFlightCommand) {
+              const ageMs =
+                Date.now() - state.latestInFlightCommand.at;
+              if (ageMs < IN_FLIGHT_TIMEOUT_MS) {
+                core.notice(
+                  `CodeRabbit slot is already in flight for PR #${state.latestInFlightCommand.prNumber} at head ${state.latestInFlightCommand.headSha}; no second review command will be emitted.`
+                );
+                return;
+              }
+              core.warning(
+                `CodeRabbit command for PR #${state.latestInFlightCommand.prNumber} has had no rate-limit response or full review for ${Math.ceil(ageMs / 60_000)} minutes; treating the slot lock as stale.`
+              );
+            }
+
             let selected = await chooseDueCandidate(state);
 
             if (!selected) {
               if (!(await waitForNextCandidate(state))) return;
               state = await collectState();
+
+              if (state.latestInFlightCommand) {
+                const ageMs =
+                  Date.now() - state.latestInFlightCommand.at;
+                if (ageMs < IN_FLIGHT_TIMEOUT_MS) {
+                  core.notice(
+                    `CodeRabbit slot became occupied by PR #${state.latestInFlightCommand.prNumber} while this controller was waiting; no second command will be emitted.`
+                  );
+                  return;
+                }
+              }
+
               selected = await chooseDueCandidate(state);
             }
 
