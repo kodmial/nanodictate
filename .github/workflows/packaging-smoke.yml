@@ -466,7 +466,7 @@ jobs:
 
             const hb = '${{ needs.production-homebrew.result }}';
             const mp = '${{ needs.production-macports.result }}';
-            const green = (r) => r === 'success' || r === 'skipped';
+            const green = (r) => r === 'success';
             const allGreen = green(hb) && green(mp);
 
             function readDirTree(dir, out) {

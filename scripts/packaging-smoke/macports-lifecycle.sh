@@ -206,7 +206,8 @@ for _ in $(seq 1 60); do
   sleep 2
 done
 [ "$POST_OK" = "1" ] || smoke_fail "post-activate never registered $LABEL within 120s (the Portfile post-activate behavior may be broken)"
-AGENT_PID="$(smoke_assert_live_job "$LABEL" | sed -n 's/^pid=//p')"
+smoke_assert_live_job "$LABEL" >/dev/null
+AGENT_PID="$(cat "$SMOKE_RESULT_DIR/agent-pid.txt")"
 smoke_set_check "executable path points to the installed MacPorts agent"
 PRINTOUT="$(/bin/launchctl print "gui/$(smoke_gui_uid)/$LABEL" 2>&1)" || \
   smoke_fail "launchctl print failed right after live check"

@@ -154,7 +154,8 @@ nanodictate start || smoke_fail "nanodictate start failed"
 smoke_phase "launchd-health"
 smoke_set_check "poll until healthy (deadline 90s)"
 smoke_poll 90 nanodictate status || smoke_fail "nanodictate status never succeeded within 90s"
-AGENT_PID="$(smoke_assert_live_job "$LABEL" | sed -n 's/^pid=//p')"
+smoke_assert_live_job "$LABEL" >/dev/null
+AGENT_PID="$(cat "$SMOKE_RESULT_DIR/agent-pid.txt")"
 smoke_set_check "registered executable resolves to the installed package"
 PRINTOUT="$(/bin/launchctl print "gui/$(smoke_gui_uid)/$LABEL" 2>&1)" || \
   smoke_fail "launchctl print failed right after live check"
