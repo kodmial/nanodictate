@@ -47,26 +47,32 @@ jobs:
             const prNumber = context.issue.number;
             const comment = context.payload.comment;
 
-            function parseRetryDelayMs(body = '') {
-              const match = body.match(
-                /Next included review available in\s+([^\n<.]+)/i
-              );
-
-              if (!match) {
-                // CodeRabbit occasionally creates the rate-limit reply before
-                // adding a precise countdown. An edited event normally replaces
-                // this waiter within seconds; 65 minutes is the conservative
-                // fallback if that edit never arrives.
-                return 65 * 60_000;
+            function retryWindowText(body = '') {
+              // CodeRabbit has used multiple English phrasings for the same
+              // quota window, for example:
+              //   "Next included review available in 13 minutes."
+              //   "Your next included review will be available in 13 minutes."
+              // Do not couple scheduling to one exact sentence. Anchor on the
+              // semantic markers and tolerate filler words / "in" vs "after".
+              const patterns = [
+                /next\s+(?:included\s+)?review\b[^\n<.]{0,120}?\bavailable\b[^\n<.]{0,40}?\b(?:in|after)\s+([^\n<.]+)/i,
+                /(?:try|retry)\s+again\b[^\n<.]{0,40}?\b(?:in|after)\s+([^\n<.]+)/i,
+              ];
+              for (const pattern of patterns) {
+                const match = body.match(pattern);
+                if (match) return match[1];
               }
+              return null;
+            }
 
-              if (/less than\s+(?:a|one)\s+minute/i.test(match[1])) {
+            function parseDurationMs(text = '') {
+              if (/less than\s+(?:a|one)\s+minute/i.test(text)) {
                 return 60_000;
               }
 
               let totalMs = 0;
               let found = false;
-              for (const part of match[1].matchAll(
+              for (const part of text.matchAll(
                 /(\d+)\s*(hours?|hrs?|minutes?|mins?|seconds?|secs?)/gi
               )) {
                 found = true;
@@ -81,8 +87,23 @@ jobs:
                   totalMs += value * 1_000;
                 }
               }
+              return found ? totalMs : null;
+            }
 
-              return found ? totalMs : 65 * 60_000;
+            function parseRetryDelayMs(body = '') {
+              const windowText = retryWindowText(body);
+              const parsed = windowText === null
+                ? null
+                : parseDurationMs(windowText);
+              if (parsed !== null) return parsed;
+
+              // Unknown/new CodeRabbit wording must never cause a retry storm.
+              // Keep a conservative fallback, but make it visible in the log so
+              // another wording change can be diagnosed immediately.
+              core.warning(
+                'Could not parse CodeRabbit quota countdown; using 65-minute fallback.'
+              );
+              return 65 * 60_000;
             }
 
             const { data: pr } = await github.rest.pulls.get({
@@ -355,23 +376,26 @@ jobs:
             const repoFullName = `${owner}/${repo}`;
             const now = Date.now();
 
-            function parseRetryDelayMs(body = '') {
-              const match = body.match(
-                /Next included review available in\s+([^\n<.]+)/i
-              );
-              if (!match) {
-                return /Review rate limited|Review limit reached/i.test(body)
-                  ? 65 * 60_000
-                  : null;
+            function retryWindowText(body = '') {
+              const patterns = [
+                /next\s+(?:included\s+)?review\b[^\n<.]{0,120}?\bavailable\b[^\n<.]{0,40}?\b(?:in|after)\s+([^\n<.]+)/i,
+                /(?:try|retry)\s+again\b[^\n<.]{0,40}?\b(?:in|after)\s+([^\n<.]+)/i,
+              ];
+              for (const pattern of patterns) {
+                const match = body.match(pattern);
+                if (match) return match[1];
               }
+              return null;
+            }
 
-              if (/less than\s+(?:a|one)\s+minute/i.test(match[1])) {
+            function parseDurationMs(text = '') {
+              if (/less than\s+(?:a|one)\s+minute/i.test(text)) {
                 return 60_000;
               }
 
               let totalMs = 0;
               let found = false;
-              for (const part of match[1].matchAll(
+              for (const part of text.matchAll(
                 /(\d+)\s*(hours?|hrs?|minutes?|mins?|seconds?|secs?)/gi
               )) {
                 found = true;
@@ -386,6 +410,22 @@ jobs:
                 }
               }
               return found ? totalMs : null;
+            }
+
+            function parseRetryDelayMs(body = '') {
+              const windowText = retryWindowText(body);
+              const parsed = windowText === null
+                ? null
+                : parseDurationMs(windowText);
+              if (parsed !== null) return parsed;
+
+              if (/Review rate limited|Review limit reached/i.test(body)) {
+                core.warning(
+                  'Could not parse CodeRabbit quota countdown; using 65-minute fallback.'
+                );
+                return 65 * 60_000;
+              }
+              return null;
             }
 
             async function hasGreenCi(pr) {
