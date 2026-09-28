@@ -758,7 +758,6 @@ COVERAGE_GAP_PHRASES = (
     "unreviewed",
     "truncated",
     "clipped",
-    "clip",
     "chunk limit",
     "max_number_of_calls",
     "max number of calls",
@@ -954,6 +953,13 @@ def openai_chat(prompt, system="You are a precise code-review verifier."):
     base = os.environ.get("PR_AGENT_API_BASE", "").rstrip("/")
     key = os.environ.get("PR_AGENT_API_KEY", "")
     model = os.environ.get("PR_AGENT_MODEL", "")
+    # Strip the LiteLLM routing prefix before calling the provider directly.
+    # The review job routes models as openai/<name> for LiteLLM, but the
+    # provider's chat-completions endpoint expects the bare model name.
+    for prefix in ("openai/", "text-completion-openai/"):
+        if model.startswith(prefix):
+            model = model[len(prefix):]
+            break
     max_tokens_raw = os.environ.get("PR_AGENT_MAX_TOKENS", "").strip()
     if not base or not key or not model:
         raise SystemExit("Missing PR_AGENT_API_BASE, PR_AGENT_API_KEY, or PR_AGENT_MODEL")
