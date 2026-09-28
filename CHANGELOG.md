@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-09-28
+
+
+
+### Bug Fixes
+
+* Added version badge to overlay header ([7b4f3d7](https://github.com/kodmial/nanodictate/commit/7b4f3d7762c1c2d2da046b0e4b6307e8862f5f6f))
+* **release:** preserve notes and complete v0.1.7 sync ([1934840](https://github.com/kodmial/nanodictate/commit/1934840a2cc7c233bdb29a7aefb1c2ac242161fe))
+
 ## [0.1.7] - 2026-09-27
 
 ### Bug Fixes
@@ -348,7 +357,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/kodmial/nanodictate/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/kodmial/nanodictate/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/kodmial/nanodictate/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/kodmial/nanodictate/compare/v0.1.4...v0.1.5
