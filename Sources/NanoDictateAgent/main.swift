@@ -165,6 +165,15 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// Start session token: incremented on each new start and on boot watchdog
   /// firing — invalidates stale completion callbacks.
   private var startSession = 0
+  /// Engine-start gate for the capture-ready cue: `audio.start` completion has
+  /// reported `.success` for the current start session. A first-buffer
+  /// notification arriving earlier is held in `pendingCaptureInfo`, never
+  /// emitted directly — otherwise the ready cue could fire before a later
+  /// startup `.failure`. Main-thread only, reset on every start.
+  private var engineStartSucceeded = false
+  /// First-buffer info held while `engine.start()` is still pending. Emitted
+  /// on startup success, discarded on startup failure/cancellation/timeout.
+  private var pendingCaptureInfo: AudioService.CaptureReadyInfo?
   /// Microphone access coordinator: session token + watchdog + MicRequestPolicy
   /// anti-storm (after 3 request timeouts in a 6 h window no new system dialog —
   /// repeated dialogs from a bundle-less background agent wedge tccd and freeze
@@ -820,6 +829,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     isStarting = true
     startSession += 1
     let session = startSession
+    engineStartSucceeded = false
+    pendingCaptureInfo = nil
 
     // Engine boot watchdog: if the engine does not start within
     // recordStartTimeout — terminal error (overlay goes out, next Alt+Alt
@@ -838,6 +849,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       Logger.log("record start timed out after \(Int(Self.recordStartTimeout)) s", level: "error")
       self.startSession += 1
       self.isStarting = false
+      self.engineStartSucceeded = false
+      self.pendingCaptureInfo = nil
       // The wedged engine is replaced with a fresh one: engine.start() may
       // never have returned (HAL blocked by a device switch) — the old
       // instance is unusable, the next Alt+Alt starts from a clean engine.
@@ -848,12 +861,22 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
 
     // Capture-readiness subscription for THIS session only: the normal start
     // cue (sound + "Recording" timer) fires here — after the first valid
-    // microphone buffer — never on engine.start() success. Exactly one cue
-    // per session (emitRecordingReadyCue guards the token); stale sessions
+    // microphone buffer AND after engine.start() success. A first buffer
+    // arriving while engine.start() is still pending is held (never emitted
+    // directly): it fires only from the startup-success branch below, and is
+    // discarded on startup failure/cancellation. Exactly one cue per session
+    // (emitRecordingReadyCue guards the token); stale sessions
     // (cancelled/timed-out/superseded) are ignored and never cue.
     audio.onCaptureReady = { [weak self] info in
       guard let self else { return }
       guard self.startSession == session, self.isStarting else { return }
+      guard self.engineStartSucceeded else {
+        self.pendingCaptureInfo = info
+        if self.isDebug {
+          Logger.log("record first buffer held: engine start pending", level: "debug")
+        }
+        return
+      }
       self.emitRecordingReadyCue(session: session, info: info)
     }
 
@@ -877,7 +900,15 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         // Engine started — still NOT ready: microphone buffers have not been
         // observed yet. The start cue waits for onCaptureReady above. A
         // capture watchdog covers "engine up but no buffers" (silent HAL):
-        // terminal error, never a false ready cue.
+        // terminal error, never a false ready cue. A first buffer that
+        // arrived while engine.start() was pending (held above) is emitted
+        // here — only on success, never on the failure branch.
+        self.engineStartSucceeded = true
+        if let held = self.pendingCaptureInfo {
+          self.pendingCaptureInfo = nil
+          self.emitRecordingReadyCue(session: session, info: held)
+          return
+        }
         if self.isDebug {
           Logger.log("record engine started, waiting for first buffer", level: "debug")
         }
@@ -889,14 +920,19 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             level: "error")
           self.startSession += 1
           self.isStarting = false
+          self.engineStartSucceeded = false
+          self.pendingCaptureInfo = nil
           self.audio.cancel()
           self.showMicrophoneError(L10n.tr("error.micNoResponse"))
         }
       case .failure(let error):
         // Startup failure: invalidate the session so a late capture-ready
-        // (stale buffer) can never emit the success cue afterwards.
+        // (stale buffer) can never emit the success cue afterwards. A buffer
+        // held while engine.start() was pending is discarded here.
         self.startSession += 1
         self.isStarting = false
+        self.engineStartSucceeded = false
+        self.pendingCaptureInfo = nil
         Logger.log("microphone unavailable: \(error.localizedDescription)", level: "error")
         self.showMicrophoneError(L10n.tr("error.micEnableFailed"))
       }
@@ -911,6 +947,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   private func emitRecordingReadyCue(session: Int, info: AudioService.CaptureReadyInfo) {
     guard startSession == session, isStarting else { return }
     isStarting = false
+    pendingCaptureInfo = nil
     sounds.playStart()
     // Timer starts HERE (capture-ready moment), not at the Alt+Alt request:
     // the displayed duration equals captured audio, never engine bring-up.
@@ -1350,6 +1387,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       Logger.log("audio device changed during start-up: \(error.localizedDescription)", level: "warn")
       startSession += 1
       isStarting = false
+      engineStartSucceeded = false
+      pendingCaptureInfo = nil
       liveSession += 1
       liveRunState?.isCancelled = true
       liveRunState = nil
@@ -2113,6 +2152,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       guard isStarting else { return }
       startSession += 1
       isStarting = false
+      engineStartSucceeded = false
+      pendingCaptureInfo = nil
       audio.cancel()
       Logger.log("record start cancelled during bring-up")
     }
