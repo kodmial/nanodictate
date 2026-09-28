@@ -296,14 +296,14 @@ public enum BenchmarkText {
     if rhs.isEmpty { return lhs.count }
     var previous = Array(0...rhs.count)
     var current = [Int](repeating: 0, count: rhs.count + 1)
-    for i in 1...lhs.count {
-      current[0] = i
-      for j in 1...rhs.count {
-        let cost = lhs[i - 1] == rhs[j - 1] ? 0 : 1
-        let deletion = previous[j] + 1
-        let insertion = current[j - 1] + 1
-        let substitution = previous[j - 1] + cost
-        current[j] = min(deletion, min(insertion, substitution))
+    for row in 1...lhs.count {
+      current[0] = row
+      for col in 1...rhs.count {
+        let cost = lhs[row - 1] == rhs[col - 1] ? 0 : 1
+        let deletion = previous[col] + 1
+        let insertion = current[col - 1] + 1
+        let substitution = previous[col - 1] + cost
+        current[col] = min(deletion, min(insertion, substitution))
       }
       previous = current
     }
