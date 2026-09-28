@@ -1,0 +1,46 @@
+name: Wire final no-Actions dependencies
+
+on:
+  push:
+    paths:
+      - '.github/workflows/runtime-lab-final-deps-temp.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  wire:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.TAP_PAT }}
+    steps:
+      - name: Wire dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN"
+
+          add_blocker() {
+            local issue="$1" blocker_id="$2"
+            printf '{"issue_id":%s}' "$blocker_id" | \
+              gh api --method POST \
+                "repos/kodmial/runtime-lab/issues/$issue/dependencies/blocked_by" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                --input - >/dev/null 2>&1 || true
+          }
+
+          remove_blocker() {
+            local issue="$1" blocker_id="$2"
+            gh api --method DELETE \
+              "repos/kodmial/runtime-lab/issues/$issue/dependencies/blocked_by/$blocker_id" \
+              -H "X-GitHub-Api-Version: 2026-03-10" >/dev/null 2>&1 || true
+          }
+
+          add_blocker 10 5608548349
+          add_blocker 11 5608823025
+          add_blocker 11 5608548158
+          add_blocker 12 5608823218
+          add_blocker 13 5608823471
+
+          remove_blocker 7 5608548349
+          add_blocker 7 5608823649
