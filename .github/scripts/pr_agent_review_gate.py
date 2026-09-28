@@ -219,6 +219,48 @@ FINDING_SECTION_HEADINGS = (
 )
 
 _HEADING_RE = re.compile(r"(?m)^\s*#{1,6}\s+(.*)\s*$")
+_FOCUS_AREAS_RE = re.compile(r"recommended\s+focus\s+areas\s+for\s+review", re.I)
+_STRONG_RE = re.compile(r"<strong>(.*?)</strong>", re.I | re.S)
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _clean_strong_title(raw):
+    """Strip inner HTML from a <strong> entry and normalize whitespace."""
+    text = _TAG_RE.sub(" ", raw or "")
+    text = re.sub(r"\s+", " ", text).strip().strip(":").strip()
+    return text[:160]
+
+
+def _extract_focus_area_titles(body):
+    """Extract actionable issue titles from PR-Agent focus areas.
+
+    PR-Agent v0.46.0 lists key issues under ``PR Reviewer Guide`` /
+    ``Recommended focus areas for review`` using HTML ``<details>`` and
+    ``<strong>`` markup. With ``inline_key_issues=false`` those issues are
+    not duplicated as inline comments, so dropping the whole Reviewer Guide
+    section would hide them. This helper runs before boilerplate removal
+    and returns the ``<strong>`` entries within the focus-areas subsection
+    so callers can feed them back into finding extraction.
+    """
+    if not body:
+        return []
+    focus_match = _FOCUS_AREAS_RE.search(body)
+    if not focus_match:
+        return []
+    # Limit to the focus-areas subsection: from the phrase to the next
+    # markdown heading that is not part of the same subsection, or EOF.
+    # The focus heading itself may or may not be a markdown heading, so
+    # search for the next heading after the phrase.
+    rest = body[focus_match.end() :]
+    next_heading = _HEADING_RE.search(rest)
+    section = rest[: next_heading.start()] if next_heading else rest
+    titles = []
+    for match in _STRONG_RE.finditer(section):
+        title = _clean_strong_title(match.group(1))
+        if len(title) < 10 or _is_boilerplate_title(title):
+            continue
+        titles.append(title)
+    return titles
 
 
 def _drop_boilerplate_sections(body):
@@ -251,19 +293,33 @@ def _select_finding_text(body):
     list, so it is dropped when headings exist. When no headings exist,
     the whole body is returned as a fallback so heading-free reviews
     still produce findings.
+
+    PR-Agent key issues under ``Recommended focus areas for review`` are
+    extracted before Reviewer Guide boilerplate removal and re-added as
+    bullets so ``extract_findings`` still sees them.
     """
+    # Extract focus-area issues first: _drop_boilerplate_sections removes
+    # the entire Reviewer Guide section that contains them.
+    focus_titles = _extract_focus_area_titles(body or "")
     text = _drop_boilerplate_sections(body or "")
     matches = list(_HEADING_RE.finditer(text))
     if not matches:
-        return text
-    kept = []
-    for i, match in enumerate(matches):
-        heading = (match.group(1) or "").lower()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        section = text[match.start() : end]
-        if any(h in heading for h in FINDING_SECTION_HEADINGS):
-            kept.append(section)
-    return "".join(kept)
+        base = text
+    else:
+        kept = []
+        for i, match in enumerate(matches):
+            heading = (match.group(1) or "").lower()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            section = text[match.start() : end]
+            if any(h in heading for h in FINDING_SECTION_HEADINGS):
+                kept.append(section)
+        base = "".join(kept)
+    if focus_titles:
+        bullets = "\n".join(f"- {t}" for t in focus_titles)
+        if base and not base.endswith("\n"):
+            base += "\n"
+        base += bullets + "\n"
+    return base
 
 
 def _parse_github_time(value):
@@ -666,16 +722,14 @@ def upsert_tracker(pr_number, head_sha, current, previous_state, last_review_at=
             source_dt = _parse_github_time(finding.get("source_created"))
             resolved_dt = _parse_github_time(old.get("resolved_at"))
             bounds = [d for d in (since_dt, resolved_dt) if d is not None]
-            if prev_head and head_sha != prev_head:
-                if not bounds:
-                    entry = {**finding, "status": "reopened"}
-                elif source_dt is not None and source_dt > max(bounds):
-                    entry = {**finding, "status": "reopened"}
-                    entry.pop("resolved_at", None)
-                else:
-                    entry = {**finding, "status": "resolved"}
-                    if old.get("resolved_at"):
-                        entry["resolved_at"] = old["resolved_at"]
+            # Fresh PR-Agent output reopens whenever its source timestamp is
+            # strictly after the latest available bound, even on the same
+            # HEAD. Without bounds, a HEAD change is the only reopen signal.
+            if bounds and source_dt is not None and source_dt > max(bounds):
+                entry = {**finding, "status": "reopened"}
+                entry.pop("resolved_at", None)
+            elif not bounds and prev_head and head_sha != prev_head:
+                entry = {**finding, "status": "reopened"}
             else:
                 entry = {**finding, "status": "resolved"}
                 if old.get("resolved_at"):
@@ -991,36 +1045,78 @@ def cmd_verify(pr_number, finding_id, head_sha=None):
     if not snippet:
         # Summary findings carry no file/line, so verify them against the
         # current PR diff instead of asking the model to guess from the title.
+        truncated = False
         try:
+            pr_files = list_pr_files(pr_number) or []
+            title_lower = (target.get("title") or "").lower()
+
+            def _mentions_target(filename):
+                name = (filename or "").lower()
+                if not name or not title_lower:
+                    return False
+                if name in title_lower:
+                    return True
+                base = name.rsplit("/", 1)[-1]
+                return bool(base) and base in title_lower
+
+            # Show the most relevant patches first so a 6000-char budget
+            # still contains the code a summary finding refers to.
+            pr_files = sorted(
+                pr_files,
+                key=lambda pf: (0 if _mentions_target(pf.get("filename")) else 1),
+            )
             diff_parts = []
             budget = 6000
-            for pr_file in list_pr_files(pr_number):
+            for pr_file in pr_files:
                 patch = pr_file.get("patch") or ""
                 if not patch:
                     continue
                 chunk = f"--- {pr_file.get('filename', '?')}\n{patch}"
-                if len(chunk) > budget - sum(len(p) for p in diff_parts) - len(diff_parts):
-                    remaining = budget - sum(len(p) for p in diff_parts) - len(diff_parts)
+                used = sum(len(p) for p in diff_parts) + len(diff_parts)
+                if len(chunk) > budget - used:
+                    remaining = budget - used
                     if remaining <= 0:
+                        truncated = True
                         break
                     chunk = chunk[:remaining]
+                    diff_parts.append(chunk)
+                    truncated = True
+                    break
                 diff_parts.append(chunk)
                 if sum(len(p) for p in diff_parts) + len(diff_parts) >= budget:
+                    truncated = True
                     break
             snippet = "\n\n".join(diff_parts)[:6000]
-        except Exception:
+            if len("\n\n".join(diff_parts)) > len(snippet):
+                truncated = True
+        except (GitHubApiError, OSError, ValueError):
             snippet = ""
+            truncated = False
     if not snippet:
         verdict = "UNRESOLVED"
         answer = "UNRESOLVED — no current-HEAD code context was available to verify this finding."
     else:
+        is_summary = not target.get("file")
+        if is_summary and truncated:
+            context_label = (
+                "Partial PR diff (may be truncated and may not contain "
+                "the relevant code):\n"
+            )
+        else:
+            context_label = "Current code around the finding:\n"
         prompt = (
             f"Re-check finding {target['id']} against the current PR HEAD.\n"
             f"Finding title: {target['title']}\n"
             f"File: {target.get('file') or 'general'} Line: {target.get('line') or 0}\n"
             f"PR HEAD: {head}\n\n"
-            f"Current code around the finding:\n{snippet[:6000]}\n\n"
-            "Reply with exactly one machine-detectable first line: either RESOLVED "
+            f"{context_label}{snippet[:6000]}\n\n"
+            + (
+                "If the code relevant to this finding is not present above, "
+                "reply UNRESOLVED.\n"
+                if is_summary
+                else ""
+            )
+            + "Reply with exactly one machine-detectable first line: either RESOLVED "
             "when the underlying problem is fully fixed, or UNRESOLVED when it still "
             "exists. After that line, explain the precise remaining problem or why it "
             "is fixed. Do not report a new finding ID."
