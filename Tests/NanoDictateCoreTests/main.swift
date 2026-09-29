@@ -65,6 +65,7 @@ let suites: [XCTestCase.Type] = [
     AudioSegmenterTests.self,
     WordDiffTests.self,
     ChunkedPipelineTests.self,
+    LiveBackpressureTests.self,
     LiveSegmentFailureTests.self,
     LiveOrchestrationBranchTests.self,
     OverlayLevelTests.self,
