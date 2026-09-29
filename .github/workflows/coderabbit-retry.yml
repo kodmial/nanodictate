@@ -517,15 +517,11 @@ jobs:
             }
 
             function candidateOrder(a, b) {
-              // Prevent starvation: every review-ready PR gets its first full
-              // review before another PR consumes a second (or later) shared
-              // quota slot. Priority still orders PRs within the same review
-              // generation, so P0 beats P1/P2 for first reviews and again for
-              // subsequent re-reviews.
-              const aGeneration = a.fullReviewCount === 0 ? 0 : 1;
-              const bGeneration = b.fullReviewCount === 0 ? 0 : 1;
+              // Priority is the hard primary key and must never be bypassed:
+              // P0 > P1 > P2 > unprioritized. Fairness is allowed only
+              // *within the same priority class* so it cannot move a lower
+              // priority PR ahead of a higher-priority re-review.
               return (
-                aGeneration - bGeneration ||
                 a.rank - b.rank ||
                 a.fullReviewCount - b.fullReviewCount ||
                 a.issueNumber - b.issueNumber ||
