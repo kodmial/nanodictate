@@ -358,7 +358,7 @@ int32_t nd_vad_feed_samples(struct NdVad *handle,
                             uint32_t sample_rate);
 
 /**
- * Resets a VAD handle to the initial state. Returns `ND_OK` or negative.
+ * Resets a VAD handle to the initial state. Returns `ND_OK` or a positive `ND_ERR_*` code.
  */
 int32_t nd_vad_reset(struct NdVad *handle);
 
@@ -417,7 +417,7 @@ uint64_t nd_session_start(struct NdSession *handle);
 
 /**
  * Drives the session with an event for a generation. Stale generations
- * are rejected silently. Returns `ND_OK` or negative.
+ * are rejected silently. Returns `ND_OK` or a positive `ND_ERR_*` code.
  */
 int32_t nd_session_event(struct NdSession *handle, uint32_t event, uint64_t generation);
 
@@ -466,7 +466,7 @@ struct NdLatch *nd_latch_new(void);
 void nd_latch_free(struct NdLatch *handle);
 
 /**
- * Arms the latch. Returns `ND_OK` or negative.
+ * Arms the latch. Returns `ND_OK` or a positive `ND_ERR_*` code.
  */
 int32_t nd_latch_arm(struct NdLatch *handle);
 
@@ -476,7 +476,7 @@ int32_t nd_latch_arm(struct NdLatch *handle);
 int32_t nd_latch_consume(struct NdLatch *handle);
 
 /**
- * Disarms the latch. Returns `ND_OK` or negative.
+ * Disarms the latch. Returns `ND_OK` or a positive `ND_ERR_*` code.
  */
 int32_t nd_latch_cancel(struct NdLatch *handle);
 
