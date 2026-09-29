@@ -103,9 +103,12 @@ try report.jsonData().write(to: URL(fileURLWithPath: "bench.json"))
 
 Live runs send fixture audio to a real STT endpoint and cost quota;
 they never run in CI. Synthetic tones do not speak the transcripts,
-so live WER is only speech quality when you supply transcript-bearing
-audio. Without it, live runs still measure latency, upload bytes, and
-timing, but WER/CER are non-speech responses.
+so live quality scoring requires transcript-bearing audio: `--live`
+fails without `--live-wav-dir` (or `NANODICTATE_BENCHMARK_LIVE_WAV_DIR`),
+fixtures without a readable `<fixture-id>.wav` are skipped and never
+scored, and the run fails when no fixture has speech audio. Reported
+WER/CER therefore only reflect recognition quality on audio that speaks
+each transcript.
 
 ```sh
 NANODICTATE_BENCHMARK_LIVE=1 swift run nanodictate benchmark --live --json /tmp/live.json
@@ -121,12 +124,13 @@ NANODICTATE_BENCHMARK_LIVE=1 swift run nanodictate benchmark --live \
 ```
 
 `NANODICTATE_BENCHMARK_LIVE_WAV_DIR` is equivalent to `--live-wav-dir`.
-`BenchmarkLiveAudio.liveFixtures(fromDirectoryPath:)` overlays matching
+`BenchmarkLiveAudio.resolvedLiveFixtures(fromDirectoryPath:)` overlays matching
 files onto the synthetic fixtures (mono-downmixed, transcripts kept as
-ground truth); fixtures without a file keep synthetic audio and are
-reported as latency-only with a stderr warning. Never commit third-party
-audio: keep live speech files outside the repo unless you recorded them
-and have redistribution rights.
+ground truth) and marks each fixture as speech (`isSpeech == true`) or
+non-speech. `cmdBenchmarkLive` scores only speech fixtures; missing or
+unreadable WAVs are skipped with a stderr warning and excluded from
+WER/CER. Never commit third-party audio: keep live speech files outside
+the repo unless you recorded them and have redistribution rights.
 
 Keys come from your existing config/env (`NANODICTATE_API_KEY` or the
 provider section) and are never written to the report or the repo.

@@ -1321,7 +1321,8 @@ func providerNamesText() -> String {
 /// two reference STT configurations and prints a human-readable summary.
 /// `--live` is opt-in and requires NANODICTATE_BENCHMARK_LIVE=1; it sends
 /// fixture audio to the configured active provider. Synthetic fixtures are
-/// tones, not speech, so live WER is only meaningful with --live-wav-dir.
+/// tones, not speech, so --live requires --live-wav-dir speech audio for
+/// quality scoring; fixtures without readable speech are skipped, never scored.
 func cmdBenchmark(_ args: [String]) -> Int32 {
   var jsonPath: String?
   var markdownPath: String?
@@ -1439,9 +1440,11 @@ func cmdBenchmarkLocal(jsonPath: String?, markdownPath: String?) -> Int32 {
 /// Opt-in live run: fixture audio through the active configured provider.
 /// Never runs in CI; requires NANODICTATE_BENCHMARK_LIVE=1 so a benchmark
 /// cannot silently spend API quota or leak audio by default. Synthetic
-/// fixtures are tones, not speech: live WER is only meaningful when the
-/// caller supplies transcript-bearing `<fixture-id>.wav` files via
-/// --live-wav-dir or NANODICTATE_BENCHMARK_LIVE_WAV_DIR.
+/// fixtures are tones, not speech, so live quality scoring requires
+/// transcript-bearing `<fixture-id>.wav` files via --live-wav-dir or
+/// NANODICTATE_BENCHMARK_LIVE_WAV_DIR. Fixtures without readable speech
+/// audio are skipped (never scored) so reported WER/CER only reflect
+/// recognition quality on audio that speaks each transcript.
 func cmdBenchmarkLive(
   jsonPath: String?, markdownPath: String?, liveWavDir: String? = nil
 ) -> Int32 {
@@ -1479,23 +1482,39 @@ func cmdBenchmarkLive(
   let envWavDir = ProcessInfo.processInfo.environment[
     "NANODICTATE_BENCHMARK_LIVE_WAV_DIR"]
   let resolvedWavDir = liveWavDir ?? envWavDir
-  let fixtures = BenchmarkLiveAudio.liveFixtures(
-    fromDirectoryPath: resolvedWavDir)
-  if let dir = resolvedWavDir, !dir.isEmpty {
-    let fm = FileManager.default
-    for fixture in fixtures {
-      let path = (dir as NSString).appendingPathComponent(
-        BenchmarkLiveAudio.fileName(for: fixture.id))
-      if !fm.fileExists(atPath: path) {
-        eprint("benchmark: live fixture \(fixture.id) uses synthetic non-speech")
-        eprint("audio; its WER is latency-only. Add \(fixture.id).wav to score it.")
-      }
-    }
-  } else {
-    eprint("benchmark: no live speech audio supplied; synthetic tones measure")
-    eprint("latency/upload only, live WER is not speech quality. Provide")
-    eprint("--live-wav-dir <dir> with <fixture-id>.wav files to score WER.")
+  guard let wavDir = resolvedWavDir, !wavDir.isEmpty else {
+    eprint("benchmark: --live quality scoring requires transcript-bearing speech audio.")
+    eprint("Synthetic tones do not speak the fixture transcripts, so their WER/CER")
+    eprint("would not measure recognition quality. Provide --live-wav-dir <dir> (or")
+    eprint("NANODICTATE_BENCHMARK_LIVE_WAV_DIR) with <fixture-id>.wav files speaking")
+    eprint("each fixture's exact transcript.")
+    return 2
   }
+  let resolved = BenchmarkLiveAudio.resolvedLiveFixtures(fromDirectoryPath: wavDir)
+  let speechFixtures = resolved.filter(\.isSpeech).map(\.fixture)
+  let nonSpeech = resolved.filter { !$0.isSpeech }
+  let fm = FileManager.default
+  for entry in nonSpeech {
+    let path = (wavDir as NSString).appendingPathComponent(
+      BenchmarkLiveAudio.fileName(for: entry.fixture.id))
+    if fm.fileExists(atPath: path) {
+      eprint("benchmark: skipping live fixture \(entry.fixture.id): unreadable or")
+      eprint("invalid WAV at \(path); its synthetic audio is not scored.")
+    } else {
+      eprint("benchmark: skipping live fixture \(entry.fixture.id): missing")
+      eprint("\(path); its synthetic audio is not scored.")
+    }
+  }
+  guard !speechFixtures.isEmpty else {
+    eprint("benchmark: no readable live speech audio in \(wavDir); nothing to score.")
+    eprint("Add <fixture-id>.wav files speaking each fixture's transcript.")
+    return 2
+  }
+  if !nonSpeech.isEmpty {
+    eprint("benchmark: scoring \(speechFixtures.count)/\(resolved.count) fixtures with")
+    eprint("speech audio; synthetic fixtures are excluded from WER/CER.")
+  }
+  let fixtures = speechFixtures
   let resolvedAdapter =
     (activeAdapterID?.isEmpty == false)
     ? activeAdapterID! : STTAdapterID.openAICompatible.rawValue

@@ -426,37 +426,75 @@ public enum BenchmarkFixtures {
 /// when the audio actually speaks the transcript. This helper overlays
 /// user-supplied WAV files (`<fixture-id>.wav` in a directory) onto the
 /// synthetic fixtures, keeping transcripts as ground truth. Fixtures with
-/// no matching file keep their synthetic samples so latency and upload
-/// timing still work; callers must treat their live WER as non-speech.
+/// no readable file keep their synthetic samples; live callers must not
+/// score those fixtures (skip them or abort) because their WER/CER would
+/// measure non-speech responses, not recognition quality.
+public struct LiveFixtureResolution: Equatable {
+  public var fixture: BenchmarkFixture
+  /// True when `fixture` carries user-supplied transcript-bearing speech.
+  public var isSpeech: Bool
+  public var sourceURL: URL?
+
+  public init(fixture: BenchmarkFixture, isSpeech: Bool, sourceURL: URL? = nil) {
+    self.fixture = fixture
+    self.isSpeech = isSpeech
+    self.sourceURL = sourceURL
+  }
+}
+
 public enum BenchmarkLiveAudio {
   public static func fileName(for fixtureID: String) -> String {
     "\(fixtureID).wav"
+  }
+
+  /// Resolve each fallback fixture to speech audio when a readable WAV
+  /// exists, otherwise keep the synthetic samples marked as non-speech.
+  /// Missing files and unreadable/invalid WAVs both resolve to
+  /// `isSpeech == false`; callers distinguish them via file existence
+  /// when reporting diagnostics.
+  public static func resolvedLiveFixtures(
+    fromDirectory directory: URL?,
+    fallback: [BenchmarkFixture] = BenchmarkFixtures.builtins()
+  ) -> [LiveFixtureResolution] {
+    guard let directory else {
+      return fallback.map { LiveFixtureResolution(fixture: $0, isSpeech: false) }
+    }
+    return fallback.map { fixture in
+      let url = directory.appendingPathComponent(fileName(for: fixture.id))
+      guard let data = try? Data(contentsOf: url),
+        let info = WAVDecoder.decodePCM16(data),
+        !info.samples.isEmpty
+      else { return LiveFixtureResolution(fixture: fixture, isSpeech: false, sourceURL: url) }
+      var copy = fixture
+      copy.sampleRate = info.sampleRate
+      copy.samples = toMono(samples: info.samples, channels: info.channels)
+      return LiveFixtureResolution(fixture: copy, isSpeech: true, sourceURL: url)
+    }
+  }
+
+  public static func resolvedLiveFixtures(
+    fromDirectoryPath path: String?,
+    fallback: [BenchmarkFixture] = BenchmarkFixtures.builtins()
+  ) -> [LiveFixtureResolution] {
+    guard let path, !path.isEmpty else {
+      return fallback.map { LiveFixtureResolution(fixture: $0, isSpeech: false) }
+    }
+    return resolvedLiveFixtures(
+      fromDirectory: URL(fileURLWithPath: path), fallback: fallback)
   }
 
   public static func liveFixtures(
     fromDirectory directory: URL?,
     fallback: [BenchmarkFixture] = BenchmarkFixtures.builtins()
   ) -> [BenchmarkFixture] {
-    guard let directory else { return fallback }
-    return fallback.map { fixture in
-      let url = directory.appendingPathComponent(fileName(for: fixture.id))
-      guard let data = try? Data(contentsOf: url),
-        let info = WAVDecoder.decodePCM16(data),
-        !info.samples.isEmpty
-      else { return fixture }
-      var copy = fixture
-      copy.sampleRate = info.sampleRate
-      copy.samples = toMono(samples: info.samples, channels: info.channels)
-      return copy
-    }
+    resolvedLiveFixtures(fromDirectory: directory, fallback: fallback).map(\.fixture)
   }
 
   public static func liveFixtures(
     fromDirectoryPath path: String?,
     fallback: [BenchmarkFixture] = BenchmarkFixtures.builtins()
   ) -> [BenchmarkFixture] {
-    guard let path, !path.isEmpty else { return fallback }
-    return liveFixtures(fromDirectory: URL(fileURLWithPath: path), fallback: fallback)
+    resolvedLiveFixtures(fromDirectoryPath: path, fallback: fallback).map(\.fixture)
   }
 
   static func toMono(samples: [Int16], channels: Int) -> [Int16] {
