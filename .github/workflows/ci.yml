@@ -235,16 +235,46 @@ jobs:
           -Xlinker ${{ github.workspace }}/rust/target/release/libnanodictate_core.a
 
       # The tests are a plain executable product (no .xctest bundle): without
-      # Xcode, `swift test` is unavailable, so `swift run` executes the custom
-      # runner (Tests/NanoDictateCoreTests/main.swift), which exits non-zero if
-      # any test fails. Build options (-Xlinker) must precede the executable
-      # name: anything after it is passed to the test binary instead of the
-      # linker, which drops the Rust archive and fails with undefined _nd_*
-      # symbols. The archive is linked by absolute path so the macOS build
-      # never picks the cdylib (which would embed an absolute LC_LOAD_DYLIB
-      # path and break packaged binaries on other hosts).
+      # Xcode, `swift test` is unavailable, so the custom runner
+      # (Tests/NanoDictateCoreTests/main.swift) is built with LLVM coverage
+      # instrumentation and executed directly, which exits non-zero if any
+      # test fails. The Rust static archive must stay linked: -Xlinker
+      # options must precede the product name, anything after it is passed
+      # to the test binary instead of the linker, which drops the Rust
+      # archive and fails with undefined _nd_* symbols. The archive is
+      # linked by absolute path so the macOS build never picks the cdylib
+      # (which would embed an absolute LC_LOAD_DYLIB path and break
+      # packaged binaries on other hosts). Coverage is then enforced for
+      # production NanoDictateCore sources.
+      - name: Build tests with coverage
+        run: |
+          swift build \
+            -Xswiftc -profile-generate \
+            -Xswiftc -profile-coverage-mapping \
+            -Xlinker ${{ github.workspace }}/rust/target/release/libnanodictate_core.a \
+            --product NanoDictateCoreTests
+
       - name: Run tests
-        run: >
-          swift run
-          -Xlinker ${{ github.workspace }}/rust/target/release/libnanodictate_core.a
-          NanoDictateCoreTests
+        env:
+          LLVM_PROFILE_FILE: .build/nanodictate-%p.profraw
+        run: .build/debug/NanoDictateCoreTests
+
+      - name: Enforce NanoDictateCore coverage
+        run: |
+          set -euo pipefail
+          xcrun llvm-profdata merge -sparse .build/nanodictate-*.profraw -o .build/nanodictate.profdata
+          REPORT=$(xcrun llvm-cov report \
+            .build/debug/NanoDictateCoreTests \
+            -instr-profile=.build/nanodictate.profdata \
+            -ignore-filename-regex='(Tests/|Sources/AudioEngineGuard/|Sources/NanoDictateAgent/|Sources/nanodictate/)')
+          printf '%s\n' "$REPORT"
+          COVERAGE=$(printf '%s\n' "$REPORT" | awk '/^TOTAL/ {gsub("%", "", $10); print $10}')
+          if [[ -z "$COVERAGE" ]]; then
+            echo "::error::Could not determine NanoDictateCore line coverage."
+            exit 1
+          fi
+          echo "NanoDictateCore line coverage: ${COVERAGE}%"
+          awk -v coverage="$COVERAGE" 'BEGIN { exit !(coverage >= 80.0) }' || {
+            echo "::error::NanoDictateCore line coverage ${COVERAGE}% is below the required 80%."
+            exit 1
+          }
