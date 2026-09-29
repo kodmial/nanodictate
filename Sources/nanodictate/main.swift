@@ -1314,6 +1314,264 @@ func providerNamesText() -> String {
   return ids.isEmpty ? L10n.tr("cli.provider.nosections") : ids.joined(separator: ", ")
 }
 
+// MARK: - Benchmark (STT quality/latency/bandwidth harness)
+
+/// `nanodictate benchmark --local [--json <path>] [--markdown <path>]`: runs
+/// the deterministic synthetic benchmark (no network, no secrets) comparing
+/// two reference STT configurations and prints a human-readable summary.
+/// `--live` is opt-in and requires NANODICTATE_BENCHMARK_LIVE=1; it sends
+/// fixture audio to the configured active provider. Synthetic fixtures are
+/// tones, not speech, so --live requires --live-wav-dir speech audio for
+/// quality scoring; fixtures without readable speech are skipped, never scored.
+func cmdBenchmark(_ args: [String]) -> Int32 {
+  var jsonPath: String?
+  var markdownPath: String?
+  var liveWavDir: String?
+  var live = false
+  var i = 0
+  while i < args.count {
+    switch args[i] {
+    case "--json":
+      guard i + 1 < args.count else {
+        eprint("benchmark: --json requires a path")
+        return 1
+      }
+      jsonPath = args[i + 1]
+      i += 2
+    case "--markdown":
+      guard i + 1 < args.count else {
+        eprint("benchmark: --markdown requires a path")
+        return 1
+      }
+      markdownPath = args[i + 1]
+      i += 2
+    case "--live-wav-dir":
+      guard i + 1 < args.count else {
+        eprint("benchmark: --live-wav-dir requires a directory")
+        return 1
+      }
+      liveWavDir = args[i + 1]
+      i += 2
+    case "--live":
+      live = true
+      i += 1
+    case "--local", "--help", "-h":
+      if args[i] == "--help" || args[i] == "-h" {
+        print("Usage: nanodictate benchmark [--local] [--live] [--json <path>]")
+        print("  --markdown <path> --live-wav-dir <dir>")
+        print("  --local (default): deterministic synthetic run, no network.")
+        print("  --live: send fixture audio to the active provider.")
+        print("    Requires NANODICTATE_BENCHMARK_LIVE=1 (opt-in, uses API key).")
+        print("    --live-wav-dir <dir>: <fixture-id>.wav speech for live WER.")
+        return 0
+      }
+      i += 1
+    default:
+      eprint("benchmark: unknown flag \(args[i])")
+      eprint("Usage: nanodictate benchmark [--local] [--live] [--json <path>]")
+      return 1
+    }
+  }
+  if live {
+    return cmdBenchmarkLive(
+      jsonPath: jsonPath, markdownPath: markdownPath, liveWavDir: liveWavDir)
+  }
+  return cmdBenchmarkLocal(jsonPath: jsonPath, markdownPath: markdownPath)
+}
+
+func writeBenchmarkOutputs(
+  report: BenchmarkReport, jsonPath: String?, markdownPath: String?
+) -> Int32 {
+  print(report.markdown())
+  if let jsonPath {
+    do {
+      try report.jsonData().write(to: URL(fileURLWithPath: jsonPath), options: .atomic)
+      eprint("benchmark: JSON written to \(jsonPath)")
+    } catch {
+      eprint("benchmark: failed to write JSON: \(error)")
+      return 1
+    }
+  }
+  if let markdownPath {
+    do {
+      try report.markdown().write(
+        to: URL(fileURLWithPath: markdownPath), atomically: true, encoding: .utf8)
+      eprint("benchmark: Markdown written to \(markdownPath)")
+    } catch {
+      eprint("benchmark: failed to write Markdown: \(error)")
+      return 1
+    }
+  }
+  return 0
+}
+
+/// Deterministic local run: two reference configs over synthetic fixtures.
+/// The second config gets a fixed insertion error so the comparison shows a
+/// non-zero WER delta; timings and byte counts are measured for real.
+func cmdBenchmarkLocal(jsonPath: String?, markdownPath: String?) -> Int32 {
+  let fixtures = BenchmarkFixtures.builtins()
+  let configs = [
+    BenchmarkSTTConfig(name: "openai-whisper-1", adapterID: "openai", model: "whisper-1"),
+    BenchmarkSTTConfig(name: "groq-whisper-large-v3", adapterID: "groq", model: "whisper-large-v3"),
+  ]
+  var hypotheses: [String: [String: String]] = [:]
+  for config in configs {
+    var perFixture: [String: String] = [:]
+    for fixture in fixtures {
+      if config.name == "openai-whisper-1" {
+        perFixture[fixture.id] = fixture.transcript
+      } else {
+        perFixture[fixture.id] = fixture.transcript + " extra"
+      }
+    }
+    hypotheses[config.name] = perFixture
+  }
+  do {
+    let report = try BenchmarkRunner.run(
+      fixtures: fixtures, configs: configs,
+      provider: BenchmarkRunner.scriptedProvider(hypotheses: hypotheses))
+    return writeBenchmarkOutputs(report: report, jsonPath: jsonPath, markdownPath: markdownPath)
+  } catch {
+    eprint("benchmark: local run failed: \(error)")
+    return 1
+  }
+}
+
+/// Opt-in live run: fixture audio through the active configured provider.
+/// Never runs in CI; requires NANODICTATE_BENCHMARK_LIVE=1 so a benchmark
+/// cannot silently spend API quota or leak audio by default. Synthetic
+/// fixtures are tones, not speech, so live quality scoring requires
+/// transcript-bearing `<fixture-id>.wav` files via --live-wav-dir or
+/// NANODICTATE_BENCHMARK_LIVE_WAV_DIR. Fixtures without readable speech
+/// audio are skipped (never scored) so reported WER/CER only reflect
+/// recognition quality on audio that speaks each transcript.
+func cmdBenchmarkLive(
+  jsonPath: String?, markdownPath: String?, liveWavDir: String? = nil
+) -> Int32 {
+  guard ProcessInfo.processInfo.environment["NANODICTATE_BENCHMARK_LIVE"] == "1" else {
+    eprint("benchmark: --live requires NANODICTATE_BENCHMARK_LIVE=1 (opt-in).")
+    eprint("Refusing to send audio to a real provider without explicit consent.")
+    return 2
+  }
+  let config: AppConfig
+  do {
+    config = try AppConfig.load(from: nil)
+  } catch {
+    eprint("benchmark: cannot load config: \(error)")
+    return 1
+  }
+  let activeAdapterID: String? =
+    config.activeProvider.isEmpty ? config.providers.first?.id : config.activeProvider
+  let transcriber = Transcriber(
+    baseURL: config.baseURL,
+    model: config.model,
+    apiKey: config.apiKey,
+    proxyKey: config.proxyKey,
+    proxyKeyHeader: config.proxyKeyHeader,
+    language: config.language,
+    timeout: config.timeoutSeconds,
+    logLevel: config.logLevel,
+    cookieRelayProvider: config.transport == "cookie-relay"
+      ? CookieRelayProvider.makeForCookieRelay(baseURL: config.baseURL)
+      : nil,
+    httpProxy: config.httpProxy,
+    proxyUser: config.proxyUser,
+    proxyPassword: config.proxyPassword,
+    adapterID: activeAdapterID
+  )
+  let envWavDir = ProcessInfo.processInfo.environment[
+    "NANODICTATE_BENCHMARK_LIVE_WAV_DIR"]
+  let resolvedWavDir = liveWavDir ?? envWavDir
+  guard let wavDir = resolvedWavDir, !wavDir.isEmpty else {
+    eprint("benchmark: --live quality scoring requires transcript-bearing speech audio.")
+    eprint("Synthetic tones do not speak the fixture transcripts, so their WER/CER")
+    eprint("would not measure recognition quality. Provide --live-wav-dir <dir> (or")
+    eprint("NANODICTATE_BENCHMARK_LIVE_WAV_DIR) with <fixture-id>.wav files speaking")
+    eprint("each fixture's exact transcript.")
+    return 2
+  }
+  let resolved = BenchmarkLiveAudio.resolvedLiveFixtures(fromDirectoryPath: wavDir)
+  let speechFixtures = resolved.filter(\.isSpeech).map(\.fixture)
+  let nonSpeech = resolved.filter { !$0.isSpeech }
+  let fm = FileManager.default
+  for entry in nonSpeech {
+    let path = (wavDir as NSString).appendingPathComponent(
+      BenchmarkLiveAudio.fileName(for: entry.fixture.id))
+    if fm.fileExists(atPath: path) {
+      eprint("benchmark: skipping live fixture \(entry.fixture.id): unreadable or")
+      eprint("invalid WAV at \(path); its synthetic audio is not scored.")
+    } else {
+      eprint("benchmark: skipping live fixture \(entry.fixture.id): missing")
+      eprint("\(path); its synthetic audio is not scored.")
+    }
+  }
+  guard !speechFixtures.isEmpty else {
+    eprint("benchmark: no readable live speech audio in \(wavDir); nothing to score.")
+    eprint("Add <fixture-id>.wav files speaking each fixture's transcript.")
+    return 2
+  }
+  if !nonSpeech.isEmpty {
+    eprint("benchmark: scoring \(speechFixtures.count)/\(resolved.count) fixtures with")
+    eprint("speech audio; synthetic fixtures are excluded from WER/CER.")
+  }
+  let fixtures = speechFixtures
+  let resolvedAdapter =
+    (activeAdapterID?.isEmpty == false)
+    ? activeAdapterID! : STTAdapterID.openAICompatible.rawValue
+  let benchmarkConfig = BenchmarkSTTConfig(
+    name: activeAdapterID ?? "active",
+    adapterID: resolvedAdapter,
+    model: ProviderRequestBuilder.resolveModel(config.model, for: resolvedAdapter),
+    language: config.language
+  )
+  Task {
+    do {
+      var results: [BenchmarkCaseResult] = []
+      for fixture in fixtures {
+        let caseStart = Date()
+        let encodeStart = Date()
+        let wav = WAVEncoder.encode(samples: fixture.samples, sampleRate: fixture.sampleRate)
+        let encodeSeconds = Date().timeIntervalSince(encodeStart)
+        let upload = BenchmarkRunner.uploadBytes(config: benchmarkConfig, wav: wav)
+        let requestStart = Date()
+        let outcome = try await transcriber.transcribe(wav: wav)
+        let requestSeconds = Date().timeIntervalSince(requestStart)
+        let endToEndSeconds = Date().timeIntervalSince(caseStart)
+        results.append(
+          BenchmarkCaseResult(
+            fixtureID: fixture.id,
+            category: fixture.category.rawValue,
+            durationBucket: fixture.durationBucket.rawValue,
+            configName: benchmarkConfig.name,
+            adapterID: benchmarkConfig.adapterID,
+            model: benchmarkConfig.model,
+            wer: BenchmarkText.wer(reference: fixture.transcript, hypothesis: outcome.text),
+            cer: BenchmarkText.cer(reference: fixture.transcript, hypothesis: outcome.text),
+            referenceWords: BenchmarkText.words(fixture.transcript).count,
+            hypothesisWords: BenchmarkText.words(outcome.text).count,
+            wavBytes: wav.count,
+            uploadBytes: upload,
+            encodeMs: encodeSeconds * 1_000.0,
+            requestMs: requestSeconds * 1_000.0,
+            endToEndMs: endToEndSeconds * 1_000.0,
+            peakRSSKB: BenchmarkResources.peakRSSKilobytes(),
+            hypothesis: outcome.text
+          ))
+      }
+      let report = BenchmarkReport(
+        results: results, summaries: BenchmarkRunner.summarize(results: results))
+      let code = writeBenchmarkOutputs(
+        report: report, jsonPath: jsonPath, markdownPath: markdownPath)
+      exit(code)
+    } catch {
+      eprint("benchmark: live run failed: \(error)")
+      exit(1)
+    }
+  }
+  RunLoop.main.run()
+  return 1
+}
+
 // MARK: - Usage
 
 var usage: String {
@@ -1350,6 +1608,8 @@ var usage: String {
     retry \(L10n.tr("usage.placeholder.name"))                        \(L10n.tr("usage.retry"))
     last                             \(L10n.tr("usage.last"))
     logs                             \(L10n.tr("usage.logs"))
+    benchmark [--local] [--live] [--json <path>] [--markdown <path>]
+                                     STT benchmark (local deterministic by default)
     help                             \(L10n.tr("usage.help"))
     --version, -v                    print version and exit
   """
@@ -1391,6 +1651,8 @@ case "routing":
   exit(cmdRouting(Array(args.dropFirst())))
 case "transcribe":
   exit(cmdTranscribe(Array(args.dropFirst())))
+case "benchmark":
+  exit(cmdBenchmark(Array(args.dropFirst())))
 case "retry":
   guard let name = args.dropFirst().first else {
     eprint(L10n.tr("cli.retry.usage"))
