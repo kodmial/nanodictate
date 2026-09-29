@@ -241,7 +241,7 @@ private extension Array {
         var out: [[Element]] = []
         var i = 0
         while i < count {
-            out.append(Array(self[i..<min(i + size, count)]))
+            out.append(Array(self[i..<Swift.min(i + size, count)]))
             i += size
         }
         return out
