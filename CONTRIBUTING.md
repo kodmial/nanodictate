@@ -3,8 +3,9 @@
 ## Сборка
 
 ```sh
-swift build                 # debug
-swift build -c release      # release
+scripts/build-rust-core.sh --release   # builds rust/target/release/libnanodictate_core.a first
+swift build -Xlinker rust/target/release/libnanodictate_core.a                 # debug
+swift build -c release -Xlinker rust/target/release/libnanodictate_core.a     # release
 ```
 
 Требуется Swift 5.7+, macOS 12+. Если `swift build` не парсит `Package.swift` (сломан CLT) — задай `SWIFT_TOOLCHAIN` (см. раздел `SWIFT_TOOLCHAIN` в README).
@@ -20,7 +21,8 @@ npm test   # build + node --test
 ## Тесты
 
 ```sh
-swift run NanoDictateCoreTests   # не `swift test` — таргет исполняемый
+scripts/build-rust-core.sh --release   # builds the Rust static archive first
+swift run -Xlinker rust/target/release/libnanodictate_core.a NanoDictateCoreTests   # not `swift test` — executable target
 bash scripts/test-release-policy.sh   # политика релизов release-pr.yml (чистый bash, где угодно)
 ```
 

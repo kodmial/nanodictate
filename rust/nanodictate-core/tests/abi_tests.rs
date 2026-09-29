@@ -182,9 +182,8 @@ fn vad_handle_lifecycle_and_realtime_ingress() {
         0
     );
     // Null buffer with nonzero count is an error, not UB.
-    // (Code-returning functions use positive nonzero error codes.)
-    assert_ne!(nd_vad_feed_samples(vad, std::ptr::null(), 8, 16000), 0);
-    assert_ne!(nd_vad_feed(std::ptr::null_mut(), 0.1, 0.1), 0);
+    assert!(nd_vad_feed_samples(vad, std::ptr::null(), 8, 16000) < 0);
+    assert!(nd_vad_feed(std::ptr::null_mut(), 0.1, 0.1) < 0);
     nd_vad_free(vad);
     nd_vad_free(std::ptr::null_mut());
 }
@@ -270,7 +269,7 @@ fn text_join_review_gate_cooldown_latch_through_abi() {
     assert_eq!(nd_review_decide(std::ptr::null(), 0, false), 0);
     assert_eq!(nd_should_drop_retry(0, 2, 2), 0);
     assert_eq!(nd_should_drop_retry(1, 1, 1), 1);
-    assert_ne!(nd_should_drop_retry(99, 1, 1), 0);
+    assert!(nd_should_drop_retry(99, 1, 1) < 0);
     assert_eq!(nd_overlay_should_hide(0), 1);
     assert_eq!(nd_overlay_should_hide(2), 0);
 

@@ -4,6 +4,7 @@
 // (include/nanodictate_core.h) as its public interface. This translation
 // unit forces the header to compile as C inside the SwiftPM build and
 // anchors the module. The Rust static library itself is linked by the
-// build script (scripts/build-rust-core.sh) via -L/-lnanodictate_core.
+// build script (scripts/build-rust-core.sh) by absolute archive path
+// (-Xlinker <root>/rust/target/<profile>/libnanodictate_core.a).
 
 #include "nanodictate_core.h"

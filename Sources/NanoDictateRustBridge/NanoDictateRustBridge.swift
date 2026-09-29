@@ -407,12 +407,12 @@ public final class RustSession {
   }
 
   public var isCaptureReady: Bool {
-    nd_session_is_capture_ready(handle) != 0
+    nd_session_is_capture_ready(handle) > 0
   }
 
   /// At most once per session, only after capture readiness.
   public var shouldEmitReadyCue: Bool {
-    nd_session_should_emit_ready_cue(handle) != 0
+    nd_session_should_emit_ready_cue(handle) > 0
   }
 
   public var state: UInt32 {

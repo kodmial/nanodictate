@@ -116,15 +116,24 @@ impl DictationSession {
                 }
             }
             SessionEvent::EngineFailed | SessionEvent::Cancelled => {
+                if self.state != DictationState::Recording {
+                    return;
+                }
                 self.ready_generation = None;
                 self.capture_ready_live = false;
                 self.state = DictationState::Idle;
             }
             SessionEvent::StopRequested => {
+                if self.state != DictationState::Recording {
+                    return;
+                }
                 self.capture_ready_live = false;
                 self.state = DictationState::Transcribing;
             }
             SessionEvent::TranscriptionDone => {
+                if self.state != DictationState::Transcribing {
+                    return;
+                }
                 self.capture_ready_live = false;
                 self.state = DictationState::Idle;
             }
@@ -330,6 +339,16 @@ mod tests {
         assert!(!s.is_capture_ready());
         assert!(!s.should_emit_ready_cue());
         assert_eq!(s.state(), DictationState::Idle);
+    }
+
+    #[test]
+    fn late_stop_after_cancel_stays_idle() {
+        let mut s = DictationSession::new();
+        let gen = s.start();
+        s.on_event(SessionEvent::Cancelled, gen);
+        s.on_event(SessionEvent::StopRequested, gen);
+        assert_eq!(s.state(), DictationState::Idle);
+        assert!(!s.is_capture_ready());
     }
 
     #[test]

@@ -422,13 +422,15 @@ uint64_t nd_session_start(struct NdSession *handle);
 int32_t nd_session_event(struct NdSession *handle, uint32_t event, uint64_t generation);
 
 /**
- * Live capture-readiness flag. Returns 1 when ready, 0 otherwise.
+ * Live capture-readiness flag. Returns 1 when ready, 0 otherwise,
+ * negative on error.
  */
 int32_t nd_session_is_capture_ready(struct NdSession *handle);
 
 /**
  * Whether the recording-ready cue may be emitted now (at most once per
- * session, only after readiness). Returns 1 to emit, 0 to suppress.
+ * session, only after readiness). Returns 1 to emit, 0 to suppress,
+ * negative on error.
  */
 int32_t nd_session_should_emit_ready_cue(struct NdSession *handle);
 
@@ -448,7 +450,8 @@ struct NdCooldown *nd_cooldown_new(double interval_secs);
 void nd_cooldown_free(struct NdCooldown *handle);
 
 /**
- * Cooldown check: 1 = show allowed (records `now`), 0 = suppressed.
+ * Cooldown check: 1 = show allowed (records `now`), 0 = suppressed,
+ * negative on error.
  */
 int32_t nd_cooldown_allow(struct NdCooldown *handle, double now_secs);
 
@@ -468,7 +471,7 @@ void nd_latch_free(struct NdLatch *handle);
 int32_t nd_latch_arm(struct NdLatch *handle);
 
 /**
- * One-shot take: 1 = post Enter, 0 = already consumed.
+ * One-shot take: 1 = post Enter, 0 = already consumed, negative on error.
  */
 int32_t nd_latch_consume(struct NdLatch *handle);
 

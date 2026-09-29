@@ -194,6 +194,8 @@ jobs:
         # Pin actions/checkout@v4 to a full commit SHA (CWE-829: mutable tag
         # could be swapped upstream; the job runs with a 'contents: read' token).
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
 
       - name: Install Swift
         # Pin swift-actions/setup-swift@v2 to a full commit SHA (peeled from the

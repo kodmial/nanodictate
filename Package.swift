@@ -52,7 +52,9 @@ let package = Package(
         // Компактный раннер тестов: на этой машине нет Xcode / XCTest.framework,
         // поэтому `swift test` физически не работает ("XCTest not available").
         // Исполняемый таргет прогоняет те же проверки и завершается с ненулевым
-        // кодом при первом упавшем тесте: `swift run NanoDictateCoreTests`.
+        // кодом при первом упавшем тесте: build the Rust archive first
+        // (`scripts/build-rust-core.sh`), then
+        // `swift run -Xlinker rust/target/release/libnanodictate_core.a NanoDictateCoreTests`.
         .executableTarget(
             name: "NanoDictateCoreTests",
             dependencies: ["NanoDictateCore", "AudioEngineGuard", "NanoDictateRustBridge"],

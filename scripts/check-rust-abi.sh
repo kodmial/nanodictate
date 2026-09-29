@@ -20,8 +20,8 @@ if ! command -v cbindgen >/dev/null 2>&1; then
   cargo install cbindgen --version "$PINNED_CBINDGEN" --locked
 fi
 
-SCRATCH="$REPO_ROOT/.opencode-tmp/abi-check"
-mkdir -p "$SCRATCH"
+mkdir -p "$REPO_ROOT/.opencode-tmp"
+SCRATCH="$(mktemp -d "$REPO_ROOT/.opencode-tmp/abi-check.XXXXXX")"
 trap 'rm -rf "$SCRATCH"' EXIT
 
 (

@@ -757,8 +757,8 @@ pub extern "C" fn nd_review_decide(
             ReviewDecision::Cancel => 0,
         })
     })) {
-        Ok(code) => code.unwrap_or_else(|code| code),
-        Err(_) => fail(ND_ERR_PANIC, "panic in nd_review_decide".to_string()),
+        Ok(code) => code.unwrap_or_else(|code: i32| -code),
+        Err(_) => -fail(ND_ERR_PANIC, "panic in nd_review_decide".to_string()),
     }
 }
 
@@ -773,8 +773,8 @@ pub extern "C" fn nd_should_drop_retry(state: u32, processing_session: u64, sess
             session,
         )))
     })) {
-        Ok(code) => code.unwrap_or_else(|code| code),
-        Err(_) => fail(ND_ERR_PANIC, "panic in nd_should_drop_retry".to_string()),
+        Ok(code) => code.unwrap_or_else(|code: i32| -code),
+        Err(_) => -fail(ND_ERR_PANIC, "panic in nd_should_drop_retry".to_string()),
     }
 }
 
@@ -785,8 +785,8 @@ pub extern "C" fn nd_overlay_should_hide(state: u32) -> i32 {
         let state = decode_state(state)?;
         Ok(i32::from(overlay_should_hide(state)))
     })) {
-        Ok(code) => code.unwrap_or_else(|code| code),
-        Err(_) => fail(ND_ERR_PANIC, "panic in nd_overlay_should_hide".to_string()),
+        Ok(code) => code.unwrap_or_else(|code: i32| -code),
+        Err(_) => -fail(ND_ERR_PANIC, "panic in nd_overlay_should_hide".to_string()),
     }
 }
 
@@ -809,8 +809,8 @@ pub extern "C" fn nd_mic_request_allowed(
             window_secs,
         )))
     })) {
-        Ok(code) => code.unwrap_or_else(|code| code),
-        Err(_) => fail(ND_ERR_PANIC, "panic in nd_mic_request_allowed".to_string()),
+        Ok(code) => code.unwrap_or_else(|code: i32| -code),
+        Err(_) => -fail(ND_ERR_PANIC, "panic in nd_mic_request_allowed".to_string()),
     }
 }
 
@@ -855,8 +855,8 @@ pub extern "C" fn nd_vad_feed(handle: *mut NdVad, rms: c_float, duration: c_doub
         let vad = with_handle(handle, "vad")?;
         Ok(i32::from(vad.inner.update(rms, duration)))
     })) {
-        Ok(code) => code.unwrap_or_else(|code| code),
-        Err(_) => fail(ND_ERR_PANIC, "panic in nd_vad_feed".to_string()),
+        Ok(code) => code.unwrap_or_else(|code: i32| -code),
+        Err(_) => -fail(ND_ERR_PANIC, "panic in nd_vad_feed".to_string()),
     }
 }
 
@@ -890,8 +890,8 @@ pub extern "C" fn nd_vad_feed_samples(
         let duration = samples.len() as f64 / f64::from(sample_rate);
         Ok(i32::from(vad.inner.update(rms, duration)))
     })) {
-        Ok(code) => code.unwrap_or_else(|code| code),
-        Err(_) => fail(ND_ERR_PANIC, "panic in nd_vad_feed_samples".to_string()),
+        Ok(code) => code.unwrap_or_else(|code: i32| -code),
+        Err(_) => -fail(ND_ERR_PANIC, "panic in nd_vad_feed_samples".to_string()),
     }
 }
 
@@ -1011,8 +1011,8 @@ pub extern "C" fn nd_autostop_feed(
         };
         Ok(i32::from(detector.inner.feed(rms, duration, hint)))
     })) {
-        Ok(code) => code.unwrap_or_else(|code| code),
-        Err(_) => fail(ND_ERR_PANIC, "panic in nd_autostop_feed".to_string()),
+        Ok(code) => code.unwrap_or_else(|code: i32| -code),
+        Err(_) => -fail(ND_ERR_PANIC, "panic in nd_autostop_feed".to_string()),
     }
 }
 
@@ -1076,15 +1076,16 @@ pub extern "C" fn nd_session_event(handle: *mut NdSession, event: u32, generatio
     }
 }
 
-/// Live capture-readiness flag. Returns 1 when ready, 0 otherwise.
+/// Live capture-readiness flag. Returns 1 when ready, 0 otherwise,
+/// negative on error.
 #[no_mangle]
 pub extern "C" fn nd_session_is_capture_ready(handle: *mut NdSession) -> i32 {
     match catch_unwind(AssertUnwindSafe(|| {
         let session = with_handle(handle, "session")?;
         Ok(i32::from(session.inner.is_capture_ready()))
     })) {
-        Ok(code) => code.unwrap_or_else(|code| code),
-        Err(_) => fail(
+        Ok(code) => code.unwrap_or_else(|code: i32| -code),
+        Err(_) => -fail(
             ND_ERR_PANIC,
             "panic in nd_session_is_capture_ready".to_string(),
         ),
@@ -1092,15 +1093,16 @@ pub extern "C" fn nd_session_is_capture_ready(handle: *mut NdSession) -> i32 {
 }
 
 /// Whether the recording-ready cue may be emitted now (at most once per
-/// session, only after readiness). Returns 1 to emit, 0 to suppress.
+/// session, only after readiness). Returns 1 to emit, 0 to suppress,
+/// negative on error.
 #[no_mangle]
 pub extern "C" fn nd_session_should_emit_ready_cue(handle: *mut NdSession) -> i32 {
     match catch_unwind(AssertUnwindSafe(|| {
         let session = with_handle(handle, "session")?;
         Ok(i32::from(session.inner.should_emit_ready_cue()))
     })) {
-        Ok(code) => code.unwrap_or_else(|code| code),
-        Err(_) => fail(
+        Ok(code) => code.unwrap_or_else(|code: i32| -code),
+        Err(_) => -fail(
             ND_ERR_PANIC,
             "panic in nd_session_should_emit_ready_cue".to_string(),
         ),
@@ -1155,15 +1157,16 @@ pub extern "C" fn nd_cooldown_free(handle: *mut NdCooldown) {
     }));
 }
 
-/// Cooldown check: 1 = show allowed (records `now`), 0 = suppressed.
+/// Cooldown check: 1 = show allowed (records `now`), 0 = suppressed,
+/// negative on error.
 #[no_mangle]
 pub extern "C" fn nd_cooldown_allow(handle: *mut NdCooldown, now_secs: c_double) -> i32 {
     match catch_unwind(AssertUnwindSafe(|| {
         let cooldown = with_handle(handle, "cooldown")?;
         Ok(i32::from(cooldown.inner.allow(now_secs)))
     })) {
-        Ok(code) => code.unwrap_or_else(|code| code),
-        Err(_) => fail(ND_ERR_PANIC, "panic in nd_cooldown_allow".to_string()),
+        Ok(code) => code.unwrap_or_else(|code: i32| -code),
+        Err(_) => -fail(ND_ERR_PANIC, "panic in nd_cooldown_allow".to_string()),
     }
 }
 
@@ -1208,15 +1211,15 @@ pub extern "C" fn nd_latch_arm(handle: *mut NdLatch) -> i32 {
     }
 }
 
-/// One-shot take: 1 = post Enter, 0 = already consumed.
+/// One-shot take: 1 = post Enter, 0 = already consumed, negative on error.
 #[no_mangle]
 pub extern "C" fn nd_latch_consume(handle: *mut NdLatch) -> i32 {
     match catch_unwind(AssertUnwindSafe(|| {
         let latch = with_handle(handle, "latch")?;
         Ok(i32::from(latch.inner.consume()))
     })) {
-        Ok(code) => code.unwrap_or_else(|code| code),
-        Err(_) => fail(ND_ERR_PANIC, "panic in nd_latch_consume".to_string()),
+        Ok(code) => code.unwrap_or_else(|code: i32| -code),
+        Err(_) => -fail(ND_ERR_PANIC, "panic in nd_latch_consume".to_string()),
     }
 }
 

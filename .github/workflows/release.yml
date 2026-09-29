@@ -455,6 +455,8 @@ jobs:
       - name: Checkout
         # actions/checkout@v4 = 11d5960a326750d5838078e36cf38b85af677262
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
 
       - name: Install Swift
         uses: swift-actions/setup-swift@7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a
