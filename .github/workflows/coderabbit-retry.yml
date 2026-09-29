@@ -20,7 +20,11 @@ permissions: {}
 # exactly one controller deciding which PR gets the next review slot.
 concurrency:
   group: nanodictate-coderabbit-rate-limit-controller
-  cancel-in-progress: true
+  # This controller deliberately sleeps until the next shared quota slot.
+  # Cancelling it on every wake-up resets that timer and can starve the queue
+  # forever when status/review events keep arriving. Keep one runner alive;
+  # GitHub concurrency retains at most one pending successor behind it.
+  cancel-in-progress: false
 
 jobs:
   controller:
@@ -370,6 +374,7 @@ jobs:
                   }
                 }
 
+                let fullReviewCount = 0;
                 for (const review of reviews) {
                   if (
                     !review.user?.login?.startsWith('coderabbitai') ||
@@ -391,6 +396,7 @@ jobs:
                     );
                   if (!fullReview) continue;
 
+                  fullReviewCount += 1;
                   latestCompletedReviewAt = Math.max(
                     latestCompletedReviewAt,
                     new Date(review.submitted_at).getTime()
@@ -484,6 +490,7 @@ jobs:
                   headSha: pr.head.sha,
                   dueAt,
                   kind,
+                  fullReviewCount,
                   ...priority,
                 });
               }
@@ -510,8 +517,17 @@ jobs:
             }
 
             function candidateOrder(a, b) {
+              // Prevent starvation: every review-ready PR gets its first full
+              // review before another PR consumes a second (or later) shared
+              // quota slot. Priority still orders PRs within the same review
+              // generation, so P0 beats P1/P2 for first reviews and again for
+              // subsequent re-reviews.
+              const aGeneration = a.fullReviewCount === 0 ? 0 : 1;
+              const bGeneration = b.fullReviewCount === 0 ? 0 : 1;
               return (
+                aGeneration - bGeneration ||
                 a.rank - b.rank ||
+                a.fullReviewCount - b.fullReviewCount ||
                 a.issueNumber - b.issueNumber ||
                 a.prNumber - b.prNumber
               );
@@ -545,7 +561,7 @@ jobs:
               const queue = [...state.candidates]
                 .sort(candidateOrder)
                 .map(candidate =>
-                  `#${candidate.prNumber}/issue#${candidate.issueNumber === Number.MAX_SAFE_INTEGER ? '?' : candidate.issueNumber} ${candidate.priority} due=${new Date(candidate.effectiveDueAt).toISOString()}`
+                  `#${candidate.prNumber}/issue#${candidate.issueNumber === Number.MAX_SAFE_INTEGER ? '?' : candidate.issueNumber} ${candidate.priority} reviews=${candidate.fullReviewCount} due=${new Date(candidate.effectiveDueAt).toISOString()}`
                 )
                 .join(', ');
 
