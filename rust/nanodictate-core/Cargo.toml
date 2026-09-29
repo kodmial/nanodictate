@@ -8,7 +8,3 @@ license = "MIT"
 [lib]
 name = "nanodictate_core"
 crate-type = ["cdylib", "staticlib", "rlib"]
-
-[profile.release]
-lto = false
-panic = "unwind"

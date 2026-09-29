@@ -44,6 +44,17 @@ if [[ "$CHECK_HEADER" == 1 ]]; then
   "$REPO_ROOT/scripts/check-rust-abi.sh"
 fi
 
-LIB_DIR="$REPO_ROOT/rust/target/$PROFILE"
+# Cargo resolves a relative CARGO_TARGET_DIR against the cwd cargo runs in
+# (rust/, after the cd below), so resolve it the same way for reporting.
+if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
+  if [[ "$CARGO_TARGET_DIR" = /* ]]; then
+    TARGET_DIR="$CARGO_TARGET_DIR"
+  else
+    TARGET_DIR="$REPO_ROOT/rust/$CARGO_TARGET_DIR"
+  fi
+else
+  TARGET_DIR="$REPO_ROOT/rust/target"
+fi
+LIB_DIR="$TARGET_DIR/$PROFILE"
 echo "Rust engine built: $LIB_DIR/libnanodictate_core.a"
 echo "Link with: swift build -Xlinker $LIB_DIR/libnanodictate_core.a"

@@ -1,3 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["nanodictate-core"]
+
+[profile.release]
+lto = false
+# The C ABI relies on catch_unwind; never switch to "abort".
+panic = "unwind"

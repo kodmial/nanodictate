@@ -164,7 +164,10 @@ fn str_from(ptr: *const c_char, len: usize) -> Result<&'static str, i32> {
 fn alloc_string(text: &str) -> *mut c_char {
     match CString::new(text) {
         Ok(owned) => owned.into_raw(),
-        Err(_) => std::ptr::null_mut(),
+        Err(_) => {
+            set_last_error("output contains an interior NUL byte".to_string());
+            std::ptr::null_mut()
+        }
     }
 }
 

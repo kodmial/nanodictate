@@ -18,7 +18,7 @@ import {
 } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import {
   ACCESSIBILITY_STAMP_KEY,
   AGENT_BUNDLE_ID,
@@ -283,7 +283,16 @@ const NANODICTATE_SYMLINK = "/usr/local/bin/nanodictate";
  * path and break packaged binaries on other hosts).
  */
 export function rustStaticArchive(): string {
-  return join(PROJECT_ROOT, "rust", "target", "release", "libnanodictate_core.a");
+  // Cargo resolves a relative CARGO_TARGET_DIR against the directory cargo
+  // runs in (rust/, via scripts/build-rust-core.sh), so mirror that here.
+  const override = process.env.CARGO_TARGET_DIR?.trim();
+  const targetDir =
+    override && override.length > 0
+      ? isAbsolute(override)
+        ? override
+        : join(PROJECT_ROOT, "rust", override)
+      : join(PROJECT_ROOT, "rust", "target");
+  return join(targetDir, "release", "libnanodictate_core.a");
 }
 
 export interface SymlinkResult {

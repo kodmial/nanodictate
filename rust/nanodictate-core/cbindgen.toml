@@ -6,7 +6,8 @@
 #
 #   cbindgen --config rust/nanodictate-core/cbindgen.toml \
 #            --crate nanodictate-core \
-#            --output Sources/NanoDictateRustFFI/include/nanodictate_core.h
+#            --output Sources/NanoDictateRustFFI/include/nanodictate_core.h \
+#            rust/nanodictate-core
 #
 # CI fails when the committed header differs from a fresh generation
 # (see scripts/check-rust-abi.sh).
