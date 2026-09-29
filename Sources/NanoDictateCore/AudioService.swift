@@ -1472,7 +1472,7 @@ public final class AudioService {
   /// and tests. No allocation; order-preserving.
   static func clipFloatToInt16(_ sample: Float) -> Int16 {
     if sample > 1.0 { return Int16(32767) }
-    if sample < -1.0 { return Int16(-32768) }
+    if sample <= -1.0 { return Int16(-32768) }
     return Int16(sample * 32767)
   }
 
