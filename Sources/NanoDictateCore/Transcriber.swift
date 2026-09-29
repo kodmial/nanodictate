@@ -365,7 +365,14 @@ public final class Transcriber {
   /// - Parameter prompt: optional context for Whisper-compatible APIs
   ///   (`prompt` form-data field): text of already-recognized segments in
   ///   stepwise dictation. Default nil — old single-request path unchanged.
-  public func transcribe(wav: Data, filename: String = "audio.wav", prompt: String? = nil)
+  /// - Parameter needsWordTimestamps: request `verbose_json` + word
+  ///   granularities where the model profile supports them (chunked/live
+  ///   segment overlap stitching). Default false: normal push-to-talk sends
+  ///   one complete utterance per request without timestamps.
+  public func transcribe(
+    wav: Data, filename: String = "audio.wav", prompt: String? = nil,
+    needsWordTimestamps: Bool = false
+  )
     async throws -> TranscriptionResult
   {  // swiftlint:disable:this opening_brace
     if logLevel.lowercased() == "debug" {
@@ -391,18 +398,23 @@ public final class Transcriber {
           "STT: no adapterID — using openAICompatible with configured baseURL", level: "info")
         return try await transcribeViaAdapter(
           adapterID: STTAdapterID.openAICompatible.rawValue,
-          wav: wav, filename: filename, prompt: prompt)
+          wav: wav, filename: filename, prompt: prompt,
+          needsWordTimestamps: needsWordTimestamps)
       }
       Logger.log("STT error: empty adapterID — transcribe требует провайдер", level: "error")
       throw TranscribeError.network("No STT provider configured")
     }
     return try await transcribeViaAdapter(
-      adapterID: adapterID, wav: wav, filename: filename, prompt: prompt)
+      adapterID: adapterID, wav: wav, filename: filename, prompt: prompt,
+      needsWordTimestamps: needsWordTimestamps)
   }
 
   // MARK: - Adapter path
 
-  private func transcribeViaAdapter(adapterID: String, wav: Data, filename: String, prompt: String?)
+  private func transcribeViaAdapter(
+    adapterID: String, wav: Data, filename: String, prompt: String?,
+    needsWordTimestamps: Bool = false
+  )
     async throws -> TranscriptionResult
   {  // swiftlint:disable:this opening_brace
     // Preflight BEFORE the request: no network — don't waste a request on
@@ -420,7 +432,8 @@ public final class Transcriber {
       language: language,
       wav: wav,
       filename: filename,
-      prompt: prompt
+      prompt: prompt,
+      needsWordTimestamps: needsWordTimestamps
     )
     guard let url = spec.url else {
       Logger.log("STT error: invalid base URL", level: "error")
@@ -568,7 +581,12 @@ extension Transcriber {
 
     var fields: [(name: String, value: String)] = [(name: "model", value: model)]
     if !language.isEmpty {
-      fields.append((name: "language", value: language))
+      // Multi-hint profiles (gpt-transcribe) send the hint as languages[],
+      // never as singular language — the dump mirrors the real request.
+      let hintName =
+        ProviderRequestBuilder.profile(adapterID: adapterID ?? "", model: model).capabilities
+        .languageHint == .multi ? "languages[]" : "language"
+      fields.append((name: hintName, value: language))
     }
     if let prompt = context.prompt, !prompt.isEmpty {
       fields.append(

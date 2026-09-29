@@ -20,14 +20,22 @@ final class STTCapabilitiesTests: XCTestCase {
 
     @objc func testOpenAIWhisperVsModernModelCapabilitiesDiffer() {
         let whisper = STTModelRegistry.resolve(adapterID: "openai", model: "whisper-1")
-        let modern = STTModelRegistry.resolve(adapterID: "openai", model: "gpt-4o-transcribe")
+        let modern = STTModelRegistry.resolve(adapterID: "openai", model: "gpt-transcribe")
         XCTAssertTrue(whisper.capabilities.supportsVerboseJSON)
         XCTAssertTrue(whisper.capabilities.supportsWordTimestamps)
         XCTAssertTrue(whisper.capabilities.supportsTemperature)
+        XCTAssertEqual(whisper.capabilities.languageHint, .single)
         XCTAssertFalse(modern.capabilities.supportsVerboseJSON)
         XCTAssertFalse(modern.capabilities.supportsWordTimestamps)
         XCTAssertFalse(modern.capabilities.supportsTemperature)
+        XCTAssertEqual(modern.capabilities.languageHint, .multi)
         XCTAssertTrue(modern.capabilities.supportsPrompt)
+    }
+
+    @objc func testOpenAIGptTranscribeSnapshotPrefixMatchesModernProfile() {
+        let snapshot = STTModelRegistry.resolve(adapterID: "openai", model: "gpt-transcribe-2026-01-01")
+        XCTAssertFalse(snapshot.capabilities.supportsVerboseJSON)
+        XCTAssertEqual(snapshot.capabilities.languageHint, .multi)
     }
 
     @objc func testOpenAIMiniTranscribeMatchesModernProfile() {
@@ -59,9 +67,20 @@ final class STTCapabilitiesTests: XCTestCase {
     // MARK: - Request construction per model (same provider family)
 
     @objc func testOpenAIWhisperPlanRequestsVerboseAndWordTimestamps() {
-        let spec = ProviderRequestBuilder.plan(
+        // Legacy whisper-1: timestamps only on explicit processing-mode request.
+        let plain = ProviderRequestBuilder.plan(
             adapterID: "openai", baseURL: "", model: "whisper-1", apiKey: "k",
             language: "ru", wav: wav)
+        guard let plainText = bodyText(plain) else {
+            XCTFail("openai whisper-1 must be multipart")
+            return
+        }
+        XCTAssertFalse(plainText.contains("response_format"))
+        XCTAssertFalse(plainText.contains("timestamp_granularities"))
+
+        let spec = ProviderRequestBuilder.plan(
+            adapterID: "openai", baseURL: "", model: "whisper-1", apiKey: "k",
+            language: "ru", wav: wav, needsWordTimestamps: true)
         guard let text = bodyText(spec) else {
             XCTFail("openai whisper-1 must be multipart")
             return
@@ -70,7 +89,43 @@ final class STTCapabilitiesTests: XCTestCase {
         XCTAssertTrue(text.contains("name=\"timestamp_granularities[]\"\r\n\r\nword\r\n"))
     }
 
-    @objc func testOpenAIModernPlanOmitsUnsupportedParams() {
+    @objc func testOpenAIGptTranscribePlanUsesLanguagesArray() {
+        // Recommended profile: languages[] instead of language, prompt kept,
+        // no temperature/verbose/timestamps even when timestamps requested.
+        let spec = ProviderRequestBuilder.plan(
+            adapterID: "openai", baseURL: "", model: "gpt-transcribe", apiKey: "k",
+            language: "ru", wav: wav, prompt: "context",
+            needsWordTimestamps: true,
+            batchParams: BatchSTTParams(prompt: "chained", temperature: 0))
+        guard let text = bodyText(spec) else {
+            XCTFail("openai gpt-transcribe must be multipart")
+            return
+        }
+        XCTAssertTrue(text.contains("name=\"model\"\r\n\r\ngpt-transcribe\r\n"))
+        XCTAssertTrue(text.contains("name=\"languages[]\"\r\n\r\nru\r\n"))
+        XCTAssertFalse(text.contains("name=\"language\"\r\n"))
+        XCTAssertTrue(text.contains("name=\"prompt\"\r\n\r\nchained\r\n"))
+        XCTAssertFalse(text.contains("response_format"))
+        XCTAssertFalse(text.contains("timestamp_granularities"))
+        XCTAssertFalse(text.contains("name=\"temperature\""))
+    }
+
+    @objc func testOpenAIGptTranscribeOmitsEmptyLanguageHint() {
+        let spec = ProviderRequestBuilder.plan(
+            adapterID: "openai", baseURL: "", model: "", apiKey: "k",
+            language: "", wav: wav)
+        guard let text = bodyText(spec) else {
+            XCTFail("openai default must be multipart")
+            return
+        }
+        XCTAssertTrue(text.contains("gpt-transcribe"), "empty model resolves to the modern default")
+        XCTAssertFalse(text.contains("languages[]"))
+        XCTAssertFalse(text.contains("name=\"language\""))
+    }
+
+    @objc func testOpenAIGpt4oFamilyKeepsLegacyModernProfile() {
+        // Deprecated gpt-4o family: single language hint, no temperature,
+        // no verbose/timestamps — unchanged compatibility behavior.
         let spec = ProviderRequestBuilder.plan(
             adapterID: "openai", baseURL: "", model: "gpt-4o-transcribe", apiKey: "k",
             language: "ru", wav: wav, prompt: "context",
@@ -90,10 +145,16 @@ final class STTCapabilitiesTests: XCTestCase {
         XCTAssertTrue(text.contains("name=\"language\""))
     }
 
+    @objc func testOpenAIDefaultModelIsModernTranscribe() {
+        XCTAssertEqual(ProviderRequestBuilder.resolveModel("", for: "openai"), "gpt-transcribe")
+        let profile = ProviderRequestBuilder.profile(adapterID: "openai", model: "")
+        XCTAssertEqual(profile.capabilities.languageHint, .multi)
+    }
+
     @objc func testGroqPlanVerboseWithoutGranularities() {
         let spec = ProviderRequestBuilder.plan(
             adapterID: "groq", baseURL: "", model: "whisper-large-v3", apiKey: "k",
-            language: "", wav: wav)
+            language: "", wav: wav, needsWordTimestamps: true)
         guard let text = bodyText(spec) else {
             XCTFail("groq must be multipart")
             return
@@ -167,8 +228,11 @@ final class STTCapabilitiesTests: XCTestCase {
             for: "openai", model: "whisper-1", params: BatchSTTParams())
         XCTAssertEqual(whisper?.temperature, 0)
         let modern = BatchStableMultipartFields.stableFields(
-            for: "openai", model: "gpt-4o-transcribe", params: BatchSTTParams())
+            for: "openai", model: "gpt-transcribe", params: BatchSTTParams())
         XCTAssertNil(modern?.temperature, "modern profile sends no temperature")
+        let gpt4o = BatchStableMultipartFields.stableFields(
+            for: "openai", model: "gpt-4o-transcribe", params: BatchSTTParams())
+        XCTAssertNil(gpt4o?.temperature, "deprecated gpt-4o profile sends no temperature")
     }
 
     @objc func testStableFieldsGroqKeepsVadFilter() {
@@ -188,6 +252,7 @@ final class STTCapabilitiesTests: XCTestCase {
     @objc func testAudioProfilesAreMono16kWav() {
         for (adapter, model) in [
             ("openai", "whisper-1"),
+            ("openai", "gpt-transcribe"),
             ("openai", "gpt-4o-transcribe"),
             ("groq", "whisper-large-v3"),
             ("cloudflare", ""),
@@ -212,7 +277,8 @@ final class STTCapabilitiesTests: XCTestCase {
 
     @objc func testNoBuiltInProfileUsesStreaming() {
         for (adapter, model) in [
-            ("openai", "whisper-1"), ("openai", "gpt-4o-transcribe"),
+            ("openai", "whisper-1"), ("openai", "gpt-transcribe"),
+            ("openai", "gpt-4o-transcribe"),
             ("groq", "whisper-large-v3"), ("cloudflare", ""),
             ("airubiz", "gigaam-v3-ctc-sherpa"), ("custom", "m"),
         ] {

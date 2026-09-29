@@ -48,7 +48,7 @@ final class STTAdapterTests: XCTestCase {
         XCTAssertEqual(STTAdapterID.cloudflare.defaultBaseURL, "")
         XCTAssertEqual(STTAdapterID.openAICompatible.defaultBaseURL, "",
                        "ручные провайдеры без дефолтного endpoint — base_url обязателен")
-        XCTAssertEqual(STTAdapterID.openai.defaultModel, "whisper-1")
+        XCTAssertEqual(STTAdapterID.openai.defaultModel, "gpt-transcribe")
         XCTAssertEqual(STTAdapterID.groq.defaultModel, "whisper-large-v3")
         XCTAssertEqual(STTAdapterID.cloudflare.defaultModel, "")
         XCTAssertEqual(STTAdapterID.openAICompatible.defaultModel, "")
@@ -58,7 +58,7 @@ final class STTAdapterTests: XCTestCase {
         XCTAssertEqual(ProviderRequestBuilder.resolveBaseURL("", for: "groq"),
                        "https://api.groq.com/openai/v1/audio/transcriptions")
         XCTAssertEqual(ProviderRequestBuilder.resolveBaseURL("https://my.api/v1", for: "groq"), "https://my.api/v1")
-        XCTAssertEqual(ProviderRequestBuilder.resolveModel("", for: "openai"), "whisper-1")
+        XCTAssertEqual(ProviderRequestBuilder.resolveModel("", for: "openai"), "gpt-transcribe")
         XCTAssertEqual(ProviderRequestBuilder.resolveModel("my-model", for: "groq"), "my-model")
         // Cloudflare has no default — model lives in the URL.
         XCTAssertEqual(ProviderRequestBuilder.resolveModel("", for: "cloudflare"), "")
@@ -70,6 +70,8 @@ final class STTAdapterTests: XCTestCase {
     // MARK: - OpenAI-совместимые адаптеры (openai/groq)
 
     @objc func testOpenAIPlan() {
+        // Default OpenAI model is the modern gpt-transcribe profile: plain
+        // JSON transcription, language hint as languages[], no timestamps.
         let spec = ProviderRequestBuilder.plan(
             adapterID: "openai", baseURL: "", model: "", apiKey: "sk-openai",
             language: "ru", wav: wav, filename: "file.wav", prompt: "контекст")
@@ -82,12 +84,82 @@ final class STTAdapterTests: XCTestCase {
             let text = String(data: data, encoding: .utf8)!
             XCTAssertTrue(text.contains("name=\"file\"; filename=\"file.wav\""))
             XCTAssertTrue(text.contains("name=\"model\""))
-            XCTAssertTrue(text.contains("whisper-1"))
-            XCTAssertTrue(text.contains("name=\"language\""))
+            XCTAssertTrue(text.contains("gpt-transcribe"))
+            XCTAssertTrue(text.contains("name=\"languages[]\"\r\n\r\nru\r\n"),
+                          "gpt-transcribe receives languages[], not singular language")
+            XCTAssertFalse(text.contains("name=\"language\"\r\n"),
+                           "gpt-transcribe must not receive singular language (API rejects both)")
             XCTAssertTrue(text.contains("name=\"prompt\""))
+            XCTAssertFalse(text.contains("response_format"),
+                           "normal single-request mode sends no timestamps")
+            XCTAssertFalse(text.contains("timestamp_granularities"),
+                           "normal single-request mode sends no timestamps")
         case .rawAudio:
             XCTFail("openai должен быть multipart")
         }
+    }
+
+    @objc func testOpenAILegacyWhisperPlanDefaultsToPlainJSON() {
+        // Explicit whisper-1 compatibility path: plain JSON by default,
+        // verbose_json + word granularities only on explicit request.
+        let plain = ProviderRequestBuilder.plan(
+            adapterID: "openai", baseURL: "", model: "whisper-1", apiKey: "sk-openai",
+            language: "ru", wav: wav, filename: "file.wav", prompt: "контекст")
+        guard case .multipart(let plainData, _) = plain.body else {
+            XCTFail("openai должен быть multipart")
+            return
+        }
+        let plainText = String(data: plainData, encoding: .utf8)!
+        XCTAssertTrue(plainText.contains("name=\"model\"\r\n\r\nwhisper-1\r\n"))
+        XCTAssertTrue(plainText.contains("name=\"language\"\r\n\r\nru\r\n"))
+        XCTAssertFalse(plainText.contains("response_format"))
+        XCTAssertFalse(plainText.contains("timestamp_granularities"))
+
+        let verbose = ProviderRequestBuilder.plan(
+            adapterID: "openai", baseURL: "", model: "whisper-1", apiKey: "sk-openai",
+            language: "ru", wav: wav, filename: "file.wav", prompt: "контекст",
+            needsWordTimestamps: true)
+        guard case .multipart(let verboseData, _) = verbose.body else {
+            XCTFail("openai должен быть multipart")
+            return
+        }
+        let verboseText = String(data: verboseData, encoding: .utf8)!
+        XCTAssertTrue(verboseText.contains("name=\"response_format\"\r\n\r\nverbose_json\r\n"))
+        XCTAssertTrue(verboseText.contains("name=\"timestamp_granularities[]\"\r\n\r\nword\r\n"))
+    }
+
+    @objc func testOpenAIModernPlanOmitsUnsupportedParams() {
+        // gpt-transcribe: prompt + languages[] only; never temperature,
+        // verbose_json, granularities, or singular language.
+        let spec = ProviderRequestBuilder.plan(
+            adapterID: "openai", baseURL: "", model: "gpt-transcribe", apiKey: "k",
+            language: "ru", wav: wav, prompt: "context",
+            needsWordTimestamps: true,
+            batchParams: BatchSTTParams(prompt: "chained", temperature: 0))
+        guard case .multipart(let data, _) = spec.body else {
+            XCTFail("openai modern model must be multipart")
+            return
+        }
+        let text = String(data: data, encoding: .utf8)!
+        XCTAssertFalse(text.contains("response_format"),
+                       "modern OpenAI model must not receive verbose_json")
+        XCTAssertFalse(text.contains("timestamp_granularities"),
+                       "modern OpenAI model must not receive word granularities")
+        XCTAssertFalse(text.contains("name=\"temperature\""),
+                       "modern OpenAI model must not receive temperature")
+        XCTAssertFalse(text.contains("name=\"language\"\r\n"),
+                       "gpt-transcribe must not receive singular language")
+        XCTAssertTrue(text.contains("name=\"languages[]\"\r\n\r\nru\r\n"))
+        XCTAssertTrue(text.contains("name=\"prompt\""),
+                      "prompt is still supported by the modern profile")
+    }
+
+    @objc func testOpenAIGptTranscribeResponseParsing() throws {
+        // Flat text extraction ignores the extra `languages` metadata the
+        // modern model returns alongside `text`.
+        let body = Data(#"{"text":"hello world","languages":[{"code":"en"}]}"#.utf8)
+        let text = try ProviderRequestBuilder.extractText(from: body, path: nil)
+        XCTAssertEqual(text, "hello world")
     }
 
     @objc func testGroqPlan() {
@@ -101,13 +173,29 @@ final class STTAdapterTests: XCTestCase {
             return
         }
         let text = String(data: data, encoding: .utf8)!
-        // HTTP 400 fix: Groq wants verbose_json, without timestamp_granularities[].
-        XCTAssertTrue(text.contains("name=\"response_format\"\r\n\r\nverbose_json\r\n"),
-                      "verbose_json запрашивается (Groq поддерживает)")
+        // Normal single-request mode: plain transcription, no timestamps.
+        XCTAssertFalse(text.contains("response_format"),
+                       "word timestamps require an explicit processing-mode request")
         XCTAssertFalse(text.contains("timestamp_granularities"),
                        "Groq отвергает timestamp_granularities[] (HTTP 400) — не шлём")
         XCTAssertFalse(text.contains("name=\"language\""),
                        "пустой language — поле language в запрос НЕ уходит (авто-детект Whisper)")
+    }
+
+    @objc func testGroqPlanWithTimestampsRequestsVerboseWithoutGranularities() {
+        // HTTP 400 fix: Groq wants verbose_json, without timestamp_granularities[].
+        let spec = ProviderRequestBuilder.plan(
+            adapterID: "groq", baseURL: "", model: "", apiKey: "sk-groq",
+            language: "", wav: wav, needsWordTimestamps: true)
+        guard case .multipart(let data, _) = spec.body else {
+            XCTFail("groq — multipart")
+            return
+        }
+        let text = String(data: data, encoding: .utf8)!
+        XCTAssertTrue(text.contains("name=\"response_format\"\r\n\r\nverbose_json\r\n"),
+                      "verbose_json запрашивается (Groq поддерживает)")
+        XCTAssertFalse(text.contains("timestamp_granularities"),
+                       "Groq отвергает timestamp_granularities[] (HTTP 400) — не шлём")
     }
 
     // MARK: - Не задан language → языковой параметр в запрос не попадает
@@ -342,9 +430,21 @@ final class STTAdapterTests: XCTestCase {
     // MARK: - Word-таймстампы (verbose_json / cloudflare words)
 
     @objc func testOpenAIPlanRequestsVerboseJSON() {
-        let spec = ProviderRequestBuilder.plan(
-            adapterID: "openai", baseURL: "", model: "", apiKey: "sk-openai",
+        // Legacy whisper-1 requests verbose_json only when the processing
+        // mode requires word timestamps (chunked/live segments).
+        let plain = ProviderRequestBuilder.plan(
+            adapterID: "openai", baseURL: "", model: "whisper-1", apiKey: "sk-openai",
             language: "ru", wav: wav, filename: "file.wav", prompt: "контекст")
+        guard case .multipart(let plainData, _) = plain.body else {
+            XCTFail("openai должен быть multipart")
+            return
+        }
+        XCTAssertFalse(String(data: plainData, encoding: .utf8)!.contains("response_format"))
+
+        let spec = ProviderRequestBuilder.plan(
+            adapterID: "openai", baseURL: "", model: "whisper-1", apiKey: "sk-openai",
+            language: "ru", wav: wav, filename: "file.wav", prompt: "контекст",
+            needsWordTimestamps: true)
         guard case .multipart(let data, _) = spec.body else {
             XCTFail("openai должен быть multipart")
             return

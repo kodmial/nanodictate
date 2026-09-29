@@ -34,7 +34,10 @@ public enum STTAdapterID: String, Equatable {
 
   public var defaultModel: String {
     switch self {
-    case .openai: return "whisper-1"
+    // Recommended high-accuracy batch transcription model (verified against
+    // the official transcription guide). Explicit `whisper-1` remains a
+    // compatibility path; empty config resolves here.
+    case .openai: return "gpt-transcribe"
     case .groq: return "whisper-large-v3"
     // Cloudflare: model in Workers AI URL, no separate default.
     case .cloudflare, .openAICompatible: return ""
@@ -117,8 +120,14 @@ public enum ProviderRequestBuilder {
   ///     OpenAI-compatible format.
   ///   - baseURL/model/apiKey: section fields; empty baseURL/model resolve
   ///     to adapter defaults here (single point).
-  ///   - language: language code (OpenAI-compatible: form field `language`).
+  ///   - language: language code (single-hint profiles: form field `language`;
+  ///     multi-hint profiles such as `gpt-transcribe`: mapped to a single
+  ///     `languages[]` entry; `none` profiles: never sent).
   ///   - wav/filename/prompt: audio and optional context (multipart fields).
+  ///   - needsWordTimestamps: request `verbose_json` + word granularities
+  ///     where the concrete profile supports them (chunked/live segment
+  ///     overlap stitching). Default false: normal single-request
+  ///     push-to-talk sends plain transcription without timestamps.
   ///   - batchParams: stable-transcription batch params (contextual prompt
   ///     chaining + temperature + stable fields). nil = batch path unused
   ///     (stepwise dictation): byte-identical behavior.
@@ -132,6 +141,7 @@ public enum ProviderRequestBuilder {
     wav: Data,
     filename: String = "audio.wav",
     prompt: String? = nil,
+    needsWordTimestamps: Bool = false,
     batchParams: BatchSTTParams? = nil
   ) -> STTRequestSpec {
     // Empty config baseURL/model resolve to adapter defaults; re-resolve of
@@ -144,9 +154,22 @@ public enum ProviderRequestBuilder {
     let profile = STTModelRegistry.resolve(adapterID: adapterID, model: resolvedModel)
     let caps = profile.capabilities
     // Batch chaining prompt wins over explicit; gated by prompt support.
-    // Language hint gated by languageHint mode (none — never sent).
+    // Language hint routing: none — never sent; single — `language` field;
+    // multi (gpt-transcribe) — `languages[]` array (never both).
     let effectivePrompt = caps.supportsPrompt ? (batchParams?.prompt ?? prompt) : nil
-    let effectiveLanguage = caps.languageHint == .none ? "" : language
+    let effectiveLanguage: String
+    let effectiveLanguages: [String]
+    switch caps.languageHint {
+    case .none:
+      effectiveLanguage = ""
+      effectiveLanguages = []
+    case .single:
+      effectiveLanguage = language
+      effectiveLanguages = []
+    case .multi:
+      effectiveLanguage = ""
+      effectiveLanguages = language.isEmpty ? [] : [language]
+    }
     let stable = BatchStableMultipartFields.stableFields(
       for: adapterID, model: resolvedModel, params: batchParams)
     switch caps.transport {
@@ -159,9 +182,11 @@ public enum ProviderRequestBuilder {
         model: resolvedModel,
         apiKey: apiKey,
         language: effectiveLanguage,
+        languages: effectiveLanguages,
         wav: wav,
         filename: filename,
         prompt: effectivePrompt,
+        needsWordTimestamps: needsWordTimestamps,
         stable: stable,
         capabilities: caps
       )
@@ -174,9 +199,11 @@ public enum ProviderRequestBuilder {
         model: resolvedModel,
         apiKey: apiKey,
         language: effectiveLanguage,
+        languages: effectiveLanguages,
         wav: wav,
         filename: filename,
         prompt: effectivePrompt,
+        needsWordTimestamps: needsWordTimestamps,
         stable: stable,
         capabilities: caps
       )
@@ -309,8 +336,10 @@ public enum ProviderRequestBuilder {
 
 extension ProviderRequestBuilder {
   /// OpenAI-compatible multipart/form-data: file first, then model,
-  /// language (if non-empty), prompt (if non-empty), optionally
-  /// response_format / timestamp_granularities[] (word timestamps), then
+  /// language (if non-empty) or `languages[]` entries (multi-hint profiles
+  /// such as `gpt-transcribe` — never both), prompt (if non-empty),
+  /// optionally response_format / timestamp_granularities[] (word
+  /// timestamps, only when explicitly required by the processing mode), then
   /// stable-transcription fields (temperature/vad_filter/thresholds — only
   /// non-nil, post-gating), closing boundary. THE single source of truth for
   /// the body format — openai/groq adapters produce byte-identical data
@@ -323,6 +352,7 @@ extension ProviderRequestBuilder {
     language: String,
     prompt: String?,
     boundary: String,
+    languages: [String] = [],
     responseFormat: String? = nil,
     timestampGranularities: [String] = [],
     stable: BatchStableMultipartFields? = nil
@@ -352,9 +382,16 @@ extension ProviderRequestBuilder {
     // Field: model
     appendField("model", value: model)
 
-    // Field: language (only when non-empty — tells Whisper the spoken language)
+    // Field: language (only when non-empty — tells Whisper the spoken language).
+    // Multi-hint profiles (gpt-transcribe) never receive this field: they
+    // get `languages[]` below instead (the API rejects sending both).
     if !language.isEmpty {
       appendField("language", value: language)
+    }
+
+    // Fields: languages[] — expected input languages for multi-hint profiles.
+    for hint in languages where !hint.isEmpty {
+      appendField("languages[]", value: hint)
     }
 
     // Field: prompt — context of already-recognized segments (stepwise dictation)
@@ -403,7 +440,9 @@ extension ProviderRequestBuilder {
 
   /// OpenAI / Groq / openai-compatible: multipart + Bearer.
   /// Parameter inclusion is driven by `capabilities` (model-aware profile),
-  /// never by the adapter id alone.
+  /// never by the adapter id alone. Word timestamps (`verbose_json` + word
+  /// granularities) are sent only when the caller explicitly requires them
+  /// for its processing mode AND the concrete profile supports them.
   // swiftlint:disable:next function_parameter_count
   private static func planOpenAICompatible(
     adapterID: String,
@@ -411,18 +450,22 @@ extension ProviderRequestBuilder {
     model: String,
     apiKey: String,
     language: String,
+    languages: [String] = [],
     wav: Data,
     filename: String,
     prompt: String?,
+    needsWordTimestamps: Bool = false,
     stable: BatchStableMultipartFields? = nil,
     capabilities: STTCapabilities? = nil
   ) -> STTRequestSpec {
     let boundary = "Boundary-\(UUID().uuidString)"
     // Word timestamps (verbose_json) — only where the concrete model profile
-    // guarantees support.
+    // guarantees support AND the processing mode requires them (chunked/live
+    // segment overlap stitching). Normal single-request push-to-talk sends
+    // plain transcription.
     let caps = capabilities ?? STTModelRegistry.resolve(adapterID: adapterID, model: model).capabilities
-    let timestamps = caps.supportsWordTimestamps
-    let verbose = caps.supportsVerboseJSON
+    let timestamps = needsWordTimestamps && caps.supportsWordTimestamps
+    let verbose = needsWordTimestamps && caps.supportsVerboseJSON
     let multipart = multipartBody(
       wav: wav,
       filename: filename,
@@ -430,6 +473,7 @@ extension ProviderRequestBuilder {
       language: language,
       prompt: prompt,
       boundary: boundary,
+      languages: languages,
       responseFormat: verbose ? "verbose_json" : nil,
       timestampGranularities: timestamps ? ["word"] : [],
       stable: stable

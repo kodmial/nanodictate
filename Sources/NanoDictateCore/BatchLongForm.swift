@@ -118,7 +118,8 @@ public struct BatchStableMultipartFields: Equatable {
   /// Gate stable fields by concrete model profile; nil — prompt outside
   /// adapter's reach (raw body / query-only). Support (2026-09):
   /// whisper-class openai — prompt + temperature; modern OpenAI models
-  /// (gpt-4o-transcribe family) — prompt only, no temperature; groq
+  /// (gpt-transcribe and the deprecated gpt-4o-transcribe family) — prompt
+  /// only, no temperature; groq
   /// whisper-class — prompt + temperature + vad_filter (groq strict about
   /// unknown fields); openAICompatible (incl. airubiz/gigaam/selfhosted) —
   /// prompt + temperature only; whisper thresholds documented for

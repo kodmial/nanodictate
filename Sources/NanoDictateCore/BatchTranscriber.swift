@@ -958,6 +958,9 @@ public enum BatchRequestBuilder {
   ///     (контекстный prompt chaining + temperature=0 + stable-поля после
   ///     гейтинга в STTAdapter.plan); nil — prompt/stable-поля не шлются,
   ///     тело запроса байт-в-байт как без пакетного пути.
+  ///   - needsWordTimestamps: запросить `verbose_json` + word granularities
+  ///     там, где профиль модели их поддерживает (стыковка чанков по
+  ///     таймстампам). Default false: обычный батч шлёт plain transcription.
   // swiftlint:disable:next function_parameter_count
   public static func makeRequest(
     provider: AppConfig.Provider,
@@ -967,6 +970,7 @@ public enum BatchRequestBuilder {
     wav: Data,
     chunkIndex: Int,
     batchParams: BatchSTTParams? = nil,
+    needsWordTimestamps: Bool = false,
     proxyKey: String = "",
     proxyKeyHeader: String = "X-Proxy-Key"
   ) -> BatchPreparedRequest? {
@@ -978,6 +982,7 @@ public enum BatchRequestBuilder {
       language: language,
       wav: wav,
       filename: "segment-\(chunkIndex + 1).wav",
+      needsWordTimestamps: needsWordTimestamps,
       batchParams: batchParams
     )
     guard let url = spec.url else { return nil }

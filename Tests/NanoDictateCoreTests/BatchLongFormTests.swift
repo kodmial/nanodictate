@@ -83,14 +83,28 @@ final class BatchLongFormTests: XCTestCase {
 
     // MARK: Гейтинг stable-полей по провайдерам
 
-    private func fields(for adapterID: String, params: BatchSTTParams? = BatchSTTParams()) -> BatchStableMultipartFields? {
-        BatchStableMultipartFields.stableFields(for: adapterID, params: params)
+    private func fields(
+        for adapterID: String, model: String = "", params: BatchSTTParams? = BatchSTTParams()
+    ) -> BatchStableMultipartFields? {
+        BatchStableMultipartFields.stableFields(for: adapterID, model: model, params: params)
     }
 
     @objc func testGatingOpenAITemperatureOnly() {
-        let f = fields(for: "openai")
+        let f = fields(for: "openai", model: "whisper-1")
         XCTAssertEqual(f?.temperature, 0)
         XCTAssertNil(f?.vadFilter, "vad_filter нет в OpenAI Create transcription")
+        XCTAssertNil(f?.noSpeechThreshold)
+        XCTAssertNil(f?.compressionRatioThreshold)
+        XCTAssertNil(f?.logprobThreshold)
+    }
+
+    @objc func testGatingOpenAIDefaultGptTranscribeOmitsTemperature() {
+        XCTAssertEqual(
+            ProviderRequestBuilder.resolveModel("", for: "openai"), "gpt-transcribe",
+            "empty OpenAI model resolves to the recommended default")
+        let f = fields(for: "openai")
+        XCTAssertNil(f?.temperature, "gpt-transcribe profile sends no temperature")
+        XCTAssertNil(f?.vadFilter)
         XCTAssertNil(f?.noSpeechThreshold)
         XCTAssertNil(f?.compressionRatioThreshold)
         XCTAssertNil(f?.logprobThreshold)
