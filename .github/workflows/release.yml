@@ -23,6 +23,15 @@ on:
       - 'v*'
     branches:
       - main
+    paths:
+      - 'Sources/**'
+      - 'Package.swift'
+      - 'packaging/**'
+      - 'scripts/**'
+      - 'Resources/**'
+      - 'config.example.toml'
+      - '.github/workflows/packaging-smoke.yml'
+      - '.github/workflows/release.yml'
   workflow_dispatch:
     inputs:
       version:
@@ -360,13 +369,28 @@ jobs:
           set -euo pipefail
 
           RUN_ID=""
-          # The candidate workflow is triggered by the same push. It can be
-          # created a few seconds after Release, so allow a bounded discovery
-          # window before declaring the gate missing.
+          EVENT="push"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            EVENT="workflow_dispatch"
+          fi
+          # The candidate workflow is triggered by the same push (or by a
+          # manual dispatch for manual releases). It can be created a few
+          # seconds after Release, so allow a bounded discovery window
+          # before declaring the gate missing.
           for _ in {1..40}; do
-            RUN_ID="$(gh api "repos/$REPO/actions/workflows/packaging-smoke.yml/runs?event=push&per_page=100" \
-              --jq ".workflow_runs[] | select(.head_sha == \"$SHA\") | .id" \
-              | head -n 1)"
+            while read -r CANDIDATE_ID; do
+              [[ -n "$CANDIDATE_ID" ]] || continue
+              JOB_NAMES="$(gh api "repos/$REPO/actions/runs/$CANDIDATE_ID/jobs?per_page=100" \
+                --jq '.jobs[].name')"
+              if grep -qxF 'Candidate build (x86_64)' <<<"$JOB_NAMES" && \
+                 grep -qxF 'Candidate build (arm64)' <<<"$JOB_NAMES"; then
+                RUN_ID="$CANDIDATE_ID"
+                break
+              fi
+            done < <(
+              gh api "repos/$REPO/actions/workflows/packaging-smoke.yml/runs?event=$EVENT&head_sha=$SHA&per_page=100" \
+                --jq '.workflow_runs[].id'
+            )
             if [[ -n "$RUN_ID" ]]; then
               break
             fi
@@ -374,7 +398,7 @@ jobs:
           done
 
           if [[ -z "$RUN_ID" ]]; then
-            echo "::error::No Packaging smoke push run exists for release commit $SHA. Publication is blocked."
+            echo "::error::No Packaging smoke $EVENT run exists for release commit $SHA. Publication is blocked."
             exit 1
           fi
 
