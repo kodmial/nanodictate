@@ -78,6 +78,11 @@ NanoDictate ships with a working default configuration:
 
 Any supported OpenAI-compatible transcription endpoint can also be configured with a custom `base_url` and `model`.
 
+The recommended OpenAI batch transcription model is `gpt-transcribe` (the
+adapter default when `model` is empty). Explicit `model = "whisper-1"`
+remains a legacy compatibility path; see `docs/stt-capabilities.md` for the
+model profiles and migration notes.
+
 List providers:
 
 ```bash

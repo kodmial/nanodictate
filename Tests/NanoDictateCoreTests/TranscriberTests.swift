@@ -1181,7 +1181,8 @@ final class TranscriberTransportTests: TranscriberTestCase {
 
     @objc func testAdapterOpenAIResolvesDefaultsAndSendsMultipart() {
         // Empty baseURL/model + adapterID "openai" → adapter defaults resolved
-        // in plan(): request goes to api.openai.com with whisper-1, multipart.
+        // in plan(): request goes to api.openai.com with gpt-transcribe, multipart.
+        // Normal single-request mode: plain JSON, languages[] hint, no timestamps.
         let transport = MockTransport(status: 200, body: Data(#"{"text":"привет"}"#.utf8))
         let transcriber = Transcriber(
             baseURL: "", model: "", apiKey: "sk-openai",
@@ -1200,8 +1201,60 @@ final class TranscriberTransportTests: TranscriberTestCase {
             .hasPrefix("multipart/form-data; boundary=Boundary-"), "multipart контент-тип")
         let bodyText = String(data: transport.lastRequest?.httpBody ?? Data(), encoding: .utf8) ?? ""
         XCTAssertTrue(bodyText.contains("name=\"file\"; filename=\"audio.wav\""))
-        XCTAssertTrue(bodyText.contains("whisper-1"))
-        XCTAssertTrue(bodyText.contains("name=\"language\""))
+        XCTAssertTrue(bodyText.contains("gpt-transcribe"))
+        XCTAssertTrue(bodyText.contains("name=\"languages[]\"\r\n\r\nru\r\n"))
+        XCTAssertFalse(bodyText.contains("name=\"language\"\r\n"))
+        XCTAssertFalse(bodyText.contains("response_format"))
+        XCTAssertFalse(bodyText.contains("timestamp_granularities"))
+    }
+
+    @objc func testAdapterOpenAILegacyWhisperSendsTimestampsOnlyOnRequest() {
+        // Explicit whisper-1: single request stays plain JSON; timestamps
+        // only with needsWordTimestamps (segment stitching path).
+        let plainTransport = MockTransport(status: 200, body: Data(#"{"text":"ok"}"#.utf8))
+        let plain = Transcriber(
+            baseURL: "", model: "whisper-1", apiKey: "sk-openai",
+            transport: plainTransport, networkChecker: { true },
+            adapterID: "openai"
+        )
+        runAsync("testAdapterOpenAILegacyPlain") {
+            _ = try await plain.transcribe(wav: self.wavData)
+        }
+        let plainBody = String(data: plainTransport.lastRequest?.httpBody ?? Data(), encoding: .utf8) ?? ""
+        XCTAssertTrue(plainBody.contains("whisper-1"))
+        XCTAssertFalse(plainBody.contains("response_format"))
+        XCTAssertFalse(plainBody.contains("timestamp_granularities"))
+
+        let verboseTransport = MockTransport(status: 200, body: Data(#"{"text":"ok"}"#.utf8))
+        let verbose = Transcriber(
+            baseURL: "", model: "whisper-1", apiKey: "sk-openai",
+            transport: verboseTransport, networkChecker: { true },
+            adapterID: "openai"
+        )
+        runAsync("testAdapterOpenAILegacyVerbose") {
+            _ = try await verbose.transcribe(wav: self.wavData, needsWordTimestamps: true)
+        }
+        let verboseBody = String(data: verboseTransport.lastRequest?.httpBody ?? Data(), encoding: .utf8) ?? ""
+        XCTAssertTrue(verboseBody.contains("name=\"response_format\"\r\n\r\nverbose_json\r\n"))
+        XCTAssertTrue(verboseBody.contains("name=\"timestamp_granularities[]\"\r\n\r\nword\r\n"))
+    }
+
+    @objc func testAdapterOpenAIModernResponseWithLanguagesMetadata() {
+        // gpt-transcribe returns detected languages alongside text; the
+        // parser extracts text and ignores the metadata.
+        let body = #"{"text":"hello","languages":[{"code":"en"}]}"#
+        let transport = MockTransport(status: 200, body: Data(body.utf8))
+        let transcriber = Transcriber(
+            baseURL: "", model: "", apiKey: "sk-openai",
+            transport: transport, networkChecker: { true },
+            adapterID: "openai"
+        )
+        runAsync("testAdapterOpenAIModernLanguages") {
+            let result = try await transcriber.transcribe(wav: self.wavData)
+            XCTAssertEqual(result.text, "hello")
+            XCTAssertTrue(result.words.isEmpty)
+        }
+        XCTAssertEqual(transport.requestCount, 1, "single batch request per utterance")
     }
 
     @objc func testAdapterCloudflareRawAudioAndTranscriptPath() {

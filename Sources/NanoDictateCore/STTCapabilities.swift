@@ -182,7 +182,8 @@ public struct STTModelProfile: Equatable {
 ///
 /// Resolution order for a known adapter family:
 /// 1. Exact known model name (case-insensitive).
-/// 2. Known model prefix (e.g. `gpt-4o-` for OpenAI modern models).
+/// 2. Known model prefix (e.g. `gpt-transcribe-` snapshots and `gpt-4o-`
+///    for OpenAI modern models).
 /// 3. Family fallback (conservative for unknown models; see docs).
 /// Unknown adapter ids (custom OpenAI-compatible endpoints, including the
 /// historic `airubiz`/`gigaam`/`selfhosted` section names) always resolve to
@@ -190,9 +191,19 @@ public struct STTModelProfile: Equatable {
 /// `docs/stt-capabilities.md`.
 public enum STTModelRegistry {
   /// Known OpenAI whisper-class models: full Whisper parameter set.
+  /// Legacy compatibility path: explicit `whisper-1` keeps working unless
+  /// the API itself rejects it. Not the default or recommended model.
   private static let openAIWhisperModels: Set<String> = ["whisper-1"]
-  /// Known OpenAI modern transcription models: narrower parameter set
-  /// (no verbose_json / word granularities / temperature in requests).
+  /// Recommended modern batch transcription model (2026-09, verified against
+  /// the official transcription guide): `gpt-transcribe` for file/batch
+  /// transcription of completed recordings. Narrower parameter set:
+  /// JSON response only (no verbose_json / word granularities), no
+  /// temperature, singular `language` replaced by the `languages[]` array.
+  private static let openAIGPTTranscribeModels: Set<String> = ["gpt-transcribe"]
+  /// Deprecated modern transcription models (removal announced 2026-08-26,
+  /// effective 2027-02-26): narrower parameter set (no verbose_json / word
+  /// granularities / temperature in requests). Kept as compatibility profiles
+  /// for existing integrations; new integrations must use `gpt-transcribe`.
   private static let openAIModernModels: Set<String> = [
     "gpt-4o-transcribe",
     "gpt-4o-mini-transcribe",
@@ -295,6 +306,27 @@ public enum STTModelRegistry {
           supportsPrompt: true,
           supportsTemperature: true,
           languageHint: .single
+        ),
+        audio: .batchMono16k,
+        transcriptPath: nil
+      )
+    }
+    if openAIGPTTranscribeModels.contains(model) || model.hasPrefix("gpt-transcribe") {
+      // Recommended batch profile: JSON only, prompt supported, singular
+      // `language` replaced by the `languages[]` array (never send both),
+      // no temperature / verbose / timestamp granularities.
+      return STTModelProfile(
+        adapterID: STTAdapterID.openai.rawValue,
+        model: model,
+        capabilities: STTCapabilities(
+          transport: .batchMultipart,
+          responseFormats: [.json],
+          supportsVerboseJSON: false,
+          supportsWordTimestamps: false,
+          supportsSegmentTimestamps: false,
+          supportsPrompt: true,
+          supportsTemperature: false,
+          languageHint: .multi
         ),
         audio: .batchMono16k,
         transcriptPath: nil
