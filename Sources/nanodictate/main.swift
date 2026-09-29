@@ -1451,16 +1451,22 @@ func cmdBenchmarkLive(jsonPath: String?, markdownPath: String?) -> Int32 {
     language: config.language,
     timeout: config.timeoutSeconds,
     logLevel: config.logLevel,
+    cookieRelayProvider: config.transport == "cookie-relay"
+      ? CookieRelayProvider.makeForCookieRelay(baseURL: config.baseURL)
+      : nil,
     httpProxy: config.httpProxy,
     proxyUser: config.proxyUser,
     proxyPassword: config.proxyPassword,
     adapterID: activeAdapterID
   )
   let fixtures = BenchmarkFixtures.builtins()
+  let resolvedAdapter =
+    (activeAdapterID?.isEmpty == false)
+    ? activeAdapterID! : STTAdapterID.openAICompatible.rawValue
   let benchmarkConfig = BenchmarkSTTConfig(
     name: activeAdapterID ?? "active",
-    adapterID: activeAdapterID ?? "",
-    model: config.model,
+    adapterID: resolvedAdapter,
+    model: ProviderRequestBuilder.resolveModel(config.model, for: resolvedAdapter),
     language: config.language
   )
   Task {
