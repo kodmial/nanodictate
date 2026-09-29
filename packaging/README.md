@@ -148,6 +148,38 @@ generated files get concrete values.
   `sudo port test nanodictate`. Neither test phase runs as part of the
   install, and a failure in either is reported without blocking the install.
 
+## Packaging lifecycle smoke
+
+`.github/workflows/packaging-smoke.yml` runs one reusable black-box macOS
+lifecycle smoke (`scripts/packaging-smoke/*-lifecycle.sh`) in three modes
+sharing the same assertions:
+
+1. **Candidate gate (blocking):** the workflow builds/signs the final
+   artifacts once per architecture, derives a temporary Cask and a temporary
+   local ports tree from the production templates (only version/source/SHA
+   adapted to those exact bytes) and runs the full
+   install → verify → start/post-activate → live launchd job → stop →
+   uninstall → cleanup lifecycle on fresh VMs (`macos-15`, `macos-15-intel`).
+   A red gate must block publication of those bytes.
+2. **Post-publish verification:** after the Release workflow completes, the
+   same lifecycle runs against the real public paths only —
+   `brew install --cask kodmial/nanodictate/nanodictate` and the documented
+   `curl .../scripts/install-macports.sh` installer covering the real
+   `kodmial/macports-nanodictate` tree. A failure opens or updates one
+   `priority:p0` `Production packaging smoke failure` incident issue
+   (marker `<!-- nanodictate-production-packaging-smoke-incident -->`)
+   and never mutates the published release.
+3. **Daily canary (03:17 UTC) + `workflow_dispatch`:** the latest stable
+   release through the same real channels, additionally exercising
+   `macos-latest` so runner-image drift is caught early. Recovery to full
+   green closes the incident issue with a recovery comment.
+
+Homebrew asserts the explicit `nanodictate start` path; MacPorts asserts the
+`post-activate` auto-start with no prior manual start. Liveness is proven via
+`launchctl print gui/$UID/com.nanodictate.agent` plus a real
+`NanoDictateAgent` PID, never by plist existence alone. User config/logs are
+preserved, never deleted. See the workflow header for the full contract.
+
 ## TODO
 
 - A Homebrew **bottle** (served from Homebrew's CDN) would wrap the same

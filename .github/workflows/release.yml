@@ -23,6 +23,15 @@ on:
       - 'v*'
     branches:
       - main
+    paths:
+      - 'Sources/**'
+      - 'Package.swift'
+      - 'packaging/**'
+      - 'scripts/**'
+      - 'Resources/**'
+      - 'config.example.toml'
+      - '.github/workflows/packaging-smoke.yml'
+      - '.github/workflows/release.yml'
   workflow_dispatch:
     inputs:
       version:
@@ -333,6 +342,86 @@ jobs:
           echo "skip_release=$SKIP" >> "$GITHUB_OUTPUT"
           echo "skip_manifests=$SKIP_MANIFESTS" >> "$GITHUB_OUTPUT"
 
+  # Publication gate: a release may only publish artifacts that were already
+  # exercised by the Packaging smoke candidate jobs for this exact immutable
+  # commit. Packaging smoke is triggered by the same main/tag push; this job
+  # waits for that run, requires it to be green, verifies that all four release
+  # artifacts exist, and exposes the run id used by the release job below.
+  candidate-gate:
+    name: Require tested release candidate
+    needs: preflight
+    if: ${{ needs.preflight.outputs.skip_release != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      run_id: ${{ steps.gate.outputs.run_id }}
+    steps:
+      - name: Wait for exact-head Packaging smoke
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          RUN_ID=""
+          EVENT="push"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            EVENT="workflow_dispatch"
+          fi
+          # The candidate workflow is triggered by the same push (or by a
+          # manual dispatch for manual releases). It can be created a few
+          # seconds after Release, so allow a bounded discovery window
+          # before declaring the gate missing.
+          for _ in {1..40}; do
+            while read -r CANDIDATE_ID; do
+              [[ -n "$CANDIDATE_ID" ]] || continue
+              JOB_NAMES="$(gh api "repos/$REPO/actions/runs/$CANDIDATE_ID/jobs?per_page=100" \
+                --jq '.jobs[].name')"
+              if grep -qxF 'Candidate build (x86_64)' <<<"$JOB_NAMES" && \
+                 grep -qxF 'Candidate build (arm64)' <<<"$JOB_NAMES"; then
+                RUN_ID="$CANDIDATE_ID"
+                break
+              fi
+            done < <(
+              gh api "repos/$REPO/actions/workflows/packaging-smoke.yml/runs?event=$EVENT&head_sha=$SHA&per_page=100" \
+                --jq '.workflow_runs[].id'
+            )
+            if [[ -n "$RUN_ID" ]]; then
+              break
+            fi
+            sleep 15
+          done
+
+          if [[ -z "$RUN_ID" ]]; then
+            echo "::error::No Packaging smoke $EVENT run exists for release commit $SHA. Publication is blocked."
+            exit 1
+          fi
+
+          echo "Waiting for Packaging smoke run $RUN_ID on exact head $SHA."
+          gh run watch "$RUN_ID" --repo "$REPO" --exit-status
+
+          NAMES="$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" --jq '.artifacts[].name')"
+          REQUIRED=(
+            candidate-dist-x86_64
+            candidate-dist-arm64
+            candidate-zip-x86_64
+            candidate-zip-arm64
+          )
+          for name in "${REQUIRED[@]}"; do
+            if ! grep -qxF "$name" <<<"$NAMES"; then
+              echo "::error::Packaging smoke run $RUN_ID is green but required tested artifact '$name' is missing."
+              exit 1
+            fi
+          done
+
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "::notice::Release publication is bound to tested Packaging smoke run $RUN_ID for $SHA."
+
   # Build the two macOS binaries (Intel + Apple Silicon), code-sign them with
   # the NanoDictate CI Signing identity and pack the release tarball. The
   # archive name contract is fixed:
@@ -340,10 +429,11 @@ jobs:
   build:
     name: Build & Package (${{ matrix.arch }})
     needs: preflight
-    # Main pushes for an already-published version are true no-ops: do not
-    # consume scarce macOS runners. Preserve the documented manual dry-run
-    # behavior, which intentionally performs the build without publishing.
-    if: ${{ needs.preflight.outputs.skip_release != 'true' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == true) }}
+    # Normal publication reuses the exact artifacts from Packaging smoke and
+    # therefore does not rebuild them here. Keep this legacy build only for a
+    # manual dry-run, which intentionally exercises compilation without
+    # publishing anything.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true }}
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -650,13 +740,13 @@ jobs:
   # without a version bump must not fail the pipeline.
   release:
     name: Create GitHub Release
-    needs: [build, preflight]
-    # Run the no-op reporting path even when the build was intentionally
-    # skipped because this version was already published. Still block release
-    # creation if preflight or a required real build failed.
-    if: ${{ always() && needs.preflight.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+    needs: [candidate-gate, preflight]
+    # No-op pushes skip the candidate gate. A real publication is reachable
+    # only after the exact-head Packaging smoke run completed successfully.
+    if: ${{ always() && needs.preflight.result == 'success' && (needs.candidate-gate.result == 'success' || needs.candidate-gate.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: write
       # release-please labels the Release PR (autorelease: pending/tagged);
       # this job transitions the merged Release PR to tagged after publication.
@@ -674,14 +764,36 @@ jobs:
             echo "Release v$VERSION already exists — no new version; bump Sources/NanoDictateCore/Version.swift in the PR to create a new one."
           fi
 
-      - name: Download tarballs
+      - name: Download exact tested candidate artifacts
         if: ${{ needs.preflight.outputs.skip_release != 'true' }}
-        # actions/download-artifact@v4 = d3f86a106a0bac45b974a628896c90dbdf5c8093
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          pattern: nanodictate-release-*
-          path: dist
-          merge-multiple: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          GATE_RUN_ID: ${{ needs.candidate-gate.outputs.run_id }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for name in \
+            candidate-dist-x86_64 candidate-dist-arm64 \
+            candidate-zip-x86_64 candidate-zip-arm64
+          do
+            gh run download "$GATE_RUN_ID" --repo "$REPO" --name "$name" --dir dist
+          done
+
+          EXPECTED=(
+            "nanodictate-$VERSION-macos-x86_64.tar.gz"
+            "nanodictate-$VERSION-macos-arm64.tar.gz"
+            "nanodictate-$VERSION-macos-x86_64.zip"
+            "nanodictate-$VERSION-macos-arm64.zip"
+          )
+          for file in "${EXPECTED[@]}"; do
+            if [[ ! -f "dist/$file" ]]; then
+              echo "::error::Tested candidate artifact dist/$file is missing from Packaging smoke run $GATE_RUN_ID."
+              exit 1
+            fi
+          done
+          echo "::notice::Publishing the exact bytes validated by Packaging smoke run $GATE_RUN_ID."
 
       - name: Compute asset info
         id: assets
