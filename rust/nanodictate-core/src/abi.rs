@@ -898,7 +898,7 @@ pub extern "C" fn nd_vad_feed_samples(
     }
 }
 
-/// Resets a VAD handle to the initial state. Returns `ND_OK` or negative.
+/// Resets a VAD handle to the initial state. Returns `ND_OK` or a positive `ND_ERR_*` code.
 #[no_mangle]
 pub extern "C" fn nd_vad_reset(handle: *mut NdVad) -> i32 {
     match catch_unwind(AssertUnwindSafe(|| {
@@ -1065,7 +1065,7 @@ pub extern "C" fn nd_session_start(handle: *mut NdSession) -> u64 {
 }
 
 /// Drives the session with an event for a generation. Stale generations
-/// are rejected silently. Returns `ND_OK` or negative.
+/// are rejected silently. Returns `ND_OK` or a positive `ND_ERR_*` code.
 #[no_mangle]
 pub extern "C" fn nd_session_event(handle: *mut NdSession, event: u32, generation: u64) -> i32 {
     match catch_unwind(AssertUnwindSafe(|| {
@@ -1201,7 +1201,7 @@ pub extern "C" fn nd_latch_free(handle: *mut NdLatch) {
     }));
 }
 
-/// Arms the latch. Returns `ND_OK` or negative.
+/// Arms the latch. Returns `ND_OK` or a positive `ND_ERR_*` code.
 #[no_mangle]
 pub extern "C" fn nd_latch_arm(handle: *mut NdLatch) -> i32 {
     match catch_unwind(AssertUnwindSafe(|| {
@@ -1226,7 +1226,7 @@ pub extern "C" fn nd_latch_consume(handle: *mut NdLatch) -> i32 {
     }
 }
 
-/// Disarms the latch. Returns `ND_OK` or negative.
+/// Disarms the latch. Returns `ND_OK` or a positive `ND_ERR_*` code.
 #[no_mangle]
 pub extern "C" fn nd_latch_cancel(handle: *mut NdLatch) -> i32 {
     match catch_unwind(AssertUnwindSafe(|| {
