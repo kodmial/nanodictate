@@ -275,8 +275,10 @@ final class LiveOrchestrationBranchTests: XCTestCase {
     }
 
     /// Segments and tail (subscribeLiveNanoDictate) go to THE SAME serial
-    /// liveExecutor queue as finishLiveRun — queue keeps delivery order
-    /// (tail → finalize), cancel-flag guard at entry.
+    /// liveExecutor chain as finishLiveRun — order is kept (tail → finalize),
+    /// cancel-flag guard at entry. Segments wait in the run's coalescing
+    /// buffer first (backpressure), each submitted task takes exactly one
+    /// batch on the executor.
     @objc func testSegmentsAndFinalize_ShareSerialExecutor() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -284,16 +286,25 @@ final class LiveOrchestrationBranchTests: XCTestCase {
         }
         let subBody = Self.functionBody(named: "subscribeLiveNanoDictate", in: source)
         XCTAssertTrue(
-            subBody.contains("self.liveExecutor.submit {"),
-            "сегменты/«хвост» обязаны идти через liveExecutor"
+            subBody.contains("runState.segmentBuffer.append(samples: segment, isTail: isTail)"),
+            "segments must wait in the run coalescing buffer (backpressure, not raw task pileup)"
         )
         XCTAssertTrue(
-            subBody.contains("await self.handleLiveSegment(segment, isTail: isTail, runState: runState)"),
-            "обработчик сегмента вызывается на liveExecutor по очереди"
+            subBody.contains("self.liveExecutor.submit {"),
+            "batches must go through liveExecutor"
+        )
+        XCTAssertTrue(
+            subBody.contains("await self.handleLiveSegment(runState: runState)"),
+            "the batch handler runs on liveExecutor in order"
         )
         XCTAssertTrue(
             subBody.contains("guard !runState.isCancelled else { return }"),
             "cancel-flag guard at entry (lock-protected) drops segments of a cancelled loop"
+        )
+        let segmentBody = Self.functionBody(named: "handleLiveSegment", in: source)
+        XCTAssertTrue(
+            segmentBody.contains("runState.segmentBuffer.takeNext()"),
+            "handleLiveSegment must take exactly one batch from the buffer (exactly-once FIFO)"
         )
         let finalizeBody = Self.functionBody(named: "liveFinalize", in: source)
         XCTAssertTrue(
@@ -543,12 +554,20 @@ final class LiveOrchestrationBranchTests: XCTestCase {
         )
     }
 
-    // MARK: - 7. SerialAsyncExecutor.pendingCount (CR12)
+    // MARK: - 7. SerialAsyncExecutor.pendingCount (CR12, backpressure update)
+    //
+    // The executor is a structured Task chain (no GCD worker blocked on a
+    // semaphore): each task awaits its predecessor, which suspends
+    // cooperatively instead of occupying a thread while STT runs.
+    // pendingCount still feeds the "processing" watchdog budget — it counts
+    // submitted-but-unfinished tasks. Structurally: submit() increments
+    // pending (under pendingLock) BEFORE chaining the task; the task body
+    // decrements it when done. No DispatchSemaphore / sema.wait may remain.
 
     /// CR12: pendingCount feeds the "processing" watchdog budget — it must
     /// really count submitted-but-unfinished tasks. Structurally: submit()
-    /// increments pending (under pendingLock) BEFORE dispatching to the queue;
-    /// the completion half (after sema.wait()) decrements it back.
+    /// increments pending (under pendingLock) BEFORE chaining the task;
+    /// the chained body decrements it back when done.
     @objc func testSerialExecutor_PendingCountLifecycleStructurally() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -556,7 +575,7 @@ final class LiveOrchestrationBranchTests: XCTestCase {
         }
         let executor = Self.substring(
             from: "private final class SerialAsyncExecutor {",
-            to: "private var state: NanoDictateState = .idle",
+            to: "private final class LivePendingBuffer {",
             in: source
         )
         XCTAssertFalse(executor.isEmpty, "SerialAsyncExecutor обязан существовать в main.swift")
@@ -564,23 +583,86 @@ final class LiveOrchestrationBranchTests: XCTestCase {
             executor.contains("var pendingCount: Int {"),
             "executor обязан экспонировать pendingCount для watchdog-бюджета"
         )
+        XCTAssertFalse(
+            executor.contains("DispatchSemaphore"),
+            "executor must not block a GCD worker on a semaphore (structured Task chain instead)"
+        )
+        XCTAssertFalse(
+            executor.contains("sema.wait()"),
+            "no semaphore wait may remain in the executor"
+        )
+        XCTAssertTrue(
+            executor.contains("await predecessor?.value"),
+            "each chained task must await its predecessor (strictly serial order)"
+        )
         let submitBlock = Self.substring(
             from: "func submit(",
-            to: "queue.async {",
+            to: "tail = next",
             in: executor
         )
         XCTAssertTrue(
             submitBlock.contains("pending += 1"),
-            "submit обязан инкрементировать pending под блокировкой ДО постановки в очередь"
-        )
-        let completionBlock = Self.substring(
-            from: "sema.wait()",
-            to: "self.pendingLock.unlock()",
-            in: executor
+            "submit обязан инкрементировать pending под блокировкой ДО постановки задачи в цепочку"
         )
         XCTAssertTrue(
-            completionBlock.contains("self.pending -= 1"),
-            "после завершения задачи (после sema.wait()) pending обязан декрементироваться"
+            submitBlock.contains("await body()"),
+            "the chained task must run the submitted body"
+        )
+        XCTAssertTrue(
+            executor.contains("self.pending -= 1"),
+            "после завершения задачи pending обязан декрементироваться"
+        )
+    }
+
+    // MARK: - 7b. Backpressure buffer (issue: bounded queue + coalescing)
+
+    /// The non-streaming live path is explicitly backpressured: each run owns
+    /// a LivePendingBuffer bounded by LiveBackpressurePolicy and merged via
+    /// LiveSegmentCoalescer (no voiced samples dropped, only fewer requests).
+    /// Cancellation clears the buffer deterministically (no orphan work).
+    @objc func testLivePendingBuffer_BoundedCoalescingAndCancelStructurally() {
+        guard let source = Self.agentMainSource() else {
+            XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
+            return
+        }
+        let buffer = Self.substring(
+            from: "private final class LivePendingBuffer {",
+            to: "private var state: NanoDictateState = .idle",
+            in: source
+        )
+        XCTAssertFalse(buffer.isEmpty, "LivePendingBuffer обязан существовать в main.swift")
+        XCTAssertTrue(
+            buffer.contains("LiveBackpressurePolicy.default"),
+            "the buffer bound must follow the shared LiveBackpressurePolicy"
+        )
+        XCTAssertTrue(
+            buffer.contains("LiveSegmentCoalescer.coalesce(batches)"),
+            "over-bound pending batches must merge via LiveSegmentCoalescer (order kept, no loss)"
+        )
+        XCTAssertTrue(
+            buffer.contains("func takeNext()"),
+            "the executor must take batches exactly once (FIFO)"
+        )
+        XCTAssertTrue(
+            buffer.contains("func clear()"),
+            "cancellation must be able to drop pending batches deterministically"
+        )
+        // Every terminal path that drops the run clears its buffer.
+        for name in ["handleCancel", "handleDeviceChange"] {
+            let body = Self.functionBody(named: name, in: source)
+            XCTAssertTrue(
+                body.contains("segmentBuffer.clear()"),
+                "\(name) обязан очищать coalescing-буфер отменённого цикла (no orphan work)"
+            )
+        }
+        let runState = Self.substring(
+            from: "private final class LiveRunState",
+            to: "private final class SerialAsyncExecutor",
+            in: source
+        )
+        XCTAssertTrue(
+            runState.contains("let segmentBuffer = LivePendingBuffer()"),
+            "each live run must own its buffer (stale loops cannot consume new audio)"
         )
     }
 
