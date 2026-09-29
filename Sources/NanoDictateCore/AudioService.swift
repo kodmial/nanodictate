@@ -180,6 +180,15 @@ public final class AudioService {
   private var engine: AudioEngineLike
   private let targetFormat: AVAudioFormat
   private var converter: AVAudioConverter?
+  /// Reusable resample output buffer for the steady-state tap path. The tap
+  /// callback is serial, so one instance serves the whole session: it is grown
+  /// only when an input buffer needs more capacity, never reallocated per
+  /// callback. Touched only in `process()` (audio thread).
+  private var reusableConvertedBuffer: AVAudioPCMBuffer?
+  /// Reusable Float32->Int16 staging for one converted buffer. Filled outside
+  /// the shared lock, then bulk-appended to `collectedSamples` under lock.
+  /// Grows monotonically within capacity needs; touched only in `process()`.
+  private var scratchInt16: [Int16] = []
   private var collectedSamples: [Int16] = []
   private var tapInstalled = false
   /// Engine generation: incremented on EVERY "wedged" engine swap
@@ -539,7 +548,12 @@ public final class AudioService {
       limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
       recordStartTime = CFAbsoluteTimeGetCurrent()
       collectedSamples = []
+      // Preallocate the bounded session store once per session (60 s x 16 kHz
+      // = 960 000 Int16): steady-state appends never regrow under the shared
+      // lock. rmsHistory holds ~700 entries for 60 s; 1024 covers it.
+      collectedSamples.reserveCapacity(limit.maxSamples)
       rmsHistory = []
+      rmsHistory.reserveCapacity(1024)
       limitStopScheduled = false
       // Auto-stop latch — in the ledger (autoStop bit): a new session starts
       // without "finalization already scheduled".
@@ -821,14 +835,24 @@ public final class AudioService {
     // Capture readiness ends with the session: the next start resets it, and
     // no late buffer may re-fire it (process drops buffers once !isRecording).
     captureReadyLive = false
-    // "Tail" (open utterance) taken in the same snapshot, under the same
-    // lock — VAD state and recording buffer stay consistent.
-    let tail = takeLiveTailLocked()
+    // "Tail" range + COW snapshot under one lock (VAD state and recording
+    // buffer stay consistent); Array materialization AFTER unlock so the
+    // lock holds only O(1) bookkeeping.
+    let tailRange = liveTailRangeLocked()
+    let tailSnapshot = tailRange != nil ? collectedSamples : [Int16]()
     let samples = collectedSamples
     collectedSamples = []
     let rms = rmsHistory
     rmsHistory = []
     lock.unlock()
+    var tail: [Int16] = []
+    if let range = tailRange {
+      let lo = max(0, range.lowerBound)
+      let hi = min(tailSnapshot.count, range.upperBound)
+      if hi > lo {
+        tail = Array(tailSnapshot[lo..<hi])
+      }
+    }
 
     // Teardown on the queue of THE engine this recording used (pair snapshot
     // under lock): seriality with operations already staged there is kept, and
@@ -1160,11 +1184,22 @@ public final class AudioService {
   /// phrase. Empty if speech never started. VAD state reset. The shared
   /// recording buffer untouched — the tail is passed by COPY.
   private func takeLiveTailLocked() -> [Int16] {
+    guard let range = liveTailRangeLocked() else { return [] }
+    let lo = max(0, range.lowerBound)
+    let hi = min(collectedSamples.count, range.upperBound)
+    guard hi > lo else { return [] }
+    return Array(collectedSamples[lo..<hi])
+  }
+
+  /// Range of the open utterance without copying. Caller materializes the
+  /// Array AFTER unlock from a COW snapshot, so large memcpy never extends
+  /// the lock hold. Resets VAD state like `takeLiveTailLocked`.
+  private func liveTailRangeLocked() -> Range<Int>? {
     defer { resetLiveVADLocked() }
-    guard let start = liveUtteranceStart else { return [] }
+    guard let start = liveUtteranceStart else { return nil }
     let end = min(liveUtteranceEnd, collectedSamples.count)
-    guard end > start else { return [] }
-    return Array(collectedSamples[start..<end])
+    guard end > start else { return nil }
+    return start..<end
   }
 
   /// The value truly belongs to the recording: `begin` sets the recording bit
@@ -1380,15 +1415,44 @@ public final class AudioService {
     targetFormat: AVAudioFormat
   ) -> (converted: AVAudioPCMBuffer, status: AVAudioConverterOutputStatus)? {
     guard
-      let converted = AVAudioPCMBuffer(
-        pcmFormat: targetFormat,
-        frameCapacity: outputFrameCapacity(
-          forInputFrames: input.frameLength,
-          inputRate: inputFormat.sampleRate,
-          outputRate: targetFormat.sampleRate
-        )
-      )
+      let result = convertOnce(
+        input: input, inputFormat: inputFormat, converter: converter, targetFormat: targetFormat,
+        reusing: nil)
     else { return nil }
+    return (result.converted, result.status)
+  }
+
+  /// Reusable-buffer variant of `convertOnce` for the steady-state tap path.
+  /// When `reusing` fits (same target format and enough frameCapacity) it is
+  /// refilled in place and returned with `reused == true`, so the callback
+  /// allocates no new AVAudioPCMBuffer. Otherwise a new buffer is allocated
+  /// and returned with `reused == false` for the caller to cache.
+  static func convertOnce(
+    input: AVAudioPCMBuffer,
+    inputFormat: AVAudioFormat,
+    converter: AVAudioConverter,
+    targetFormat: AVAudioFormat,
+    reusing reusable: AVAudioPCMBuffer?
+  ) -> (converted: AVAudioPCMBuffer, status: AVAudioConverterOutputStatus, reused: Bool)? {
+    let required = outputFrameCapacity(
+      forInputFrames: input.frameLength,
+      inputRate: inputFormat.sampleRate,
+      outputRate: targetFormat.sampleRate
+    )
+    var output: AVAudioPCMBuffer?
+    var reused = false
+    if let reusable,
+      reusable.format.sampleRate == targetFormat.sampleRate,
+      reusable.format.channelCount == targetFormat.channelCount,
+      reusable.frameCapacity >= required
+    {
+      reusable.frameLength = 0
+      output = reusable
+      reused = true
+    } else {
+      output = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: required)
+    }
+    guard let converted = output else { return nil }
 
     var fedInput = false
     let status = converter.convert(to: converted, error: nil) { _, outStatus in
@@ -1401,7 +1465,15 @@ public final class AudioService {
       return input
     }
     guard converted.frameLength > 0, status != .error else { return nil }
-    return (converted, status)
+    return (converted, status, reused)
+  }
+
+  /// Single-sample Float32 -> Int16 clipping conversion shared by the tap path
+  /// and tests. No allocation; order-preserving.
+  static func clipFloatToInt16(_ sample: Float) -> Int16 {
+    if sample > 1.0 { return Int16(32767) }
+    if sample < -1.0 { return Int16(-32768) }
+    return Int16(sample * 32767)
   }
 
   // swiftlint:disable:next cyclomatic_complexity function_body_length
@@ -1423,12 +1495,19 @@ public final class AudioService {
         input: buffer,
         inputFormat: buffer.format,
         converter: converter,
-        targetFormat: targetFormat
+        targetFormat: targetFormat,
+        reusing: reusableConvertedBuffer
       )
     else {
       logDroppedBuffer(
         reason: "convertOnce -> nil (empty output or error)", frames: buffer.frameLength)
       return
+    }
+    // Cache a newly allocated output buffer for the next callback; a reused
+    // instance is already cached. Steady state therefore allocates no new
+    // AVAudioPCMBuffer per callback.
+    if !result.reused {
+      reusableConvertedBuffer = result.converted
     }
     guard let channel = result.converted.floatChannelData?[0] else {
       logDroppedBuffer(reason: "converted buffer has no float channel", frames: buffer.frameLength)
@@ -1469,6 +1548,22 @@ public final class AudioService {
       sampleRate: Int(targetFormat.sampleRate)
     )
     let appliedGainDb = gain.currentGainDb
+    // Float32->Int16 staging OUTSIDE the shared lock: per-sample clipping here,
+    // bulk append under the lock below. `scratchInt16` is reused across
+    // callbacks (grows only), so steady state allocates no temporary Array.
+    // Tap callbacks are serial, and `scratchInt16` is touched only here.
+    if scratchInt16.count < frameLength {
+      scratchInt16.reserveCapacity(frameLength)
+      while scratchInt16.count < frameLength {
+        scratchInt16.append(0)
+      }
+    }
+    for i in 0..<frameLength {
+      scratchInt16[i] = Self.clipFloatToInt16(channel[i])
+    }
+    // Synchronous delegate delivery (no queue, no allocation): the UI-side
+    // coalescing lives in the Agent (`audioLevelChanged` keeps at most one
+    // pending main-queue update), so stale levels never pile up.
     levelDelegate?.audioLevelChanged(rms: meteredRms)
     // Debug diagnostics: raw level, floor, VAD state and gain. No raw audio.
     if isDebug, vadIsSpeech != lastVadSpeech {
@@ -1494,7 +1589,11 @@ public final class AudioService {
 
     // All shared memory (isRecording, collectedSamples, rmsHistory, limit,
     // live-VAD) — under the lock: stop()/cancel() take a snapshot on main
-    // synchronously with the accumulation here.
+    // synchronously with the accumulation here. Kept minimal: bulk append plus
+    // O(1) bookkeeping. The completed-segment copy happens AFTER unlock from a
+    // COW snapshot + range, so large memcpy never extends the hold time.
+    var segmentRangeToDeliver: Range<Int>?
+    var segmentSnapshot: [Int16]?
     var deliveredSegment: [Int16]?
     lock.lock()
     guard isRecordingLocked else {
@@ -1534,21 +1633,12 @@ public final class AudioService {
     }
 
     // Memory bound: append no more than the limit allows (960 000 samples per
-    // 60 s). Buffer never exceeds it.
+    // 60 s). Buffer never exceeds it. Store pre-reserved at session start, so
+    // this is a bounded memcpy with no regrow allocation in steady state.
     let sampleStart = collectedSamples.count
     let appendCount = min(frameLength, limit.remainingSamples(after: collectedSamples.count))
-    collectedSamples.reserveCapacity(
-      min(collectedSamples.count + frameLength, limit.maxSamples)
-    )
-    for i in 0..<appendCount {
-      let sample = channel[i]
-      if sample > 1.0 {
-        collectedSamples.append(Int16(32767))
-      } else if sample < -1.0 {
-        collectedSamples.append(Int16(-32768))
-      } else {
-        collectedSamples.append(Int16(sample * 32767))
-      }
+    if appendCount > 0 {
+      collectedSamples.append(contentsOf: scratchInt16[0..<appendCount])
     }
     let sampleEnd = collectedSamples.count
 
@@ -1603,6 +1693,8 @@ public final class AudioService {
     // delivered piece) and VAD reset. The range is provably non-empty: the
     // utterance holds ≥1 speech sample (liveUtteranceEnd > liveUtteranceStart),
     // post-roll non-negative — cut without an empty-range branch.
+    // Lock holds only the range + a COW snapshot (O(1), no element copy); the
+    // Array materialization happens after unlock below.
     let deliverSegment: () -> Void = {
       // Called only with liveUtteranceStart != nil (see below) — nil is
       // impossible by the invariant, the guard is compiler reassurance.
@@ -1610,7 +1702,8 @@ public final class AudioService {
       let postEnd = min(
         self.liveUtteranceEnd + self.livePostRollSamples, self.collectedSamples.count)
       let cutIndex = postEnd
-      deliveredSegment = Array(self.collectedSamples[start..<postEnd])
+      segmentRangeToDeliver = start..<postEnd
+      segmentSnapshot = self.collectedSamples
       self.liveLastCutIndex = cutIndex
       self.resetLiveVADLocked()
     }
@@ -1712,6 +1805,17 @@ public final class AudioService {
     } else if autoStopFired {
       scheduleAutoStop()
     }
+    // Materialize the completed segment outside the shared lock from the COW
+    // snapshot + range captured above: no voiced samples lost or reordered
+    // (range covers utterance start through last speech + post-roll), and the
+    // lock was held only for O(1) bookkeeping.
+    if let range = segmentRangeToDeliver, let snapshot = segmentSnapshot {
+      let lo = max(0, range.lowerBound)
+      let hi = min(snapshot.count, range.upperBound)
+      if hi > lo {
+        deliveredSegment = Array(snapshot[lo..<hi])
+      }
+    }
     if let segment = deliveredSegment, !segment.isEmpty {
       onSpeechSegment?(segment, false)
     }
@@ -1794,9 +1898,19 @@ public final class AudioService {
     captureReadyLive = false
     let rms = rmsHistory
     rmsHistory = []
-    let tail = takeLiveTailLocked()
+    // Same range+snapshot tail handoff as stop(): copy after unlock.
+    let tailRange = liveTailRangeLocked()
+    let tailSnapshot = tailRange != nil ? collectedSamples : [Int16]()
     let samples = collectedSamples
     lock.unlock()
+    var tail: [Int16] = []
+    if let range = tailRange {
+      let lo = max(0, range.lowerBound)
+      let hi = min(tailSnapshot.count, range.upperBound)
+      if hi > lo {
+        tail = Array(tailSnapshot[lo..<hi])
+      }
+    }
 
     if isDebug {
       Logger.log(
