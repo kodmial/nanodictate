@@ -189,18 +189,31 @@ smoke_collect_diagnostics() {
 }
 
 # Escape a string for inclusion inside a double-quoted JSON string value.
-# Handles backslashes, double quotes, and control characters (newline, CR,
-# tab) so arbitrary metadata values cannot produce invalid JSON or alter the
-# decoded value. Covers the characters that can appear in this record's
-# plain-text metadata values (backslash, quote, newline, CR, tab).
+# Handles backslashes, double quotes, and every C0 control character
+# (U+0000 through U+001F) so arbitrary metadata values cannot produce invalid
+# JSON or alter the decoded value. Short escapes are used for backspace,
+# form feed, newline, CR and tab; remaining controls use \u00XX. NUL cannot
+# occur in a shell variable (the shell strips it), so it needs no case here.
 smoke_json_escape() {
   local str="$1"
   str=${str//\\/\\\\}
   str=${str//\"/\\\"}
+  str=${str//$'\b'/\\b}
+  str=${str//$'\f'/\\f}
   str=${str//$'\n'/\\n}
   str=${str//$'\r'/\\r}
   str=${str//$'\t'/\\t}
-  printf '%s' "$str"
+  local out="" i ch code
+  local len=${#str}
+  for (( i = 0; i < len; i++ )); do
+    ch=${str:i:1}
+    printf -v code '%d' "'$ch"
+    if (( code < 32 )); then
+      printf -v ch '\\u%04x' "$code"
+    fi
+    out+=$ch
+  done
+  printf '%s' "$out"
 }
 
 # Write the machine-readable result record consumed by the incident reporter.
