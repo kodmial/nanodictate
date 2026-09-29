@@ -273,7 +273,7 @@ final class STTCapabilitiesTests: XCTestCase {
         XCTAssertEqual(viaProfile, direct)
     }
 
-    // MARK: - Streaming reserved, batch everywhere today
+    // MARK: - Streaming only for realtime profiles, batch elsewhere
 
     @objc func testNoBuiltInProfileUsesStreaming() {
         for (adapter, model) in [
@@ -286,8 +286,12 @@ final class STTCapabilitiesTests: XCTestCase {
                 .capabilities.transport
             XCTAssertTrue(
                 transport == .batchMultipart || transport == .batchRawAudio,
-                "\(adapter)/\(model) must be batch today")
+                "\(adapter)/\(model) must stay batch")
         }
+        // Realtime exception: the live-transcribe family streams.
+        let realtime = STTModelRegistry.resolve(adapterID: "openai", model: "gpt-live-transcribe")
+            .capabilities.transport
+        XCTAssertEqual(realtime, .streamingSession)
     }
 
     // MARK: - Unknown-model conservative fallbacks

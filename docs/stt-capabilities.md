@@ -25,6 +25,7 @@ segment overlap stitching) and only for profiles that support them.
 
 | Provider id | Model(s) | Transport | verbose_json | word granularities | prompt | temperature | vad_filter | language hint | transcript path |
 |---|---|---|---|---|---|---|---|---|---|
+| `openai` | `gpt-live-transcribe`, `gpt-live-transcribe-*` (stateful realtime session) | streaming WebSocket (`input_audio_buffer.append`/`commit`) | n/a (delta events) | n/a (delta events) | yes (session) | no | no | multi (`languages[]`) | delta/completed events |
 | `openai` | `gpt-transcribe`, `gpt-transcribe-*` (default, recommended) | batch multipart | no | no | yes | no | no | multi (`languages[]`) | flat `text` |
 | `openai` | `whisper-1`, `whisper-*` (legacy compat) | batch multipart | on request | on request (`word`) | yes | yes | no | single | flat `text` |
 | `openai` | `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, `gpt-4o-*` (deprecated upstream, removal 2027-02-26) | batch multipart | no | no | yes | no | no | single | flat `text` |
@@ -34,8 +35,11 @@ segment overlap stitching) and only for profiles that support them.
 | `cloudflare` | any (model baked into URL) | batch raw WAV (`audio/wav`) | no | no | no | no | no | none | `result.text` |
 | `airubiz` / `gigaam` / `selfhosted` / custom | any | batch multipart (conservative fallback below) | no | no | yes | yes | no | single | flat `text` |
 
-Audio requirements for every built-in profile: 16 kHz mono WAV
-(`STTAudioProfile.batchMono16k`). The profile struct carries
+Audio requirements for every built-in batch profile: 16 kHz mono WAV
+(`STTAudioProfile.batchMono16k`). The realtime `gpt-live-transcribe` family
+uses 24 kHz mono raw PCM16 (`STTAudioProfile.realtimeMono24k`, base64 inside
+`input_audio_buffer.append` — verified against the official realtime
+transcription guide, 2026-09). The profile struct carries
 `sampleRate` / `channels` / `uploadFormat` so future models with different
 requirements only change the registry entry; `streamingSession` transport,
 keyword biasing, segment timestamps, server-side chunking and noise

@@ -10,9 +10,11 @@ import Foundation
 // MARK: - Upload audio format
 
 /// Accepted upload audio format for a model profile.
-/// Only WAV is implemented (FLAC/Opus encoding is explicitly out of scope).
 public enum STTUploadFormat: String, Equatable {
   case wav
+  /// Raw 16-bit PCM, mono, little-endian, no container header. Used only by
+  /// realtime streaming sessions (base64 inside `input_audio_buffer.append`).
+  case pcm16
 }
 
 // MARK: - Audio profile
@@ -35,21 +37,29 @@ public struct STTAudioProfile: Equatable {
     self.uploadFormat = uploadFormat
   }
 
-  /// Shared batch profile used by every built-in model today.
+  /// Shared batch profile used by every built-in batch model today.
   public static let batchMono16k = STTAudioProfile(sampleRate: 16000, channels: 1, uploadFormat: .wav)
+
+  /// Realtime streaming profile for OpenAI realtime transcription
+  /// (`gpt-live-transcribe`): 24 kHz mono raw PCM16, little-endian, no WAV
+  /// header. Verified against the official realtime transcription guide
+  /// (2026-09): `audio.input.format = { type: "audio/pcm", rate: 24000 }`,
+  /// `input_audio_format = pcm16`. Never force the 16 kHz batch profile here.
+  public static let realtimeMono24k = STTAudioProfile(
+    sampleRate: 24000, channels: 1, uploadFormat: .pcm16)
 }
 
 // MARK: - Transport
 
 /// Session/transport semantics of a model profile.
-/// Only batch transports are implemented; `.streamingSession` is reserved
-/// for future WebSocket work (explicit non-goal) and used by no profile yet.
+/// Batch transports upload one request per audio; `.streamingSession` keeps
+/// one stateful WebSocket session per dictation (realtime transcription).
 public enum STTTransportKind: String, Equatable {
   /// OpenAI-compatible multipart/form-data upload, one request per audio.
   case batchMultipart
   /// Raw audio bytes upload (Cloudflare Workers AI), one request per audio.
   case batchRawAudio
-  /// Reserved: WebSocket/persistent streaming session (not implemented).
+  /// Stateful realtime streaming session (OpenAI realtime transcription).
   case streamingSession
 }
 
@@ -214,6 +224,11 @@ public enum STTModelRegistry {
     "whisper-large-v3-turbo",
     "distil-whisper-large-v3-en",
   ]
+  /// Realtime streaming transcription models (OpenAI realtime transcription
+  /// API, verified 2026-09 against the official realtime transcription
+  /// guide): `gpt-live-transcribe` family. Prefix match covers dated
+  /// snapshots such as `gpt-live-transcribe-2026-01-01`.
+  private static let openAIRealtimeModels: Set<String> = ["gpt-live-transcribe"]
 
   /// Conservative fallback for custom OpenAI-compatible endpoints:
   /// plain transcription only. No verbose_json (not guaranteed), no word
@@ -285,6 +300,12 @@ public enum STTModelRegistry {
     resolve(adapterID: adapterID, model: model).audio
   }
 
+  /// True when the profile requires a stateful realtime streaming session
+  /// instead of a one-shot batch upload.
+  public static func isStreaming(adapterID: String, model: String) -> Bool {
+    resolve(adapterID: adapterID, model: model).capabilities.transport == .streamingSession
+  }
+
   /// Capabilities for a concrete (adapterID, model) pair.
   public static func capabilities(adapterID: String, model: String) -> STTCapabilities {
     resolve(adapterID: adapterID, model: model).capabilities
@@ -293,6 +314,29 @@ public enum STTModelRegistry {
   // MARK: - Families
 
   private static func resolveOpenAI(model: String) -> STTModelProfile {
+    if openAIRealtimeModels.contains(model) || model.hasPrefix("gpt-live-transcribe") {
+      // Stateful realtime transcription session (one WebSocket per
+      // dictation): 24 kHz mono PCM16 streaming, delta/completed events.
+      // Prompt supported (session.update), language hint as `languages[]`
+      // (same convention as gpt-transcribe), keyword biasing supported.
+      return STTModelProfile(
+        adapterID: STTAdapterID.openai.rawValue,
+        model: model,
+        capabilities: STTCapabilities(
+          transport: .streamingSession,
+          responseFormats: [.json],
+          supportsVerboseJSON: false,
+          supportsWordTimestamps: false,
+          supportsSegmentTimestamps: false,
+          supportsPrompt: true,
+          supportsTemperature: false,
+          languageHint: .multi,
+          supportsKeywordBiasing: true
+        ),
+        audio: .realtimeMono24k,
+        transcriptPath: nil
+      )
+    }
     if openAIWhisperModels.contains(model) || model.hasPrefix("whisper-") {
       return STTModelProfile(
         adapterID: STTAdapterID.openai.rawValue,

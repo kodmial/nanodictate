@@ -191,8 +191,11 @@ public enum ProviderRequestBuilder {
         capabilities: caps
       )
     case .streamingSession:
-      // Reserved for future WebSocket streaming (non-goal): no profile uses
-      // it yet; fall back to multipart so the request path stays total.
+      // Streaming profiles transcribe via RealtimeTranscriptionSession (one
+      // WebSocket per dictation), never via plan(). This branch stays total
+      // for callers that build a batch request explicitly (explicit
+      // RealtimeFallbackPolicy.batchOnce); realtime failures never reach it
+      // implicitly (see RealtimeTranscriptionSession — no silent fallback).
       return planOpenAICompatible(
         adapterID: adapterID,
         baseURL: resolvedBaseURL,
