@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-09-29
+
+
+
+### Bug Fixes
+
+* Audio hot path: reuse buffers, cut locks ([caf7d52](https://github.com/kodmial/nanodictate/commit/caf7d528d23abc0a12e80c765b7b39e7e25529a2))
+
 ## [0.1.12] - 2026-09-29
 
 
@@ -389,7 +397,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.12...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.13...HEAD
+[0.1.13]: https://github.com/kodmial/nanodictate/compare/v0.1.12...v0.1.13
 [0.1.12]: https://github.com/kodmial/nanodictate/compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/kodmial/nanodictate/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/kodmial/nanodictate/compare/v0.1.9...v0.1.10
