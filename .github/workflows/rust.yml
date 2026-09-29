@@ -118,18 +118,19 @@ jobs:
       - name: Build (Swift + Rust)
         run: >
           swift build
-          -Xlinker -L${{ github.workspace }}/rust/target/release
-          -Xlinker -lnanodictate_core
+          -Xlinker ${{ github.workspace }}/rust/target/release/libnanodictate_core.a
 
       # The custom test runner (Tests/NanoDictateCoreTests/main.swift) exits
       # non-zero on the first failure; RustParityTests runs the shared input
       # vectors against the Swift reference and the engine here. Build
       # options (-Xlinker) must precede the executable name: anything after
       # it is passed to the test binary instead of the linker, which drops
-      # -lnanodictate_core and fails with undefined _nd_* symbols.
+      # the Rust archive and fails with undefined _nd_* symbols. The archive
+      # is linked by absolute path so the macOS build never picks the cdylib
+      # (which would embed an absolute LC_LOAD_DYLIB path and break packaged
+      # binaries on other hosts).
       - name: Run tests (Swift + Rust)
         run: >
           swift run
-          -Xlinker -L${{ github.workspace }}/rust/target/release
-          -Xlinker -lnanodictate_core
+          -Xlinker ${{ github.workspace }}/rust/target/release/libnanodictate_core.a
           NanoDictateCoreTests

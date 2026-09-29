@@ -152,10 +152,14 @@ the cue itself are produced.
 ```text
 scripts/build-rust-core.sh
   ├── cargo build --release -p nanodictate-core
-  │     ├── librust staticlib  → linked into the macOS app
+  │     ├── libnanodictate_core.a (staticlib) → linked into the macOS app
+  │     │     by absolute archive path (-Xlinker .../libnanodictate_core.a);
+  │     │     never via -L/-lnanodictate_core, which would pick the cdylib
+  │     │     and embed an absolute LC_LOAD_DYLIB path that breaks packaged
+  │     │     binaries on other hosts.
   │     └── cdylib/DLL         → Windows portability artifact
   ├── scripts/check-rust-abi.sh (cbindgen freshness gate)
-  └── prints the -L/-lnanodictate_core flags for swift build
+  └── prints the -Xlinker <abs path>/libnanodictate_core.a flags for swift build
 ```
 
 SwiftPM targets:

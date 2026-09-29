@@ -10,6 +10,11 @@
 #   Sources/NanoDictateRustFFI/include/nanodictate_core.h is stale, so the
 #   Swift bridge can never silently drift from the Rust ABI.
 # - Prints the SwiftPM link flags needed to link the static library.
+#   Link the static archive by absolute path
+#   (-Xlinker <root>/rust/target/<profile>/libnanodictate_core.a): using
+#   -L/-lnanodictate_core picks the cdylib when both outputs exist and embeds
+#   an absolute LC_LOAD_DYLIB path that breaks packaged binaries on any other
+#   host ("Library not loaded ... libnanodictate_core.dylib").
 #
 # Requires: cargo, cbindgen 0.27.0 (scripts/check-rust-abi.sh installs it
 # when missing and network access is available).
@@ -41,4 +46,4 @@ fi
 
 LIB_DIR="$REPO_ROOT/rust/target/$PROFILE"
 echo "Rust engine built: $LIB_DIR/libnanodictate_core.a"
-echo "Link with: swift build -Xlinker -L$LIB_DIR -Xlinker -lnanodictate_core"
+echo "Link with: swift build -Xlinker $LIB_DIR/libnanodictate_core.a"

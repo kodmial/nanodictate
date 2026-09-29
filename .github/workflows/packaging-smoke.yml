@@ -157,17 +157,29 @@ jobs:
         run: cargo build --release -p nanodictate-core
 
       - name: Build release binaries
+        # Link the Rust engine statically by absolute archive path. Using
+        # -L/-lnanodictate_core would pick the cdylib (libnanodictate_core.dylib)
+        # when both outputs exist, embedding an absolute LC_LOAD_DYLIB path
+        # from the build machine that fails on every other host with
+        # "Library not loaded ... libnanodictate_core.dylib" (Homebrew
+        # verify-package) and MacPorts rev-upgrade "broken files".
         run: |
           swift build -c release --product NanoDictateAgent \
             -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
             -Xlinker packaging/Info.NanoDictateAgent.plist \
-            -Xlinker -L${{ github.workspace }}/rust/target/release \
-            -Xlinker -lnanodictate_core
+            -Xlinker ${{ github.workspace }}/rust/target/release/libnanodictate_core.a
           swift build -c release --product nanodictate \
             -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
             -Xlinker packaging/Info.nanodictate.plist \
-            -Xlinker -L${{ github.workspace }}/rust/target/release \
-            -Xlinker -lnanodictate_core
+            -Xlinker ${{ github.workspace }}/rust/target/release/libnanodictate_core.a
+          if otool -L .build/release/NanoDictateAgent | grep -q nanodictate_core; then
+            echo "::error::NanoDictateAgent links libnanodictate_core dynamically"
+            exit 1
+          fi
+          if otool -L .build/release/nanodictate | grep -q nanodictate_core; then
+            echo "::error::nanodictate links libnanodictate_core dynamically"
+            exit 1
+          fi
 
       - name: Code-sign binaries and assemble the .app bundle
         env:
