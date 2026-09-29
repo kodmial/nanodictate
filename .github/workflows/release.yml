@@ -465,6 +465,10 @@ jobs:
           # Xcode/Swift by default.
           swift-version: "${{ matrix.swift }}"
 
+      - name: Build Rust engine
+        working-directory: rust
+        run: cargo build --release -p nanodictate-core
+
       - name: Build release binaries
         # Each binary embeds its own Info.plist as a Mach-O __info_plist
         # section (via -sectcreate) so tccd sees a real bundle identifier
@@ -480,10 +484,14 @@ jobs:
           #   packaging/Info.nanodictate.plist       -> com.nanodictate.ctl
           swift build -c release --product NanoDictateAgent \
             -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
-            -Xlinker packaging/Info.NanoDictateAgent.plist
+            -Xlinker packaging/Info.NanoDictateAgent.plist \
+            -Xlinker -L${{ github.workspace }}/rust/target/release \
+            -Xlinker -lnanodictate_core
           swift build -c release --product nanodictate \
             -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
-            -Xlinker packaging/Info.nanodictate.plist
+            -Xlinker packaging/Info.nanodictate.plist \
+            -Xlinker -L${{ github.workspace }}/rust/target/release \
+            -Xlinker -lnanodictate_core
 
       - name: Code-sign binaries, assemble & sign the .app bundle
         # Signed with a purpose-made self-signed "NanoDictate CI Signing"

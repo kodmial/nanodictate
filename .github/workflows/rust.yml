@@ -1,0 +1,131 @@
+name: Rust engine
+
+# Shared-engine quality gates: formatting, lints, tests on macOS/Windows/Linux,
+# the Windows DLL portability artifact, the generated C ABI freshness check,
+# and the Swift<->Rust integration test against the real built library.
+#
+# The Windows job is a portability check for the shared engine only; it is
+# not the Windows application (see docs/architecture-rust-engine.md).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'rust/**'
+      - 'Sources/NanoDictateRustFFI/**'
+      - 'Sources/NanoDictateRustBridge/**'
+      - 'Sources/NanoDictateCore/RustEngine.swift'
+      - 'Tests/NanoDictateCoreTests/RustParityTests.swift'
+      - 'scripts/build-rust-core.sh'
+      - 'scripts/check-rust-abi.sh'
+      - 'docs/architecture-rust-engine.md'
+      - 'Package.swift'
+      - '.github/workflows/rust.yml'
+  pull_request:
+    paths:
+      - 'rust/**'
+      - 'Sources/NanoDictateRustFFI/**'
+      - 'Sources/NanoDictateRustBridge/**'
+      - 'Sources/NanoDictateCore/RustEngine.swift'
+      - 'Tests/NanoDictateCoreTests/RustParityTests.swift'
+      - 'scripts/build-rust-core.sh'
+      - 'scripts/check-rust-abi.sh'
+      - 'docs/architecture-rust-engine.md'
+      - 'Package.swift'
+      - '.github/workflows/rust.yml'
+
+permissions:
+  contents: read
+
+# Keep only the newest run per PR/branch.
+concurrency:
+  group: rust-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-test:
+    name: fmt/clippy/test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Check formatting
+        working-directory: rust
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: rust
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        working-directory: rust
+        run: cargo test
+
+      - name: Release build (staticlib + cdylib)
+        working-directory: rust
+        run: cargo build --release -p nanodictate-core
+
+      # Windows portability artifact: the shared engine as a DLL.
+      - name: Upload Windows DLL artifact
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nanodictate-core-windows-dll
+          path: rust/target/release/nanodictate_core.dll
+          if-no-files-found: error
+
+  abi-header:
+    name: C ABI header freshness
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Install cbindgen
+        run: cargo install cbindgen --version 0.27.0 --locked
+
+      - name: Verify generated header is fresh
+        run: bash scripts/check-rust-abi.sh
+
+  swift-integration:
+    name: Swift<->Rust integration (macOS)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Install Swift
+        uses: swift-actions/setup-swift@7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a
+        with:
+          swift-version: "6.1"
+
+      - name: Build Rust engine
+        working-directory: rust
+        run: cargo build --release -p nanodictate-core
+
+      - name: Build (Swift + Rust)
+        run: >
+          swift build
+          -Xlinker -L${{ github.workspace }}/rust/target/release
+          -Xlinker -lnanodictate_core
+
+      # The custom test runner (Tests/NanoDictateCoreTests/main.swift) exits
+      # non-zero on the first failure; RustParityTests runs the shared input
+      # vectors against the Swift reference and the engine here.
+      - name: Run tests (Swift + Rust)
+        run: >
+          swift run NanoDictateCoreTests
+          -Xlinker -L${{ github.workspace }}/rust/target/release
+          -Xlinker -lnanodictate_core

@@ -1,0 +1,14 @@
+[package]
+name = "nanodictate-core"
+version = "0.1.0"
+edition = "2021"
+description = "Shared portable dictation engine for NanoDictate (no OS-specific dependencies)"
+license = "MIT"
+
+[lib]
+name = "nanodictate_core"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[profile.release]
+lto = false
+panic = "unwind"

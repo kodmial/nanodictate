@@ -219,12 +219,26 @@ jobs:
           brew install swiftlint
           swiftlint lint Sources
 
+      # The shared Rust engine links in as a static library
+      # (docs/architecture-rust-engine.md): NanoDictateCore depends on the
+      # NanoDictateRustBridge target, whose symbols resolve to the
+      # libnanodictate_core static library built here.
+      - name: Build Rust engine
+        working-directory: rust
+        run: cargo build --release -p nanodictate-core
+
       - name: Build
-        run: swift build
+        run: >
+          swift build
+          -Xlinker -L${{ github.workspace }}/rust/target/release
+          -Xlinker -lnanodictate_core
 
       # The tests are a plain executable product (no .xctest bundle): without
       # Xcode, `swift test` is unavailable, so `swift run` executes the custom
       # runner (Tests/NanoDictateCoreTests/main.swift), which exits non-zero if
       # any test fails.
       - name: Run tests
-        run: swift run NanoDictateCoreTests
+        run: >
+          swift run NanoDictateCoreTests
+          -Xlinker -L${{ github.workspace }}/rust/target/release
+          -Xlinker -lnanodictate_core
