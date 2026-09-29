@@ -97,8 +97,13 @@ entry if the old parameter set is required.
 
 Manual integration validation (no secrets in CI): set the OpenAI key via
 `nanodictate config set-key openai`, select the provider
-(`nanodictate provider use openai`), then run one real request
-(`nanodictate transcribe <wav>` or a push-to-talk utterance) against the
-default model and once with `model = "whisper-1"`; both must return text,
-and the default request body must contain no `response_format` or
-`timestamp_granularities[]` fields (check with `log_level = "debug"`).
+(`nanodictate provider use openai`), keep `log_level = "debug"` for
+request/response correlation, then capture the actual outgoing multipart
+request body with a local HTTP proxy (for example mitmproxy) while running
+one real request (`nanodictate transcribe <wav>` or a push-to-talk
+utterance) against the default model and once with
+`model = "whisper-1"`; both must return text. Inspect the captured
+multipart body directly — not only the `transcriber-debug.log`
+selected-fields dump, which lists just `model`/`language(s)`/`prompt` and
+cannot prove a field is absent — and verify the default request body
+contains neither `response_format` nor `timestamp_granularities[]`.
