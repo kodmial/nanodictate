@@ -277,8 +277,9 @@ final class LiveOrchestrationBranchTests: XCTestCase {
     /// Segments and tail (subscribeLiveNanoDictate) go to THE SAME serial
     /// liveExecutor chain as finishLiveRun — order is kept (tail → finalize),
     /// cancel-flag guard at entry. Segments wait in the run's coalescing
-    /// buffer first (backpressure), each submitted task takes exactly one
-    /// batch on the executor.
+    /// buffer first (backpressure); one active drain task per run loops over
+    /// all available batches on the executor (review #72, no empty successor
+    /// chain nodes, no pendingCount overstatement).
     @objc func testSegmentsAndFinalize_ShareSerialExecutor() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -290,12 +291,16 @@ final class LiveOrchestrationBranchTests: XCTestCase {
             "segments must wait in the run coalescing buffer (backpressure, not raw task pileup)"
         )
         XCTAssertTrue(
+            subBody.contains("guard runState.tryClaimDrain() else { return }"),
+            "one active drain per run: segments arriving while the drain runs are picked up by it, no new chain node"
+        )
+        XCTAssertTrue(
             subBody.contains("self.liveExecutor.submit {"),
             "batches must go through liveExecutor"
         )
         XCTAssertTrue(
             subBody.contains("await self.handleLiveSegment(runState: runState)"),
-            "the batch handler runs on liveExecutor in order"
+            "the drain runs on liveExecutor in order"
         )
         XCTAssertTrue(
             subBody.contains("guard !runState.isCancelled else { return }"),
@@ -304,7 +309,11 @@ final class LiveOrchestrationBranchTests: XCTestCase {
         let segmentBody = Self.functionBody(named: "handleLiveSegment", in: source)
         XCTAssertTrue(
             segmentBody.contains("runState.segmentBuffer.takeNext()"),
-            "handleLiveSegment must take exactly one batch from the buffer (exactly-once FIFO)"
+            "drain must take batches from the buffer exactly once each (FIFO)"
+        )
+        XCTAssertTrue(
+            segmentBody.contains("while true {"),
+            "drain must loop over all available batches (single active task per run)"
         )
         let finalizeBody = Self.functionBody(named: "liveFinalize", in: source)
         XCTAssertTrue(
@@ -316,9 +325,11 @@ final class LiveOrchestrationBranchTests: XCTestCase {
     // MARK: - 3. watchdog-бюджет (liveFinalize / liveFinalizeFromSamples)
 
     /// Processing-phase guard: live-cycle budget scales with request count
-    /// (pending segments + tail + final pass); on timeout cycle ends with
-    /// explicit failTranscription (sttTimeoutMessage). Block exists in BOTH
-    /// finalize paths.
+    /// (pending buffer batches + in-flight batch + final pass); on timeout
+    /// cycle ends with explicit failTranscription (sttTimeoutMessage). Block
+    /// exists in BOTH finalize paths. Single drain per run (review #72), so
+    /// the budget is sized from batches, not from the drain-task count
+    /// (always ≤1), which would undercount STT calls.
     @objc func testWatchdogBudget_BothFinalizePaths() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -328,8 +339,16 @@ final class LiveOrchestrationBranchTests: XCTestCase {
             let body = Self.functionBody(named: name, in: source)
             let label = "\(name)"
             XCTAssertTrue(
-                body.contains("let requestCount = max(2, liveExecutor.pendingCount + 1)"),
-                "\(label): бюджет обязан учитывать очередь незавершённых сегментов (pendingCount)"
+                body.contains("runState.segmentBuffer.depth"),
+                "\(label): бюджет обязан учитывать pending-буфер батчей (single drain, не pendingCount задач)"
+            )
+            XCTAssertTrue(
+                body.contains("let requestCount = max(2, pendingBatches + 2)"),
+                "\(label): бюджет = pending-батчи + in-flight + финальный проход"
+            )
+            XCTAssertFalse(
+                body.contains("liveExecutor.pendingCount + 1"),
+                "\(label): бюджет НЕ должен считаться от числа drain-задач (всегда ≤1 — undercount)"
             )
             XCTAssertTrue(
                 body.contains("let liveMaxDuration = Double(requestCount) * Transcriber.networkRequestTimeout + 5"),
@@ -549,8 +568,12 @@ final class LiveOrchestrationBranchTests: XCTestCase {
             in: segmentBody
         )
         XCTAssertTrue(
-            head.contains("guard !runState.isCancelled else { return }"),
-            "handleLiveSegment обязан первым делом отбрасывать сегменты отменённого runState"
+            head.contains("if runState.isCancelled { break }"),
+            "handleLiveSegment (single drain) обязан отбрасывать работу отменённого runState в начале каждой итерации"
+        )
+        XCTAssertTrue(
+            segmentBody.contains("runState.releaseDrain()"),
+            "drain обязан освобождать single-drain claim при выходе (иначе run зависнет)"
         )
     }
 
@@ -666,19 +689,21 @@ final class LiveOrchestrationBranchTests: XCTestCase {
         )
     }
 
-    // MARK: - 8. Watchdog-бюджет против serial-очереди (CR12)
+    // MARK: - 8. Watchdog-бюджет против serial-очереди (CR12, review #72)
 
-    /// CR12: the "processing" watchdog budget accounts for the serial queue —
-    /// requestCount = max(2, pendingCount + 1), i.e. queued/running segments +
-    /// the final pass, each up to networkRequestTimeout, plus 5 s margin. The
-    /// same formula guards BOTH finalize paths: forced stop (liveFinalize) and
-    /// duration limit (liveFinalizeFromSamples).
+    /// Single drain per run (review #72): the "processing" watchdog budget is
+    /// sized from batches the drain can process — pending buffer + in-flight
+    /// batch + final pass (max(2, pendingBatches + 2)), each up to
+    /// networkRequestTimeout, plus 5 s margin. The same formula guards BOTH
+    /// finalize paths: forced stop (liveFinalize) and duration limit
+    /// (liveFinalizeFromSamples). It must NOT use the drain-task count
+    /// (always ≤1), which would undercount STT calls.
     @objc func testProcessingWatchdog_BudgetAccountsPendingCountStructurally() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
             return
         }
-        let expected = "max(2, liveExecutor.pendingCount + 1)"
+        let expected = "max(2, pendingBatches + 2)"
         for name in ["liveFinalize", "liveFinalizeFromSamples"] {
             let body = Self.functionBody(named: name, in: source)
             let watchdog = Self.substring(
@@ -692,7 +717,11 @@ final class LiveOrchestrationBranchTests: XCTestCase {
             )
             XCTAssertTrue(
                 watchdog.contains(expected),
-                "\(name): бюджет обязан учитывать pendingCount (\(expected))"
+                "\(name): бюджет обязан учитывать батчи drain-а (\(expected): pending + in-flight + final)"
+            )
+            XCTAssertTrue(
+                body.contains("runState.segmentBuffer.depth"),
+                "\(name): бюджет sized from buffer depth, not task count"
             )
         }
     }

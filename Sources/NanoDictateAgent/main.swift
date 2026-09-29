@@ -110,6 +110,27 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     /// run. Appended on the audio-tap thread, drained strictly in order on
     /// liveExecutor; cleared on cancellation.
     let segmentBuffer = LivePendingBuffer()
+    /// Single active drain task per live run (review #72): the drain loops
+    /// over all available batches, so per-segment submission cannot pile up
+    /// empty chain nodes. Guarded by drainLock; claimed on the audio-tap
+    /// thread, released on liveExecutor when the buffer drains.
+    private let drainLock = NSLock()
+    private var drainActive = false
+    /// Claims the run's drain task when none is active. Returns true when
+    /// the caller now owns the drain and must submit it to liveExecutor.
+    func tryClaimDrain() -> Bool {
+      drainLock.lock()
+      defer { drainLock.unlock() }
+      if drainActive { return false }
+      drainActive = true
+      return true
+    }
+    /// Releases the drain claim when the drain finds no more work.
+    func releaseDrain() {
+      drainLock.lock()
+      drainActive = false
+      drainLock.unlock()
+    }
     var isCancelled: Bool {
       get {
         cancelLock.lock()
@@ -1507,113 +1528,130 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       guard !runState.isCancelled else { return }
       // Backpressure: the segment waits in the run's coalescing buffer (merged
       // with neighbours when STT falls behind) instead of piling up as
-      // dozens of tiny serial tasks. The submitted task takes exactly one
-      // batch; tasks whose batch was already absorbed into a merged one find
-      // the buffer empty and exit without an STT call.
+      // dozens of tiny serial tasks. One active drain task per run loops over
+      // all available batches; a segment arriving while the drain runs is
+      // picked up by that same drain, so no extra chain node is submitted.
       runState.segmentBuffer.append(samples: segment, isTail: isTail)
+      guard runState.tryClaimDrain() else { return }
       self.liveExecutor.submit {
         await self.handleLiveSegment(runState: runState)
       }
     }
   }
 
-  /// Handles one transcribed batch (live VAD or the tail, possibly coalesced
-  /// from several delivered segments). Always on liveExecutor — batches are
-  /// recognized strictly in order, each next one's accumulated prompt includes
-  /// all previous; the stop tail is guaranteed processed BEFORE the final pass.
+  /// Single active drain per live run (review #72): loops over all available
+  /// batches (live VAD or the tail, possibly coalesced from several
+  /// delivered segments). Always on liveExecutor — batches are recognized
+  /// strictly in order, each next one's accumulated prompt includes all
+  /// previous; the stop tail is guaranteed processed BEFORE the final pass.
+  /// Segments arriving while the drain runs are picked up by the same task,
+  /// so no empty successor chain nodes pile up.
   private func handleLiveSegment(
     runState: LiveRunState
   ) async {
-    // Stale loop (Esc / device change / restart): do not send its audio to
-    // STT — the queued task would also hold the serial chain.
-    guard !runState.isCancelled else { return }
-    // Exactly-once FIFO take from the run's coalescing buffer. Nil means this
-    // task's segment was already absorbed into a merged batch transcribed by
-    // an earlier task — exit without an STT call (this is what bounds the
-    // request count when STT falls behind).
-    guard let batch = runState.segmentBuffer.takeNext() else { return }
-    let segmentSamples = batch.samples
-    let isTail = batch.isTail
-    let index = runState.segmentCount
+    // Drain loop: each iteration takes exactly one batch FIFO. Nil means the
+    // buffer is empty (earlier iterations already transcribed the merged
+    // batch that bounds the request count when STT falls behind).
+    while true {
+      // Stale loop (Esc / device change / restart): do not send its audio
+      // to STT.
+      if runState.isCancelled { break }
+      guard let batch = runState.segmentBuffer.takeNext() else { break }
+      let segmentSamples = batch.samples
+      let isTail = batch.isTail
+      let index = runState.segmentCount
 
-    // Overlay: "Recognizing… (part N)" while the segment's STT runs; the
-    // recording phase stays (user still talks) — only status changes.
-    DispatchQueue.main.async { [weak self] in
-      guard
-        let self,
-        self.liveSession == runState.session,
-        self.state == .recording || self.state == .transcribing
-      else { return }
-      self.overlay.setStatus(
-        L10n.tr("overlay.recognizingPart").replacingOccurrences(of: "{n}", with: "\(index + 1)"))
-    }
-
-    do {
-      // Same per-segment path as in offline chunking (ChunkedPipeline.
-      // recognizeSegment): WAV → STT with prompt context → finalization.
-      // No failover here — the final pass over the whole WAV recovers the
-      // error (in offline chunking a segment failure, by contrast, aborts
-      // the run).
-      let result = try await ChunkedPipeline.recognizeSegment(
-        samples: segmentSamples,
-        index: index,
-        insertedText: runState.insertedText,
-        prompt: runState.promptParts.isEmpty
-          ? nil : ChunkedPipeline.truncatedPrompt(runState.promptParts),
-        stt: { wav, filename, prompt in
-          // The segment role from [routing] — as in processChunked: the
-          // segment provider; unset — active transcriber (no failover here
-          // either — the final pass recovers). Segments request word
-          // timestamps for overlap stitching (dedupeOverlap); other paths
-          // send plain transcription.
-          let transcriber = self.roleTranscriber(self.segmentRoleProviderID) ?? self.transcriber
-          let segmentResult = try await transcriber.transcribe(
-            wav: wav, filename: filename, prompt: prompt, needsWordTimestamps: true)
-          return ChunkedPipeline.SttResult(text: segmentResult.text, words: segmentResult.words)
-        },
-        filename: "live-segment-\(index + 1).wav"
-      )
-
-      // Accumulation — on liveExecutor AFTER successful STT: only recognized
-      // text enters the next segment's prompt and the final diff base.
-      runState.insertedText += result.insertText
-      runState.promptParts.append(result.promptText)
-      runState.segmentCount += 1
-      if isTail {
-        runState.tailDelivered = true
-      }
-
+      // Overlay: "Recognizing… (part N)" while the segment's STT runs; the
+      // recording phase stays (user still talks) — only status changes.
       DispatchQueue.main.async { [weak self] in
         guard
           let self,
           self.liveSession == runState.session,
           self.state == .recording || self.state == .transcribing
         else { return }
-        // Incremental insert into the input field: "appears gradually".
-        Inserter.append(result.insertText)
-        Logger.log(
-          "live append segment \(index + 1) (\(result.insertText.count) chars)", level: "info")
-        // Status returns to the recording phase — except for the tail
-        // (finalization runs: "Recognizing…" shows the guard/final pass).
-        if self.state == .recording {
-          self.overlay.setStatus(L10n.tr("overlay.recording"))
-        }
+        self.overlay.setStatus(
+          L10n.tr("overlay.recognizingPart").replacingOccurrences(of: "{n}", with: "\(index + 1)"))
       }
-    } catch {
-      let networkText = OverlayErrorText.text(for: error)
-      let message = networkText ?? Self.message(for: error)
-      Logger.log(
-        "live segment \(index + 1) failed: \(message) — фраза «докрутится» финальным проходом",
-        level: "error"
-      )
-      // A segment failure never interrupts dictation: the whole phrase (or
-      // part of it) is recognized by the final pass over the WHOLE WAV at
-      // commit.
-      runState.anySegmentFailed = true
-      // Remember the last failure text: if ALL segments fail (segmentCount
-      // == 0, STT unavailable), the final pass ends with an explicit
-      // failTranscription carrying this text, not an "Empty result".
-      runState.lastErrorText = message
+
+      do {
+        // Same per-segment path as in offline chunking (ChunkedPipeline.
+        // recognizeSegment): WAV → STT with prompt context → finalization.
+        // No failover here — the final pass over the whole WAV recovers the
+        // error (in offline chunking a segment failure, by contrast, aborts
+        // the run).
+        let result = try await ChunkedPipeline.recognizeSegment(
+          samples: segmentSamples,
+          index: index,
+          insertedText: runState.insertedText,
+          prompt: runState.promptParts.isEmpty
+            ? nil : ChunkedPipeline.truncatedPrompt(runState.promptParts),
+          stt: { wav, filename, prompt in
+            // The segment role from [routing] — as in processChunked: the
+            // segment provider; unset — active transcriber (no failover here
+            // either — the final pass recovers). Segments request word
+            // timestamps for overlap stitching (dedupeOverlap); other paths
+            // send plain transcription.
+            let transcriber = self.roleTranscriber(self.segmentRoleProviderID) ?? self.transcriber
+            let segmentResult = try await transcriber.transcribe(
+              wav: wav, filename: filename, prompt: prompt, needsWordTimestamps: true)
+            return ChunkedPipeline.SttResult(text: segmentResult.text, words: segmentResult.words)
+          },
+          filename: "live-segment-\(index + 1).wav"
+        )
+
+        // Accumulation — on liveExecutor AFTER successful STT: only recognized
+        // text enters the next segment's prompt and the final diff base.
+        runState.insertedText += result.insertText
+        runState.promptParts.append(result.promptText)
+        runState.segmentCount += 1
+        if isTail {
+          runState.tailDelivered = true
+        }
+
+        DispatchQueue.main.async { [weak self] in
+          guard
+            let self,
+            self.liveSession == runState.session,
+            self.state == .recording || self.state == .transcribing
+          else { return }
+          // Incremental insert into the input field: "appears gradually".
+          Inserter.append(result.insertText)
+          Logger.log(
+            "live append segment \(index + 1) (\(result.insertText.count) chars)", level: "info")
+          // Status returns to the recording phase — except for the tail
+          // (finalization runs: "Recognizing…" shows the guard/final pass).
+          if self.state == .recording {
+            self.overlay.setStatus(L10n.tr("overlay.recording"))
+          }
+        }
+      } catch {
+        let networkText = OverlayErrorText.text(for: error)
+        let message = networkText ?? Self.message(for: error)
+        Logger.log(
+          "live segment \(index + 1) failed: \(message) — фраза «докрутится» финальным проходом",
+          level: "error"
+        )
+        // A segment failure never interrupts dictation: the whole phrase (or
+        // part of it) is recognized by the final pass over the WHOLE WAV at
+        // commit.
+        runState.anySegmentFailed = true
+        // Remember the last failure text: if ALL segments fail (segmentCount
+        // == 0, STT unavailable), the final pass ends with an explicit
+        // failTranscription carrying this text, not an "Empty result".
+        runState.lastErrorText = message
+      }
+      // Continue draining: batches appended while this STT ran are picked up
+      // by the same task — no extra chain node.
+    }
+    // Buffer empty (or run cancelled): release the single-drain claim, then
+    // re-check for appends that landed between the last takeNext and the
+    // release — those appends saw an active drain and skipped submitting a
+    // new one, so this task must reclaim and keep draining them.
+    runState.releaseDrain()
+    if !runState.isCancelled, runState.segmentBuffer.depth > 0,
+      runState.tryClaimDrain()
+    {
+      await self.handleLiveSegment(runState: runState)
     }
   }
 
@@ -1645,10 +1683,12 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     Logger.log(
       String(format: "live finalize (\(samples.count) samples, %.2f s)", duration), level: "info")
 
-    // "Processing" phase watchdog: queued/running segments + tail (already
-    // submitted by stop()) + final pass — each request up to
-    // networkRequestTimeout (margin for all).
-    let requestCount = max(2, liveExecutor.pendingCount + 1)
+    // "Processing" phase watchdog: the single drain can process the pending
+    // buffer plus the in-flight batch, plus the final pass — each request up
+    // to networkRequestTimeout (margin for all). Sized from batches, not
+    // from the drain-task count (always ≤1), which would undercount STT calls.
+    let pendingBatches = runState.segmentBuffer.depth
+    let requestCount = max(2, pendingBatches + 2)
     let liveMaxDuration = Double(requestCount) * Transcriber.networkRequestTimeout + 5
     processingSession += 1
     let session = processingSession
@@ -1684,9 +1724,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       String(format: "live limit finalize (\(samples.count) samples, %.2f s)", duration),
       level: "info")
 
-    // Watchdog (same budget as liveFinalize): queued/running segments +
-    // tail + final pass.
-    let requestCount = max(2, liveExecutor.pendingCount + 1)
+    // Watchdog (same budget as liveFinalize): the single drain can process
+    // the pending buffer plus the in-flight batch, plus the final pass.
+    // Sized from batches, not from the drain-task count, which would undercount.
+    let pendingBatches = runState.segmentBuffer.depth
+    let requestCount = max(2, pendingBatches + 2)
     let liveMaxDuration = Double(requestCount) * Transcriber.networkRequestTimeout + 5
     processingSession += 1
     let session = processingSession

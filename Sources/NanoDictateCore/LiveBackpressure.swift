@@ -283,6 +283,9 @@ public actor LiveSegmentScheduler {
                     stt: stt,
                     filename: "live-segment-\(index + 1).wav"
                 )
+                // The STT call can return after cancel() or task cancellation:
+                // do not record or deliver its result.
+                guard !cancelled, !Task.isCancelled else { break }
                 markCompleted(insertText: result.insertText, promptText: result.promptText)
                 let transcribed = TranscribedBatch(
                     batch: batch, insertText: result.insertText,
@@ -291,6 +294,9 @@ public actor LiveSegmentScheduler {
                 out.append(transcribed)
                 insert?(transcribed)
             } catch {
+                // Suppress failure bookkeeping and error delivery after
+                // cancellation; the in-flight request is already abandoned.
+                guard !cancelled, !Task.isCancelled else { break }
                 markFailed()
                 onSegmentError?(batch, error)
             }
