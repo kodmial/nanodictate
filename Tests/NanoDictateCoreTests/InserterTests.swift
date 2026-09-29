@@ -376,4 +376,81 @@ final class InserterTests: XCTestCase {
         XCTAssertTrue(sleeps.allSatisfy { $0 == 5000 }, "паузы по 5 мс")
         XCTAssertEqual(posts, chunks.count * 2, "keyDown+keyUp на каждый чанк")
     }
+
+    // MARK: - append / replaceRange (контракт пошаговой диктовки)
+
+    /// Наблюдает replaceRange/append через хуки: число keyDown+keyUp событий и пауз.
+    private func observeReplace(old: String, new: String) -> (posts: Int, sleeps: Int) {
+        var posts = 0
+        var sleeps = 0
+        Inserter.postHook = { _, _ in posts += 1 }
+        Inserter.sleepHook = { _ in sleeps += 1 }
+        defer {
+            Inserter.postHook = nil
+            Inserter.sleepHook = nil
+        }
+        Inserter.replaceRange(old: old, new: new)
+        return (posts, sleeps)
+    }
+
+    /// append — тот же путь, что insert: короткий текст постит keyDown+keyUp без пауз.
+    @objc func testAppendTypesTextLikeInsert() {
+        var chunks: [String] = []
+        var sleeps = 0
+        Inserter.postHook = { event, _ in
+            guard event.type == .keyDown else { return }
+            var actual = 0
+            var buf = [UniChar](repeating: 0, count: 64)
+            event.keyboardGetUnicodeString(
+                maxStringLength: 64, actualStringLength: &actual, unicodeString: &buf)
+            chunks.append(String(decoding: buf[..<actual], as: UTF16.self))
+        }
+        Inserter.sleepHook = { _ in sleeps += 1 }
+        defer {
+            Inserter.postHook = nil
+            Inserter.sleepHook = nil
+        }
+        Inserter.append("hello")
+        XCTAssertEqual(chunks, ["hello"])
+        XCTAssertEqual(sleeps, 0)
+        // Пустой append — no-op, как пустой insert.
+        chunks.removeAll()
+        Inserter.append("")
+        XCTAssertTrue(chunks.isEmpty)
+        XCTAssertEqual(sleeps, 0)
+    }
+
+    /// old == new — no-op: ни backspace'ов, ни печати.
+    @objc func testReplaceRangeEqualIsNoOp() {
+        let (posts, sleeps) = observeReplace(old: "hello", new: "hello")
+        XCTAssertEqual(posts, 0)
+        XCTAssertEqual(sleeps, 0)
+    }
+
+    /// Пустой old — только печать new (стирать нечего).
+    @objc func testReplaceRangeEmptyOldTypesNewOnly() {
+        let (posts, sleeps) = observeReplace(old: "", new: "hi")
+        XCTAssertEqual(posts, 2, "один чанк печати: keyDown+keyUp")
+        XCTAssertEqual(sleeps, 0)
+    }
+
+    /// Непустой old + пустой new — только backspace'ы по числу графем old.
+    @objc func testReplaceRangeEmptyNewDeletesOldOnly() {
+        let (posts, sleeps) = observeReplace(old: "ab", new: "")
+        XCTAssertEqual(posts, 4, "2 графемы → 2 backspace (keyDown+keyUp)")
+        XCTAssertEqual(sleeps, 0, "одна пачка — без пауз")
+    }
+
+    /// Обычная замена: backspace'ы old (по графемам, не UTF-16) + печать new.
+    @objc func testReplaceRangeDeletesOldAndTypesNew() {
+        let (posts, sleeps) = observeReplace(old: "ab", new: "cde")
+        XCTAssertEqual(posts, 6, "2 backspace + 1 чанк печати, каждое keyDown+keyUp")
+        XCTAssertEqual(sleeps, 0)
+    }
+
+    /// Эмодзи стирается одним backspace на графему (не два по UTF-16).
+    @objc func testReplaceRangeCountsEmojiAsOneGrapheme() {
+        let (posts, _) = observeReplace(old: "\u{1F600}", new: "")
+        XCTAssertEqual(posts, 2, "один эмодзи — один backspace (keyDown+keyUp)")
+    }
 }

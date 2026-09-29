@@ -1578,4 +1578,40 @@ final class ConfigTests: XCTestCase {
             XCTFail("Неожиданная ошибка: \(error)")
         }
     }
+
+    // MARK: - AppConfigError descriptions (user-facing diagnostics)
+
+    @objc func testErrorDescriptionsNameLineAndKey() {
+        XCTAssertEqual(
+            AppConfig.AppConfigError.invalidLine(7, "bogus line").description,
+            "Invalid config at line 7: bogus line")
+        XCTAssertEqual(
+            AppConfig.AppConfigError.invalidValue("timeout_seconds", "abc", 3).description,
+            "Invalid value for key 'timeout_seconds' at line 3: 'abc'")
+        XCTAssertEqual(
+            AppConfig.AppConfigError.duplicateProvider("groq").description,
+            "Duplicate provider section: [providers.groq]")
+        let ambiguous = AppConfig.AppConfigError.ambiguousLegacyAndProviders.description
+        XCTAssertTrue(ambiguous.contains("active_provider"), "подсказка называет недостающий ключ")
+    }
+
+    @objc func testErrorDescriptionActiveProviderNotFound() {
+        let withList = AppConfig.AppConfigError.activeProviderNotFound(
+            active: "nope", available: ["groq", "ya"]).description
+        XCTAssertTrue(withList.contains("nope"))
+        XCTAssertTrue(withList.contains("groq"))
+        XCTAssertTrue(withList.contains("ya"))
+        // Empty list degrades to the localized placeholder, never an empty tail.
+        let empty = AppConfig.AppConfigError.activeProviderNotFound(
+            active: "nope", available: []).description
+        XCTAssertTrue(empty.contains("nope"))
+        XCTAssertFalse(empty.hasSuffix("Available providers: "))
+    }
+
+    @objc func testErrorDescriptionKeyFileAndWriteFallback() {
+        let read = AppConfig.AppConfigError.cannotReadKeyFile("/keys/x.key", nil).description
+        XCTAssertTrue(read.contains("/keys/x.key"))
+        let write = AppConfig.AppConfigError.cannotWriteConfig("/cfg.toml", nil).description
+        XCTAssertTrue(write.contains("/cfg.toml"))
+    }
 }

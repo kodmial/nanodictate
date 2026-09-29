@@ -289,4 +289,76 @@ final class STTCapabilitiesTests: XCTestCase {
                 "\(adapter)/\(model) must be batch today")
         }
     }
+
+    // MARK: - Unknown-model conservative fallbacks
+
+    /// Unknown OpenAI model: never assume verbose_json/word timestamps for a
+    /// model the registry does not know; prompt + temperature still sent.
+    @objc func testUnknownOpenAIModelConservativeFallback() {
+        let profile = STTModelRegistry.resolve(adapterID: "openai", model: "some-future-model-xyz")
+        XCTAssertEqual(profile.adapterID, "openai")
+        XCTAssertEqual(profile.model, "some-future-model-xyz")
+        XCTAssertEqual(profile.capabilities.transport, .batchMultipart)
+        XCTAssertEqual(profile.capabilities.responseFormats, [.json])
+        XCTAssertFalse(profile.capabilities.supportsVerboseJSON)
+        XCTAssertFalse(profile.capabilities.supportsWordTimestamps)
+        XCTAssertFalse(profile.capabilities.supportsSegmentTimestamps)
+        XCTAssertTrue(profile.capabilities.supportsPrompt)
+        XCTAssertTrue(profile.capabilities.supportsTemperature)
+        XCTAssertEqual(profile.capabilities.languageHint, .single)
+        XCTAssertEqual(profile.audio, .batchMono16k)
+        XCTAssertNil(profile.transcriptPath)
+    }
+
+    /// Unknown Groq model: same conservative rule — no verbose_json assumed.
+    @objc func testUnknownGroqModelConservativeFallback() {
+        let profile = STTModelRegistry.resolve(adapterID: "groq", model: "future-groq-model-xyz")
+        XCTAssertEqual(profile.adapterID, "groq")
+        XCTAssertEqual(profile.capabilities.transport, .batchMultipart)
+        XCTAssertEqual(profile.capabilities.responseFormats, [.json])
+        XCTAssertFalse(profile.capabilities.supportsVerboseJSON)
+        XCTAssertFalse(profile.capabilities.supportsWordTimestamps)
+        XCTAssertTrue(profile.capabilities.supportsPrompt)
+        XCTAssertTrue(profile.capabilities.supportsTemperature)
+        XCTAssertEqual(profile.capabilities.languageHint, .single)
+        XCTAssertEqual(profile.audio, .batchMono16k)
+    }
+
+    /// Convenience accessors return exactly what resolve() reports.
+    @objc func testCapabilitiesAndAudioProfileWrappersMatchResolve() {
+        for (adapter, model) in [
+            ("openai", "whisper-1"),
+            ("openai", "gpt-transcribe"),
+            ("openai", "some-future-model-xyz"),
+            ("groq", "whisper-large-v3"),
+            ("groq", "future-groq-model-xyz"),
+        ] as [(String, String)] {
+            XCTAssertEqual(
+                STTModelRegistry.capabilities(adapterID: adapter, model: model),
+                STTModelRegistry.resolve(adapterID: adapter, model: model).capabilities,
+                "\(adapter)/\(model)")
+            XCTAssertEqual(
+                STTModelRegistry.audioProfile(adapterID: adapter, model: model),
+                STTModelRegistry.resolve(adapterID: adapter, model: model).audio,
+                "\(adapter)/\(model)")
+        }
+    }
+
+    /// gpt-4o dated snapshots take the modern single-hint profile.
+    @objc func testOpenAIGpt4oDatedSnapshotUsesModernProfile() {
+        let profile = STTModelRegistry.resolve(adapterID: "openai", model: "gpt-4o-transcribe-2026-01-01")
+        XCTAssertFalse(profile.capabilities.supportsVerboseJSON)
+        XCTAssertFalse(profile.capabilities.supportsWordTimestamps)
+        XCTAssertFalse(profile.capabilities.supportsTemperature)
+        XCTAssertEqual(profile.capabilities.languageHint, .single)
+        XCTAssertTrue(profile.capabilities.supportsPrompt)
+    }
+
+    /// Groq distil-whisper prefix resolves to the known verbose profile.
+    @objc func testGroqDistilWhisperPrefixMatchesKnownProfile() {
+        let profile = STTModelRegistry.resolve(adapterID: "groq", model: "distil-whisper-large-v3-en-future")
+        XCTAssertTrue(profile.capabilities.supportsVerboseJSON)
+        XCTAssertTrue(profile.capabilities.supportsVadFilter)
+        XCTAssertTrue(profile.capabilities.supportsServerVAD)
+    }
 }
