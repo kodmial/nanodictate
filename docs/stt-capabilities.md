@@ -90,9 +90,9 @@ entry if the old parameter set is required.
   which the parser ignores); parsing is identical to other flat-text
   profiles.
 - Explicit `model = "whisper-1"` remains a compatibility path with the
-  previous parameter set (timestamps only on request as above) until the API
-  itself rejects it. The `gpt-4o-transcribe` family is deprecated upstream
-  (removal 2027-02-26): existing integrations keep working through the same
+  previous parameter set (timestamps only on request as above). It is
+  deprecated upstream with removal scheduled for 2027-02-26, alongside the
+  `gpt-4o-transcribe` family: existing integrations keep working through the same
   capability gating; prefer `gpt-transcribe` for new setups.
 
 Manual integration validation (no secrets in CI): set the OpenAI key via
