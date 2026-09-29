@@ -70,6 +70,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// ever blocked). In front of it sits each run's coalescing buffer, so a
   /// slow STT yields fewer, larger requests instead of dozens of tiny tasks.
   private let liveExecutor = SerialAsyncExecutor()
+  /// Coalesced VU-meter delivery: the tap callback runs ~11 Hz on the audio
+  /// thread, but the main queue may stall under load. Keep only the latest RMS
+  /// with at most one pending main-queue block, so stale levels never pile up
+  /// as an unbounded backlog.
+  private let meterCoalescer = LevelMeterCoalescer()
   /// Live-loop token: new recording start / Esc invalidate prior loop segment
   /// processing (early insert guard). Read/written on main; every loop callback
   /// captures its own token.
@@ -703,9 +708,13 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
 
   func audioLevelChanged(rms: Float) {
     // installTap callback runs on the audio thread — hop to main,
-    // since overlay.updateLevel touches SwiftUI @Published.
-    DispatchQueue.main.async {
-      self.overlay.updateLevel(rms)
+    // since overlay.updateLevel touches SwiftUI @Published. Coalesced: at most
+    // one pending main-queue block holds the latest RMS; intermediate levels
+    // collapse instead of queueing behind a stalled main thread.
+    guard meterCoalescer.submit(rms) else { return }
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      self.overlay.updateLevel(self.meterCoalescer.takePending())
     }
   }
 

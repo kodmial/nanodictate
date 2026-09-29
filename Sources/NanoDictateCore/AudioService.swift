@@ -180,6 +180,27 @@ public final class AudioService {
   private var engine: AudioEngineLike
   private let targetFormat: AVAudioFormat
   private var converter: AVAudioConverter?
+  /// Reusable resample output buffer for the steady-state tap path. The tap
+  /// callback is serial within one engine generation, so one instance serves
+  /// the whole session: it is grown only when an input buffer needs more
+  /// capacity, never reallocated per callback. Touched only in `process()`
+  /// (audio thread) via per-generation checkout — never shared across
+  /// generations (see `reusableBuffersGeneration`).
+  private var reusableConvertedBuffer: AVAudioPCMBuffer?
+  /// Reusable Float32->Int16 staging for one converted buffer. Filled outside
+  /// the shared lock, then bulk-appended to `collectedSamples` under lock.
+  /// Grows monotonically within capacity needs; touched only in `process()`
+  /// via per-generation checkout.
+  private var scratchInt16: [Int16] = []
+  /// Generation the cached reuse buffers above belong to (nil — invalid).
+  /// Callbacks from different engine generations must never share the mutable
+  /// `reusableConvertedBuffer`/`scratchInt16` outside the lock: an old tap
+  /// callback that passed its generation check before `replaceEngineAfterWedge()`
+  /// can otherwise run concurrently with the fresh engine's callback and
+  /// corrupt samples. Checkout moves these buffers to locals only on a tag
+  /// match; the wedge swap invalidates the tag so the fresh generation
+  /// allocates its own instances. Guarded by `lock`.
+  private var reusableBuffersGeneration: Int?
   private var collectedSamples: [Int16] = []
   private var tapInstalled = false
   /// Engine generation: incremented on EVERY "wedged" engine swap
@@ -539,7 +560,12 @@ public final class AudioService {
       limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
       recordStartTime = CFAbsoluteTimeGetCurrent()
       collectedSamples = []
+      // Preallocate the bounded session store once per session (60 s x 16 kHz
+      // = 960 000 Int16): steady-state appends never regrow under the shared
+      // lock. rmsHistory holds ~700 entries for 60 s; 1024 covers it.
+      collectedSamples.reserveCapacity(limit.maxSamples)
       rmsHistory = []
+      rmsHistory.reserveCapacity(1024)
       limitStopScheduled = false
       // Auto-stop latch — in the ledger (autoStop bit): a new session starts
       // without "finalization already scheduled".
@@ -721,7 +747,7 @@ public final class AudioService {
         // feed the new session. The old tap itself cannot be removed (its
         // engine may be stuck) — the generation guard is cheaper and safer.
         guard self.isCurrentGeneration(tapGeneration) else { return }
-        self.process(buffer)
+        self.process(buffer, tapGeneration: tapGeneration)
       }
     }
     if failure == nil, isCurrentGeneration(startGeneration) {
@@ -821,14 +847,24 @@ public final class AudioService {
     // Capture readiness ends with the session: the next start resets it, and
     // no late buffer may re-fire it (process drops buffers once !isRecording).
     captureReadyLive = false
-    // "Tail" (open utterance) taken in the same snapshot, under the same
-    // lock — VAD state and recording buffer stay consistent.
-    let tail = takeLiveTailLocked()
+    // "Tail" range + COW snapshot under one lock (VAD state and recording
+    // buffer stay consistent); Array materialization AFTER unlock so the
+    // lock holds only O(1) bookkeeping.
+    let tailRange = liveTailRangeLocked()
+    let tailSnapshot = tailRange != nil ? collectedSamples : [Int16]()
     let samples = collectedSamples
     collectedSamples = []
     let rms = rmsHistory
     rmsHistory = []
     lock.unlock()
+    var tail: [Int16] = []
+    if let range = tailRange {
+      let lo = max(0, range.lowerBound)
+      let hi = min(tailSnapshot.count, range.upperBound)
+      if hi > lo {
+        tail = Array(tailSnapshot[lo..<hi])
+      }
+    }
 
     // Teardown on the queue of THE engine this recording used (pair snapshot
     // under lock): seriality with operations already staged there is kept, and
@@ -934,6 +970,13 @@ public final class AudioService {
     // them from scratch (repeat installTap on a busy bus = NSException).
     tapInstalled = false
     converter = nil
+    // Reuse buffers belonged to the old generation's tap callback: invalidate
+    // so an in-flight stale callback never shares mutable instances with the
+    // fresh engine's callback (a stale callback that already checked out its
+    // locals keeps them privately; the fresh generation allocates its own).
+    reusableConvertedBuffer = nil
+    scratchInt16 = []
+    reusableBuffersGeneration = nil
     // Warmed converter belonged to the old engine/format path — drop it; the
     // next start (or prewarm) rebuilds for the fresh engine. A pending
     // capture-ready wait is invalidated with the generation: the ready cue
@@ -1160,11 +1203,22 @@ public final class AudioService {
   /// phrase. Empty if speech never started. VAD state reset. The shared
   /// recording buffer untouched — the tail is passed by COPY.
   private func takeLiveTailLocked() -> [Int16] {
+    guard let range = liveTailRangeLocked() else { return [] }
+    let lo = max(0, range.lowerBound)
+    let hi = min(collectedSamples.count, range.upperBound)
+    guard hi > lo else { return [] }
+    return Array(collectedSamples[lo..<hi])
+  }
+
+  /// Range of the open utterance without copying. Caller materializes the
+  /// Array AFTER unlock from a COW snapshot, so large memcpy never extends
+  /// the lock hold. Resets VAD state like `takeLiveTailLocked`.
+  private func liveTailRangeLocked() -> Range<Int>? {
     defer { resetLiveVADLocked() }
-    guard let start = liveUtteranceStart else { return [] }
+    guard let start = liveUtteranceStart else { return nil }
     let end = min(liveUtteranceEnd, collectedSamples.count)
-    guard end > start else { return [] }
-    return Array(collectedSamples[start..<end])
+    guard end > start else { return nil }
+    return start..<end
   }
 
   /// The value truly belongs to the recording: `begin` sets the recording bit
@@ -1380,15 +1434,44 @@ public final class AudioService {
     targetFormat: AVAudioFormat
   ) -> (converted: AVAudioPCMBuffer, status: AVAudioConverterOutputStatus)? {
     guard
-      let converted = AVAudioPCMBuffer(
-        pcmFormat: targetFormat,
-        frameCapacity: outputFrameCapacity(
-          forInputFrames: input.frameLength,
-          inputRate: inputFormat.sampleRate,
-          outputRate: targetFormat.sampleRate
-        )
-      )
+      let result = convertOnce(
+        input: input, inputFormat: inputFormat, converter: converter, targetFormat: targetFormat,
+        reusing: nil)
     else { return nil }
+    return (result.converted, result.status)
+  }
+
+  /// Reusable-buffer variant of `convertOnce` for the steady-state tap path.
+  /// When `reusing` fits (same target format and enough frameCapacity) it is
+  /// refilled in place and returned with `reused == true`, so the callback
+  /// allocates no new AVAudioPCMBuffer. Otherwise a new buffer is allocated
+  /// and returned with `reused == false` for the caller to cache.
+  static func convertOnce(
+    input: AVAudioPCMBuffer,
+    inputFormat: AVAudioFormat,
+    converter: AVAudioConverter,
+    targetFormat: AVAudioFormat,
+    reusing reusable: AVAudioPCMBuffer?
+  ) -> (converted: AVAudioPCMBuffer, status: AVAudioConverterOutputStatus, reused: Bool)? {
+    let required = outputFrameCapacity(
+      forInputFrames: input.frameLength,
+      inputRate: inputFormat.sampleRate,
+      outputRate: targetFormat.sampleRate
+    )
+    var output: AVAudioPCMBuffer?
+    var reused = false
+    if let reusable,
+      reusable.format.sampleRate == targetFormat.sampleRate,
+      reusable.format.channelCount == targetFormat.channelCount,
+      reusable.frameCapacity >= required
+    {
+      reusable.frameLength = 0
+      output = reusable
+      reused = true
+    } else {
+      output = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: required)
+    }
+    guard let converted = output else { return nil }
 
     var fedInput = false
     let status = converter.convert(to: converted, error: nil) { _, outStatus in
@@ -1401,11 +1484,23 @@ public final class AudioService {
       return input
     }
     guard converted.frameLength > 0, status != .error else { return nil }
-    return (converted, status)
+    return (converted, status, reused)
+  }
+
+  /// Single-sample Float32 -> Int16 clipping conversion shared by the tap path
+  /// and tests. No allocation; order-preserving.
+  static func clipFloatToInt16(_ sample: Float) -> Int16 {
+    if sample > 1.0 { return Int16(32767) }
+    if sample <= -1.0 { return Int16(-32768) }
+    return Int16(sample * 32767)
   }
 
   // swiftlint:disable:next cyclomatic_complexity function_body_length
-  private func process(_ buffer: AVAudioPCMBuffer) {
+  private func process(_ buffer: AVAudioPCMBuffer, tapGeneration: Int) {
+    // Generation gate at process entry: the tap block checked before dispatch,
+    // but `replaceEngineAfterWedge()` may have advanced the generation since —
+    // a stale callback must not touch the fresh session's buffers or state.
+    guard isCurrentGeneration(tapGeneration) else { return }
     // Early "is recording?" guard BEFORE conversion and AGC: after stop()/start()
     // a late buffer of the old tap must not touch InputGain state — reset() of
     // the new session (engineQueue, under lock) and apply (audio stream) do
@@ -1414,23 +1509,64 @@ public final class AudioService {
     // lock-free guard is gone — start/stop race closed (see takeBufferedSnapshot).
     let snapshot = takeBufferedSnapshot()
     guard snapshot.alive else { return }
+    guard isCurrentGeneration(tapGeneration) else { return }
     guard let converter = snapshot.converter else {
       logDroppedBuffer(reason: "converter is nil (stopped?)", frames: buffer.frameLength)
       return
     }
+    // Per-generation checkout of the reuse buffers (O(1) under lock). A tag
+    // match moves the staging storage to a local so the fill below mutates
+    // uniquely-owned memory (no COW copy) that no other generation shares; a
+    // mismatch (fresh generation after a wedge swap) starts from empty locals
+    // so old and new callbacks never share mutable instances outside the lock.
+    let cachedConverted: AVAudioPCMBuffer?
+    var localScratch: [Int16]
+    lock.lock()
+    if reusableBuffersGeneration == tapGeneration {
+      cachedConverted = reusableConvertedBuffer
+      localScratch = scratchInt16
+      scratchInt16 = []
+    } else {
+      cachedConverted = nil
+      localScratch = []
+    }
+    lock.unlock()
     guard
       let result = AudioService.convertOnce(
         input: buffer,
         inputFormat: buffer.format,
         converter: converter,
-        targetFormat: targetFormat
+        targetFormat: targetFormat,
+        reusing: cachedConverted
       )
     else {
+      // Conversion failed: restore the moved staging storage when this
+      // generation still owns the slots, so steady-state reuse keeps its
+      // capacity. A stale generation discards its locals — the fresh
+      // generation owns the slots now and must not be clobbered.
+      lock.lock()
+      if isCurrentGeneration(tapGeneration),
+        reusableBuffersGeneration == tapGeneration
+      {
+        scratchInt16 = localScratch
+      }
+      lock.unlock()
       logDroppedBuffer(
         reason: "convertOnce -> nil (empty output or error)", frames: buffer.frameLength)
       return
     }
+    // Stale during conversion (the wedge swap unblocked mid-convert): drop
+    // before touching VAD/gain/recording state or caching buffers — the fresh
+    // generation owns the slots now.
+    guard isCurrentGeneration(tapGeneration) else { return }
     guard let channel = result.converted.floatChannelData?[0] else {
+      lock.lock()
+      if isCurrentGeneration(tapGeneration),
+        reusableBuffersGeneration == tapGeneration
+      {
+        scratchInt16 = localScratch
+      }
+      lock.unlock()
       logDroppedBuffer(reason: "converted buffer has no float channel", frames: buffer.frameLength)
       return
     }
@@ -1469,6 +1605,22 @@ public final class AudioService {
       sampleRate: Int(targetFormat.sampleRate)
     )
     let appliedGainDb = gain.currentGainDb
+    // Float32->Int16 staging OUTSIDE the shared lock: per-sample clipping here,
+    // bulk append under the lock below. `localScratch` is the checked-out
+    // per-generation staging (grows only), so steady state allocates no
+    // temporary Array and no generation shares mutable staging outside the lock.
+    if localScratch.count < frameLength {
+      localScratch.reserveCapacity(frameLength)
+      while localScratch.count < frameLength {
+        localScratch.append(0)
+      }
+    }
+    for i in 0..<frameLength {
+      localScratch[i] = Self.clipFloatToInt16(channel[i])
+    }
+    // Synchronous delegate delivery (no queue, no allocation): the UI-side
+    // coalescing lives in the Agent (`audioLevelChanged` keeps at most one
+    // pending main-queue update), so stale levels never pile up.
     levelDelegate?.audioLevelChanged(rms: meteredRms)
     // Debug diagnostics: raw level, floor, VAD state and gain. No raw audio.
     if isDebug, vadIsSpeech != lastVadSpeech {
@@ -1494,10 +1646,27 @@ public final class AudioService {
 
     // All shared memory (isRecording, collectedSamples, rmsHistory, limit,
     // live-VAD) — under the lock: stop()/cancel() take a snapshot on main
-    // synchronously with the accumulation here.
+    // synchronously with the accumulation here. Kept minimal: bulk append plus
+    // O(1) bookkeeping. The completed-segment copy happens AFTER unlock from a
+    // COW snapshot + range, so large memcpy never extends the hold time.
+    var segmentRangeToDeliver: Range<Int>?
+    var segmentSnapshot: [Int16]?
     var deliveredSegment: [Int16]?
     lock.lock()
+    guard isCurrentGeneration(tapGeneration) else {
+      lock.unlock()
+      return
+    }
     guard isRecordingLocked else {
+      // Not recording (stop/cancel raced the fill): park the locals back when
+      // this generation still owns the slots so reuse capacity is kept.
+      if reusableBuffersGeneration == tapGeneration {
+        scratchInt16 = localScratch
+      } else if reusableBuffersGeneration == nil {
+        reusableConvertedBuffer = result.converted
+        scratchInt16 = localScratch
+        reusableBuffersGeneration = tapGeneration
+      }
       lock.unlock()
       return
     }
@@ -1534,21 +1703,20 @@ public final class AudioService {
     }
 
     // Memory bound: append no more than the limit allows (960 000 samples per
-    // 60 s). Buffer never exceeds it.
+    // 60 s). Buffer never exceeds it. Store pre-reserved at session start, so
+    // this is a bounded memcpy with no regrow allocation in steady state.
+    // Cache the per-generation reuse buffers (converted output + staging) for
+    // the next callback of this generation: steady state allocates no new
+    // AVAudioPCMBuffer per callback and reuses staging storage. Reached only
+    // on a generation match above, so a stale callback never clobbers the
+    // fresh generation's instances.
+    reusableConvertedBuffer = result.converted
+    scratchInt16 = localScratch
+    reusableBuffersGeneration = tapGeneration
     let sampleStart = collectedSamples.count
     let appendCount = min(frameLength, limit.remainingSamples(after: collectedSamples.count))
-    collectedSamples.reserveCapacity(
-      min(collectedSamples.count + frameLength, limit.maxSamples)
-    )
-    for i in 0..<appendCount {
-      let sample = channel[i]
-      if sample > 1.0 {
-        collectedSamples.append(Int16(32767))
-      } else if sample < -1.0 {
-        collectedSamples.append(Int16(-32768))
-      } else {
-        collectedSamples.append(Int16(sample * 32767))
-      }
+    if appendCount > 0 {
+      collectedSamples.append(contentsOf: localScratch[0..<appendCount])
     }
     let sampleEnd = collectedSamples.count
 
@@ -1603,6 +1771,8 @@ public final class AudioService {
     // delivered piece) and VAD reset. The range is provably non-empty: the
     // utterance holds ≥1 speech sample (liveUtteranceEnd > liveUtteranceStart),
     // post-roll non-negative — cut without an empty-range branch.
+    // Lock holds only the range + a COW snapshot (O(1), no element copy); the
+    // Array materialization happens after unlock below.
     let deliverSegment: () -> Void = {
       // Called only with liveUtteranceStart != nil (see below) — nil is
       // impossible by the invariant, the guard is compiler reassurance.
@@ -1610,7 +1780,8 @@ public final class AudioService {
       let postEnd = min(
         self.liveUtteranceEnd + self.livePostRollSamples, self.collectedSamples.count)
       let cutIndex = postEnd
-      deliveredSegment = Array(self.collectedSamples[start..<postEnd])
+      segmentRangeToDeliver = start..<postEnd
+      segmentSnapshot = self.collectedSamples
       self.liveLastCutIndex = cutIndex
       self.resetLiveVADLocked()
     }
@@ -1712,6 +1883,17 @@ public final class AudioService {
     } else if autoStopFired {
       scheduleAutoStop()
     }
+    // Materialize the completed segment outside the shared lock from the COW
+    // snapshot + range captured above: no voiced samples lost or reordered
+    // (range covers utterance start through last speech + post-roll), and the
+    // lock was held only for O(1) bookkeeping.
+    if let range = segmentRangeToDeliver, let snapshot = segmentSnapshot {
+      let lo = max(0, range.lowerBound)
+      let hi = min(snapshot.count, range.upperBound)
+      if hi > lo {
+        deliveredSegment = Array(snapshot[lo..<hi])
+      }
+    }
     if let segment = deliveredSegment, !segment.isEmpty {
       onSpeechSegment?(segment, false)
     }
@@ -1794,9 +1976,19 @@ public final class AudioService {
     captureReadyLive = false
     let rms = rmsHistory
     rmsHistory = []
-    let tail = takeLiveTailLocked()
+    // Same range+snapshot tail handoff as stop(): copy after unlock.
+    let tailRange = liveTailRangeLocked()
+    let tailSnapshot = tailRange != nil ? collectedSamples : [Int16]()
     let samples = collectedSamples
     lock.unlock()
+    var tail: [Int16] = []
+    if let range = tailRange {
+      let lo = max(0, range.lowerBound)
+      let hi = min(tailSnapshot.count, range.upperBound)
+      if hi > lo {
+        tail = Array(tailSnapshot[lo..<hi])
+      }
+    }
 
     if isDebug {
       Logger.log(
