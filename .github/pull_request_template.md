@@ -8,8 +8,8 @@
 
 ## Как проверял
 
-- [ ] `scripts/build-rust-core.sh --release` + `swift build -Xlinker rust/target/release/libnanodictate_core.a` (debug/release)
-- [ ] `swift run -Xlinker rust/target/release/libnanodictate_core.a NanoDictateCoreTests`
+- [ ] `scripts/build-rust-core.sh --release` + `swift build -Xlinker "$(pwd)/rust/target/release/libnanodictate_core.a"` (debug/release)
+- [ ] `swift run -Xlinker "$(pwd)/rust/target/release/libnanodictate_core.a" NanoDictateCoreTests`
 - [ ] Ручная проверка (опиши):
 
 ## Чек-лист

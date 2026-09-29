@@ -15,9 +15,9 @@ For every production-code change, run:
 
 ```sh
 scripts/build-rust-core.sh --release   # builds rust/target/release/libnanodictate_core.a first
-swift build -Xlinker rust/target/release/libnanodictate_core.a                 # debug
-swift build -c release -Xlinker rust/target/release/libnanodictate_core.a     # release
-swift run -Xlinker rust/target/release/libnanodictate_core.a NanoDictateCoreTests   # not `swift test` — executable target
+swift build -Xlinker "$(pwd)/rust/target/release/libnanodictate_core.a"                 # debug
+swift build -c release -Xlinker "$(pwd)/rust/target/release/libnanodictate_core.a"     # release
+swift run -Xlinker "$(pwd)/rust/target/release/libnanodictate_core.a" NanoDictateCoreTests   # not `swift test` — executable target
 ```
 
 `NanoDictateCoreTests` is an executable test runner, so do not use `swift test`. It exits non-zero when a test fails.
@@ -60,7 +60,7 @@ docs: clarify local verification
 
 - Branch from `main` and target `main`.
 - Keep the PR scoped to one coherent change.
-- Explain what changed, why it changed, and how it was verified (for example, `swift build -Xlinker rust/target/release/libnanodictate_core.a` / `swift run -Xlinker rust/target/release/libnanodictate_core.a NanoDictateCoreTests`).
+- Explain what changed, why it changed, and how it was verified (for example, `swift build -Xlinker "$(pwd)/rust/target/release/libnanodictate_core.a"` / `swift run -Xlinker "$(pwd)/rust/target/release/libnanodictate_core.a" NanoDictateCoreTests`).
 - Add or update focused tests for changed behavior.
 - Never commit secrets, credentials, or local configuration such as `~/.config/nanodictate/`.
 - Do not change `Sources/NanoDictateCore/Version.swift` or `.release-please-manifest.json` in ordinary feature or fix PRs; release automation owns version changes.

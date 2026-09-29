@@ -45,7 +45,7 @@ if [[ "$CHECK_HEADER" == 1 ]]; then
 fi
 
 # Cargo resolves a relative CARGO_TARGET_DIR against the cwd cargo runs in
-# (rust/, after the cd below), so resolve it the same way for reporting.
+# (rust/, after the cd above), so resolve it the same way for reporting.
 if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
   if [[ "$CARGO_TARGET_DIR" = /* ]]; then
     TARGET_DIR="$CARGO_TARGET_DIR"
