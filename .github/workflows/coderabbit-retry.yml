@@ -20,7 +20,11 @@ permissions: {}
 # exactly one controller deciding which PR gets the next review slot.
 concurrency:
   group: nanodictate-coderabbit-rate-limit-controller
-  cancel-in-progress: true
+  # This controller deliberately sleeps until the next shared quota slot.
+  # Cancelling it on every wake-up resets that timer and can starve the queue
+  # forever when status/review events keep arriving. Keep one runner alive;
+  # GitHub concurrency retains at most one pending successor behind it.
+  cancel-in-progress: false
 
 jobs:
   controller:
@@ -370,6 +374,7 @@ jobs:
                   }
                 }
 
+                let fullReviewCount = 0;
                 for (const review of reviews) {
                   if (
                     !review.user?.login?.startsWith('coderabbitai') ||
@@ -391,6 +396,7 @@ jobs:
                     );
                   if (!fullReview) continue;
 
+                  fullReviewCount += 1;
                   latestCompletedReviewAt = Math.max(
                     latestCompletedReviewAt,
                     new Date(review.submitted_at).getTime()
@@ -484,6 +490,7 @@ jobs:
                   headSha: pr.head.sha,
                   dueAt,
                   kind,
+                  fullReviewCount,
                   ...priority,
                 });
               }
@@ -510,8 +517,13 @@ jobs:
             }
 
             function candidateOrder(a, b) {
+              // Priority is the hard primary key and must never be bypassed:
+              // P0 > P1 > P2 > unprioritized. Fairness is allowed only
+              // *within the same priority class* so it cannot move a lower
+              // priority PR ahead of a higher-priority re-review.
               return (
                 a.rank - b.rank ||
+                a.fullReviewCount - b.fullReviewCount ||
                 a.issueNumber - b.issueNumber ||
                 a.prNumber - b.prNumber
               );
@@ -545,7 +557,7 @@ jobs:
               const queue = [...state.candidates]
                 .sort(candidateOrder)
                 .map(candidate =>
-                  `#${candidate.prNumber}/issue#${candidate.issueNumber === Number.MAX_SAFE_INTEGER ? '?' : candidate.issueNumber} ${candidate.priority} due=${new Date(candidate.effectiveDueAt).toISOString()}`
+                  `#${candidate.prNumber}/issue#${candidate.issueNumber === Number.MAX_SAFE_INTEGER ? '?' : candidate.issueNumber} ${candidate.priority} reviews=${candidate.fullReviewCount} due=${new Date(candidate.effectiveDueAt).toISOString()}`
                 )
                 .join(', ');
 
