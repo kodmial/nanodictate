@@ -73,6 +73,7 @@ let suites: [XCTestCase.Type] = [
     BatchTextJoinerTests.self,
     BatchTranscriberTests.self,
     BatchLongFormTests.self,
+    STTBenchmarkTests.self,
     WAVDecoderTests.self,
     AgentPlistTests.self,
 ]
