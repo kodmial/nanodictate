@@ -142,4 +142,116 @@ final class STTBenchmarkTests: XCTestCase {
     XCTAssertNotNil(json?["results"])
     XCTAssertNotNil(json?["summaries"])
   }
+
+  // MARK: - Live audio overlay (BenchmarkLiveAudio)
+
+  @objc func testLiveAudioFileNameAppendsWavExtension() {
+    XCTAssertEqual(BenchmarkLiveAudio.fileName(for: "quiet-short"), "quiet-short.wav")
+  }
+
+  @objc func testLiveAudioNilDirectoryKeepsSyntheticFixtures() {
+    let fallback = Array(BenchmarkFixtures.builtins().prefix(2))
+    let resolved = BenchmarkLiveAudio.resolvedLiveFixtures(fromDirectory: nil, fallback: fallback)
+    XCTAssertEqual(resolved.count, fallback.count)
+    for (index, resolution) in resolved.enumerated() {
+      XCTAssertFalse(resolution.isSpeech, "nil directory keeps synthetic non-speech")
+      XCTAssertNil(resolution.sourceURL)
+      XCTAssertEqual(resolution.fixture, fallback[index])
+    }
+  }
+
+  @objc func testLiveAudioEmptyAndNilPathKeepSynthetic() {
+    let fallback = Array(BenchmarkFixtures.builtins().prefix(1))
+    for path in [nil, "", ] as [String?] {
+      let resolved = BenchmarkLiveAudio.resolvedLiveFixtures(fromDirectoryPath: path, fallback: fallback)
+      XCTAssertEqual(resolved.count, 1)
+      XCTAssertFalse(resolved[0].isSpeech)
+      XCTAssertNil(resolved[0].sourceURL)
+      XCTAssertEqual(resolved[0].fixture, fallback[0])
+    }
+    let live = BenchmarkLiveAudio.liveFixtures(fromDirectoryPath: nil, fallback: fallback)
+    XCTAssertEqual(live, fallback)
+  }
+
+  private func makeLiveFixtureDir() throws -> URL {
+    let dir = FileManager.default.temporaryDirectory
+      .appendingPathComponent("live-audio-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    return dir
+  }
+
+  @objc func testLiveAudioMissingFileIsNonSpeechWithSourceURL() throws {
+    let dir = try makeLiveFixtureDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let fallback = Array(BenchmarkFixtures.builtins().prefix(1))
+    let resolved = BenchmarkLiveAudio.resolvedLiveFixtures(fromDirectory: dir, fallback: fallback)
+    XCTAssertEqual(resolved.count, 1)
+    XCTAssertFalse(resolved[0].isSpeech)
+    XCTAssertEqual(resolved[0].sourceURL, dir.appendingPathComponent(BenchmarkLiveAudio.fileName(for: fallback[0].id)))
+    XCTAssertEqual(resolved[0].fixture, fallback[0])
+    // Path-based overload resolves through the same directory logic.
+    let viaPath = BenchmarkLiveAudio.resolvedLiveFixtures(fromDirectoryPath: dir.path, fallback: fallback)
+    XCTAssertEqual(viaPath, resolved)
+  }
+
+  @objc func testLiveAudioInvalidWavIsNonSpeech() throws {
+    let dir = try makeLiveFixtureDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let fallback = Array(BenchmarkFixtures.builtins().prefix(1))
+    let url = dir.appendingPathComponent(BenchmarkLiveAudio.fileName(for: fallback[0].id))
+    try Data("not a wav file".utf8).write(to: url)
+    let resolved = BenchmarkLiveAudio.resolvedLiveFixtures(fromDirectory: dir, fallback: fallback)
+    XCTAssertFalse(resolved[0].isSpeech, "undecodable WAV keeps synthetic samples")
+    XCTAssertEqual(resolved[0].sourceURL, url)
+    XCTAssertEqual(resolved[0].fixture.samples, fallback[0].samples)
+  }
+
+  @objc func testLiveAudioValidMonoWavResolvesToSpeech() throws {
+    let dir = try makeLiveFixtureDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    var fallback = Array(BenchmarkFixtures.builtins().prefix(1))
+    fallback[0].samples = [1, 2, 3]
+    let speech: [Int16] = [0, 1000, -1000, 32767, -32768]
+    let url = dir.appendingPathComponent(BenchmarkLiveAudio.fileName(for: fallback[0].id))
+    try WAVEncoder.encode(samples: speech, sampleRate: 16000, channels: 1).write(to: url)
+    let resolved = BenchmarkLiveAudio.resolvedLiveFixtures(fromDirectory: dir, fallback: fallback)
+    XCTAssertTrue(resolved[0].isSpeech)
+    XCTAssertEqual(resolved[0].sourceURL, url)
+    XCTAssertEqual(resolved[0].fixture.sampleRate, 16000)
+    XCTAssertEqual(resolved[0].fixture.samples, speech, "mono WAV passes through unchanged")
+    XCTAssertEqual(resolved[0].fixture.transcript, fallback[0].transcript, "transcript stays ground truth")
+    // liveFixtures wrapper maps resolved fixtures.
+    XCTAssertEqual(BenchmarkLiveAudio.liveFixtures(fromDirectory: dir, fallback: fallback), [resolved[0].fixture])
+    XCTAssertEqual(
+      BenchmarkLiveAudio.liveFixtures(fromDirectoryPath: dir.path, fallback: fallback),
+      [resolved[0].fixture])
+  }
+
+  @objc func testLiveAudioStereoWavMixedDownToMono() throws {
+    let dir = try makeLiveFixtureDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let fallback = Array(BenchmarkFixtures.builtins().prefix(1))
+    // Interleaved stereo frames: (1000, 3000) and (2000, 4000).
+    let stereo: [Int16] = [1000, 3000, 2000, 4000]
+    let url = dir.appendingPathComponent(BenchmarkLiveAudio.fileName(for: fallback[0].id))
+    try WAVEncoder.encode(samples: stereo, sampleRate: 16000, channels: 2).write(to: url)
+    let resolved = BenchmarkLiveAudio.resolvedLiveFixtures(fromDirectory: dir, fallback: fallback)
+    XCTAssertTrue(resolved[0].isSpeech)
+    XCTAssertEqual(resolved[0].fixture.samples, [2000, 3000], "stereo averages per frame")
+  }
+
+  @objc func testToMonoEdgeCases() {
+    XCTAssertEqual(BenchmarkLiveAudio.toMono(samples: [1, 2, 3], channels: 1), [1, 2, 3])
+    XCTAssertEqual(BenchmarkLiveAudio.toMono(samples: [], channels: 2), [])
+    XCTAssertEqual(BenchmarkLiveAudio.toMono(samples: [10, 20], channels: 2), [15])
+    XCTAssertEqual(BenchmarkLiveAudio.toMono(samples: [1000, 3000, 2000, 4000], channels: 2), [2000, 3000])
+  }
+
+  @objc func testLiveFixtureResolutionInitAndPeakRSS() {
+    let fixture = BenchmarkFixtures.builtins()[0]
+    let implicit = LiveFixtureResolution(fixture: fixture, isSpeech: false)
+    XCTAssertNil(implicit.sourceURL)
+    XCTAssertEqual(implicit, LiveFixtureResolution(fixture: fixture, isSpeech: false, sourceURL: nil))
+    XCTAssertGreaterThanOrEqual(BenchmarkResources.peakRSSKilobytes(), 0)
+  }
 }

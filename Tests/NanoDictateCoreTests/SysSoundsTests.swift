@@ -87,4 +87,63 @@ final class SysSoundsTests: XCTestCase {
         sounds.playError()
         XCTAssertNil(sounds.playingName)
     }
+
+    // MARK: - Post-insert / empty-result / undo sounds (labels distinguish shared files)
+
+    /// Completion-after-insert shares the Pop file with playEnd but records
+    /// its own label, so tests can tell the two call sites apart.
+    @objc func testPlayCompletionAfterInsertSharesPopWithOwnLabel() {
+        let sounds = SysSounds(enabled: true)
+        sounds.playCompletionAfterInsert()
+        XCTAssertEqual(sounds.playingName, "Pop")
+        XCTAssertEqual(sounds.lastPlayedLabel, "completionAfterInsert")
+        sounds.playEnd()
+        XCTAssertEqual(sounds.playingName, "Pop")
+        XCTAssertEqual(sounds.lastPlayedLabel, "end")
+    }
+
+    @objc func testPlayEmptyResultUsesFunk() {
+        let sounds = SysSounds(enabled: true)
+        sounds.playEmptyResult()
+        XCTAssertEqual(sounds.playingName, "Funk")
+        XCTAssertEqual(sounds.lastPlayedLabel, "emptyResult")
+    }
+
+    @objc func testPlayUndoUsesPopWithOwnLabel() {
+        let sounds = SysSounds(enabled: true)
+        sounds.playUndo()
+        XCTAssertEqual(sounds.playingName, "Pop")
+        XCTAssertEqual(sounds.lastPlayedLabel, "undo")
+    }
+
+    @objc func testPlayCancelUsesPing() {
+        let sounds = SysSounds(enabled: true)
+        sounds.playCancel()
+        XCTAssertEqual(sounds.playingName, "Ping")
+        XCTAssertEqual(sounds.lastPlayedLabel, "cancel")
+    }
+
+    /// Disabled sounds never record intent, including the new cases.
+    @objc func testDisabledNewSoundsAreNoOp() {
+        let sounds = SysSounds(enabled: false)
+        sounds.playCompletionAfterInsert()
+        sounds.playEmptyResult()
+        sounds.playUndo()
+        sounds.playCancel()
+        sounds.playEnd()
+        XCTAssertNil(sounds.playingName)
+        XCTAssertNil(sounds.lastPlayedLabel)
+    }
+
+    /// shouldSkipReplay only skips the same still-playing sound.
+    @objc func testShouldSkipReplayMatrix() {
+        let sounds = SysSounds(enabled: true)
+        sounds.playStart() // playingName == "Tink"
+        XCTAssertTrue(sounds.shouldSkipReplay(of: "Tink", currentlyPlaying: true))
+        XCTAssertFalse(sounds.shouldSkipReplay(of: "Tink", currentlyPlaying: false))
+        XCTAssertFalse(sounds.shouldSkipReplay(of: "Pop", currentlyPlaying: false))
+        // Fresh instance with no sound yet never skips.
+        let fresh = SysSounds(enabled: true)
+        XCTAssertFalse(fresh.shouldSkipReplay(of: "Tink", currentlyPlaying: true))
+    }
 }

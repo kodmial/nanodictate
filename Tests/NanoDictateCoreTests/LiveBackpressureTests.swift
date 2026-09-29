@@ -231,6 +231,81 @@ final class LiveBackpressureTests: XCTestCase {
             XCTAssertEqual(enqueued, 0)
         }
     }
+
+    // MARK: - Telemetry accessors and failure bookkeeping
+
+    @objc func testQueuedDurationAndCounters() throws {
+        try runAsync {
+            let scheduler = LiveSegmentScheduler(
+                policy: LiveBackpressurePolicy(maxPendingBatches: 10, maxQueuedSeconds: 60.0, sampleRate: 16000))
+            await scheduler.enqueue(samples: self.segment(1, count: 1600), isTail: false)
+            await scheduler.enqueue(samples: self.segment(2, count: 3200), isTail: false)
+            let queued = await scheduler.queuedSampleCount
+            XCTAssertEqual(queued, 4800)
+            let duration = await scheduler.queuedDuration
+            XCTAssertEqual(duration, 0.3, accuracy: 1e-9, "4800 samples at 16 kHz")
+            let enqueuedSamples = await scheduler.totalEnqueuedSamples
+            XCTAssertEqual(enqueuedSamples, 4800)
+            let started = await scheduler.totalStartedRequests
+            XCTAssertEqual(started, 0)
+            let completed = await scheduler.totalCompletedRequests
+            XCTAssertEqual(completed, 0)
+            let transcribed = await scheduler.transcribedBatchCount
+            XCTAssertEqual(transcribed, 0)
+            let inserted = await scheduler.currentInsertedText
+            XCTAssertEqual(inserted, "")
+            let cancelled = await scheduler.isCancelled
+            XCTAssertFalse(cancelled)
+        }
+    }
+
+    @objc func testMarkFailedAdvancesWithoutPromptContext() throws {
+        try runAsync {
+            let scheduler = LiveSegmentScheduler(policy: .default)
+            // No in-flight batch: no-op, counters untouched.
+            await scheduler.markFailed()
+            let completedBefore = await scheduler.totalCompletedRequests
+            XCTAssertEqual(completedBefore, 0)
+            let transcribedBefore = await scheduler.transcribedBatchCount
+            XCTAssertEqual(transcribedBefore, 0)
+
+            await scheduler.enqueue(samples: self.segment(1, count: 1600), isTail: false)
+            let batch = await scheduler.dequeue()
+            XCTAssertNotNil(batch)
+            await scheduler.markFailed()
+            let completed = await scheduler.totalCompletedRequests
+            XCTAssertEqual(completed, 1)
+            let transcribed = await scheduler.transcribedBatchCount
+            XCTAssertEqual(transcribed, 1)
+            let inserted = await scheduler.currentInsertedText
+            XCTAssertEqual(inserted, "", "failure adds no prompt context")
+            let busy = await scheduler.isBusy
+            XCTAssertFalse(busy)
+            let prompt = await scheduler.currentPrompt
+            XCTAssertNil(prompt, "no prompt context after failure")
+        }
+    }
+
+    @objc func testMarkCompletedAccumulatesInsertedText() throws {
+        try runAsync {
+            let scheduler = LiveSegmentScheduler(policy: .default)
+            await scheduler.enqueue(samples: self.segment(1, count: 1600), isTail: false)
+            _ = await scheduler.dequeue()
+            await scheduler.markCompleted(insertText: "hello ", promptText: "hello ")
+            let completed = await scheduler.totalCompletedRequests
+            XCTAssertEqual(completed, 1)
+            let transcribed = await scheduler.transcribedBatchCount
+            XCTAssertEqual(transcribed, 1)
+            let inserted = await scheduler.currentInsertedText
+            XCTAssertEqual(inserted, "hello ")
+            let prompt = await scheduler.currentPrompt
+            XCTAssertNotNil(prompt)
+            // Second completion without dequeue is a no-op.
+            await scheduler.markCompleted(insertText: "ignored", promptText: "ignored")
+            let completedAgain = await scheduler.totalCompletedRequests
+            XCTAssertEqual(completedAgain, 1)
+        }
+    }
 }
 
 // MARK: - Helpers

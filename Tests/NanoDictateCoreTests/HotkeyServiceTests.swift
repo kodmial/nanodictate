@@ -380,4 +380,111 @@ final class HotkeyServiceTests: XCTestCase {
         service = nil // последняя strong-ссылка исчезла → deinit (stop в guard-ветке)
         XCTAssertNil(service, "сервис освобождён, deinit прошёл без креша")
     }
+
+    // MARK: - Debug logging paths preserve routing behavior
+
+    private func makeDebugService(delegate: SpyDelegate) -> HotkeyService {
+        let service = HotkeyService(doubleTapMaxInterval: 0.4, logLevel: "debug")
+        service.delegate = delegate
+        return service
+    }
+
+    /// Debug mode: clean Alt+Alt still fires through the debug log seams.
+    @objc func testDebugCleanAltAltFires() {
+        let delegate = SpyDelegate()
+        let service = makeDebugService(delegate: delegate)
+        service.handleKeyboardEvent(type: .flagsChanged, keyCode: 58, flags: [.maskAlternate], isRepeat: false, at: 1.0)
+        service.handleKeyboardEvent(type: .flagsChanged, keyCode: 58, flags: [], isRepeat: false, at: 1.1)
+        service.handleKeyboardEvent(type: .flagsChanged, keyCode: 58, flags: [.maskAlternate], isRepeat: false, at: 1.2)
+        XCTAssertEqual(delegate.altDoubleTapCount, 1)
+    }
+
+    /// Debug mode: second tap inside the window logs the SECOND-tap state and fires.
+    @objc func testDebugSecondTapWithinWindowFires() {
+        let delegate = SpyDelegate()
+        let service = makeDebugService(delegate: delegate)
+        service.handleKeyboardEvent(type: .flagsChanged, keyCode: 61, flags: [.maskAlternate], isRepeat: false, at: 5.0)
+        service.handleKeyboardEvent(type: .flagsChanged, keyCode: 61, flags: [.maskAlternate], isRepeat: false, at: 5.2)
+        XCTAssertEqual(delegate.altDoubleTapCount, 1)
+    }
+
+    /// Debug mode: tap past the window logs TIMEOUT and restarts the window.
+    @objc func testDebugTimeoutRestartsWindow() {
+        let delegate = SpyDelegate()
+        let service = makeDebugService(delegate: delegate)
+        service.handleKeyboardEvent(type: .flagsChanged, keyCode: 58, flags: [.maskAlternate], isRepeat: false, at: 1.0)
+        service.handleKeyboardEvent(type: .flagsChanged, keyCode: 58, flags: [.maskAlternate], isRepeat: false, at: 2.0)
+        XCTAssertEqual(delegate.altDoubleTapCount, 0)
+        service.handleKeyboardEvent(type: .flagsChanged, keyCode: 58, flags: [.maskAlternate], isRepeat: false, at: 2.2)
+        XCTAssertEqual(delegate.altDoubleTapCount, 1)
+    }
+
+    /// Debug mode: other-modifier between taps cancels the pending tap.
+    @objc func testDebugOtherModifierCancelsPendingTap() {
+        let delegate = SpyDelegate()
+        let service = makeDebugService(delegate: delegate)
+        service.handleKeyboardEvent(type: .flagsChanged, keyCode: 58, flags: [.maskAlternate], isRepeat: false, at: 1.0)
+        service.handleKeyboardEvent(type: .flagsChanged, keyCode: 59, flags: [.maskAlternate, .maskControl], isRepeat: false, at: 1.1)
+        service.handleKeyboardEvent(type: .flagsChanged, keyCode: 58, flags: [.maskAlternate], isRepeat: false, at: 1.2)
+        XCTAssertEqual(delegate.altDoubleTapCount, 0)
+    }
+
+    /// Debug mode: Escape/Return/foreign key cancel the pending tap and notify.
+    @objc func testDebugCancelKeysCancelPendingTap() {
+        let delegate = SpyDelegate()
+        let service = makeDebugService(delegate: delegate)
+        service.handleKeyboardEvent(type: .flagsChanged, keyCode: 58, flags: [.maskAlternate], isRepeat: false, at: 1.0)
+        service.handleKeyboardEvent(type: .keyDown, keyCode: 53, flags: [], isRepeat: false, at: 1.1)
+        XCTAssertEqual(delegate.cancelPressedCount, 1)
+        XCTAssertEqual(delegate.altDoubleTapCount, 0)
+
+        service.handleKeyboardEvent(type: .flagsChanged, keyCode: 58, flags: [.maskAlternate], isRepeat: false, at: 2.0)
+        service.handleKeyboardEvent(type: .keyDown, keyCode: 36, flags: [], isRepeat: false, at: 2.1)
+        XCTAssertEqual(delegate.enterPressedCount, 1)
+        service.handleKeyboardEvent(type: .flagsChanged, keyCode: 58, flags: [.maskAlternate], isRepeat: false, at: 2.2)
+        XCTAssertEqual(delegate.altDoubleTapCount, 0)
+
+        service.handleKeyboardEvent(type: .flagsChanged, keyCode: 58, flags: [.maskAlternate], isRepeat: false, at: 3.0)
+        service.handleKeyboardEvent(type: .keyDown, keyCode: 0, flags: [], isRepeat: false, at: 3.1)
+        service.handleKeyboardEvent(type: .flagsChanged, keyCode: 58, flags: [.maskAlternate], isRepeat: false, at: 3.2)
+        XCTAssertEqual(delegate.altDoubleTapCount, 0)
+    }
+
+    /// Debug mode: keyDown Option without repeat registers a tap.
+    @objc func testDebugKeyDownOptionPairFires() {
+        let delegate = SpyDelegate()
+        let service = makeDebugService(delegate: delegate)
+        service.handleKeyboardEvent(type: .keyDown, keyCode: 58, flags: [.maskAlternate], isRepeat: false, at: 1.0)
+        service.handleKeyboardEvent(type: .keyDown, keyCode: 61, flags: [.maskAlternate], isRepeat: false, at: 1.2)
+        XCTAssertEqual(delegate.altDoubleTapCount, 1)
+    }
+
+    // MARK: - Event-type guard and lifecycle
+
+    /// Unknown event types are ignored: no delegate, no pending-tap damage.
+    @objc func testUnknownEventTypeIsIgnored() {
+        let delegate = SpyDelegate()
+        let service = makeService(delegate: delegate)
+        service.handleKeyboardEvent(type: .keyUp, keyCode: 58, flags: [.maskAlternate], isRepeat: false, at: 1.0)
+        XCTAssertEqual(delegate.altDoubleTapCount, 0)
+        XCTAssertEqual(delegate.cancelPressedCount, 0)
+        XCTAssertEqual(delegate.enterPressedCount, 0)
+        // A real pair afterwards still works — the ignored event left no state.
+        service.handleKeyboardEvent(type: .flagsChanged, keyCode: 58, flags: [.maskAlternate], isRepeat: false, at: 2.0)
+        service.handleKeyboardEvent(type: .flagsChanged, keyCode: 58, flags: [.maskAlternate], isRepeat: false, at: 2.2)
+        XCTAssertEqual(delegate.altDoubleTapCount, 1)
+    }
+
+    /// stop() without a tap is a safe no-op; repeated stops stay safe.
+    @objc func testStopWithoutTapIsNoop() {
+        let service = makeService(delegate: SpyDelegate())
+        service.stop()
+        service.stop()
+    }
+
+    /// Error description guides toward the Accessibility grant.
+    @objc func testHotkeyServiceErrorDescription() {
+        let message = HotkeyServiceError.eventTapCreationFailed.errorDescription ?? ""
+        XCTAssertTrue(message.contains("Accessibility"))
+    }
 }

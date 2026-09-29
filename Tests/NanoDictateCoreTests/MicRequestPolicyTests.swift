@@ -108,4 +108,12 @@ final class MicRequestPolicyTests: XCTestCase {
         let fourth = MicRequestPolicy(fileURL: url)
         XCTAssertTrue(fourth.allowRequest(now: t0.addingTimeInterval(11)))
     }
+
+    /// Default state file lives under Application Support with a stable name.
+    @objc func testDefaultFileURLPointsAtApplicationSupport() {
+        let url = MicRequestPolicy.defaultFileURL()
+        XCTAssertEqual(url.lastPathComponent, "mic-request-state.json")
+        XCTAssertTrue(url.path.contains("NanoDictate"), "state file is namespaced to the app")
+        XCTAssertTrue(url.path.contains("Application Support"), "state persists in Application Support")
+    }
 }
