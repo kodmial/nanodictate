@@ -188,22 +188,40 @@ smoke_collect_diagnostics() {
   smoke_log "diagnostics written to $dir/diagnostics.log"
 }
 
+# Escape a string for inclusion inside a double-quoted JSON string value.
+# Handles backslashes, double quotes, and control characters (newline, CR,
+# tab) so arbitrary metadata values cannot produce invalid JSON or alter the
+# decoded value. Covers the characters that can appear in this record's
+# plain-text metadata values (backslash, quote, newline, CR, tab).
+smoke_json_escape() {
+  local str="$1"
+  str=${str//\\/\\\\}
+  str=${str//\"/\\\"}
+  str=${str//$'\n'/\\n}
+  str=${str//$'\r'/\\r}
+  str=${str//$'\t'/\\t}
+  printf '%s' "$str"
+}
+
 # Write the machine-readable result record consumed by the incident reporter.
 # Args: mode channel expected_version result failed_phase.
 smoke_write_metadata() {
   local mode="$1" channel="$2" expected="$3" result="$4" failed_phase="$5"
+  local arch macos
   mkdir -p "$SMOKE_RESULT_DIR"
+  arch="$(/usr/bin/arch 2>/dev/null || uname -m)"
+  macos="$(/usr/bin/sw_vers -productVersion 2>/dev/null || echo unknown)"
   {
     printf '{\n'
-    printf '  "mode": "%s",\n' "$mode"
-    printf '  "channel": "%s",\n' "$channel"
-    printf '  "expected_version": "%s",\n' "$expected"
-    printf '  "result": "%s",\n' "$result"
-    printf '  "failed_phase": "%s",\n' "$failed_phase"
-    printf '  "arch": "%s",\n' "$(/usr/bin/arch 2>/dev/null || uname -m)"
-    printf '  "macos": "%s",\n' "$(/usr/bin/sw_vers -productVersion 2>/dev/null || echo unknown)"
-    printf '  "run_id": "%s",\n' "${GITHUB_RUN_ID:-local}"
-    printf '  "run_attempt": "%s"\n' "${GITHUB_RUN_ATTEMPT:-1}"
+    printf '  "mode": "%s",\n' "$(smoke_json_escape "$mode")"
+    printf '  "channel": "%s",\n' "$(smoke_json_escape "$channel")"
+    printf '  "expected_version": "%s",\n' "$(smoke_json_escape "$expected")"
+    printf '  "result": "%s",\n' "$(smoke_json_escape "$result")"
+    printf '  "failed_phase": "%s",\n' "$(smoke_json_escape "$failed_phase")"
+    printf '  "arch": "%s",\n' "$(smoke_json_escape "$arch")"
+    printf '  "macos": "%s",\n' "$(smoke_json_escape "$macos")"
+    printf '  "run_id": "%s",\n' "$(smoke_json_escape "${GITHUB_RUN_ID:-local}")"
+    printf '  "run_attempt": "%s"\n' "$(smoke_json_escape "${GITHUB_RUN_ATTEMPT:-1}")"
     printf '}\n'
   } > "$SMOKE_RESULT_DIR/smoke-metadata.json"
 }
