@@ -1164,13 +1164,21 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             // No failover on roles — the role provider is used directly.
             // A segment failure aborts the whole run (ChunkedPipeline.run
             // does not catch segment errors); no final pass then.
+            // Word timestamps only for segments (overlap stitching via
+            // dedupeOverlap); the final whole-WAV pass and the normal
+            // single-request path send plain transcription.
             let selected: Transcriber
+            let needsTimestamps: Bool
             if filename == "final.wav" {
               selected = self.roleTranscriber(self.finalRoleProviderID) ?? self.transcriber
+              needsTimestamps = false
             } else {
               selected = self.roleTranscriber(self.segmentRoleProviderID) ?? self.transcriber
+              needsTimestamps = true
             }
-            let result = try await selected.transcribe(wav: wav, filename: filename, prompt: prompt)
+            let result = try await selected.transcribe(
+              wav: wav, filename: filename, prompt: prompt,
+              needsWordTimestamps: needsTimestamps)
             return ChunkedPipeline.SttResult(text: result.text, words: result.words)
           },
           insert: { operation in
@@ -1473,10 +1481,12 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         stt: { wav, filename, prompt in
           // The segment role from [routing] — as in processChunked: the
           // segment provider; unset — active transcriber (no failover here
-          // either — the final pass recovers).
+          // either — the final pass recovers). Segments request word
+          // timestamps for overlap stitching (dedupeOverlap); other paths
+          // send plain transcription.
           let transcriber = self.roleTranscriber(self.segmentRoleProviderID) ?? self.transcriber
           let segmentResult = try await transcriber.transcribe(
-            wav: wav, filename: filename, prompt: prompt)
+            wav: wav, filename: filename, prompt: prompt, needsWordTimestamps: true)
           return ChunkedPipeline.SttResult(text: segmentResult.text, words: segmentResult.words)
         },
         filename: "live-segment-\(index + 1).wav"

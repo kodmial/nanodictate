@@ -15,9 +15,16 @@ active_provider = "airubiz"
 [providers.openai]
 name = "OpenAI"
 base_url = ""
+# Recommended batch transcription model is gpt-transcribe (the adapter default
+# when model is empty). Explicit model = "whisper-1" remains a legacy
+# compatibility path (word timestamps only there, and only for chunked/live
+# segments); gpt-4o-transcribe family is deprecated upstream.
 model = ""
 api_key = ""
 # api_key_file = "~/.config/nanodictate/keys/openai.txt"
+# Language hint: forwarded as `language` (Whisper-style models) or as a single
+# `languages[]` entry (gpt-transcribe). Empty = auto-detect, param omitted.
+# language = ""
 
 [providers.groq]
 name = "Groq"
