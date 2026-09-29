@@ -285,7 +285,10 @@ const NANODICTATE_SYMLINK = "/usr/local/bin/nanodictate";
 export function rustStaticArchive(): string {
   // Cargo resolves a relative CARGO_TARGET_DIR against the directory cargo
   // runs in (rust/, via scripts/build-rust-core.sh), so mirror that here.
-  const override = process.env.CARGO_TARGET_DIR?.trim();
+  // Use the raw value without trimming: Cargo consumes CARGO_TARGET_DIR
+  // literally, so trimming here would link a different path than the Rust
+  // build produced when the value has leading/trailing whitespace.
+  const override = process.env.CARGO_TARGET_DIR;
   const targetDir =
     override && override.length > 0
       ? isAbsolute(override)
