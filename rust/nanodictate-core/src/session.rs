@@ -110,7 +110,7 @@ impl DictationSession {
                 // Engine start alone reports nothing.
             }
             SessionEvent::FirstBuffer => {
-                if self.ready_generation.is_none() {
+                if self.state == DictationState::Recording && self.ready_generation.is_none() {
                     self.ready_generation = Some(generation);
                     self.capture_ready_live = true;
                 }
@@ -316,6 +316,17 @@ mod tests {
         let mut s = DictationSession::new();
         let gen = s.start();
         s.on_event(SessionEvent::Cancelled, gen);
+        assert!(!s.is_capture_ready());
+        assert!(!s.should_emit_ready_cue());
+        assert_eq!(s.state(), DictationState::Idle);
+    }
+
+    #[test]
+    fn late_first_buffer_after_cancel_never_fires_readiness() {
+        let mut s = DictationSession::new();
+        let gen = s.start();
+        s.on_event(SessionEvent::Cancelled, gen);
+        s.on_event(SessionEvent::FirstBuffer, gen);
         assert!(!s.is_capture_ready());
         assert!(!s.should_emit_ready_cue());
         assert_eq!(s.state(), DictationState::Idle);

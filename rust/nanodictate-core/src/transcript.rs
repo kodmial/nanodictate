@@ -73,15 +73,21 @@ impl std::fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 struct Parser<'a> {
+    text: &'a str,
     bytes: &'a [u8],
     pos: usize,
+    depth: usize,
 }
+
+const MAX_DEPTH: usize = 64;
 
 impl<'a> Parser<'a> {
     fn new(text: &'a str) -> Self {
         Self {
+            text,
             bytes: text.as_bytes(),
             pos: 0,
+            depth: 0,
         }
     }
 
@@ -113,8 +119,19 @@ impl<'a> Parser<'a> {
     fn parse_value(&mut self) -> Result<JsonValue, ParseError> {
         self.skip_ws();
         match self.peek() {
-            Some(b'{') => self.parse_object(),
-            Some(b'[') => self.parse_array(),
+            Some(b'{') | Some(b'[') => {
+                if self.depth >= MAX_DEPTH {
+                    return Err(self.error("nesting too deep"));
+                }
+                self.depth += 1;
+                let result = if self.peek() == Some(b'{') {
+                    self.parse_object()
+                } else {
+                    self.parse_array()
+                };
+                self.depth -= 1;
+                result
+            }
             Some(b'"') => Ok(JsonValue::String(self.parse_string()?)),
             Some(b't') => self.parse_literal("true", JsonValue::Bool(true)),
             Some(b'f') => self.parse_literal("false", JsonValue::Bool(false)),
@@ -185,37 +202,59 @@ impl<'a> Parser<'a> {
                         Some(b'r') => out.push('\r'),
                         Some(b't') => out.push('\t'),
                         Some(b'u') => {
-                            self.pos += 1;
-                            if self.pos + 4 > self.bytes.len() {
-                                return Err(self.error("bad unicode escape"));
+                            self.pos += 1; // consume 'u'
+                            let mut code = self.read_hex4()?;
+                            if (0xD800..0xDC00).contains(&code) {
+                                if self.bytes.get(self.pos..self.pos + 2) != Some(b"\\u".as_slice())
+                                {
+                                    return Err(self.error("unpaired surrogate"));
+                                }
+                                self.pos += 2;
+                                let low = self.read_hex4()?;
+                                if !(0xDC00..0xE000).contains(&low) {
+                                    return Err(self.error("unpaired surrogate"));
+                                }
+                                code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+                            } else if (0xDC00..0xE000).contains(&code) {
+                                return Err(self.error("unpaired surrogate"));
                             }
-                            let hex = std::str::from_utf8(&self.bytes[self.pos..self.pos + 4])
-                                .map_err(|_| self.error("bad unicode escape"))?;
-                            let code = u32::from_str_radix(hex, 16)
-                                .map_err(|_| self.error("bad unicode escape"))?;
                             out.push(
                                 char::from_u32(code)
                                     .ok_or_else(|| self.error("bad unicode escape"))?,
                             );
-                            self.pos += 3; // +1 from the common increment below
+                            self.pos -= 1; // +1 from the common increment below
                         }
                         _ => return Err(self.error("bad escape")),
                     }
                     self.pos += 1;
                 }
                 Some(_) => {
-                    // Copy the full UTF-8 sequence starting here.
-                    let rest = std::str::from_utf8(&self.bytes[self.pos..])
-                        .map_err(|_| self.error("bad string bytes"))?;
-                    let ch = rest
-                        .chars()
-                        .next()
+                    // `pos` always sits on a char boundary: it advances only
+                    // over ASCII bytes or whole multi-byte characters.
+                    let text = self.text;
+                    let ch = text
+                        .get(self.pos..)
+                        .and_then(|rest| rest.chars().next())
                         .ok_or_else(|| self.error("bad string bytes"))?;
                     out.push(ch);
                     self.pos += ch.len_utf8();
                 }
             }
         }
+    }
+
+    /// Reads four hex digits at `pos` and advances past them.
+    fn read_hex4(&mut self) -> Result<u32, ParseError> {
+        let slice = self
+            .bytes
+            .get(self.pos..self.pos + 4)
+            .filter(|s| s.iter().all(u8::is_ascii_hexdigit))
+            .ok_or_else(|| self.error("bad unicode escape"))?;
+        // SAFETY: filtered to ASCII hex digits above, so always valid UTF-8.
+        let code = u32::from_str_radix(std::str::from_utf8(slice).unwrap(), 16)
+            .map_err(|_| self.error("bad unicode escape"))?;
+        self.pos += 4;
+        Ok(code)
     }
 
     fn parse_array(&mut self) -> Result<JsonValue, ParseError> {
@@ -400,6 +439,26 @@ mod tests {
     fn string_escapes_and_unicode() {
         let t = parse_transcript(r#"{"text": "a\"b\\c\n\u0041"}"#, None).unwrap();
         assert_eq!(t.text, "a\"b\\c\nA");
+    }
+
+    #[test]
+    fn surrogate_pair_decodes_to_non_bmp_character() {
+        let t = parse_transcript(r#"{"text": "\ud83d\ude00"}"#, None).unwrap();
+        assert_eq!(t.text, "😀");
+    }
+
+    #[test]
+    fn unpaired_surrogate_is_an_error() {
+        assert!(parse_transcript(r#"{"text": "\ud83d"}"#, None).is_err());
+        assert!(parse_transcript(r#"{"text": "\ude00"}"#, None).is_err());
+        assert!(parse_transcript(r#"{"text": "\ud83d\u0041"}"#, None).is_err());
+    }
+
+    #[test]
+    fn deeply_nested_input_is_rejected() {
+        let deep = format!("{}{}", "[".repeat(128), "]".repeat(128));
+        assert!(parse_json(&deep).is_err());
+        assert!(parse_json("[[[[1]]]]").is_ok());
     }
 
     #[test]

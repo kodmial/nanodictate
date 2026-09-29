@@ -498,18 +498,7 @@ pub extern "C" fn nd_text_join(
         let lens = slice_from(lens, count)?;
         let mut owned: Vec<String> = Vec::with_capacity(count);
         for i in 0..count {
-            // SAFETY: element pointers follow the same contract as inputs.
-            let bytes = unsafe {
-                if texts[i].is_null() {
-                    set_last_error("null text entry".to_string());
-                    return Err(ND_ERR_NULL);
-                }
-                std::slice::from_raw_parts(texts[i] as *const u8, lens[i])
-            };
-            let text = std::str::from_utf8(bytes).map_err(|_| {
-                set_last_error("input is not valid UTF-8".to_string());
-                ND_ERR_UTF8
-            })?;
+            let text = str_from(texts[i], lens[i])?;
             owned.push(text.to_string());
         }
         let refs: Vec<&str> = owned.iter().map(String::as_str).collect();

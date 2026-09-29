@@ -101,10 +101,10 @@ public func rustWAVEncode(samples: [Int16], sampleRate: UInt32, channels: UInt16
   guard code == 0 else {
     throw RustEngineError(code: code, message: lastErrorMessage())
   }
+  defer { nd_bytes_free(out) }
   guard let data = out.data else {
     throw RustEngineError(code: -1, message: "engine returned an empty WAV buffer")
   }
-  defer { nd_bytes_free(out) }
   return Data(bytes: data, count: out.len)
 }
 

@@ -76,7 +76,7 @@ jobs:
       # Windows portability artifact: the shared engine as a DLL.
       - name: Upload Windows DLL artifact
         if: matrix.os == 'windows-latest'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: nanodictate-core-windows-dll
           path: rust/target/release/nanodictate_core.dll
@@ -105,6 +105,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
 
       - name: Install Swift
         uses: swift-actions/setup-swift@7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a

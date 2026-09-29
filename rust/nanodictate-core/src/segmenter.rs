@@ -67,7 +67,7 @@ pub fn thresholds(rms: &[f32], config: &SegmenterConfig) -> (f32, f32) {
         return (config.silence_rms, config.silence_rms);
     }
     let mut sorted = rms.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| a.total_cmp(b));
     let idx = ((sorted.len() as f64) * 0.2) as usize;
     let low = if sorted.is_empty() {
         config.silence_rms
