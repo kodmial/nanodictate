@@ -77,7 +77,15 @@ jobs:
        github.actor == github.repository_owner &&
        (contains(github.event.comment.body, '/oc') ||
         contains(github.event.comment.body, '/opencode')))
-    runs-on: ubuntu-latest
+    runs-on: macos-15
+    # macOS execution environment (P0): NanoDictate's AVFoundation code only
+    # compiles and its tests only run on macOS. The OpenCode GitHub action is
+    # a composite bash action (curl install + `opencode github run`) with a
+    # runner.os-aware cache key, so the existing implementation job runs
+    # directly on a GitHub-hosted macOS runner with the repo checkout below.
+    # Capability-only: this selects where OpenCode runs, not when it must
+    # build/test; scheduler, branch/commit/PR lifecycle, CI, CodeRabbit, and
+    # repair/recovery are unchanged.
     timeout-minutes: 30
 
     permissions:
@@ -108,6 +116,33 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # macOS execution capability: same Swift 6.1 toolchain as CI's
+      # Build & Test (macOS) job, so OpenCode can invoke the real
+      # compilation (`swift build`) and test (`swift run
+      # NanoDictateCoreTests`) tooling from the checked-out working tree.
+      # Installing the toolchain does not run builds/tests by itself.
+      - name: Install Swift
+        # Pin swift-actions/setup-swift@v2 to a full commit SHA (peeled from
+        # the annotated v2 tag; CWE-829: mutable tag could be swapped
+        # upstream). Must stay aligned with .github/workflows/ci.yml.
+        uses: swift-actions/setup-swift@7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a
+        with:
+          # swift.org toolchain Swift 6.1 runs in Swift 5 language mode: it
+          # compiles the tools-version 5.7 manifest and builds Swift 5 code.
+          # 5.10.1 crashes its swift-frontend on the macOS 15.5 SDK.
+          swift-version: "6.1"
+
+      # Read-only capability probe: proves per-run that the macOS
+      # environment, working tree, and real tooling are invocable without
+      # building, testing, or changing CI/recovery semantics.
+      - name: Verify macOS execution capability
+        run: |
+          set -euo pipefail
+          sw_vers
+          swift --version
+          git --version
+          echo "workspace=$GITHUB_WORKSPACE revision=$(git rev-parse HEAD)"
 
       # workflow_dispatch repair modes must NOT use "opencode github run":
       # that integration owns a branch/PR lifecycle and can open a new PR even
