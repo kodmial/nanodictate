@@ -26,13 +26,30 @@ else
   cargo install cbindgen --version "$PINNED_CBINDGEN" --locked
 fi
 
+# cargo install drops the binary in $CARGO_HOME/bin (default ~/.cargo/bin),
+# which may be shadowed in PATH by an older cbindgen. Resolve the verified
+# pinned binary explicitly and use it for header generation below.
+CBINDGEN_BIN=""
+for candidate in "${CARGO_HOME:-$HOME/.cargo}/bin/cbindgen" "$(command -v cbindgen 2>/dev/null || true)"; do
+  [[ -n "$candidate" && -x "$candidate" ]] || continue
+  CANDIDATE_VERSION="$("$candidate" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"
+  if [[ "$CANDIDATE_VERSION" == "$PINNED_CBINDGEN" ]]; then
+    CBINDGEN_BIN="$candidate"
+    break
+  fi
+done
+if [[ -z "$CBINDGEN_BIN" ]]; then
+  echo "::error::cbindgen $PINNED_CBINDGEN not found after install attempt." >&2
+  exit 1
+fi
+
 mkdir -p "$REPO_ROOT/.opencode-tmp"
 SCRATCH="$(mktemp -d "$REPO_ROOT/.opencode-tmp/abi-check.XXXXXX")"
 trap 'rm -rf "$SCRATCH"' EXIT
 
 (
   cd "$REPO_ROOT/rust"
-  cbindgen --config nanodictate-core/cbindgen.toml --crate nanodictate-core \
+  "$CBINDGEN_BIN" --config nanodictate-core/cbindgen.toml --crate nanodictate-core \
     --output "$SCRATCH/nanodictate_core.h"
 )
 
