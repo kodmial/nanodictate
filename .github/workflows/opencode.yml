@@ -152,8 +152,17 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         run: |
           set -euo pipefail
-          curl -fsSL https://opencode.ai/install | bash
-          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+          for attempt in 1 2 3; do
+            if curl -fsSL --retry 3 --retry-delay 2 https://opencode.ai/install | bash; then
+              echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+              exit 0
+            fi
+            if [[ "$attempt" -eq 3 ]]; then
+              echo "::error::OpenCode installer failed after 3 attempts."
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
       - name: Run OpenCode
         if: github.event_name != 'workflow_dispatch'
@@ -491,3 +500,131 @@ jobs:
           gh api --method DELETE \
             "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels/opencode-conflict-repair" \
             >/dev/null 2>&1 || true
+
+  recover-scheduled-issue:
+    name: Recover failed scheduled issue dispatch
+    needs: opencode
+    if: >-
+      always() &&
+      needs.opencode.result != 'success' &&
+      needs.opencode.result != 'skipped' &&
+      github.event_name == 'issue_comment' &&
+      github.actor == github.repository_owner &&
+      !github.event.issue.pull_request &&
+      contains(github.event.comment.body, '<!-- issue-scheduler-dispatch -->')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      issues: write
+      pull-requests: read
+
+    env:
+      MAX_DISPATCH_ATTEMPTS: ${{ vars.AUTOMATION_MAX_DISPATCH_ATTEMPTS || '2' }}
+
+    steps:
+      - name: Brief backoff before retrying scheduler
+        run: sleep 120
+
+      - name: Release failed reservation or pause exhausted issue
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          # TAP_PAT is intentional: mutations made with GITHUB_TOKEN do not
+          # fan out into the issue scheduler's labeled/unlabeled triggers.
+          github-token: ${{ secrets.TAP_PAT }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issueNumber = context.payload.issue.number;
+            const marker = '<!-- issue-scheduler-dispatch -->';
+            const inProgress = 'automation:in-progress';
+            const paused = 'automation:paused';
+            const maxAttempts = Number.parseInt(
+              process.env.MAX_DISPATCH_ATTEMPTS || '2',
+              10
+            );
+
+            const { data: issue } = await github.rest.issues.get({
+              owner,
+              repo,
+              issue_number: issueNumber,
+            });
+            if (issue.state !== 'open') {
+              core.info(`Issue #${issueNumber} is no longer open.`);
+              return;
+            }
+
+            const labels = new Set(
+              (issue.labels || []).map(label =>
+                typeof label === 'string' ? label : label.name
+              )
+            );
+            if (!labels.has(inProgress)) {
+              core.info(
+                `Issue #${issueNumber} no longer owns an automation reservation.`
+              );
+              return;
+            }
+
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: 'open',
+              base: 'main',
+              per_page: 100,
+            });
+            const openPr = pulls.find(pr =>
+              pr.head?.repo?.full_name === `${owner}/${repo}` &&
+              (pr.head.ref || '').startsWith(`opencode/issue${issueNumber}-`)
+            );
+            if (openPr) {
+              core.notice(
+                `Issue #${issueNumber} already has open PR #${openPr.number}; keeping reservation.`
+              );
+              return;
+            }
+
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              {
+                owner,
+                repo,
+                issue_number: issueNumber,
+                per_page: 100,
+              }
+            );
+            const attempts = comments.filter(comment =>
+              (comment.body || '').includes(marker)
+            ).length;
+
+            try {
+              await github.rest.issues.removeLabel({
+                owner,
+                repo,
+                issue_number: issueNumber,
+                name: inProgress,
+              });
+            } catch (err) {
+              if (err.status !== 404) throw err;
+            }
+
+            if (attempts >= maxAttempts) {
+              await github.rest.issues.addLabels({
+                owner,
+                repo,
+                issue_number: issueNumber,
+                labels: [paused],
+              });
+              core.warning(
+                `Issue #${issueNumber} failed after ${attempts} scheduler dispatch attempt(s); automation paused.`
+              );
+              return;
+            }
+
+            // Removing automation:in-progress with TAP_PAT emits an issue
+            // event, waking issue-scheduler immediately. The scheduler then
+            // re-evaluates all priorities and WIP slots from current state.
+            core.notice(
+              `Released failed reservation for issue #${issueNumber} after attempt ${attempts}/${maxAttempts}; scheduler will retry from live priority state.`
+            );
+
