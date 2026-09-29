@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-09-29
+
+
+
+### Bug Fixes
+
+* Default OpenAI model now gpt-transcribe ([7ab2228](https://github.com/kodmial/nanodictate/commit/7ab2228f8bbaddb928268875aaccd29ec721fccb))
+
 ## [0.1.10] - 2026-09-29
 
 
@@ -373,7 +381,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.10...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.11...HEAD
+[0.1.11]: https://github.com/kodmial/nanodictate/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/kodmial/nanodictate/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/kodmial/nanodictate/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/kodmial/nanodictate/compare/v0.1.7...v0.1.8
