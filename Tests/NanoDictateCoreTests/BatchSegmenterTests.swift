@@ -237,4 +237,48 @@ final class BatchSegmenterTests: XCTestCase {
                            "стерео WAV должен отклоняться stereo-guard'ом")
         }
     }
+
+    // MARK: - BatchBodySpec equality (chunk identity for caching/dedup)
+
+    @objc func testBatchBodySpecEquality() {
+        let base = BatchBodySpec(
+            index: 1, bodyStart: 30.0, bodyEnd: 60.0,
+            bodyRange: 480_000..<960_000, overlapRange: 440_000..<480_000)
+        XCTAssertEqual(base, base, "same value equals itself")
+        XCTAssertEqual(
+            base,
+            BatchBodySpec(
+                index: 1, bodyStart: 30.0, bodyEnd: 60.0,
+                bodyRange: 480_000..<960_000, overlapRange: 440_000..<480_000))
+        XCTAssertTrue(
+            base
+                != BatchBodySpec(
+                    index: 2, bodyStart: 30.0, bodyEnd: 60.0,
+                    bodyRange: 480_000..<960_000, overlapRange: 440_000..<480_000),
+            "index distinguishes chunks")
+        XCTAssertTrue(
+            base
+                != BatchBodySpec(
+                    index: 1, bodyStart: 31.0, bodyEnd: 60.0,
+                    bodyRange: 480_000..<960_000, overlapRange: 440_000..<480_000),
+            "bodyStart distinguishes chunks")
+        XCTAssertTrue(
+            base
+                != BatchBodySpec(
+                    index: 1, bodyStart: 30.0, bodyEnd: 61.0,
+                    bodyRange: 480_000..<960_000, overlapRange: 440_000..<480_000),
+            "bodyEnd distinguishes chunks")
+        XCTAssertTrue(
+            base
+                != BatchBodySpec(
+                    index: 1, bodyStart: 30.0, bodyEnd: 60.0,
+                    bodyRange: 480_000..<961_000, overlapRange: 440_000..<480_000),
+            "bodyRange distinguishes chunks")
+        XCTAssertTrue(
+            base
+                != BatchBodySpec(
+                    index: 1, bodyStart: 30.0, bodyEnd: 60.0,
+                    bodyRange: 480_000..<960_000, overlapRange: nil),
+            "overlap presence distinguishes first vs later chunks")
+    }
 }

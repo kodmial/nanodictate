@@ -354,4 +354,21 @@ final class ProviderTests: XCTestCase {
         XCTAssertFalse(providers[1].isActive)
         XCTAssertEqual(ProviderStore.activeProvider?.id, "groq")
     }
+
+    // MARK: - ProviderStoreError description (menu-facing message)
+
+    @objc func testProviderStoreErrorDescriptionListsAvailable() {
+        let message = ProviderStoreError.unknownProvider(providerID: "nope", available: ["groq", "ya"]).description
+        XCTAssertTrue(message.contains("nope"))
+        XCTAssertTrue(message.contains("groq"))
+        XCTAssertTrue(message.contains("ya"))
+    }
+
+    @objc func testProviderStoreErrorDescriptionEmptyAvailable() {
+        // Empty list falls back to the localized "no providers" string —
+        // must still name the missing provider, never render an empty list.
+        let message = ProviderStoreError.unknownProvider(providerID: "nope", available: []).description
+        XCTAssertTrue(message.contains("nope"))
+        XCTAssertFalse(message.hasSuffix("Available: "))
+    }
 }
