@@ -1319,11 +1319,13 @@ func providerNamesText() -> String {
 /// `nanodictate benchmark --local [--json <path>] [--markdown <path>]`: runs
 /// the deterministic synthetic benchmark (no network, no secrets) comparing
 /// two reference STT configurations and prints a human-readable summary.
-/// `--live` is opt-in and requires NANODICTATE_BENCHMARK_LIVE=1; it sends the
-/// synthetic fixtures to the configured active provider.
+/// `--live` is opt-in and requires NANODICTATE_BENCHMARK_LIVE=1; it sends
+/// fixture audio to the configured active provider. Synthetic fixtures are
+/// tones, not speech, so live WER is only meaningful with --live-wav-dir.
 func cmdBenchmark(_ args: [String]) -> Int32 {
   var jsonPath: String?
   var markdownPath: String?
+  var liveWavDir: String?
   var live = false
   var i = 0
   while i < args.count {
@@ -1342,26 +1344,36 @@ func cmdBenchmark(_ args: [String]) -> Int32 {
       }
       markdownPath = args[i + 1]
       i += 2
+    case "--live-wav-dir":
+      guard i + 1 < args.count else {
+        eprint("benchmark: --live-wav-dir requires a directory")
+        return 1
+      }
+      liveWavDir = args[i + 1]
+      i += 2
     case "--live":
       live = true
       i += 1
     case "--local", "--help", "-h":
       if args[i] == "--help" || args[i] == "-h" {
-        print("Usage: nanodictate benchmark [--local] [--live] [--json <path>] [--markdown <path>]")
+        print("Usage: nanodictate benchmark [--local] [--live] [--json <path>]")
+        print("  --markdown <path> --live-wav-dir <dir>")
         print("  --local (default): deterministic synthetic run, no network.")
-        print("  --live: send synthetic fixtures to the active provider.")
-        print("    Requires NANODICTATE_BENCHMARK_LIVE=1 (opt-in, uses your API key).")
+        print("  --live: send fixture audio to the active provider.")
+        print("    Requires NANODICTATE_BENCHMARK_LIVE=1 (opt-in, uses API key).")
+        print("    --live-wav-dir <dir>: <fixture-id>.wav speech for live WER.")
         return 0
       }
       i += 1
     default:
       eprint("benchmark: unknown flag \(args[i])")
-      eprint("Usage: nanodictate benchmark [--local] [--live] [--json <path>] [--markdown <path>]")
+      eprint("Usage: nanodictate benchmark [--local] [--live] [--json <path>]")
       return 1
     }
   }
   if live {
-    return cmdBenchmarkLive(jsonPath: jsonPath, markdownPath: markdownPath)
+    return cmdBenchmarkLive(
+      jsonPath: jsonPath, markdownPath: markdownPath, liveWavDir: liveWavDir)
   }
   return cmdBenchmarkLocal(jsonPath: jsonPath, markdownPath: markdownPath)
 }
@@ -1424,10 +1436,15 @@ func cmdBenchmarkLocal(jsonPath: String?, markdownPath: String?) -> Int32 {
   }
 }
 
-/// Opt-in live run: synthetic fixtures through the active configured
-/// provider. Never runs in CI; requires NANODICTATE_BENCHMARK_LIVE=1 so a
-/// benchmark cannot silently spend API quota or leak audio by default.
-func cmdBenchmarkLive(jsonPath: String?, markdownPath: String?) -> Int32 {
+/// Opt-in live run: fixture audio through the active configured provider.
+/// Never runs in CI; requires NANODICTATE_BENCHMARK_LIVE=1 so a benchmark
+/// cannot silently spend API quota or leak audio by default. Synthetic
+/// fixtures are tones, not speech: live WER is only meaningful when the
+/// caller supplies transcript-bearing `<fixture-id>.wav` files via
+/// --live-wav-dir or NANODICTATE_BENCHMARK_LIVE_WAV_DIR.
+func cmdBenchmarkLive(
+  jsonPath: String?, markdownPath: String?, liveWavDir: String? = nil
+) -> Int32 {
   guard ProcessInfo.processInfo.environment["NANODICTATE_BENCHMARK_LIVE"] == "1" else {
     eprint("benchmark: --live requires NANODICTATE_BENCHMARK_LIVE=1 (opt-in).")
     eprint("Refusing to send audio to a real provider without explicit consent.")
@@ -1459,7 +1476,26 @@ func cmdBenchmarkLive(jsonPath: String?, markdownPath: String?) -> Int32 {
     proxyPassword: config.proxyPassword,
     adapterID: activeAdapterID
   )
-  let fixtures = BenchmarkFixtures.builtins()
+  let envWavDir = ProcessInfo.processInfo.environment[
+    "NANODICTATE_BENCHMARK_LIVE_WAV_DIR"]
+  let resolvedWavDir = liveWavDir ?? envWavDir
+  let fixtures = BenchmarkLiveAudio.liveFixtures(
+    fromDirectoryPath: resolvedWavDir)
+  if let dir = resolvedWavDir, !dir.isEmpty {
+    let fm = FileManager.default
+    for fixture in fixtures {
+      let path = (dir as NSString).appendingPathComponent(
+        BenchmarkLiveAudio.fileName(for: fixture.id))
+      if !fm.fileExists(atPath: path) {
+        eprint("benchmark: live fixture \(fixture.id) uses synthetic non-speech")
+        eprint("audio; its WER is latency-only. Add \(fixture.id).wav to score it.")
+      }
+    }
+  } else {
+    eprint("benchmark: no live speech audio supplied; synthetic tones measure")
+    eprint("latency/upload only, live WER is not speech quality. Provide")
+    eprint("--live-wav-dir <dir> with <fixture-id>.wav files to score WER.")
+  }
   let resolvedAdapter =
     (activeAdapterID?.isEmpty == false)
     ? activeAdapterID! : STTAdapterID.openAICompatible.rawValue

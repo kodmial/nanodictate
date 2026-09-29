@@ -419,6 +419,62 @@ public enum BenchmarkFixtures {
   }
 }
 
+// MARK: - Live audio overlay (transcript-bearing WAVs, opt-in)
+
+/// `BenchmarkSynth` tones are not intelligible speech, so scoring live
+/// provider output against fixture transcripts only measures STT quality
+/// when the audio actually speaks the transcript. This helper overlays
+/// user-supplied WAV files (`<fixture-id>.wav` in a directory) onto the
+/// synthetic fixtures, keeping transcripts as ground truth. Fixtures with
+/// no matching file keep their synthetic samples so latency and upload
+/// timing still work; callers must treat their live WER as non-speech.
+public enum BenchmarkLiveAudio {
+  public static func fileName(for fixtureID: String) -> String {
+    "\(fixtureID).wav"
+  }
+
+  public static func liveFixtures(
+    fromDirectory directory: URL?,
+    fallback: [BenchmarkFixture] = BenchmarkFixtures.builtins()
+  ) -> [BenchmarkFixture] {
+    guard let directory else { return fallback }
+    return fallback.map { fixture in
+      let url = directory.appendingPathComponent(fileName(for: fixture.id))
+      guard let data = try? Data(contentsOf: url),
+        let info = WAVDecoder.decodePCM16(data),
+        !info.samples.isEmpty
+      else { return fixture }
+      var copy = fixture
+      copy.sampleRate = info.sampleRate
+      copy.samples = toMono(samples: info.samples, channels: info.channels)
+      return copy
+    }
+  }
+
+  public static func liveFixtures(
+    fromDirectoryPath path: String?,
+    fallback: [BenchmarkFixture] = BenchmarkFixtures.builtins()
+  ) -> [BenchmarkFixture] {
+    guard let path, !path.isEmpty else { return fallback }
+    return liveFixtures(fromDirectory: URL(fileURLWithPath: path), fallback: fallback)
+  }
+
+  static func toMono(samples: [Int16], channels: Int) -> [Int16] {
+    guard channels > 1, !samples.isEmpty else { return samples }
+    let frames = samples.count / channels
+    var mono: [Int16] = []
+    mono.reserveCapacity(frames)
+    for frame in 0..<frames {
+      var sum = 0
+      for channel in 0..<channels {
+        sum += Int(samples[frame * channels + channel])
+      }
+      mono.append(Int16(sum / channels))
+    }
+    return mono
+  }
+}
+
 // MARK: - Resource sampling (best effort)
 
 /// Peak RSS snapshot for the current process, kilobytes. Best effort:
