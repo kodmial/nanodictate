@@ -5,7 +5,7 @@
 - The invoking workflow owns the Git lifecycle. Do not create or switch branches or open another pull request unless explicitly instructed. When a repair task explicitly requires commit/push, update only the current PR branch.
 - GitHub Actions runs are headless. Never request interactive approval or wait for user input.
 - Use `CONTRIBUTING.md` as the source of truth for project build, test, and release mechanics. For Swift core changes, use `swift build` and `swift run NanoDictateCoreTests`; do not use `swift test`.
-- Automated test coverage for production code must remain at or above 80%. New or changed behavior must include focused tests. Do not weaken or remove tests, or exclude production code from coverage, merely to satisfy the threshold. If coverage cannot be measured in the available runner, state that explicitly and do not claim the threshold passed.
+- New or changed behavior must include focused automated tests. Do not weaken or remove existing tests or coverage checks merely to make validation pass. CI is the source of truth for the minimum coverage threshold.
 - Ordinary feature and fix tasks must not bump `Sources/NanoDictateCore/Version.swift` or `.release-please-manifest.json`; release automation owns version changes unless the task explicitly concerns release machinery.
 - When a change depends on current provider, API, platform, or tooling behavior, verify the relevant current upstream documentation rather than relying on remembered behavior.
 - For signing, deployment, TCC, Accessibility, or microphone-specific workflow rules, consult the relevant project documentation only when the task touches those areas.
