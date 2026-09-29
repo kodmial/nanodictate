@@ -35,7 +35,7 @@ Conventional Commits с областью: `feat(agent): …`, `fix(agent): …`,
 ## Pull Request
 
 - Ветка от `main`, PR в `main`.
-- Опиши что и зачем, укажи как проверял (`swift build` / `swift run NanoDictateCoreTests`).
+- Опиши что и зачем, укажи как проверял (`swift build -Xlinker rust/target/release/libnanodictate_core.a` / `swift run -Xlinker rust/target/release/libnanodictate_core.a NanoDictateCoreTests`).
 - Не коммить секреты, ключи и `~/.config/nanodictate/`.
 - TCC/Accessibility/микрофон затрагиваешь — подписью только через MCP `dictation_deploy` (см. `SECURITY.md`), `codesign` вручную не трогай.
 

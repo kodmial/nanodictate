@@ -96,7 +96,7 @@ both human-readable text and `structuredContent`.
 
 | Tool                | Description                                                              |
 | ------------------- | ------------------------------------------------------------------------ |
-| `dictation_build`   | `swift build -c debug\|release` in the main checkout. Does not sign.      |
+| `dictation_build`   | Builds the Rust engine, then `swift build -c debug\|release -Xlinker rust/target/release/libnanodictate_core.a` in the main checkout. Does not sign. |
 | `dictation_sign`    | Re-signs both binaries with "NanoDictate Code Signing" + entitlements + hardened runtime, then `codesign --verify --strict`. Fails cleanly if the identity is missing. |
 | `dictation_deploy`  | One-call workflow: build → sign → restart (each step gated on the previous one). |
 | `dictation_restart` | `launchctl kickstart -k gui/<uid>/com.nanodictate.agent` (fallback: `nanodictate start`). See note below. |

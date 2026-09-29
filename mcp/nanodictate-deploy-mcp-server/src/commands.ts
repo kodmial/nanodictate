@@ -276,6 +276,16 @@ export function resolveSwiftToolchain(
 
 const NANODICTATE_SYMLINK = "/usr/local/bin/nanodictate";
 
+/**
+ * Absolute path to the release Rust static archive linked into Swift builds.
+ * Built by scripts/build-rust-core.sh; linked by absolute path so the macOS
+ * build never picks the cdylib (which would embed an absolute LC_LOAD_DYLIB
+ * path and break packaged binaries on other hosts).
+ */
+export function rustStaticArchive(): string {
+  return join(PROJECT_ROOT, "rust", "target", "release", "libnanodictate_core.a");
+}
+
 export interface SymlinkResult {
   created: boolean;
   /** Absolute path to the freshly built binary. */
@@ -340,7 +350,7 @@ export async function createNanodictateSymlink(
   };
 }
 
-/** Run `swift build -c <configuration>` in the main checkout. */
+/** Run the Rust build then `swift build -c <configuration>` in the main checkout. */
 export async function buildProject(
   configuration: Configuration,
 ): Promise<BuildResult> {
@@ -363,11 +373,38 @@ export async function buildProject(
     };
   }
 
-  const res = await run(toolchain.toolchain.swift, ["build", "-c", configuration], {
+  // The shared Rust engine (NanoDictateRustBridge) resolves its nd_* symbols
+  // from the static archive built by scripts/build-rust-core.sh. Build it
+  // first so `swift build` below never fails with undefined _nd_* symbols.
+  const rustBuild = await run("bash", ["scripts/build-rust-core.sh", "--release"], {
     cwd: PROJECT_ROOT,
     timeoutMs: BUILD_TIMEOUT_MS,
-    env: toolchain.toolchain.env,
   });
+  if (rustBuild.status !== 0) {
+    return {
+      configuration,
+      success: false,
+      exitCode: rustBuild.status,
+      binaryPath: paths.agent,
+      symlink: {
+        created: false,
+        target: paths.nanodictate,
+        linkPath: NANODICTATE_SYMLINK,
+        detail: "Rust engine build failed — symlink not created",
+      },
+      tail: tail(rustBuild.stdout + "\n" + rustBuild.stderr),
+    };
+  }
+
+  const res = await run(
+    toolchain.toolchain.swift,
+    ["build", "-c", configuration, "-Xlinker", rustStaticArchive()],
+    {
+      cwd: PROJECT_ROOT,
+      timeoutMs: BUILD_TIMEOUT_MS,
+      env: toolchain.toolchain.env,
+    },
+  );
   const buildOk = res.status === 0 && existsSync(paths.agent);
   const symlink =
     buildOk
