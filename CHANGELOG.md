@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-09-29
+
+
+
+### Bug Fixes
+
+* macOS packaging smoke CI implemented ([640cb97](https://github.com/kodmial/nanodictate/commit/640cb97cce452b86fe35839662fa9ad35a460d0a))
+
 ## [0.1.8] - 2026-09-28
 
 
@@ -357,7 +365,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.9...HEAD
+[0.1.9]: https://github.com/kodmial/nanodictate/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/kodmial/nanodictate/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/kodmial/nanodictate/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/kodmial/nanodictate/compare/v0.1.5...v0.1.6
