@@ -236,9 +236,13 @@ jobs:
       # The tests are a plain executable product (no .xctest bundle): without
       # Xcode, `swift test` is unavailable, so `swift run` executes the custom
       # runner (Tests/NanoDictateCoreTests/main.swift), which exits non-zero if
-      # any test fails.
+      # any test fails. Build options (-Xlinker) must precede the executable
+      # name: anything after it is passed to the test binary instead of the
+      # linker, which drops -lnanodictate_core and fails with undefined _nd_*
+      # symbols.
       - name: Run tests
         run: >
-          swift run NanoDictateCoreTests
+          swift run
           -Xlinker -L${{ github.workspace }}/rust/target/release
           -Xlinker -lnanodictate_core
+          NanoDictateCoreTests
