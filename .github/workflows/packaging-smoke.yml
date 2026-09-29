@@ -161,8 +161,13 @@ jobs:
 
       - name: Code-sign binaries and assemble the .app bundle
         env:
-          P12_B64: ${{ secrets.NANODICTATE_SIGNING_P12 }}
-          P12_PASS: ${{ secrets.NANODICTATE_SIGNING_PASSWORD }}
+          # Never expose the production signing credential to pull-request
+          # candidate jobs. PRs still exercise the full package lifecycle with
+          # an ad-hoc signature; trusted push/manual candidate gates use the
+          # production identity, and those exact tested bytes are what the
+          # Release workflow publishes.
+          P12_B64: ${{ github.event_name != 'pull_request' && secrets.NANODICTATE_SIGNING_P12 || '' }}
+          P12_PASS: ${{ github.event_name != 'pull_request' && secrets.NANODICTATE_SIGNING_PASSWORD || '' }}
         run: |
           set -euo pipefail
           VERSION="$(grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' Sources/NanoDictateCore/Version.swift)"
@@ -217,16 +222,33 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="$(grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' Sources/NanoDictateCore/Version.swift)"
-          mkdir -p candidate-dist
-          cp .build/release/NanoDictateAgent .build/release/nanodictate config.example.toml candidate-dist/
-          cp -R Resources candidate-dist/
-          cp -R .build/release/NanoDictate.app candidate-dist/
-          (cd candidate-dist && COPYFILE_DISABLE=1 tar -czf "nanodictate-$VERSION-macos-${{ matrix.arch }}.tar.gz" \
-            NanoDictateAgent nanodictate config.example.toml Resources)
-          (cd candidate-dist && COPYFILE_DISABLE=1 zip -Xr -y -q \
-            "nanodictate-$VERSION-macos-${{ matrix.arch }}.zip" \
-            NanoDictate.app nanodictate NanoDictateAgent config.example.toml Resources)
-          ls -l candidate-dist/
+          DIST="candidate-dist"
+          mkdir -p "$DIST"
+          cp .build/release/NanoDictateAgent .build/release/nanodictate config.example.toml "$DIST"/
+          cp -R Resources "$DIST"/
+          cp -R .build/release/NanoDictate.app "$DIST"/
+
+          # These archives are release-candidate artifacts, not throwaway test
+          # bundles. Make them deterministic so a retry of the same immutable
+          # commit produces the same bytes and therefore the same checksums.
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          TAR_MTIME="$(TZ=UTC date -u -r "$SOURCE_DATE_EPOCH" +%y%m%d%H%M.%S)"
+          find "$DIST" ! -type l -exec env TZ=UTC touch -m -t "$TAR_MTIME" {} +
+
+          ARCHIVE="$DIST/nanodictate-$VERSION-macos-${{ matrix.arch }}.tar.gz"
+          (cd "$DIST" && find . -type f ! -path '*/NanoDictate.app/*' ! -name 'nanodictate-*.tar.gz' ! -name 'nanodictate-*.zip' | sed 's|^\./||' | sort > /tmp/nanodictate-members.txt)
+          COPYFILE_DISABLE=1 tar -c \
+            --uid 0 --gid 0 --numeric-owner \
+            --no-xattrs --no-acls --no-fflags --no-mac-metadata \
+            -C "$DIST" -T /tmp/nanodictate-members.txt \
+            | gzip -n > "$ARCHIVE"
+
+          ZIP_ARCHIVE="$DIST/nanodictate-$VERSION-macos-${{ matrix.arch }}.zip"
+          ZIP_PATH="$(pwd)/$ZIP_ARCHIVE"
+          (cd "$DIST" && find . -type f ! -name 'nanodictate-*.tar.gz' ! -name 'nanodictate-*.zip' | sed 's|^\./||' | sort > /tmp/nanodictate-zip-members.txt)
+          (cd "$DIST" && TZ=UTC SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" COPYFILE_DISABLE=1 zip -Xr -y -q "$ZIP_PATH" -@ < /tmp/nanodictate-zip-members.txt)
+          shasum -a 256 "$ARCHIVE" "$ZIP_ARCHIVE"
+          ls -l "$DIST"/
 
       - name: Upload candidate artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
