@@ -334,7 +334,7 @@ jobs:
             } else {
               for (const finding of findings) {
                 const marker =
-                  `<!-- opencode-coderabbit-verification review=${reviewId} finding=${finding.id} head=${headSha} -->`;
+                  `<!-- coderabbit-verification review=${reviewId} finding=${finding.id} head=${headSha} -->`;
 
                 const duplicate = comments.some(
                   (comment) =>
