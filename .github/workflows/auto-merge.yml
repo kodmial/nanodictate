@@ -616,12 +616,33 @@ jobs:
               return carriedCodeRabbitReviewBasis(pr, headSha);
             }
 
-            function codeRabbitExplicitlyResolved(body = '') {
-              if (/\bUNRESOLVED\b/i.test(body)) return false;
-              return (
-                /\*\*RESOLVED(?:\.|\*\*)/i.test(body) ||
-                /✅\s*Review thread resolved\.?/i.test(body)
+            function codeRabbitVerdict(body = '') {
+              const visible = body
+                .replace(/<details\b[\s\S]*?<\/details>/gi, '')
+                .replace(/```[\s\S]*?```/g, '');
+
+              const explicit = visible.match(
+                /(?:^|\n)\s*(?:`?@[A-Za-z0-9_-]+`?[,\s]+)?\*\*(RESOLVED|UNRESOLVED)\*\*/im
               );
+              if (explicit) return explicit[1].toUpperCase();
+
+              if (
+                /(?:^|\n)\s*(?:`?@[A-Za-z0-9_-]+`?[,\s]+)?(?:the\s+)?(?:finding|issue|thread)\s+(?:still\s+)?remains?\s+unresolved\b/im.test(
+                  visible
+                )
+              ) {
+                return 'UNRESOLVED';
+              }
+
+              if (/✅\s*Review thread resolved\.?/i.test(visible)) {
+                return 'RESOLVED';
+              }
+
+              return null;
+            }
+
+            function codeRabbitExplicitlyResolved(body = '') {
+              return codeRabbitVerdict(body) === 'RESOLVED';
             }
 
             async function unresolvedCodeRabbitThreads(pr) {
@@ -743,12 +764,26 @@ jobs:
               for (const thread of threads) {
                 if (!thread.commentId) continue;
 
+                const root = comments.find(
+                  comment => comment.id === thread.commentId
+                );
+                const reviewId = Number(root?.pull_request_review_id);
+                if (!Number.isInteger(reviewId)) {
+                  core.warning(
+                    `PR #${pr.number}: cannot verify finding ${thread.commentId}; source review id is unavailable.`
+                  );
+                  continue;
+                }
+
                 const marker =
-                  `<!-- auto-merge-coderabbit-verification finding=${thread.commentId} head=${pr.head.sha} -->`;
+                  `<!-- coderabbit-verification review=${reviewId} finding=${thread.commentId} head=${pr.head.sha} -->`;
 
                 const duplicate = comments.some(comment =>
                   comment.in_reply_to_id === thread.commentId &&
-                  comment.body?.includes(marker)
+                  (comment.body || '').includes(
+                    `finding=${thread.commentId} head=${pr.head.sha}`
+                  ) &&
+                  (comment.body || '').includes('coderabbit-verification')
                 );
                 if (duplicate) continue;
 
@@ -759,8 +794,8 @@ jobs:
                   `Current PR HEAD: \`${pr.head.sha}\``,
                   '',
                   'Inspect the current code itself, not only the incremental diff.',
-                  'Resolve this thread only if the underlying issue is fully fixed.',
-                  'Otherwise explain exactly what remains unresolved.',
+                  'Reply with **RESOLVED** only if the underlying issue is fully fixed.',
+                  'Otherwise reply with **UNRESOLVED** and state exactly what remains.',
                 ].join('\n');
 
                 await github.request(
