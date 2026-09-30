@@ -13,8 +13,7 @@ jobs:
       github.event.comment.user.login == 'coderabbitai[bot]' &&
       github.event.pull_request.state == 'open' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.comment.in_reply_to_id != null &&
-      contains(github.event.comment.body, 'UNRESOLVED')
+      github.event.comment.in_reply_to_id != null
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -42,8 +41,40 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const pullNumber = context.payload.pull_request.number;
-            const verificationPattern =
+            const openCodeVerificationPattern =
               /<!-- opencode-coderabbit-verification review=(\d+) finding=(\d+) head=([0-9a-f]{40}) -->/;
+            const autoMergeVerificationPattern =
+              /<!-- auto-merge-coderabbit-verification finding=(\d+) head=([0-9a-f]{40}) -->/;
+
+            function codeRabbitVerdict(body = '') {
+              // CodeRabbit analysis/details can quote older verdicts and even
+              // complete prior thread bodies. Ignore those blocks and parse
+              // only the bot's visible conclusion.
+              const visible = body
+                .replace(/<details\b[\s\S]*?<\/details>/gi, '')
+                .replace(/```[\s\S]*?```/g, '');
+
+              const explicit = visible.match(
+                /(?:^|\n)\s*(?:`?@[A-Za-z0-9_-]+`?[,\s]+)?\*\*(RESOLVED|UNRESOLVED)\*\*/im
+              );
+              if (explicit) return explicit[1].toUpperCase();
+
+              // Some CodeRabbit verification replies use prose instead of the
+              // requested bold token, e.g. "the finding remains unresolved".
+              if (
+                /(?:^|\n)\s*(?:`?@[A-Za-z0-9_-]+`?[,\s]+)?(?:the\s+)?(?:finding|issue|thread)\s+(?:still\s+)?remains?\s+unresolved\b/im.test(
+                  visible
+                )
+              ) {
+                return 'UNRESOLVED';
+              }
+
+              if (/✅\s*Review thread resolved\.?/i.test(visible)) {
+                return 'RESOLVED';
+              }
+
+              return null;
+            }
 
             const comments = await github.paginate(
               github.rest.pulls.listReviewComments,
@@ -79,13 +110,33 @@ jobs:
             // verification request that is still awaiting CodeRabbit.
             const latestVerification = new Map();
             for (const comment of comments) {
-              const match = comment.body?.match(verificationPattern);
-              if (!match) continue;
+              const body = comment.body || '';
+              const openCodeMatch = body.match(openCodeVerificationPattern);
+              const autoMergeMatch = body.match(autoMergeVerificationPattern);
+              if (!openCodeMatch && !autoMergeMatch) continue;
 
-              const reviewId = Number(match[1]);
-              const findingId = Number(match[2]);
-              const verifiedHead = match[3];
-              if (getRootId(comment) !== findingId) continue;
+              let reviewId;
+              let findingId;
+              let verifiedHead;
+
+              if (openCodeMatch) {
+                reviewId = Number(openCodeMatch[1]);
+                findingId = Number(openCodeMatch[2]);
+                verifiedHead = openCodeMatch[3];
+              } else {
+                findingId = Number(autoMergeMatch[1]);
+                verifiedHead = autoMergeMatch[2];
+                const root = byId.get(findingId);
+                reviewId = Number(root?.pull_request_review_id);
+              }
+
+              if (
+                !Number.isInteger(reviewId) ||
+                !Number.isInteger(findingId) ||
+                getRootId(comment) !== findingId
+              ) {
+                continue;
+              }
 
               const previous = latestVerification.get(findingId);
               if (!previous || comment.id > previous.comment.id) {
@@ -106,12 +157,15 @@ jobs:
                     comment.user?.login === 'coderabbitai[bot]' &&
                     getRootId(comment) === verification.findingId &&
                     comment.id > verification.comment.id &&
-                    /\b(?:RESOLVED|UNRESOLVED)\b/i.test(comment.body ?? '')
+                    codeRabbitVerdict(comment.body ?? '') !== null
                 )
                 .sort((a, b) => b.id - a.id);
 
               const latestReply = replies[0];
-              if (!latestReply || !/\bUNRESOLVED\b/i.test(latestReply.body ?? '')) {
+              if (
+                !latestReply ||
+                codeRabbitVerdict(latestReply.body ?? '') !== 'UNRESOLVED'
+              ) {
                 continue;
               }
 
