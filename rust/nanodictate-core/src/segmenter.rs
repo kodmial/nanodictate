@@ -96,7 +96,7 @@ pub fn split_ranges(
     window_duration: f64,
     config: &SegmenterConfig,
 ) -> Vec<std::ops::Range<usize>> {
-    if rms.is_empty() {
+    if rms.is_empty() || !(window_duration.is_finite() && window_duration > 0.0) {
         return Vec::new();
     }
     let pause_windows = ((config.pause_duration / window_duration).round() as usize).max(1);
@@ -329,6 +329,16 @@ mod tests {
         let rms = vec![0.0002f32; 100];
         assert!(split_ranges(&rms, 0.085, &SegmenterConfig::default()).is_empty());
         assert!(split_ranges(&[], 0.085, &SegmenterConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn rejects_non_finite_or_non_positive_window_duration() {
+        let rms = speech_silence_timeline();
+        let config = SegmenterConfig::default();
+        assert!(split_ranges(&rms, 0.0, &config).is_empty());
+        assert!(split_ranges(&rms, -0.085, &config).is_empty());
+        assert!(split_ranges(&rms, f64::NAN, &config).is_empty());
+        assert!(split_ranges(&rms, f64::INFINITY, &config).is_empty());
     }
 
     #[test]
