@@ -366,9 +366,15 @@ pub extern "C" fn nd_wav_encode(
             set_last_error("sample rate and channels must be nonzero".to_string());
             return Err(ND_ERR_ARG);
         }
+        let bytes = wav::encode(samples, sample_rate, channels).ok_or_else(|| {
+            set_last_error(
+                "WAV header fields cannot represent inputs (byte_rate, block_align, or RIFF size overflow)".to_string(),
+            );
+            ND_ERR_ARG
+        })?;
         // SAFETY: `out` is a valid caller-owned slot (ABI contract).
         unsafe {
-            *out = bytes_out(wav::encode(samples, sample_rate, channels));
+            *out = bytes_out(bytes);
         }
         Ok(ND_OK)
     })) {

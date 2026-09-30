@@ -35,17 +35,26 @@ impl WavPcmHeader {
 ///
 /// The default profile is the historic batch profile (mono 16 kHz); callers
 /// pass the model audio profile explicitly instead of relying on defaults.
-pub fn encode(samples: &[i16], sample_rate: u32, channels: u16) -> Vec<u8> {
-    let channels = channels.max(1);
+///
+/// Returns `None` when the WAV header fields cannot represent the inputs:
+/// `sample_rate` or `channels` is zero, `byte_rate` does not fit `u32`,
+/// `block_align` does not fit `u16`, or the payload (`36 + bytes`) does not
+/// fit the `u32` RIFF/data size fields.
+pub fn encode(samples: &[i16], sample_rate: u32, channels: u16) -> Option<Vec<u8>> {
+    if sample_rate == 0 || channels == 0 {
+        return None;
+    }
     let bits_per_sample: u16 = 16;
+    let bytes_per_sample = u32::from(bits_per_sample / 8);
     let byte_rate = sample_rate
-        .saturating_mul(u32::from(channels))
-        .saturating_mul(u32::from(bits_per_sample / 8));
-    let block_align = channels.saturating_mul(bits_per_sample / 8);
-    let data_size = u32::try_from(samples.len().saturating_mul(2)).unwrap_or(u32::MAX - 36);
-    let file_size = data_size.saturating_add(36);
+        .checked_mul(u32::from(channels))?
+        .checked_mul(bytes_per_sample)?;
+    let block_align = channels.checked_mul(bits_per_sample / 8)?;
+    let payload_bytes = samples.len().checked_mul(2)?;
+    let data_size = u32::try_from(payload_bytes).ok()?;
+    let file_size = data_size.checked_add(36)?;
 
-    let mut out = Vec::with_capacity(44 + samples.len() * 2);
+    let mut out = Vec::with_capacity(44usize.checked_add(payload_bytes)?);
     out.extend_from_slice(b"RIFF");
     out.extend_from_slice(&file_size.to_le_bytes());
     out.extend_from_slice(b"WAVE");
@@ -62,7 +71,7 @@ pub fn encode(samples: &[i16], sample_rate: u32, channels: u16) -> Vec<u8> {
     for s in samples {
         out.extend_from_slice(&s.to_le_bytes());
     }
-    out
+    Some(out)
 }
 
 fn read_u16_le(data: &[u8], at: usize) -> u16 {
@@ -178,7 +187,7 @@ mod tests {
 
     #[test]
     fn encode_header_matches_canonical_layout() {
-        let wav = encode(&[0, 1, -1, 32767, -32768], 16000, 1);
+        let wav = encode(&[0, 1, -1, 32767, -32768], 16000, 1).expect("valid inputs must encode");
         assert_eq!(wav.len(), 44 + 10);
         assert_eq!(&wav[0..4], b"RIFF");
         assert_eq!(&wav[8..12], b"WAVE");
@@ -206,29 +215,27 @@ mod tests {
 
     #[test]
     fn encode_empty_payload() {
-        let wav = encode(&[], 16000, 1);
+        let wav = encode(&[], 16000, 1).expect("valid inputs must encode");
         assert_eq!(wav.len(), 44);
         assert_eq!(u32::from_le_bytes([wav[40], wav[41], wav[42], wav[43]]), 0);
     }
 
     #[test]
-    fn encode_saturates_header_on_overflow_inputs() {
-        // u32::MAX sample rate with stereo channels would overflow u32
-        // byte_rate with plain multiplication; saturating math must not panic.
-        let wav = encode(&[1, 2, 3], u32::MAX, u16::MAX);
-        assert_eq!(
-            u32::from_le_bytes([wav[28], wav[29], wav[30], wav[31]]),
-            u32::MAX
-        );
-        assert_eq!(u16::from_le_bytes([wav[32], wav[33]]), u16::MAX);
-        assert_eq!(u32::from_le_bytes([wav[40], wav[41], wav[42], wav[43]]), 6);
-        assert_eq!(u32::from_le_bytes([wav[4], wav[5], wav[6], wav[7]]), 36 + 6);
+    fn encode_rejects_header_overflow_inputs() {
+        // u32::MAX sample rate with stereo channels overflows u32 byte_rate.
+        assert!(encode(&[1, 2, 3], u32::MAX, u16::MAX).is_none());
+        assert!(encode(&[1, 2, 3], u32::MAX, 2).is_none());
+        // block_align overflows u16 when channels * 2 exceeds u16::MAX.
+        assert!(encode(&[1, 2, 3], 16000, u16::MAX).is_none());
+        // Zero rate/channels have no valid header representation.
+        assert!(encode(&[1, 2, 3], 0, 1).is_none());
+        assert!(encode(&[1, 2, 3], 16000, 0).is_none());
     }
 
     #[test]
     fn roundtrip_encode_decode() {
         let samples: Vec<i16> = (0..16000).map(|i| ((i % 256) as i16) * 100).collect();
-        let wav = encode(&samples, 16000, 1);
+        let wav = encode(&samples, 16000, 1).expect("valid inputs must encode");
         let info = decode_pcm16(&wav).expect("roundtrip must decode");
         assert_eq!(info.sample_rate, 16000);
         assert_eq!(info.channels, 1);
@@ -238,7 +245,7 @@ mod tests {
     #[test]
     fn header_prefix_without_payload() {
         let samples = vec![7i16; 100];
-        let wav = encode(&samples, 16000, 1);
+        let wav = encode(&samples, 16000, 1).expect("valid inputs must encode");
         let prefix = &wav[..44];
         let header = pcm_header(prefix).expect("header visible in prefix");
         assert_eq!(header.sample_count(), 100);
@@ -248,7 +255,7 @@ mod tests {
     #[test]
     fn rejects_non_wav_and_non_pcm() {
         assert!(decode_pcm16(b"not a wav file at all, definitely too short!!").is_none());
-        let mut wav = encode(&[1, 2, 3], 16000, 1);
+        let mut wav = encode(&[1, 2, 3], 16000, 1).expect("valid inputs must encode");
         // Corrupt audioFormat (offset 20) to 3 (float).
         wav[20] = 3;
         assert!(decode_pcm16(&wav).is_none());
@@ -273,7 +280,7 @@ mod tests {
     #[test]
     fn skips_unknown_chunks_with_odd_size_padding() {
         let samples = vec![5i16, 6, 7];
-        let canonical = encode(&samples, 16000, 1);
+        let canonical = encode(&samples, 16000, 1).expect("valid inputs must encode");
         // Insert a 3-byte JUNK chunk (odd size + 1 pad byte) between fmt and data.
         let mut f = Vec::new();
         f.extend_from_slice(&canonical[..36]);

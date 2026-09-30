@@ -117,6 +117,24 @@ fn wav_encode_decode_roundtrip_through_abi() {
 }
 
 #[test]
+fn wav_encode_rejects_header_overflow() {
+    let samples: Vec<i16> = vec![1, 2, 3];
+    let mut out = NdByteBuffer {
+        data: std::ptr::null_mut(),
+        len: 0,
+        cap: 0,
+    };
+    // byte_rate overflows u32 (u32::MAX * 2 * 2).
+    let code = nd_wav_encode(samples.as_ptr(), samples.len(), u32::MAX, 2, &mut out);
+    assert_eq!(code, 3);
+    assert!(out.data.is_null());
+    // block_align overflows u16 (u16::MAX * 2).
+    let code = nd_wav_encode(samples.as_ptr(), samples.len(), 16000, u16::MAX, &mut out);
+    assert_eq!(code, 3);
+    assert!(out.data.is_null());
+}
+
+#[test]
 fn stt_resolve_json_shape() {
     let adapter = to_c("groq");
     let model = to_c("whisper-large-v3-turbo");
