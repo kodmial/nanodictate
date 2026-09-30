@@ -22,4 +22,23 @@ usize_is_size_t = true
 [export]
 # PLACEHOLDER is a non-ASCII string literal that cbindgen cannot emit;
 # the placeholder contract lives in the Swift layer and the ABI docs.
-exclude = ["PLACEHOLDER"]
+# Internal tuning constants and types are not part of the C ABI. Note:
+# cbindgen matches associated constants by their short Rust name, not by
+# the prefixed C name it emits, so exclude those here.
+exclude = [
+  "PLACEHOLDER",
+  "AudioProfile",
+  "NEAR_SILENCE_THRESHOLD",
+  "DEFAULT_WINDOW_DURATION",
+  "DEFAULT_SPEECH_RMS_THRESHOLD",
+  "DEFAULT_SILENCE_RMS_THRESHOLD",
+  "DEFAULT_GRACE_PERIOD",
+  "DEFAULT_MIN_SPEECH_RUN",
+  "DEFAULT_MIN_RECORDING_DURATION",
+  "ABSOLUTE_MIN_DB",
+  "GATE_MARGIN_DB",
+  "FACTOR_REFRESH_SAMPLES",
+  "MAX_UP_GAP_DB",
+  "FAR_ABOVE_SLOWDOWN",
+  "KNEE",
+]

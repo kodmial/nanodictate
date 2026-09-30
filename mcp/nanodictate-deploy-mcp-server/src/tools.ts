@@ -699,7 +699,7 @@ export function registerTools(server: McpServer): void {
     {
       title: "Build dictation agent binaries",
       description:
-        "Builds the Rust engine (scripts/build-rust-core.sh --release) then runs `swift build -c <configuration> -Xlinker <root>/rust/target/release/libnanodictate_core.a` for the dictation macOS app and reports the resulting binary path. Does not sign or restart the agent — combine with dictation_sign / dictation_deploy." +
+        "Builds the Rust engine (scripts/build-rust-core.sh --release) then runs `swift build -c <configuration> -Xlinker <root>/rust/target/release/libnanodictate_core.a` (or under `CARGO_TARGET_DIR` if set) for the dictation macOS app and reports the resulting binary path. Does not sign or restart the agent — combine with dictation_sign / dictation_deploy." +
         SHARED_FOOTER,
       inputSchema: BuildInputSchema,
       outputSchema: BuildOutputSchema,

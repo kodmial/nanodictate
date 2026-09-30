@@ -41,22 +41,6 @@
 #define ND_EVENT_TRANSCRIPTION_DONE 5
 
 /**
- * Near-silence VAD threshold (0.00316, approximately -50 dBFS).
- * Values below this are microphone noise, not speech.
- */
-#define NEAR_SILENCE_THRESHOLD 0.00316
-
-#define AutoStopConfig_DEFAULT_SPEECH_RMS_THRESHOLD 0.00562
-
-#define AutoStopConfig_DEFAULT_SILENCE_RMS_THRESHOLD 0.00126
-
-#define AutoStopConfig_DEFAULT_GRACE_PERIOD 2.0
-
-#define AutoStopConfig_DEFAULT_MIN_SPEECH_RUN 0.3
-
-#define AutoStopConfig_DEFAULT_MIN_RECORDING_DURATION 3.0
-
-/**
  * Success.
  */
 #define ND_OK 0
@@ -95,37 +79,6 @@
  * A Rust panic was caught at the ABI boundary.
  */
 #define ND_ERR_PANIC 100
-
-/**
- * Absolute minimum raw level that may be amplified (-70 dBFS).
- */
-#define InputGain_ABSOLUTE_MIN_DB -70.0
-
-/**
- * Gate margin above the noise floor in dB.
- */
-#define InputGain_GATE_MARGIN_DB 4.0
-
-/**
- * Linear-factor refresh cadence inside the per-sample loop.
- */
-#define InputGain_FACTOR_REFRESH_SAMPLES 64
-
-/**
- * Sample-work window duration in seconds (85 ms, like the tap RMS buffers).
- */
-#define DEFAULT_WINDOW_DURATION 0.085
-
-#define NoiseFloorTracker_MAX_UP_GAP_DB 20.0
-
-#define NoiseFloorTracker_FAR_ABOVE_SLOWDOWN 5.0
-
-#define SoftLimiter_KNEE 0.8
-
-/**
- * Model-specific audio requirements for request preparation.
- */
-typedef struct AudioProfile AudioProfile;
 
 /**
  * Opaque silence auto-stop handle.
