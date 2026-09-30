@@ -38,7 +38,6 @@ jobs:
 
           missing=()
           [[ "$HAS_TAP_PAT" == "true" ]] || missing+=("TAP_PAT")
-          [[ "$HAS_OPENCODE_API_KEY" == "true" ]] || missing+=("OPENCODE_API_KEY")
           [[ "$HAS_SIGNING_P12" == "true" ]] || missing+=("NANODICTATE_SIGNING_P12")
           [[ "$HAS_SIGNING_PASSWORD" == "true" ]] || missing+=("NANODICTATE_SIGNING_PASSWORD")
 
@@ -79,7 +78,13 @@ jobs:
           {
             echo "### Result: READY"
             echo
-            echo "All secret prerequisites already exist in NanoDictate. No new secret provisioning is required for the Continuum cutover."
+            echo "All mandatory existing repository secrets for cutover are present."
+            if [[ "$HAS_OPENCODE_API_KEY" == "true" ]]; then
+              echo "Optional OPENCODE_API_KEY is present."
+            else
+              echo "Optional OPENCODE_API_KEY is absent; this is not a blocker because the current NanoDictate OpenCode issue run succeeds with the configured OpenCode free model without it."
+            fi
+            echo "No new secret provisioning is required for the current cutover design."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify GitHub dependency API is readable
