@@ -117,21 +117,21 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      # macOS execution capability: same Swift 6.1 toolchain as CI's
-      # Build & Test (macOS) job, so OpenCode can invoke the real
-      # compilation (`swift build`) and test (`swift run
-      # NanoDictateCoreTests`) tooling from the checked-out working tree.
-      # Installing the toolchain does not run builds/tests by itself.
-      - name: Install Swift
-        # Pin swift-actions/setup-swift@v2 to a full commit SHA (peeled from
-        # the annotated v2 tag; CWE-829: mutable tag could be swapped
-        # upstream). Must stay aligned with .github/workflows/ci.yml.
-        uses: swift-actions/setup-swift@7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a
+      # Reusable cached toolchain bootstrap (P0): restores the immutable
+      # OpenCode/Swift/Rust layers from .github/toolchain.json first and
+      # installs only on cache miss. On a cache hit this step never calls the
+      # OpenCode release API/install endpoint; on a miss it installs the pinned
+      # artifact deterministically and verifies `opencode --version`.
+      # enable-opencode is true only for workflow_dispatch repair modes, which
+      # invoke plain `opencode run` below. Issue/PR-comment sessions use the
+      # anomalyco/opencode/github integration, which owns its own lifecycle.
+      - name: Setup cached toolchain
+        uses: ./.github/actions/setup-toolchain
         with:
-          # swift.org toolchain Swift 6.1 runs in Swift 5 language mode: it
-          # compiles the tools-version 5.7 manifest and builds Swift 5 code.
-          # 5.10.1 crashes its swift-frontend on the macOS 15.5 SDK.
-          swift-version: "6.1"
+          enable-opencode: ${{ github.event_name == 'workflow_dispatch' }}
+          enable-swift: 'true'
+          enable-rust: auto
+          github-token: ${{ secrets.TAP_PAT }}
 
       # Read-only capability probe: proves per-run that the macOS
       # environment, working tree, and real tooling are invocable without
@@ -147,22 +147,14 @@ jobs:
       # workflow_dispatch repair modes must NOT use "opencode github run":
       # that integration owns a branch/PR lifecycle and can open a new PR even
       # when the prompt says not to. Plain "opencode run" works in this already
-      # checked-out PR branch and has no built-in PR-creation lifecycle.
-      - name: Install OpenCode CLI for automated repair
+      # checked-out PR branch and has no built-in PR-creation lifecycle. The
+      # pinned binary was restored from cache or installed above.
+      - name: Verify repaired OpenCode binary
         if: github.event_name == 'workflow_dispatch'
         run: |
           set -euo pipefail
-          for attempt in 1 2 3; do
-            if curl -fsSL --retry 3 --retry-delay 2 https://opencode.ai/install | bash; then
-              echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
-              exit 0
-            fi
-            if [[ "$attempt" -eq 3 ]]; then
-              echo "::error::OpenCode installer failed after 3 attempts."
-              exit 1
-            fi
-            sleep $((attempt * 15))
-          done
+          command -v opencode
+          opencode --version
 
       - name: Run OpenCode
         if: github.event_name != 'workflow_dispatch'

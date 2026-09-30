@@ -180,6 +180,19 @@ jobs:
             exit 1
           fi
 
+  toolchain-validation:
+    name: Toolchain validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Validate layered toolchain caches
+        run: bash scripts/test-toolchain.sh
+
   build-and-test:
     name: Build & Test (macOS)
     needs: classify-changes
@@ -195,16 +208,15 @@ jobs:
         # could be swapped upstream; the job runs with a 'contents: read' token).
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
-      - name: Install Swift
-        # Pin swift-actions/setup-swift@v2 to a full commit SHA (peeled from the
-        # annotated v2 tag; CWE-829: mutable tag could be swapped upstream).
-        uses: swift-actions/setup-swift@7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a
+      - name: Setup cached toolchain
+        # Reusable P0 bootstrap: pinned Swift from .github/toolchain.json with
+        # layered SwiftPM/Rust caches. Replaces the former duplicated
+        # swift-actions/setup-swift invocation.
+        uses: ./.github/actions/setup-toolchain
         with:
-          # swift.org toolchain Swift 6.1 runs in Swift 5 language mode: it
-          # compiles the tools-version 5.7 manifest and builds Swift 5 code
-          # (compiler 6.1 emits the same clang-generation as Xcode 16.4).
-          # 5.10.1 crashes its swift-frontend on the macOS 15.5 SDK.
-          swift-version: "6.1"
+          enable-opencode: 'false'
+          enable-swift: 'true'
+          enable-rust: auto
 
       # swift-format (Apple) is installed from its standard Homebrew location,
       # matching the local development setup. No source build or /tmp files.

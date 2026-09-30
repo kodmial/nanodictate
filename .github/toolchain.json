@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Canonical pinned toolchain manifest for OpenCode repair and CI. Production jobs never resolve these tools from an unauthenticated 'latest' lookup; the daily toolchain-update workflow proposes manifest bumps as reviewable PRs, and changed manifest values naturally generate new cache generations.",
+  "cache_schema": "v1",
+  "tools": {
+    "opencode": {
+      "version": "1.18.33",
+      "repo": "sst/opencode",
+      "asset_url": "https://github.com/sst/opencode/releases/download/v1.18.33",
+      "install": "curl -fsSL https://opencode.ai/install | bash -s -- --version 1.18.33 --no-modify-path"
+    },
+    "swift": {
+      "version": "6.1"
+    },
+    "rust": {
+      "channel": "stable",
+      "version": "1.89.0",
+      "profile": "minimal"
+    },
+    "cbindgen": {
+      "version": "0.29.4"
+    },
+    "windows": {
+      "runner": "windows-latest",
+      "notes": "Platform-specific install steps may differ, but manifest fields, key derivation inputs, and the setup-toolchain output contract are identical across macOS, Linux, and Windows."
+    }
+  }
+}

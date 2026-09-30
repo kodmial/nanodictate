@@ -147,10 +147,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Swift
-        uses: swift-actions/setup-swift@7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a
+      - name: Setup cached toolchain
+        # Reusable P0 bootstrap: pinned Swift from .github/toolchain.json.
+        uses: ./.github/actions/setup-toolchain
         with:
-          swift-version: ${{ matrix.swift }}
+          enable-opencode: 'false'
+          enable-swift: 'true'
+          enable-rust: auto
 
       - name: Build release binaries
         run: |

@@ -1,0 +1,69 @@
+name: Toolchain update discovery
+
+# Daily update discovery for managed toolchain versions. This workflow never
+# mutates a running production job: it only proposes a reviewable manifest
+# change. Merging that change naturally generates new cache generations via
+# the layered keys in .github/actions/setup-toolchain. A no-update day is a
+# green no-op with no PR and no noise.
+
+on:
+  schedule:
+    # Non-round daily discovery time (06:24 UTC), not cache recreation.
+    - cron: '24 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: toolchain-update
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    name: Discover upstream tool updates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: true
+
+      - name: Check managed upstream versions
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          bash scripts/toolchain/check-updates.sh --apply --report toolchain-update-report.txt
+          cat toolchain-update-report.txt
+
+      - name: Open or update manifest bump PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- .github/toolchain.json; then
+            echo "No managed tool version changed; nothing to propose."
+            exit 0
+          fi
+          echo "Managed versions changed:"
+          git diff -- .github/toolchain.json
+          BRANCH="chore/toolchain-bump-$(date -u +%Y%m%d)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add .github/toolchain.json
+          git commit -m "chore(toolchain): bump managed tool versions"
+          git push -u origin "$BRANCH" --force-with-lease
+          if gh pr view "$BRANCH" --json number >/dev/null 2>&1; then
+            echo "Update PR already exists for $BRANCH."
+            exit 0
+          fi
+          REPORT="$(cat toolchain-update-report.txt)"
+          gh pr create --base main --head "$BRANCH" \
+            --title "chore(toolchain): bump managed tool versions" \
+            --body "$(printf 'Automated toolchain update discovery.\n\n%s\n\nMerging this PR updates .github/toolchain.json, which naturally generates new cache generations for the affected layers only. Unchanged layers stay reusable.\n\nReview the pinned versions before merging; production jobs never auto-adopt unreviewed latest versions.' "$REPORT")"
