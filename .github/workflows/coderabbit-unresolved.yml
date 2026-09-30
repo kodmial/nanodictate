@@ -41,6 +41,8 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const pullNumber = context.payload.pull_request.number;
+            const canonicalVerificationPattern =
+              /<!-- coderabbit-verification review=(\d+) finding=(\d+) head=([0-9a-f]{40}) -->/;
             const openCodeVerificationPattern =
               /<!-- opencode-coderabbit-verification review=(\d+) finding=(\d+) head=([0-9a-f]{40}) -->/;
             const autoMergeVerificationPattern =
@@ -111,15 +113,20 @@ jobs:
             const latestVerification = new Map();
             for (const comment of comments) {
               const body = comment.body || '';
+              const canonicalMatch = body.match(canonicalVerificationPattern);
               const openCodeMatch = body.match(openCodeVerificationPattern);
               const autoMergeMatch = body.match(autoMergeVerificationPattern);
-              if (!openCodeMatch && !autoMergeMatch) continue;
+              if (!canonicalMatch && !openCodeMatch && !autoMergeMatch) continue;
 
               let reviewId;
               let findingId;
               let verifiedHead;
 
-              if (openCodeMatch) {
+              if (canonicalMatch) {
+                reviewId = Number(canonicalMatch[1]);
+                findingId = Number(canonicalMatch[2]);
+                verifiedHead = canonicalMatch[3];
+              } else if (openCodeMatch) {
                 reviewId = Number(openCodeMatch[1]);
                 findingId = Number(openCodeMatch[2]);
                 verifiedHead = openCodeMatch[3];
