@@ -38,10 +38,12 @@ impl WavPcmHeader {
 pub fn encode(samples: &[i16], sample_rate: u32, channels: u16) -> Vec<u8> {
     let channels = channels.max(1);
     let bits_per_sample: u16 = 16;
-    let byte_rate = sample_rate * u32::from(channels) * u32::from(bits_per_sample / 8);
-    let block_align = channels * (bits_per_sample / 8);
-    let data_size = (samples.len() * 2) as u32;
-    let file_size = 36 + data_size;
+    let byte_rate = sample_rate
+        .saturating_mul(u32::from(channels))
+        .saturating_mul(u32::from(bits_per_sample / 8));
+    let block_align = channels.saturating_mul(bits_per_sample / 8);
+    let data_size = u32::try_from(samples.len().saturating_mul(2)).unwrap_or(u32::MAX - 36);
+    let file_size = data_size.saturating_add(36);
 
     let mut out = Vec::with_capacity(44 + samples.len() * 2);
     out.extend_from_slice(b"RIFF");
@@ -207,6 +209,20 @@ mod tests {
         let wav = encode(&[], 16000, 1);
         assert_eq!(wav.len(), 44);
         assert_eq!(u32::from_le_bytes([wav[40], wav[41], wav[42], wav[43]]), 0);
+    }
+
+    #[test]
+    fn encode_saturates_header_on_overflow_inputs() {
+        // u32::MAX sample rate with stereo channels would overflow u32
+        // byte_rate with plain multiplication; saturating math must not panic.
+        let wav = encode(&[1, 2, 3], u32::MAX, u16::MAX);
+        assert_eq!(
+            u32::from_le_bytes([wav[28], wav[29], wav[30], wav[31]]),
+            u32::MAX
+        );
+        assert_eq!(u16::from_le_bytes([wav[32], wav[33]]), u16::MAX);
+        assert_eq!(u32::from_le_bytes([wav[40], wav[41], wav[42], wav[43]]), 6);
+        assert_eq!(u32::from_le_bytes([wav[4], wav[5], wav[6], wav[7]]), 36 + 6);
     }
 
     #[test]
