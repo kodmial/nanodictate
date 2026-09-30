@@ -29,6 +29,7 @@ on:
   pull_request:
     paths:
       - 'Sources/**'
+      - 'rust/**'
       - 'Package.swift'
       - 'packaging/**'
       - 'scripts/**'
@@ -43,6 +44,7 @@ on:
       - 'v*'
     paths:
       - 'Sources/**'
+      - 'rust/**'
       - 'Package.swift'
       - 'packaging/**'
       - 'scripts/**'
