@@ -47,20 +47,33 @@ jobs:
               /<!-- auto-merge-coderabbit-verification finding=(\d+) head=([0-9a-f]{40}) -->/;
 
             function codeRabbitVerdict(body = '') {
-              // CodeRabbit analysis/details can quote older RESOLVED/UNRESOLVED
-              // text. Only parse the visible decisive verdict outside details
-              // and fenced code blocks.
+              // CodeRabbit analysis/details can quote older verdicts and even
+              // complete prior thread bodies. Ignore those blocks and parse
+              // only the bot's visible conclusion.
               const visible = body
                 .replace(/<details\b[\s\S]*?<\/details>/gi, '')
                 .replace(/```[\s\S]*?```/g, '');
-              const matches = [
-                ...visible.matchAll(
-                  /(?:^|\n)\s*(?:`?@[A-Za-z0-9_-]+`?\s+)?\*\*(RESOLVED|UNRESOLVED)\*\*[.!:]?\s*(?=\n|$)/gim
-                ),
-              ];
-              return matches.length
-                ? matches.at(-1)[1].toUpperCase()
-                : null;
+
+              const explicit = visible.match(
+                /(?:^|\n)\s*(?:`?@[A-Za-z0-9_-]+`?[,\s]+)?\*\*(RESOLVED|UNRESOLVED)\*\*/im
+              );
+              if (explicit) return explicit[1].toUpperCase();
+
+              // Some CodeRabbit verification replies use prose instead of the
+              // requested bold token, e.g. "the finding remains unresolved".
+              if (
+                /(?:^|\n)\s*(?:`?@[A-Za-z0-9_-]+`?[,\s]+)?(?:the\s+)?(?:finding|issue|thread)\s+(?:still\s+)?remains?\s+unresolved\b/im.test(
+                  visible
+                )
+              ) {
+                return 'UNRESOLVED';
+              }
+
+              if (/✅\s*Review thread resolved\.?/i.test(visible)) {
+                return 'RESOLVED';
+              }
+
+              return null;
             }
 
             const comments = await github.paginate(
