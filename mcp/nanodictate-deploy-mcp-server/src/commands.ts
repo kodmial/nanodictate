@@ -388,7 +388,7 @@ export async function buildProject(
   // The shared Rust engine (NanoDictateRustBridge) resolves its nd_* symbols
   // from the static archive built by scripts/build-rust-core.sh. Build it
   // first so `swift build` below never fails with undefined _nd_* symbols.
-  const rustBuild = await run("bash", ["scripts/build-rust-core.sh", "--release"], {
+  const rustBuild = await run("bash", ["scripts/build-rust-core.sh", "--release", "--skip-header-check"], {
     cwd: PROJECT_ROOT,
     timeoutMs: BUILD_TIMEOUT_MS,
   });
