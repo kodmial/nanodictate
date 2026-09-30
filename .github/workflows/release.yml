@@ -25,6 +25,7 @@ on:
       - main
     paths:
       - 'Sources/**'
+      - 'rust/**'
       - 'Package.swift'
       - 'packaging/**'
       - 'scripts/**'
