@@ -55,8 +55,11 @@ pub fn should_failover(kind: TranscribeKind) -> bool {
 /// doubling from `base_ms` and capped at `cap_ms`. Deterministic (no
 /// jitter): the native layer adds jitter if a deployment needs it.
 pub fn backoff_delay_ms(attempt: u32, base_ms: u64, cap_ms: u64) -> u64 {
-    let shift = attempt.min(16);
-    base_ms.saturating_mul(1u64 << shift).min(cap_ms)
+    if base_ms == 0 {
+        return 0;
+    }
+    let factor = 2u64.checked_pow(attempt).unwrap_or(u64::MAX);
+    base_ms.saturating_mul(factor).min(cap_ms)
 }
 
 #[cfg(test)]
@@ -108,5 +111,14 @@ mod tests {
         assert_eq!(backoff_delay_ms(1, 500, 8000), 1000);
         assert_eq!(backoff_delay_ms(4, 500, 8000), 8000);
         assert_eq!(backoff_delay_ms(100, 500, 8000), 8000);
+    }
+
+    #[test]
+    fn backoff_grows_until_cap_without_16_attempt_limit() {
+        assert_eq!(backoff_delay_ms(17, 1, 100_000), 100_000);
+        assert_eq!(backoff_delay_ms(17, 1, u64::MAX), 131_072);
+        assert_eq!(backoff_delay_ms(0, 0, 8000), 0);
+        assert_eq!(backoff_delay_ms(100, 0, 8000), 0);
+        assert_eq!(backoff_delay_ms(u32::MAX, 500, 8000), 8000);
     }
 }

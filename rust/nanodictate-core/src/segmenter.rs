@@ -252,7 +252,7 @@ pub fn batch_plan(
     max_segment: f64,
     overlap: f64,
 ) -> Vec<BatchChunkSpec> {
-    if sample_count == 0 {
+    if sample_count == 0 || !(max_segment.is_finite() && max_segment > 0.0) {
         return Vec::new();
     }
     let rate = sample_rate.max(1) as f64;
@@ -400,5 +400,14 @@ mod tests {
             assert_eq!(w[0].body_range.end, w[1].body_range.start);
         }
         assert!(batch_plan(0, 16000, 30.0, 2.5).is_empty());
+    }
+
+    #[test]
+    fn batch_plan_rejects_non_finite_or_non_positive_max_segment() {
+        assert!(batch_plan(16000, 16000, 0.0, 2.5).is_empty());
+        assert!(batch_plan(16000, 16000, -30.0, 2.5).is_empty());
+        assert!(batch_plan(16000, 16000, f64::NAN, 2.5).is_empty());
+        assert!(batch_plan(16000, 16000, f64::INFINITY, 2.5).is_empty());
+        assert!(batch_plan(16000, 16000, f64::NEG_INFINITY, 2.5).is_empty());
     }
 }
