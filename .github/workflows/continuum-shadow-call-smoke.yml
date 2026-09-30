@@ -1,0 +1,26 @@
+name: Continuum reusable-call smoke
+
+on:
+  push:
+    paths:
+      - '.github/workflows/continuum-shadow-call-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+  checks: read
+  statuses: read
+  actions: read
+
+jobs:
+  shadow:
+    uses: kodmial/continuum/.github/workflows/continuum-shadow.yml@dfffb3c1384f569c4a789e839bc413742b051e26
+    with:
+      mode: run
+      repository: kodmial/nanodictate
+      event_json: '{"event_type":"schedule.tick","action":"tick","repository":"kodmial/nanodictate","number":null,"labels":[],"context":{}}'
+      state_json: '{}'
+      capture_live: false
+      save_case: false
