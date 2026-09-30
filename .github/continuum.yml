@@ -1,0 +1,4 @@
+# NanoDictate Phase A: Continuum owns scheduler/agent/repair/review/merge.
+# Release remains consumer-local until Phase B.
+review: true
+release: false
