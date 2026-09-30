@@ -260,7 +260,7 @@ jobs:
     # This reference is deliberately pinned to the first validated commit that
     # contains the corrected reusable shadow workflow. Consumer rollout may
     # advance this pin only through the validated Continuum repin path.
-    uses: kodmial/continuum/.github/workflows/continuum-shadow.yml@9446b1a7ce31aebe8676e721c831b5c1c3698a1f
+    uses: kodmial/continuum/.github/workflows/continuum-shadow.yml@dfffb3c1384f569c4a789e839bc413742b051e26
     with:
       mode: run
       repository: ${{ github.repository }}
