@@ -1,0 +1,48 @@
+name: Continuum review
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+  pull_request_review:
+    types: [submitted, dismissed]
+  pull_request_review_comment:
+    types: [created]
+  workflow_run:
+    workflows: ["CI", "Packaging smoke"]
+    types: [completed]
+  status:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number"
+        required: false
+        type: string
+
+permissions:
+  actions: write
+  checks: write
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: continuum-nanodictate-review
+  cancel-in-progress: false
+
+jobs:
+  review:
+    uses: kodmial/continuum/.github/workflows/consumer-review-gate.yml@2ee9c8703676f6ae009f9a58912893633902b026
+    permissions:
+      actions: write
+      checks: write
+      contents: read
+      issues: write
+      pull-requests: write
+    secrets:
+      continuum_token: ${{ secrets.TAP_PAT }}
+    with:
+      pr_number: ${{ github.event.pull_request.number || inputs.pr_number }}
+      agent_workflow: opencode.yml
+      config_path: .github/continuum.yml
