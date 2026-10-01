@@ -1,0 +1,26 @@
+name: Bootstrap quantum migration deploy key
+
+on:
+  push:
+    paths:
+      - '.github/workflows/bootstrap-quantum-deploy-key.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  add-key:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add temporary write deploy key
+        env:
+          GH_TOKEN: ${{ secrets.TAP_PAT }}
+          PUBKEY: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINr3BRVDQJhOIPP15FGxSYR8GqJz0ASbDaUttuuZo3TK temporary-quantum-migration
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN"
+          gh api --method POST repos/kodmial/quantum/keys \
+            -f title=temporary-quantum-migration \
+            -f key="$PUBKEY" \
+            -F read_only=false \
+            --jq '{id,title,read_only}'
