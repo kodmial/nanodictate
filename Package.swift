@@ -53,8 +53,10 @@ let package = Package(
         // поэтому `swift test` физически не работает ("XCTest not available").
         // Исполняемый таргет прогоняет те же проверки и завершается с ненулевым
         // кодом при первом упавшем тесте: build the Rust archive first
-        // (`scripts/build-rust-core.sh`), then
-        // `swift run -Xlinker rust/target/release/libnanodictate_core.a NanoDictateCoreTests`.
+        // (`scripts/build-rust-core.sh`), then pass the absolute archive
+        // path printed by the script to `swift run` (default
+        // `rust/target/release/libnanodictate_core.a` when `CARGO_TARGET_DIR`
+        // is unset, e.g. `swift run -Xlinker <absolute path>/libnanodictate_core.a NanoDictateCoreTests`).
         .executableTarget(
             name: "NanoDictateCoreTests",
             dependencies: ["NanoDictateCore", "AudioEngineGuard", "NanoDictateRustBridge"],
