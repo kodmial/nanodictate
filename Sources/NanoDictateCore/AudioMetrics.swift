@@ -88,7 +88,7 @@ public enum AudioMetrics {
 
   /// RMS over a raw buffer view; zero-copy core for windowed scans.
   public static func rms(buffer: UnsafeBufferPointer<Int16>) -> Float {
-    guard buffer.count > 0 else { return 0 }
+    guard !buffer.isEmpty else { return 0 }
     var sum: Float = 0
     for i in 0..<buffer.count {
       let value = Float(buffer[i]) / 32767.0
