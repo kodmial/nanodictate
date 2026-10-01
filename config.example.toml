@@ -80,6 +80,16 @@ api_key = ""
 # segment_provider = "cloudflare"
 # final_provider = "groq"
 
+# Chunked final-pass policy: when the complete recording is re-uploaded
+# after segment transcription. "always" = historical behavior (final pass
+# for every multi-segment recording); "on-uncertainty" (default) = skip the
+# full re-upload when all segments look acceptable, keep it as fallback for
+# empty segments or unverifiable seams; "never" = never re-upload after
+# successful segments (a failed segment still recovers via the full pass).
+# True streaming providers should prefer "never": the stream's own final
+# hypothesis already carries full context.
+# chunked_final_pass = "on-uncertainty"
+
 # Extra top-level options (defaults):
 # double_alt_max_interval = 0.4
 # undo_max_interval = 2.0

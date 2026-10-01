@@ -57,21 +57,45 @@ public struct ChunkedPipeline {
     public let finalized: Bool
     /// Final pass changed inserted text (diff not empty).
     public let finalChanged: Bool
+    /// Policy that governed the final-pass decision.
+    public let policy: ChunkedFinalPassPolicy
+    /// Why the final pass ran or was skipped.
+    public let reason: ChunkedFinalReason
+    /// Indices of segments whose quality signaled uncertainty.
+    public let uncertainSegments: [Int]
 
-    public init(segmentCount: Int, insertedText: String, finalized: Bool, finalChanged: Bool) {
+    public init(
+      segmentCount: Int,
+      insertedText: String,
+      finalized: Bool,
+      finalChanged: Bool,
+      policy: ChunkedFinalPassPolicy = .default,
+      reason: ChunkedFinalReason = .confidentSkip,
+      uncertainSegments: [Int] = []
+    ) {
       self.segmentCount = segmentCount
       self.insertedText = insertedText
       self.finalized = finalized
       self.finalChanged = finalChanged
+      self.policy = policy
+      self.reason = reason
+      self.uncertainSegments = uncertainSegments
     }
   }
 
   public let sampleRate: Int
   public let segmenterConfig: AudioSegmenterConfig
+  /// Final-pass policy: when the complete recording is re-uploaded.
+  public let finalPassPolicy: ChunkedFinalPassPolicy
 
-  public init(sampleRate: Int = 16000, segmenterConfig: AudioSegmenterConfig = .defaults) {
+  public init(
+    sampleRate: Int = 16000,
+    segmenterConfig: AudioSegmenterConfig = .defaults,
+    finalPassPolicy: ChunkedFinalPassPolicy = .default
+  ) {
     self.sampleRate = sampleRate
     self.segmenterConfig = segmenterConfig
+    self.finalPassPolicy = finalPassPolicy
   }
 
   // MARK: - Хелперы
@@ -176,11 +200,24 @@ public struct ChunkedPipeline {
     // Empty recording (no segments) — empty insert, no final pass:
     // transcribing silence pointless and costly.
     guard !segments.isEmpty else {
-      return Outcome(segmentCount: 0, insertedText: "", finalized: false, finalChanged: false)
+      return Outcome(
+        segmentCount: 0, insertedText: "", finalized: false, finalChanged: false,
+        policy: finalPassPolicy, reason: .emptyRecording, uncertainSegments: [])
     }
 
     var insertedText = ""
     var promptParts: [String] = []
+    var reports: [ChunkedSegmentReport] = []
+    // Track whether each segment STT returned word timestamps. Wrapped
+    // handler records per call in order; segment calls come first.
+    var segmentHasTimestamps: [Bool] = []
+    let trackingSTT: STTHandler = { wav, filename, prompt in
+      let result = try await stt(wav, filename, prompt)
+      if filename.hasPrefix("segment-") {
+        segmentHasTimestamps.append(!result.words.isEmpty)
+      }
+      return result
+    }
 
     for (index, segment) in segments.enumerated() {
       onPhase?(.segment(index))
@@ -190,7 +227,7 @@ public struct ChunkedPipeline {
         sampleRate: sampleRate,
         insertedText: insertedText,
         prompt: promptParts.isEmpty ? nil : Self.truncatedPrompt(promptParts),
-        stt: stt,
+        stt: trackingSTT,
         filename: "segment-\(index + 1).wav",
         // ACTUAL glued overlap (min(config.overlap, prior segment body)),
         // not config: overlap > minSegment would cut new segment words.
@@ -200,13 +237,29 @@ public struct ChunkedPipeline {
       insertedText += result.insertText
       // Prompt gets clean text, no leading space.
       promptParts.append(result.promptText)
+      let hasTimestamps = index < segmentHasTimestamps.count ? segmentHasTimestamps[index] : false
+      reports.append(
+        ChunkedSegmentReport(
+          index: index,
+          isEmpty: result.promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+          hasTimestamps: hasTimestamps,
+          overlapSeconds: segment.overlapSeconds))
     }
 
-    // Single segment = whole recording: final pass pointless, double
-    // request only costs.
-    guard segments.count > 1 else {
+    // Decide the final full-recording pass from the explicit policy.
+    // Single segment = whole recording: final pass pointless under any
+    // policy, double request only costs.
+    let decision = ChunkedFinalDecision.shouldRunFinalPass(
+      segmentCount: segments.count, reports: reports, policy: finalPassPolicy)
+    guard decision.run else {
       return Outcome(
-        segmentCount: 1, insertedText: insertedText, finalized: false, finalChanged: false)
+        segmentCount: segments.count,
+        insertedText: insertedText,
+        finalized: false,
+        finalChanged: false,
+        policy: finalPassPolicy,
+        reason: decision.reason,
+        uncertainSegments: decision.uncertainIndices)
     }
 
     // Final pass: whole WAV one request (full context), word diff → replace
@@ -224,13 +277,19 @@ public struct ChunkedPipeline {
         segmentCount: segments.count,
         insertedText: insertedText,
         finalized: true,
-        finalChanged: false)
+        finalChanged: false,
+        policy: finalPassPolicy,
+        reason: decision.reason,
+        uncertainSegments: decision.uncertainIndices)
     }
     return Outcome(
       segmentCount: segments.count,
       insertedText: result.finalText,
       finalized: true,
-      finalChanged: true
+      finalChanged: true,
+      policy: finalPassPolicy,
+      reason: decision.reason,
+      uncertainSegments: decision.uncertainIndices
     )
   }
 }

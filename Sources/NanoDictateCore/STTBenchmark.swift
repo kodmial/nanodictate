@@ -638,3 +638,145 @@ public enum BenchmarkRunner {
     }
   }
 }
+
+// MARK: - Chunked final-pass comparison (always vs default)
+//
+// Deterministic byte/latency/quality comparison for the chunked final-pass
+// policy. Segments are derived from the real AudioSegmenter so upload bytes
+// use the exact multipart body the adapter would send; hypotheses are
+// scripted (no network). The confident scenario (correct segment texts with
+// word timestamps) shows the default `on-uncertainty` saving the full
+// final upload at identical WER; the uncertain scenario (one empty segment
+// or missing timestamps) shows it falling back to the final pass.
+
+/// One policy row of a chunked final-pass comparison.
+public struct ChunkedPolicyComparison: Codable, Equatable {
+  public var policy: String
+  public var requests: Int
+  public var segmentUploadBytes: Int
+  public var finalUploadBytes: Int
+  public var totalUploadBytes: Int
+  public var finalLatencyMs: Double
+  public var wer: Double
+  public var cer: Double
+  public var hypothesis: String
+  public var finalRan: Bool
+  public var reason: String
+
+  public init(
+    policy: String,
+    requests: Int,
+    segmentUploadBytes: Int,
+    finalUploadBytes: Int,
+    totalUploadBytes: Int,
+    finalLatencyMs: Double,
+    wer: Double,
+    cer: Double,
+    hypothesis: String,
+    finalRan: Bool,
+    reason: String
+  ) {
+    self.policy = policy
+    self.requests = requests
+    self.segmentUploadBytes = segmentUploadBytes
+    self.finalUploadBytes = finalUploadBytes
+    self.totalUploadBytes = totalUploadBytes
+    self.finalLatencyMs = finalLatencyMs
+    self.wer = wer
+    self.cer = cer
+    self.hypothesis = hypothesis
+    self.finalRan = finalRan
+    self.reason = reason
+  }
+}
+
+public enum ChunkedBenchmark {
+  /// Simulated per-request latency for the final pass, milliseconds.
+  /// Scripted runs report no real network time; the comparison uses a fixed
+  /// representative figure so the latency delta is visible and stable.
+  public static let simulatedFinalLatencyMs: Double = 800
+
+  /// Compare `always` (historical) against the default (`on-uncertainty`)
+  /// for one fixture with scripted segment/final hypotheses.
+  /// - `segmentTexts`: one hypothesis per AudioSegmenter segment, in order.
+  /// - `segmentHasTimestamps`: per-segment timestamp presence, in order.
+  /// - `finalText`: hypothesis of the full-recording pass.
+  public static func compare(
+    fixture: BenchmarkFixture,
+    config: BenchmarkSTTConfig,
+    segmentTexts: [String],
+    segmentHasTimestamps: [Bool],
+    finalText: String,
+    segmenterConfig: AudioSegmenterConfig = .defaults,
+    simulatedFinalLatencyMs: Double = Self.simulatedFinalLatencyMs
+  ) -> [ChunkedPolicyComparison] {
+    let segments = AudioSegmenter.segments(
+      samples: fixture.samples, sampleRate: fixture.sampleRate, config: segmenterConfig)
+    let segmentCount = segments.count
+    var segmentUpload = 0
+    for segment in segments {
+      let wav = WAVEncoder.encode(samples: segment.samples, sampleRate: fixture.sampleRate)
+      segmentUpload += BenchmarkRunner.uploadBytes(config: config, wav: wav)
+    }
+    let fullWAV = WAVEncoder.encode(samples: fixture.samples, sampleRate: fixture.sampleRate)
+    let finalUpload = BenchmarkRunner.uploadBytes(config: config, wav: fullWAV)
+
+    // Stitched text mirrors ChunkedPipeline joining (space between segments).
+    var stitched = ""
+    for (index, text) in segmentTexts.enumerated() {
+      let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !clean.isEmpty else { continue }
+      if index > 0, !stitched.isEmpty, !stitched.hasSuffix(" ") {
+        stitched += " "
+      }
+      stitched += clean
+    }
+    let reports: [ChunkedSegmentReport] = (0..<segmentCount).map { index in
+      let text = index < segmentTexts.count ? segmentTexts[index] : ""
+      let overlap = index < segments.count ? segments[index].overlapSeconds : 0
+      let hasStamps = index < segmentHasTimestamps.count ? segmentHasTimestamps[index] : false
+      return ChunkedSegmentReport(
+        index: index,
+        isEmpty: text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+        hasTimestamps: hasStamps,
+        overlapSeconds: overlap)
+    }
+    let policies: [ChunkedFinalPassPolicy] = [.always, .default, .never]
+    return policies.map { policy in
+      let decision = ChunkedFinalDecision.shouldRunFinalPass(
+        segmentCount: segmentCount, reports: reports, policy: policy)
+      let hypothesis = decision.run ? finalText : stitched
+      let requests = segmentCount + (decision.run ? 1 : 0)
+      return ChunkedPolicyComparison(
+        policy: policy.configValue,
+        requests: requests,
+        segmentUploadBytes: segmentUpload,
+        finalUploadBytes: decision.run ? finalUpload : 0,
+        totalUploadBytes: segmentUpload + (decision.run ? finalUpload : 0),
+        finalLatencyMs: decision.run ? simulatedFinalLatencyMs : 0,
+        wer: BenchmarkText.wer(reference: fixture.transcript, hypothesis: hypothesis),
+        cer: BenchmarkText.cer(reference: fixture.transcript, hypothesis: hypothesis),
+        hypothesis: hypothesis,
+        finalRan: decision.run,
+        reason: decision.reason.rawValue)
+    }
+  }
+
+  /// Human-readable markdown for one fixture comparison.
+  public static func markdown(fixtureID: String, rows: [ChunkedPolicyComparison]) -> String {
+    var lines: [String] = []
+    lines.append("## Chunked final-pass: \(fixtureID) (always vs default)")
+    lines.append("")
+    lines.append(
+      "| policy | requests | total upload | final latency | WER | CER | final | reason |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+    for row in rows {
+      lines.append(
+        "| \(row.policy) | \(row.requests) | \(row.totalUploadBytes)B"
+          + " | \(BenchmarkFormat.ms(row.finalLatencyMs)) | \(BenchmarkFormat.ratio(row.wer))"
+          + " | \(BenchmarkFormat.ratio(row.cer)) | \(row.finalRan ? "yes" : "no")"
+          + " | \(row.reason) |")
+    }
+    return lines.joined(separator: "\n") + "\n"
+  }
+}

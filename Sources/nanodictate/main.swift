@@ -317,6 +317,7 @@ func cmdConfig(_ args: [String]) -> Int32 {
     print("double_alt_max_interval: \(config.doubleAltMaxInterval)")
     print("log_level: \(config.logLevel)")
     print("language: \(config.language)")
+    print("chunked_final_pass: \(config.chunkedFinalPass.configValue)")
     print("api_key: \(secretDisplay(config.apiKey))")
     print("proxy_key: \(secretDisplay(config.proxyKey))")
     return 0
@@ -1430,11 +1431,83 @@ func cmdBenchmarkLocal(jsonPath: String?, markdownPath: String?) -> Int32 {
     let report = try BenchmarkRunner.run(
       fixtures: fixtures, configs: configs,
       provider: BenchmarkRunner.scriptedProvider(hypotheses: hypotheses))
+    // Chunked final-pass evidence (always vs default on-uncertainty): the
+    // long fixture is segmented for real; scripted segment hypotheses are
+    // confident (correct slice + timestamps) so the default skips the final
+    // full-recording upload at identical WER. Printed after the main report;
+    // file outputs append the section.
+    let chunkedConfig = configs[0]
+    if let longFixture = fixtures.first(where: { $0.durationBucket == .long }) {
+      let chunkedRows = chunkedComparisonRows(fixture: longFixture, config: chunkedConfig)
+      print("")
+      print(ChunkedBenchmark.markdown(fixtureID: longFixture.id, rows: chunkedRows))
+      let chunkedMarkdown = ChunkedBenchmark.markdown(fixtureID: longFixture.id, rows: chunkedRows)
+      let fullMarkdown = report.markdown() + "\n" + chunkedMarkdown
+      if let markdownPath {
+        do {
+          try fullMarkdown.write(
+            to: URL(fileURLWithPath: markdownPath), atomically: true, encoding: .utf8)
+          eprint("benchmark: Markdown written to \(markdownPath)")
+        } catch {
+          eprint("benchmark: failed to write Markdown: \(error)")
+          return 1
+        }
+      }
+      if let jsonPath {
+        // JSON keeps the machine-readable STT report; chunked rows are
+        // human-evidence in markdown (scripted, deterministic).
+        do {
+          try report.jsonData().write(to: URL(fileURLWithPath: jsonPath), options: .atomic)
+          eprint("benchmark: JSON written to \(jsonPath)")
+        } catch {
+          eprint("benchmark: failed to write JSON: \(error)")
+          return 1
+        }
+      } else {
+        print(report.markdown())
+      }
+      return 0
+    }
     return writeBenchmarkOutputs(report: report, jsonPath: jsonPath, markdownPath: markdownPath)
   } catch {
     eprint("benchmark: local run failed: \(error)")
     return 1
   }
+}
+
+/// Scripted chunked hypotheses for the local benchmark: split the fixture
+/// transcript across the real AudioSegmenter segments so each segment is
+/// confident (correct words + timestamps) and the final hypothesis equals
+/// the ground truth. Deterministic, no network.
+func chunkedComparisonRows(
+  fixture: BenchmarkFixture,
+  config: BenchmarkSTTConfig
+) -> [ChunkedPolicyComparison] {
+  let segments = AudioSegmenter.segments(
+    samples: fixture.samples, sampleRate: fixture.sampleRate)
+  let words = BenchmarkText.words(fixture.transcript)
+  var segmentTexts: [String] = []
+  if segments.isEmpty {
+    segmentTexts = []
+  } else {
+    let perSegment = max(1, words.count / max(1, segments.count))
+    for index in 0..<segments.count {
+      let start = index * perSegment
+      let end = index == segments.count - 1 ? words.count : min(words.count, start + perSegment)
+      if start < end {
+        segmentTexts.append(words[start..<end].joined(separator: " "))
+      } else {
+        segmentTexts.append("")
+      }
+    }
+  }
+  let hasTimestamps = Array(repeating: true, count: max(1, segmentTexts.count))
+  return ChunkedBenchmark.compare(
+    fixture: fixture,
+    config: config,
+    segmentTexts: segmentTexts,
+    segmentHasTimestamps: hasTimestamps,
+    finalText: fixture.transcript)
 }
 
 /// Opt-in live run: fixture audio through the active configured provider.

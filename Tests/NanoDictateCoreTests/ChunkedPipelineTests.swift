@@ -72,9 +72,11 @@ final class ChunkedPipelineTests: XCTestCase {
     private func runPipeline(
         samples: [Int16],
         mockSTT: MockSTT,
-        onPhase: ((ChunkedPipeline.Phase) -> Void)? = nil
+        onPhase: ((ChunkedPipeline.Phase) -> Void)? = nil,
+        policy: ChunkedFinalPassPolicy = .always
     ) async throws -> (outcome: ChunkedPipeline.Outcome, steps: [RecordedOperation], phases: [ChunkedPipeline.Phase]) {
-        let pipeline = ChunkedPipeline(sampleRate: 16000, segmenterConfig: segConfig)
+        let pipeline = ChunkedPipeline(
+            sampleRate: 16000, segmenterConfig: segConfig, finalPassPolicy: policy)
         var steps: [RecordedOperation] = []
         var phases: [ChunkedPipeline.Phase] = []
         let outcome = try await pipeline.run(
@@ -245,7 +247,8 @@ final class ChunkedPipelineTests: XCTestCase {
         runQueue.async { [self] in
             let sema = DispatchSemaphore(value: 0)
             Task {
-                let pipeline = ChunkedPipeline(sampleRate: 16000, segmenterConfig: self.segConfig)
+                let pipeline = ChunkedPipeline(
+                    sampleRate: 16000, segmenterConfig: self.segConfig, finalPassPolicy: .always)
                 _ = try? await pipeline.run(
                     samples: self.twoSegmentSamples(),
                     stt: { wav, filename, prompt in try await mockSTT.call(wav, filename, prompt) },
@@ -482,7 +485,7 @@ final class ChunkedPipelineTests: XCTestCase {
             ),
             ChunkedPipeline.SttResult(text: "Один два. Три четыре."),
         ])
-        let pipeline = ChunkedPipeline() // production-конфиг: overlap 1.0
+        let pipeline = ChunkedPipeline(finalPassPolicy: .always) // production-конфиг: overlap 1.0
         var steps: [RecordedOperation] = []
         let outcome = try runAsync {
             try await pipeline.run(
@@ -549,7 +552,8 @@ final class ChunkedPipelineTests: XCTestCase {
             ),
             ChunkedPipeline.SttResult(text: "Один два. Три четыре."),
         ])
-        let pipeline = ChunkedPipeline(sampleRate: 16000, segmenterConfig: overlapConfig)
+        let pipeline = ChunkedPipeline(
+            sampleRate: 16000, segmenterConfig: overlapConfig, finalPassPolicy: .always)
         var steps: [RecordedOperation] = []
         let outcome = try runAsync {
             try await pipeline.run(

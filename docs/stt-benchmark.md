@@ -134,3 +134,25 @@ the repo unless you recorded them and have redistribution rights.
 
 Keys come from your existing config/env (`NANODICTATE_API_KEY` or the
 provider section) and are never written to the report or the repo.
+
+## Chunked final-pass comparison (always vs default)
+
+The local run also prints a `Chunked final-pass` section for the long
+fixture (`normal-long`): real `AudioSegmenter` segments, scripted confident
+hypotheses (correct transcript slice + word timestamps per segment, correct
+full transcript for the final pass), exact multipart upload bytes via
+`ProviderRequestBuilder.plan`.
+
+| policy | meaning |
+| --- | --- |
+| `always` | Historical behavior: final full-recording pass for every multi-segment recording. |
+| `on-uncertainty` (default) | Skip the full re-upload when all segments look acceptable; fall back on empty segments or seams without timestamps. |
+| `never` | Never re-upload after successful segments (failed segments still recover via the full pass). |
+
+With confident segments the default reaches the same WER/CER as `always`
+while saving the whole final upload plus one request of tail latency
+(`ChunkedBenchmark.simulatedFinalLatencyMs`). With an empty segment or a
+seam without timestamps the default falls back to the final pass, matching
+`always` on quality. Decision: default `on-uncertainty`; keep `always` as
+the quality-first option; use `never` with true streaming providers, where
+the stream's own final hypothesis already carries full context.
