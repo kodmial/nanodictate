@@ -972,7 +972,8 @@ public enum BatchRequestBuilder {
     batchParams: BatchSTTParams? = nil,
     needsWordTimestamps: Bool = false,
     proxyKey: String = "",
-    proxyKeyHeader: String = "X-Proxy-Key"
+    proxyKeyHeader: String = "X-Proxy-Key",
+    audioFormat: STTUploadFormat = .wav
   ) -> BatchPreparedRequest? {
     let spec = ProviderRequestBuilder.plan(
       adapterID: provider.id,
@@ -983,7 +984,8 @@ public enum BatchRequestBuilder {
       wav: wav,
       filename: "segment-\(chunkIndex + 1).wav",
       needsWordTimestamps: needsWordTimestamps,
-      batchParams: batchParams
+      batchParams: batchParams,
+      audioFormat: audioFormat
     )
     guard let url = spec.url else { return nil }
     var request = URLRequest(url: url)

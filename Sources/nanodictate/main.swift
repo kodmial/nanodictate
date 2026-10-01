@@ -1430,7 +1430,29 @@ func cmdBenchmarkLocal(jsonPath: String?, markdownPath: String?) -> Int32 {
     let report = try BenchmarkRunner.run(
       fixtures: fixtures, configs: configs,
       provider: BenchmarkRunner.scriptedProvider(hypotheses: hypotheses))
-    return writeBenchmarkOutputs(report: report, jsonPath: jsonPath, markdownPath: markdownPath)
+    // WAV vs FLAC transport comparison (size, local encode time, upload
+    // body accounting, lossless check) on the same fixtures: short and
+    // near-60-second speech are both covered by the built-in corpus.
+    // Printed to stdout and appended to the markdown file; the JSON file
+    // keeps the historic BenchmarkReport shape (machine-readable
+    // transport rows are available via BenchmarkRunner
+    // .compareTransportFormats for programmatic use).
+    let transport = BenchmarkRunner.compareTransportFormats(
+      fixtures: fixtures,
+      config: BenchmarkSTTConfig(name: "transport", adapterID: "openai", model: "whisper-1"))
+    let code = writeBenchmarkOutputs(report: report, jsonPath: jsonPath, markdownPath: nil)
+    print(BenchmarkTransportComparison.markdown(transport))
+    if let markdownPath {
+      do {
+        try (report.markdown() + "\n" + BenchmarkTransportComparison.markdown(transport)).write(
+          to: URL(fileURLWithPath: markdownPath), atomically: true, encoding: .utf8)
+        eprint("benchmark: Markdown written to \(markdownPath)")
+      } catch {
+        eprint("benchmark: failed to write Markdown: \(error)")
+        return 1
+      }
+    }
+    return code
   } catch {
     eprint("benchmark: local run failed: \(error)")
     return 1

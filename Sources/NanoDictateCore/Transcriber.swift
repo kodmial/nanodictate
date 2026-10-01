@@ -371,7 +371,8 @@ public final class Transcriber {
   ///   one complete utterance per request without timestamps.
   public func transcribe(
     wav: Data, filename: String = "audio.wav", prompt: String? = nil,
-    needsWordTimestamps: Bool = false
+    needsWordTimestamps: Bool = false,
+    audioFormat: STTUploadFormat = .wav
   )
     async throws -> TranscriptionResult
   {  // swiftlint:disable:this opening_brace
@@ -399,21 +400,22 @@ public final class Transcriber {
         return try await transcribeViaAdapter(
           adapterID: STTAdapterID.openAICompatible.rawValue,
           wav: wav, filename: filename, prompt: prompt,
-          needsWordTimestamps: needsWordTimestamps)
+          needsWordTimestamps: needsWordTimestamps, audioFormat: audioFormat)
       }
       Logger.log("STT error: empty adapterID — transcribe требует провайдер", level: "error")
       throw TranscribeError.network("No STT provider configured")
     }
     return try await transcribeViaAdapter(
       adapterID: adapterID, wav: wav, filename: filename, prompt: prompt,
-      needsWordTimestamps: needsWordTimestamps)
+      needsWordTimestamps: needsWordTimestamps, audioFormat: audioFormat)
   }
 
   // MARK: - Adapter path
 
   private func transcribeViaAdapter(
     adapterID: String, wav: Data, filename: String, prompt: String?,
-    needsWordTimestamps: Bool = false
+    needsWordTimestamps: Bool = false,
+    audioFormat: STTUploadFormat = .wav
   )
     async throws -> TranscriptionResult
   {  // swiftlint:disable:this opening_brace
@@ -433,7 +435,8 @@ public final class Transcriber {
       wav: wav,
       filename: filename,
       prompt: prompt,
-      needsWordTimestamps: needsWordTimestamps
+      needsWordTimestamps: needsWordTimestamps,
+      audioFormat: audioFormat
     )
     guard let url = spec.url else {
       Logger.log("STT error: invalid base URL", level: "error")

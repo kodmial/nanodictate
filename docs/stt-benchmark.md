@@ -34,12 +34,35 @@ Per fixture × config:
 - WER and CER against the ground-truth transcript (normalized:
   lowercase, punctuation stripped, whitespace collapsed).
 - Upload bytes: exact request body from `ProviderRequestBuilder.plan`
-  (multipart overhead included), plus raw WAV bytes.
-- Encoding/preprocessing time: `WAVEncoder.encode` wall clock.
+  (multipart overhead included), plus raw WAV bytes. `uploadBytes` accepts
+  an `audioFormat` (default WAV) so FLAC bodies are accounted with their
+  real `audio/flac` part and filename.
+- Encoding/preprocessing time: `WAVEncoder.encode` wall clock (plus
+  `FLACEncoder.encode` wall clock in the transport comparison).
 - Request latency: provider-call wall clock (scripted provider reports 0
   simulated latency; live runs measure the real STT request).
 - End-to-end time to final transcript: case wall clock.
 - Peak RSS kilobytes (best effort via `getrusage`; 0 when unavailable).
+
+## WAV vs FLAC transport comparison
+
+`BenchmarkRunner.compareTransportFormats(fixtures:config:)` encodes every
+fixture as WAV and FLAC and reports per fixture: raw bytes, local encode
+time, multipart upload bytes for a reference config, and lossless
+verification (FLAC decodes back to the exact source samples). The local
+benchmark command prints this table on every run (short and near-60-second
+fixtures are both in the built-in corpus):
+
+```sh
+swift run nanodictate benchmark --local
+```
+
+Recognition regression is measured, not assumed: run the same fixtures
+through `BenchmarkRunner.run` (or a live provider) per format and compare
+WER/CER. FLAC is lossless, so a deterministic provider must score
+identically on both transports; any deviation is investigated before a
+default change. No default changes on benchmark evidence in this cycle:
+`auto` still resolves to WAV everywhere.
 
 ## Fixture strategy (no recordings in repo)
 

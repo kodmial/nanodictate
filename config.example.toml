@@ -89,3 +89,11 @@ api_key = ""
 # auto_failover = false
 # insert_method = "cgevent"
 # review_before_insert = false
+# Upload audio transport (see docs/stt-capabilities.md "Audio transport formats"):
+# auto (default) = profile preferred format (WAV everywhere today);
+# wav = always WAV; flac = lossless compact transport where the profile
+# declares FLAC support (openai/groq), WAV fallback elsewhere;
+# opus/opus-experimental = experimental bandwidth mode, resolves to WAV
+# until benchmark evidence is documented. Per-provider override:
+# [providers.groq] upload_format = "flac".
+# upload_format = "auto"

@@ -543,15 +543,20 @@ public enum BenchmarkResources {
 /// same code works for scripted (deterministic) and live providers.
 public enum BenchmarkRunner {
   /// Upload byte count for a config: exact request body the adapter would
-  /// send for this WAV (multipart overhead included).
-  public static func uploadBytes(config: BenchmarkSTTConfig, wav: Data) -> Int {
+  /// send for this audio payload (multipart overhead included).
+  /// Default format is WAV (byte-identical to historic behavior); pass
+  /// `.flac` to account the FLAC transport for the same config.
+  public static func uploadBytes(
+    config: BenchmarkSTTConfig, wav: Data, audioFormat: STTUploadFormat = .wav
+  ) -> Int {
     let spec = ProviderRequestBuilder.plan(
       adapterID: config.adapterID,
       baseURL: "https://benchmark.invalid/v1/audio/transcriptions",
       model: config.model,
       apiKey: "",
       language: config.language,
-      wav: wav
+      wav: wav,
+      audioFormat: audioFormat
     )
     return spec.bodyData.count
   }
@@ -636,5 +641,117 @@ public enum BenchmarkRunner {
       let text = hypotheses[config.name]?[fixture.id] ?? fixture.transcript
       return BenchmarkHypothesis(text: text, requestSeconds: 0)
     }
+  }
+
+  // MARK: - WAV vs FLAC transport comparison
+
+  /// Compare upload transports for one fixture set: WAV vs FLAC bytes, local
+  /// encode time, and lossless verification (FLAC decodes back to the exact
+  /// source samples). Recognition regression is measured, not assumed: run
+  /// the same fixtures through `run(fixtures:configs:provider:)` (or a live
+  /// provider) and compare WER/CER per format; lossless FLAC must score
+  /// identically on a deterministic provider.
+  public static func compareTransportFormats(
+    fixtures: [BenchmarkFixture],
+    config: BenchmarkSTTConfig
+  ) -> [BenchmarkTransportComparison] {
+    fixtures.map { fixture in
+      let wavStart = Date()
+      let wav = WAVEncoder.encode(samples: fixture.samples, sampleRate: fixture.sampleRate)
+      let wavEncodeMs = Date().timeIntervalSince(wavStart) * 1_000.0
+      let flacStart = Date()
+      let flac = FLACEncoder.encode(
+        samples: fixture.samples, sampleRate: fixture.sampleRate, channels: 1)
+      let flacEncodeMs = Date().timeIntervalSince(flacStart) * 1_000.0
+      var lossless = false
+      if let flac {
+        lossless = (try? FLACDecoder.decode(flac))?.samples == fixture.samples
+      }
+      let uploadWav = uploadBytes(config: config, wav: wav, audioFormat: .wav)
+      let uploadFlac =
+        flac.map { uploadBytes(config: config, wav: $0, audioFormat: .flac) } ?? 0
+      return BenchmarkTransportComparison(
+        fixtureID: fixture.id,
+        category: fixture.category.rawValue,
+        durationBucket: fixture.durationBucket.rawValue,
+        durationSeconds: fixture.durationSeconds,
+        wavBytes: wav.count,
+        flacBytes: flac?.count ?? 0,
+        wavEncodeMs: wavEncodeMs,
+        flacEncodeMs: flacEncodeMs,
+        uploadWavBytes: uploadWav,
+        uploadFlacBytes: uploadFlac,
+        lossless: lossless
+      )
+    }
+  }
+}
+
+// MARK: - WAV vs FLAC transport comparison row
+
+/// Per-fixture WAV vs FLAC comparison: size, local encode time, upload body
+/// accounting (multipart overhead included) and lossless verification.
+/// Codable for machine output alongside `BenchmarkReport`.
+public struct BenchmarkTransportComparison: Codable, Equatable {
+  public var fixtureID: String
+  public var category: String
+  public var durationBucket: String
+  public var durationSeconds: Double
+  public var wavBytes: Int
+  public var flacBytes: Int
+  public var wavEncodeMs: Double
+  public var flacEncodeMs: Double
+  public var uploadWavBytes: Int
+  public var uploadFlacBytes: Int
+  /// FLAC decodes back to the exact source samples (lossless transport).
+  public var lossless: Bool
+
+  public init(
+    fixtureID: String,
+    category: String,
+    durationBucket: String,
+    durationSeconds: Double,
+    wavBytes: Int,
+    flacBytes: Int,
+    wavEncodeMs: Double,
+    flacEncodeMs: Double,
+    uploadWavBytes: Int,
+    uploadFlacBytes: Int,
+    lossless: Bool
+  ) {
+    self.fixtureID = fixtureID
+    self.category = category
+    self.durationBucket = durationBucket
+    self.durationSeconds = durationSeconds
+    self.wavBytes = wavBytes
+    self.flacBytes = flacBytes
+    self.wavEncodeMs = wavEncodeMs
+    self.flacEncodeMs = flacEncodeMs
+    self.uploadWavBytes = uploadWavBytes
+    self.uploadFlacBytes = uploadFlacBytes
+    self.lossless = lossless
+  }
+
+  /// FLAC share of WAV bytes (< 1 means FLAC is smaller).
+  public var sizeRatio: Double {
+    guard wavBytes > 0 else { return 0 }
+    return Double(flacBytes) / Double(wavBytes)
+  }
+
+  public static func markdown(_ rows: [BenchmarkTransportComparison]) -> String {
+    var lines: [String] = []
+    lines.append("## Transport comparison (WAV vs FLAC)")
+    lines.append("")
+    lines.append("| fixture | wav | flac | ratio | wav encode | flac encode | lossless |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+    for row in rows {
+      lines.append(
+        "| \(row.fixtureID) | \(row.wavBytes)B | \(row.flacBytes)B"
+          + " | \(String(format: "%.3f", row.sizeRatio))"
+          + " | \(BenchmarkFormat.ms(row.wavEncodeMs)) | \(BenchmarkFormat.ms(row.flacEncodeMs))"
+          + " | \(row.lossless ? "yes" : "NO") |"
+      )
+    }
+    return lines.joined(separator: "\n") + "\n"
   }
 }
