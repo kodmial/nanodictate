@@ -188,6 +188,19 @@ assert_contains '5: ordinary change still renders' "$BODY_SKIP" 'Audio hot path'
 assert_contains '5: near-miss label keeps the entry' \
   "$(printf 's1|feat(stt): x|Visible||no-skip-release\n' | release_notes_render)" \
   'Visible'
+# A stray `|` inside the subject or note changes the field count, so the
+# entry is skipped instead of shifting fields into `labels`.
+PIPE_NOTE=$(printf 'p1|fix(cli): handle edge|note with|pipe|91|')
+assert_eq '5: pipe in note is rejected without output' '' "$(printf '%s\n' "$PIPE_NOTE" | release_notes_render)"
+PIPE_SUBJECT=$(printf 'p1|fix(cli): handle a|b|Clean note|91|')
+assert_eq '5: pipe in subject is rejected without output' '' "$(printf '%s\n' "$PIPE_SUBJECT" | release_notes_render)"
+PIPE_MIXED=$'p1|fix(cli): handle a|b|Clean note|91|\nr1|fix(audio): reuse buffers|Audio hot path|71|'
+assert_contains '5: valid entry still renders alongside malformed entry' \
+  "$(printf '%s\n' "$PIPE_MIXED" | release_notes_render)" 'Audio hot path'
+assert_eq '5: malformed entry renders exactly one bullet' \
+  '1' "$(printf '%s\n' "$PIPE_MIXED" | release_notes_render | grep -c '^- ')"
+SHORT_ENTRY=$(printf 'only|two|fields\n')
+assert_eq '5: short entry without five fields is rejected' '' "$(printf '%s\n' "$SHORT_ENTRY" | release_notes_render)"
 
 # --- 6. Release PR update rerun is idempotent ---------------------------------
 # Re-running the renderer over the same merged history yields byte-identical

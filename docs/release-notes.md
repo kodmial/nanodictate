@@ -106,6 +106,11 @@ materially affect users (for example, a fix for a stale distribution
 channel). A PR that must merge without touching the release flow uses the
 `skip-release` label instead — such entries are always excluded from notes.
 
+Entry encoding: the renderer consumes `sha|subject|note|pr|labels` lines, so
+`|` must not appear inside the subject or note (producers sanitize it, e.g. to
+`/`). A line without exactly five fields is skipped rather than rendered with
+shifted fields.
+
 ## Publication gate (fail closed)
 
 Publication refuses to proceed when:

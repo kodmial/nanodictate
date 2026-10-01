@@ -43,6 +43,12 @@
 #   labels               comma-separated PR labels, may be empty. An entry
 #                        labelled `skip-release` is always excluded.
 #
+# `|` is the field separator and must not appear inside the subject or the
+# release-note: producers must sanitize it (e.g. replace with `/`) before
+# emitting entries. A line that does not contain exactly five `|`-separated
+# fields is malformed and is skipped so a stray `|` can never shift fields
+# or corrupt the `skip-release` check.
+#
 # Only the subject and the explicit release-note footer ever reach the notes:
 # full PR bodies, review threads, Co-authored-by lines and automation chatter
 # are never dumped into release notes.
@@ -117,7 +123,9 @@ release_notes_entry_text() {
   fi
   local parsed
   parsed=$(release_notes_parse_subject "$subject")
-  local desc=${parsed##*|}
+  # Strip the first three `|`-separated fields so a `|` inside the
+  # description itself is preserved.
+  local desc=${parsed#*|*|*|}
   desc=$(printf '%s' "$desc" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
   [[ -n "$desc" ]] || return 1
   printf '%s\n' "$desc"
@@ -140,7 +148,7 @@ release_notes_has_skip_release() {
 
 # release_notes_render
 #
-# stdin:  TAB-separated entry lines (see header).
+# stdin:  `|`-separated entry lines (see header).
 # stdout: the canonical version-section body: `### <Section>` groups in
 #         canonical order, one `- <text> (<refs>)` bullet per entry.
 #         Groups without entries are omitted.
@@ -154,6 +162,13 @@ release_notes_render() {
   local added="" changed="" deprecated="" removed="" fixed="" security=""
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ -z "${line//[[:space:]]/}" ]] && continue
+    # Fail closed on malformed entries: exactly five `|`-separated fields
+    # (four separators) are required. A `|` inside the subject or note
+    # would otherwise shift fields — the remainder lands in `labels` and
+    # the `skip-release` check reads the wrong field — so such lines are
+    # skipped instead of rendered with truncated or misattributed notes.
+    local pipes=${line//[^|]/}
+    [[ "${#pipes}" -eq 4 ]] || continue
     # `|` is a non-whitespace IFS character, so empty middle fields are
     # preserved (a TAB separator would collapse them as IFS whitespace).
     IFS='|' read -r sha subject note pr labels <<< "$line"
