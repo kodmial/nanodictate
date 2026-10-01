@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.18] - 2026-10-01
+
+
+
+### Bug Fixes
+
+* re-sync packaging-smoke common.sh with Continuum ([665f6f2](https://github.com/kodmial/nanodictate/commit/665f6f24f773f892dbf73e9f7f4c33fc1e7e2b5e))
+
 ## [0.1.17] - 2026-10-01
 
 
@@ -421,7 +429,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.17...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.18...HEAD
+[0.1.18]: https://github.com/kodmial/nanodictate/compare/v0.1.17...v0.1.18
 [0.1.17]: https://github.com/kodmial/nanodictate/compare/v0.1.16...v0.1.17
 [0.1.15]: https://github.com/kodmial/nanodictate/compare/v0.1.14...v0.1.15
 [0.1.14]: https://github.com/kodmial/nanodictate/compare/v0.1.13...v0.1.14
