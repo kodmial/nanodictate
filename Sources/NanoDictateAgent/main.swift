@@ -674,9 +674,26 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     // clipping): travels with the start request into AudioService so the log
     // can separate hotkey/main-thread delay from engine/first-buffer latency.
     let triggerNanos = DispatchTime.now().uptimeNanoseconds
+    // Confirmed second Alt: stamp the double-tap moment for the startup
+    // breakdown. The pre-arm (if any) is consumed by the start below.
+    audio.noteSecondAltTap(atNanos: triggerNanos)
     DispatchQueue.main.async {
       self.handleAltDoubleTap(triggerNanos: triggerNanos)
     }
+  }
+
+  /// First Alt tap opened the double-tap window: non-capturing pre-arm only
+  /// (no microphone capture, no audio stored). Cancelled by
+  /// altPendingCancelled on timeout/foreign key.
+  func altFirstTapDetected() {
+    audio.noteFirstAltTap()
+    audio.armForImminentStart()
+  }
+
+  /// Pending first Alt expired or was cancelled: discard the pre-arm so no
+  /// half-open audio state survives a lone single-Alt.
+  func altPendingCancelled() {
+    audio.cancelPendingArm()
   }
 
   func cancelKeyPressed() {
@@ -911,17 +928,14 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       Logger.log("record start ignored: already starting", level: "info")
       return
     }
-    overlay.show()
     // Label "what recognition goes through" ("<provider> · <model>") — from
     // THE SAME resolved provider the session transcriber was built with in
     // init (resolvedConfig): single source of truth, config not re-read here.
+    // The overlay show + starting phase are deferred by the StartingUIDefer
+    // grace interval: fast starts go straight to recording without flashing
+    // the transient starting state; slow starts still show it. The ready cue
+    // (emitRecordingReadyCue) ensures the overlay is visible regardless.
     overlay.setSTTLabel(RecognitionLabel.forSession(resolvedConfig))
-    // Starting phase: engine bring-up, capture NOT yet ready. No start sound
-    // and no recording timer here by design — they fire only on capture
-    // readiness (see emitRecordingReadyCue), so the user is never led to
-    // believe speech is captured before the capture path is ready.
-    overlay.setStartingPhase()
-    overlay.setStatus(L10n.tr("overlay.starting"))
     Logger.log("record start requested (engine bring-up, capture not ready yet)")
 
     isStarting = true
@@ -929,6 +943,18 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     let session = startSession
     engineStartSucceeded = false
     pendingCaptureInfo = nil
+    // Deferred starting UI: only show when bring-up exceeds the grace window
+    // and the session is still waiting for capture readiness.
+    DispatchQueue.main.asyncAfter(deadline: .now() + OverlayLifecycle.StartingUIDefer.graceInterval) {
+      [weak self] in
+      guard let self, self.startSession == session, self.isStarting else { return }
+      // Starting phase: engine bring-up, capture NOT yet ready. No start
+      // sound and no recording timer here by design — they fire only on
+      // capture readiness (see emitRecordingReadyCue).
+      self.overlay.show()
+      self.overlay.setStartingPhase()
+      self.overlay.setStatus(L10n.tr("overlay.starting"))
+    }
 
     // Engine boot watchdog: if the engine does not start within
     // recordStartTimeout — terminal error (overlay goes out, next Alt+Alt
@@ -1049,6 +1075,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     sounds.playStart()
     // Timer starts HERE (capture-ready moment), not at the Alt+Alt request:
     // the displayed duration equals captured audio, never engine bring-up.
+    // The overlay may not be visible yet when the starting UI was deferred
+    // for a fast start: ensure it is shown before switching to recording.
+    if !overlay.isVisible {
+      overlay.show()
+    }
     overlay.setRecordingPhase()
     overlay.setStatus(L10n.tr("overlay.recording"))
     Logger.log(

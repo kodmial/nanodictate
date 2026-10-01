@@ -16,6 +16,7 @@ final class FakeInputNode: AudioInputNodeLike {
     var onInstallTap: (() -> Void)?
     private(set) var tapCount = 0
     private(set) var removeTapCount = 0
+    private(set) var lastBufferSize: AVAudioFrameCount = 0
 
     init(format: AVAudioFormat? = nil, sampleRate: Double = 44100) {
         if let format = format {
@@ -38,6 +39,7 @@ final class FakeInputNode: AudioInputNodeLike {
     ) {
         onInstallTap?()
         tapCount += 1
+        lastBufferSize = bufferSize
         self.tapBlock = tapBlock
     }
 

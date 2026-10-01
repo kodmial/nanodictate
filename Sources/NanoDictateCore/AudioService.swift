@@ -241,6 +241,13 @@ public final class AudioService {
   private var startupRequestNanos: UInt64 = 0
   private var startupQueueEntryNanos: UInt64 = 0
   private var startupEngineStartedNanos: UInt64 = 0
+  /// Fine-grained stage marks for the current session (monotonic nanos).
+  private var startupFirstAltNanos: UInt64?
+  private var startupSecondAltNanos: UInt64?
+  private var startupInputReadyNanos: UInt64 = 0
+  private var startupTapInstalledNanos: UInt64 = 0
+  private var startupPrepareDoneNanos: UInt64 = 0
+  private var startupFirstRawNanos: UInt64 = 0
   /// Generation the marks above belong to; stale sessions never fire readiness.
   private var startupGeneration: Int = -1
   /// Exactly-once latch for `onCaptureReady` within one session.
@@ -254,6 +261,66 @@ public final class AudioService {
   private var warmedConverter: AVAudioConverter?
   private var warmedHWSignature: String?
 
+  /// Tap buffer size (frames per callback request). 1024 at 48 kHz is ~21 ms
+  /// per requested buffer vs ~85 ms at 4096, so first-buffer delivery itself
+  /// stops dominating perceived startup latency. 512 would halve that again
+  /// but doubles callback/lock traffic for a marginal gain and risks allocator
+  /// churn on slow HALs; 2048 keeps ~43 ms of first-buffer floor. 1024 is the
+  /// smallest stable value with the #29 reuse path (reusable converted buffer
+  /// + scratch staging, no per-callback allocation). HAL delivery is not
+  /// guaranteed to match the request exactly; measured on hardware via the
+  /// startup timing log (engineStarted->firstBuffer).
+  static let tapBufferSize: AVAudioFrameCount = 1024
+
+  /// Fine-grained monotonic startup stages for one session (uptime nanos).
+  /// Timing only, never audio content. Reported once per session on capture
+  /// readiness alongside CaptureReadyInfo.
+  public struct StartupBreakdown {
+    public let firstAltNanos: UInt64?
+    public let secondAltNanos: UInt64?
+    public let requestNanos: UInt64
+    public let queueEntryNanos: UInt64
+    public let inputReadyNanos: UInt64
+    public let tapInstalledNanos: UInt64
+    public let prepareDoneNanos: UInt64
+    public let engineStartedNanos: UInt64
+    public let firstRawCallbackNanos: UInt64
+    public let firstAcceptedNanos: UInt64
+  }
+
+  /// Last completed startup breakdown (for diagnostics/tests). Set when
+  /// capture readiness fires; nil before the first successful session.
+  public var lastStartupBreakdown: StartupBreakdown? {
+    lock.lock()
+    defer { lock.unlock() }
+    return completedBreakdown
+  }
+
+  private var completedBreakdown: StartupBreakdown?
+  /// First-Alt / second-Alt stamps (monotonic nanos) recorded via
+  /// noteFirstAltTap()/noteSecondAltTap() during the double-tap window.
+  /// Consumed by the next start into its breakdown, then cleared.
+  private var pendingFirstAltNanos: UInt64?
+  private var pendingSecondAltNanos: UInt64?
+
+  /// Non-capturing pre-armed state built during the first-Alt window.
+  /// Safe subset only: input format resolved, converter built/reset,
+  /// engine.prepare() called, session buffers preallocated. Never installs a
+  /// tap, never starts the engine, never stores audio. Invalidated by timeout,
+  /// foreign key, device change, permission-relevant teardown, wedge swap and
+  /// any new start that does not consume it.
+  private struct ArmedState {
+    var generation: Int
+    var hwSignature: String
+    var prepared: Bool
+  }
+
+  private var pendingArm: ArmedState?
+  /// Session-store capacity target (60 s at 16 kHz). Preallocated once and
+  /// preserved across sessions via removeAll(keepingCapacity:) so the
+  /// latency-critical start path never grows under the shared lock.
+  private let sessionStoreCapacity = 960_000
+
   /// Monotonic now for startup timing (uptime nanoseconds).
   private static func monotonicNanos() -> UInt64 {
     DispatchTime.now().uptimeNanoseconds
@@ -261,6 +328,32 @@ public final class AudioService {
 
   private static func ms(fromNanos start: UInt64, to end: UInt64) -> Double {
     Double(end >= start ? end - start : 0) / 1_000_000.0
+  }
+
+  /// Single-line fine-grained startup stage log (timing only, never audio).
+  /// Covers first Alt → second Alt → request → queue entry → input ready →
+  /// tap installed → prepare done → engine started → first raw callback →
+  /// first accepted buffer. Missing stamps (legacy callers without Alt taps)
+  /// render as absence of that segment, never as zero.
+  private func logStartupStages(_ stages: StartupBreakdown) {
+    var parts: [String] = []
+    func append(_ label: String, from start: UInt64, to end: UInt64) {
+      guard end >= start, end > 0 else { return }
+      parts.append(String(format: "%@=%.1f ms", label, Self.ms(fromNanos: start, to: end)))
+    }
+    if let first = stages.firstAltNanos, let second = stages.secondAltNanos {
+      append("firstAlt->secondAlt", from: first, to: second)
+      append("secondAlt->request", from: second, to: stages.requestNanos)
+    }
+    append("request->queue", from: stages.requestNanos, to: stages.queueEntryNanos)
+    append("queue->input", from: stages.queueEntryNanos, to: stages.inputReadyNanos)
+    append("input->tap", from: stages.inputReadyNanos, to: stages.tapInstalledNanos)
+    append("tap->prepare", from: stages.tapInstalledNanos, to: stages.prepareDoneNanos)
+    append("prepare->started", from: stages.prepareDoneNanos, to: stages.engineStartedNanos)
+    append("started->raw", from: stages.engineStartedNanos, to: stages.firstRawCallbackNanos)
+    append("raw->accepted", from: stages.firstRawCallbackNanos, to: stages.firstAcceptedNanos)
+    guard !parts.isEmpty else { return }
+    Logger.log("record startup stages: " + parts.joined(separator: " "), level: "info")
   }
 
   /// Hardware input-format signature for converter-cache matching.
@@ -469,6 +562,127 @@ public final class AudioService {
     }
   }
 
+  /// Records the first-Alt tap stamp (double-tap window opened). Called from
+  /// the main thread; consumed by the next start into its timing breakdown.
+  public func noteFirstAltTap(atNanos nanos: UInt64? = nil) {
+    lock.lock()
+    pendingFirstAltNanos = nanos ?? Self.monotonicNanos()
+    // A new first tap supersedes any previous second-tap stamp.
+    pendingSecondAltNanos = nil
+    lock.unlock()
+  }
+
+  /// Records the confirmed second-Alt tap stamp. Called from the main thread
+  /// just before the start request; the start path moves it into the session.
+  public func noteSecondAltTap(atNanos nanos: UInt64? = nil) {
+    lock.lock()
+    pendingSecondAltNanos = nanos ?? Self.monotonicNanos()
+    lock.unlock()
+  }
+
+  /// Non-capturing pre-arm for an imminent double-Alt confirm: resolves the
+  /// input format, builds/resets the converter into the warm cache, calls
+  /// engine.prepare() and preallocates bounded session buffers — all without
+  /// installing a tap, starting the engine, or storing audio. Best-effort and
+  /// silent on failure. No-op while recording or on stale generations.
+  /// A prepared tap/graph cannot safely remain armed across the window (the
+  /// tap belongs to a live engine session and device-change invalidation must
+  /// stay synchronous), so the tap install stays in the confirmed-start path.
+  public func armForImminentStart() {
+    let slot = captureEngineSlot()
+    slot.queue.async { [weak self, engine = slot.engine, generation = slot.generation] in
+      guard let self else { return }
+      self.armOnEngineQueue(using: engine, generation: generation)
+    }
+  }
+
+  /// Discards a pending pre-arm without touching a live session. Safe to call
+  /// when no arm exists. Runs on the engine queue to serialize with arm/start.
+  public func cancelPendingArm() {
+    let slot = captureEngineSlot()
+    slot.queue.async { [weak self, generation = slot.generation] in
+      guard let self else { return }
+      self.lock.lock()
+      if let arm = self.pendingArm, arm.generation == generation {
+        self.pendingArm = nil
+      } else if self.pendingArm == nil {
+        // No arm: still clear stale Alt stamps so a lone single-Alt leaves no
+        // persistent timing residue.
+        self.pendingFirstAltNanos = nil
+        self.pendingSecondAltNanos = nil
+      }
+      self.lock.unlock()
+    }
+  }
+
+  /// Synchronous test hook: true while a pre-arm is pending for the current
+  /// generation. For unit tests only; production uses generation-gated start.
+  func isArmedForTests() -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return pendingArm != nil
+  }
+
+  /// Pre-arm body — strictly on the given engine's queue.
+  private func armOnEngineQueue(using engine: AudioEngineLike, generation: Int) {
+    guard !isRecordingLocked else { return }
+    guard isCurrentGeneration(generation) else { return }
+    lock.lock()
+    if pendingArm?.generation == generation {
+      lock.unlock()
+      return
+    }
+    lock.unlock()
+    var hwFormat: AVAudioFormat?
+    let setupError = guardedEngineCall {
+      hwFormat = engine.makeInputNode().outputFormat(forBus: 0)
+    }
+    guard setupError == nil, let hw = hwFormat else { return }
+    let signature = Self.hwSignature(sampleRate: hw.sampleRate, channels: hw.channelCount)
+    lock.lock()
+    let alreadyWarm = warmedHWSignature == signature && warmedConverter != nil
+    lock.unlock()
+    if !alreadyWarm {
+      var built: AVAudioConverter?
+      let converterError = guardedEngineCall {
+        built = AVAudioConverter(from: hw, to: self.targetFormat)
+      }
+      guard converterError == nil, let fresh = built else { return }
+      lock.lock()
+      if isCurrentGeneration(generation) {
+        warmedConverter = fresh
+        warmedHWSignature = signature
+      }
+      lock.unlock()
+    } else {
+      lock.lock()
+      warmedConverter?.reset()
+      lock.unlock()
+    }
+    // engine.prepare() without a tap or start: preallocates the graph without
+    // opening microphone capture. Guarded: HAL exceptions become silent abort.
+    _ = guardedEngineCall {
+      engine.prepare()
+    }
+    guard isCurrentGeneration(generation) else { return }
+    // Preallocate bounded session buffers now so the confirmed start path
+    // performs no growth under the shared lock.
+    lock.lock()
+    if isCurrentGeneration(generation), !isRecordingLocked {
+      if collectedSamples.capacity < sessionStoreCapacity {
+        collectedSamples.reserveCapacity(sessionStoreCapacity)
+      }
+      if rmsHistory.capacity < 4096 {
+        rmsHistory.reserveCapacity(4096)
+      }
+      if scratchInt16.capacity < 4096 {
+        scratchInt16.reserveCapacity(4096)
+      }
+      pendingArm = ArmedState(generation: generation, hwSignature: signature, prepared: true)
+    }
+    lock.unlock()
+  }
+
   /// Pre-warm body — strictly on the given engine's queue.
   private func prewarmOnEngineQueue(using engine: AudioEngineLike, generation: Int) {
     guard !isRecordingLocked else { return }
@@ -559,13 +773,18 @@ public final class AudioService {
       didLogFirstBuffer = false
       limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
       recordStartTime = CFAbsoluteTimeGetCurrent()
-      collectedSamples = []
-      // Preallocate the bounded session store once per session (60 s x 16 kHz
-      // = 960 000 Int16): steady-state appends never regrow under the shared
-      // lock. rmsHistory holds ~700 entries for 60 s; 1024 covers it.
-      collectedSamples.reserveCapacity(limit.maxSamples)
-      rmsHistory = []
-      rmsHistory.reserveCapacity(1024)
+      // Capacity-preserving reuse: a pre-armed session (or the previous
+      // session's store kept by teardown) already holds the bounded capacity,
+      // so steady-state appends never regrow under the shared lock. First
+      // session without capacity reserves once; later sessions reuse.
+      collectedSamples.removeAll(keepingCapacity: true)
+      if collectedSamples.capacity < sessionStoreCapacity {
+        collectedSamples.reserveCapacity(sessionStoreCapacity)
+      }
+      rmsHistory.removeAll(keepingCapacity: true)
+      if rmsHistory.capacity < 4096 {
+        rmsHistory.reserveCapacity(4096)
+      }
       limitStopScheduled = false
       // Auto-stop latch — in the ledger (autoStop bit): a new session starts
       // without "finalization already scheduled".
@@ -582,6 +801,14 @@ public final class AudioService {
       startupRequestNanos = requestNanos
       startupQueueEntryNanos = queueEntryNanos
       startupEngineStartedNanos = 0
+      startupFirstAltNanos = pendingFirstAltNanos
+      startupSecondAltNanos = pendingSecondAltNanos ?? triggerNanos
+      pendingFirstAltNanos = nil
+      pendingSecondAltNanos = nil
+      startupInputReadyNanos = 0
+      startupTapInstalledNanos = 0
+      startupPrepareDoneNanos = 0
+      startupFirstRawNanos = 0
       startupGeneration = startGeneration
       captureReadyFired = false
       captureReadyLive = false
@@ -621,10 +848,23 @@ public final class AudioService {
     // dictation. A device change alters the signature → rebuild, preserving
     // the device-change protection. No microphone capture involved.
     var reusedWarmedConverter = false
+    var usedArmedFastPath = false
     if setupFailure == nil, let fmt = capturedHWFormat {
       let signature = Self.hwSignature(sampleRate: fmt.sampleRate, channels: fmt.channelCount)
       lock.lock()
       let warmed = (warmedHWSignature == signature) ? warmedConverter : nil
+      let armedMatches =
+        pendingArm?.generation == startGeneration && pendingArm?.hwSignature == signature
+      if armedMatches {
+        // Consume the pre-arm exactly once: a late duplicate start must not
+        // reuse the same prepared graph.
+        usedArmedFastPath = pendingArm?.prepared ?? false
+        pendingArm = nil
+      }
+      // Stage stamp: input node/format resolved (whether armed or fresh).
+      if isCurrentGeneration(startGeneration) {
+        startupInputReadyNanos = Self.monotonicNanos()
+      }
       lock.unlock()
       if let warmed {
         // AVAudioConverter is stateful (resample filter state): an instance
@@ -692,44 +932,16 @@ public final class AudioService {
     // notification may arrive right after registration.
     observeConfigurationChanges(for: engine)
 
-    // Mic permission (TCC) on every create/restart of recording. A repeated
-    // system access prompt (top complaint) shows in the log as status
-    // notDetermined before start — instantly visible that the grant is lost.
-    let mic = MicrophoneAuth.statusText(AVCaptureDevice.authorizationStatus(for: .audio))
-    Logger.log("mic permission: \(mic) (record start)", level: "info")
-    Logger.log(
-      "record start: sampleRate=\(Int(targetFormat.sampleRate)) Hz, channels=\(targetFormat.channelCount), "
-        + "hwFormat=\(Int(hwFormat.sampleRate)) Hz",
-      level: "info"
-    )
-    // Auto-stop diagnostics: visible whether the feature is on, the pair of
-    // hysteresis thresholds, grace, the "speech happened" gate and the
-    // recording floor (all values from environment — see fromEnvironment).
-    Logger.log(
-      "record auto-stop: enabled=\(autoStopConfig.enabled), "
-        + "speech>=\(autoStopConfig.speechRMSThreshold), silence<\(autoStopConfig.silenceRMSThreshold), "
-        + "silence>=\(String(format: "%.1f", autoStopConfig.requiredSilenceDuration))s, "
-        + "grace=\(String(format: "%.1f", autoStopConfig.gracePeriod))s, "
-        + "gate>=\(String(format: "%.1f", autoStopConfig.minSpeechRun))s, "
-        + "minRecord=\(String(format: "%.1f", autoStopConfig.minRecordingDuration))s",
-      level: "info"
-    )
-    // AGC diagnostics: visible whether gain is on and with what params (kill
-    // switch/target/ceiling from environment — see InputGainConfig.fromEnvironment).
-    Logger.log(
-      "record input-gain: enabled=\(gain.config.enabled), "
-        + "target=\(String(format: "%.1f", gain.config.targetRmsDb)) dBFS, "
-        + "max=\(String(format: "%.1f", gain.config.maxGainDb)) dB",
-      level: "info"
-    )
-
+    // Latency-critical path starts here: only tap install + prepare (unless
+    // pre-armed) + engine.start(). Diagnostics logging moved AFTER a
+    // successful start so string formatting never delays capture.
     // Breadcrumb before installTap: if the next AVFoundation call crashes, the
     // last log line pinpoints the exact place. No re-poll of the hardware
     // format here — the same call was already taken under the ObjC gateway in
     // the bring-up above (duplication added no information).
     if isDebug {
       Logger.log(
-        "record engine: installing tap (bus 0, bufferSize 4096, hwFormat=\(Int(hwFormat.sampleRate)) Hz)",
+        "record engine: installing tap (bus 0, bufferSize \(Self.tapBufferSize), hwFormat=\(Int(hwFormat.sampleRate)) Hz)",
         level: "debug"
       )
     }
@@ -738,7 +950,7 @@ public final class AudioService {
     var failure = guardedEngineCall {
       input.installTap(
         onBus: 0,
-        bufferSize: 4096,
+        bufferSize: Self.tapBufferSize,
         format: hwFormat
       ) { [weak self, tapGeneration = startGeneration] buffer, _ in
         guard let self else { return }
@@ -752,14 +964,25 @@ public final class AudioService {
     }
     if failure == nil, isCurrentGeneration(startGeneration) {
       setTapInstalled(true)
+      lock.lock()
+      startupTapInstalledNanos = Self.monotonicNanos()
+      lock.unlock()
     }
     if failure == nil, isDebug {
       Logger.log("record engine: tap installed, engine.prepare()…", level: "debug")
     }
-    if failure == nil {
+    // Pre-armed sessions already called engine.prepare() during the first-Alt
+    // window on the same generation and format: skip the redundant second
+    // prepare and go straight to engine.start(). Fresh sessions prepare here.
+    if failure == nil, !usedArmedFastPath {
       failure = guardedEngineCall {
         engine.prepare()
       }
+    }
+    if failure == nil, isCurrentGeneration(startGeneration) {
+      lock.lock()
+      startupPrepareDoneNanos = Self.monotonicNanos()
+      lock.unlock()
     }
     if failure == nil, isDebug {
       Logger.log("record engine: prepared, engine.start()…", level: "debug")
@@ -828,6 +1051,34 @@ public final class AudioService {
     if reusedWarmedConverter, isDebug {
       Logger.log("record prewarm: warmed converter reused for start", level: "debug")
     }
+    if usedArmedFastPath {
+      Logger.log("record pre-arm: armed fast path consumed (prepare skipped)", level: "info")
+    }
+    // Deferred diagnostics: string formatting stays off the latency-critical
+    // path above (tap install → prepare → engine.start). Safe here — capture
+    // is already flowing or imminent, and these logs carry no timing.
+    let mic = MicrophoneAuth.statusText(AVCaptureDevice.authorizationStatus(for: .audio))
+    Logger.log("mic permission: \(mic) (record start)", level: "info")
+    Logger.log(
+      "record start: sampleRate=\(Int(targetFormat.sampleRate)) Hz, channels=\(targetFormat.channelCount), "
+        + "hwFormat=\(Int(hwFormat.sampleRate)) Hz tap=\(Self.tapBufferSize)",
+      level: "info"
+    )
+    Logger.log(
+      "record auto-stop: enabled=\(autoStopConfig.enabled), "
+        + "speech>=\(autoStopConfig.speechRMSThreshold), silence<\(autoStopConfig.silenceRMSThreshold), "
+        + "silence>=\(String(format: "%.1f", autoStopConfig.requiredSilenceDuration))s, "
+        + "grace=\(String(format: "%.1f", autoStopConfig.gracePeriod))s, "
+        + "gate>=\(String(format: "%.1f", autoStopConfig.minSpeechRun))s, "
+        + "minRecord=\(String(format: "%.1f", autoStopConfig.minRecordingDuration))s",
+      level: "info"
+    )
+    Logger.log(
+      "record input-gain: enabled=\(gain.config.enabled), "
+        + "target=\(String(format: "%.1f", gain.config.targetRmsDb)) dBFS, "
+        + "max=\(String(format: "%.1f", gain.config.maxGainDb)) dB",
+      level: "info"
+    )
     return .success(())
   }
 
@@ -853,9 +1104,9 @@ public final class AudioService {
     let tailRange = liveTailRangeLocked()
     let tailSnapshot = tailRange != nil ? collectedSamples : [Int16]()
     let samples = collectedSamples
-    collectedSamples = []
+    collectedSamples.removeAll(keepingCapacity: true)
     let rms = rmsHistory
-    rmsHistory = []
+    rmsHistory.removeAll(keepingCapacity: true)
     lock.unlock()
     var tail: [Int16] = []
     if let range = tailRange {
@@ -903,7 +1154,7 @@ public final class AudioService {
     // becomes ready, and the ready cue must never fire for it.
     captureReadyLive = false
     captureReadyFired = true
-    collectedSamples = []
+    collectedSamples.removeAll(keepingCapacity: true)
     // Cancel discards EVERYTHING, including the open utterance: no
     // onSpeechSegment callback (Esc = no delivery).
     liveLastCutIndex = 0
@@ -983,6 +1234,11 @@ public final class AudioService {
     // must never fire for the discarded session.
     warmedConverter = nil
     warmedHWSignature = nil
+    // A pre-arm built for the wedged engine is meaningless on the fresh
+    // engine: drop it so the next start performs a full bring-up.
+    pendingArm = nil
+    pendingFirstAltNanos = nil
+    pendingSecondAltNanos = nil
     captureReadyFired = true
     captureReadyLive = false
     startupGeneration = -1
@@ -1044,8 +1300,10 @@ public final class AudioService {
     removeConfigurationObserver()
     lock.lock()
     converter = nil
-    collectedSamples = []
-    rmsHistory = []
+    // Preserve bounded capacity across sessions: the next start (or pre-arm)
+    // reuses the store without regrowing under the shared lock.
+    collectedSamples.removeAll(keepingCapacity: true)
+    rmsHistory.removeAll(keepingCapacity: true)
     liveLastCutIndex = 0
     session.clearAutoStop()
     autoStopDetector.reset()
@@ -1055,6 +1313,9 @@ public final class AudioService {
     // Session ended: capture readiness lapses with it (next start resets).
     // The warmed converter cache is KEPT — it holds no microphone state and
     // makes the next start cheaper (reused when the format matches).
+    // A pending pre-arm does not survive teardown: the graph it prepared
+    // belongs to the torn-down session (device-change safety).
+    pendingArm = nil
     captureReadyLive = false
     lock.unlock()
     // Best-effort re-warm for the next dictation (still on this engine's
@@ -1173,6 +1434,11 @@ public final class AudioService {
   /// itself clears flags and tears down tap/engine. Double stop safe (stop is
   /// idempotent through the same isRecording guard).
   private func handleConfigurationChange() {
+    // A device change invalidates any non-capturing pre-arm even when idle:
+    // the armed converter/prepare belong to the old input format.
+    lock.lock()
+    pendingArm = nil
+    lock.unlock()
     // isRecording read without NSLock: the notification may arrive on a
     // foreign queue, and the `session` ledger holds no state lock.
     guard isRecordingLocked else { return }
@@ -1507,6 +1773,15 @@ public final class AudioService {
     // not overlap (the guard below stays — protection duplicated).
     // All flags and the converter are taken under lock in one snapshot: the
     // lock-free guard is gone — start/stop race closed (see takeBufferedSnapshot).
+    // First raw tap callback stamp (before conversion): proves HAL delivery
+    // independent of converter/VAD cost. Exactly once per session generation.
+    lock.lock()
+    if isCurrentGeneration(tapGeneration), isCurrentGeneration(startupGeneration),
+      startupFirstRawNanos == 0, startupEngineStartedNanos > 0
+    {
+      startupFirstRawNanos = Self.monotonicNanos()
+    }
+    lock.unlock()
     let snapshot = takeBufferedSnapshot()
     guard snapshot.alive else { return }
     guard isCurrentGeneration(tapGeneration) else { return }
@@ -1670,8 +1945,8 @@ public final class AudioService {
       lock.unlock()
       return
     }
-    // Per-buffer RMS history — final level summary metrics. 60 s at 4096
-    // frames and 48 kHz ≈ 700 values — memory fine.
+    // Per-buffer RMS history — final level summary metrics. 60 s at 1024
+    // frames and 48 kHz ≈ 2800 values — memory fine.
     rmsHistory.append(meteredRms)
 
     // First session buffer — proof sound really reached the engine (piece
@@ -1728,6 +2003,7 @@ public final class AudioService {
     // Exactly once per session generation; startup failure/timeout/cancel
     // paths never fire (error path only, no false ready cue).
     var pendingCaptureInfo: CaptureReadyInfo?
+    var pendingBreakdown: StartupBreakdown?
     if appendCount > 0, !captureReadyFired, startupGeneration >= 0,
       isCurrentGeneration(startupGeneration)
     {
@@ -1737,6 +2013,9 @@ public final class AudioService {
         // engine.start() completion. Stamp now so readiness still fires on
         // the true first buffer (engine→first delay reads 0).
         startupEngineStartedNanos = firstNanos
+      }
+      if startupFirstRawNanos == 0 {
+        startupFirstRawNanos = firstNanos
       }
       if startupEngineStartedNanos > 0 {
         captureReadyFired = true
@@ -1751,6 +2030,19 @@ public final class AudioService {
             fromNanos: startupEngineStartedNanos, to: firstNanos),
           requestToFirstBufferMs: Self.ms(fromNanos: startupRequestNanos, to: firstNanos)
         )
+        pendingBreakdown = StartupBreakdown(
+          firstAltNanos: startupFirstAltNanos,
+          secondAltNanos: startupSecondAltNanos,
+          requestNanos: startupRequestNanos,
+          queueEntryNanos: startupQueueEntryNanos,
+          inputReadyNanos: startupInputReadyNanos,
+          tapInstalledNanos: startupTapInstalledNanos,
+          prepareDoneNanos: startupPrepareDoneNanos,
+          engineStartedNanos: startupEngineStartedNanos,
+          firstRawCallbackNanos: startupFirstRawNanos,
+          firstAcceptedNanos: firstNanos
+        )
+        completedBreakdown = pendingBreakdown
       }
     }
 
@@ -1836,8 +2128,8 @@ public final class AudioService {
     // Buffer duration — real:
     // converted frames / target rate 16 kHz.
     // Accumulation by audio time, not buffer count — callback frequency
-    // tracks hardware sample rate (~85 ms @ 48 kHz, ~93 ms @ 44.1 kHz),
-    // "3 s of silence" measured by sound.
+    // tracks the tap request size (1024 frames ≈ 21 ms @ 48 kHz, ≈ 23 ms
+    // @ 44.1 kHz), "3 s of silence" measured by sound.
     let autoStopFired =
       autoStopConfig.enabled && !shouldStop
       && autoStopDetector.feed(
@@ -1873,6 +2165,9 @@ public final class AudioService {
           ),
           level: "info"
         )
+      }
+      if let stages = pendingBreakdown {
+        logStartupStages(stages)
       }
       DispatchQueue.main.async { [weak self] in
         self?.onCaptureReady?(info)
