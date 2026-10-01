@@ -78,6 +78,73 @@ public struct AudioSegment: Equatable {
   }
 }
 
+/// Range-based segment metadata: references the original bounded recording
+/// buffer via sample ranges instead of owned PCM. The caller keeps the source
+/// `[Int16]` alive for the plan lifetime; PCM is materialized on demand per
+/// segment (overlap + body) only when bytes are needed for a request.
+/// Mirrors `BatchBodySpec` naming (`bodyRange`/`overlapRange`) so the two
+/// paths do not introduce competing buffer abstractions.
+public struct AudioSegmentSpec: Equatable {
+  /// 0-based segment index.
+  public let index: Int
+  /// Body start (no overlap) from recording start, seconds.
+  public let start: TimeInterval
+  /// Body end (no overlap) from recording start, seconds.
+  public let end: TimeInterval
+  /// Body sample range into the source buffer (0-based, end-exclusive).
+  public let bodyRange: Range<Int>
+  /// Overlap sample range (tail of previous body); nil for the first segment.
+  public let overlapRange: Range<Int>?
+  /// Actually glued overlap seconds (0 for first segment).
+  public let overlapSeconds: TimeInterval
+
+  public init(
+    index: Int,
+    start: TimeInterval,
+    end: TimeInterval,
+    bodyRange: Range<Int>,
+    overlapRange: Range<Int>?,
+    overlapSeconds: TimeInterval = 0
+  ) {
+    self.index = index
+    self.start = start
+    self.end = end
+    self.bodyRange = bodyRange
+    self.overlapRange = overlapRange
+    self.overlapSeconds = overlapSeconds
+  }
+
+  /// Materialize PCM for this segment only: overlap tail + body.
+  /// Bounds are clamped to `source.count`; out-of-range specs yield the
+  /// intersecting part (empty when disjoint).
+  public func samples(from source: [Int16]) -> [Int16] {
+    let total = source.count
+    let bodyLow = max(0, min(total, bodyRange.lowerBound))
+    let bodyHigh = max(0, min(total, bodyRange.upperBound))
+    guard bodyLow < bodyHigh else {
+      if let overlap = overlapRange {
+        let low = max(0, min(total, overlap.lowerBound))
+        let high = max(0, min(total, overlap.upperBound))
+        guard low < high else { return [] }
+        return Array(source[low..<high])
+      }
+      return []
+    }
+    if let overlap = overlapRange {
+      let low = max(0, min(total, overlap.lowerBound))
+      let high = max(0, min(total, overlap.upperBound))
+      if low < high {
+        var out: [Int16] = []
+        out.reserveCapacity((high - low) + (bodyHigh - bodyLow))
+        out.append(contentsOf: source[low..<high])
+        out.append(contentsOf: source[bodyLow..<bodyHigh])
+        return out
+      }
+    }
+    return Array(source[bodyLow..<bodyHigh])
+  }
+}
+
 public enum AudioSegmenter {
   /// Sample-work window duration: 85 ms at 16 kHz = 1360 samples
   /// (like AudioService.rmsHistory RMS buffers).
@@ -235,23 +302,43 @@ public enum AudioSegmenter {
     }
   }
 
-  // MARK: - Разбиение по сэмплам
+  // MARK: - Single-pass segmentation (range-based)
 
-  /// Split Int16 PCM samples (16 kHz) into segments with overlap.
-  /// Samples treated as continuous from recording start.
-  public static func segments(
+  /// RMS timeline over PCM without per-window Array copies: windows are
+  /// scanned in place via the source buffer. Single pass, no PCM retained.
+  public static func rmsTimeline(
+    samples: [Int16],
+    sampleRate: Int = 16000
+  ) -> [Float] {
+    let windowSize = max(1, Int((defaultWindowDuration * Double(sampleRate)).rounded()))
+    guard !samples.isEmpty else { return [] }
+    let windowCount = (samples.count + windowSize - 1) / windowSize
+    var rms: [Float] = []
+    rms.reserveCapacity(windowCount)
+    samples.withUnsafeBufferPointer { buffer in
+      guard let base = buffer.baseAddress else { return }
+      var cursor = 0
+      while cursor < buffer.count {
+        let length = min(windowSize, buffer.count - cursor)
+        let window = UnsafeBufferPointer(start: base.advanced(by: cursor), count: length)
+        rms.append(AudioMetrics.rms(buffer: window))
+        cursor += windowSize
+      }
+    }
+    return rms
+  }
+
+  /// Compute segmentation once per recording for a given policy.
+  /// Returns lightweight specs referencing the source buffer; PCM is NOT
+  /// copied here. Materialize per segment via `AudioSegmentSpec.samples(from:)`
+  /// or `WAVEncoder.encodeSegment` only when bytes are needed for a request.
+  public static func plan(
     samples: [Int16],
     sampleRate: Int = 16000,
     config: AudioSegmenterConfig = .defaults
-  ) -> [AudioSegment] {
+  ) -> [AudioSegmentSpec] {
     let windowSize = max(1, Int((defaultWindowDuration * Double(sampleRate)).rounded()))
-    var rms: [Float] = []
-    var cursor = 0
-    while cursor < samples.count {
-      let chunk = Array(samples[cursor..<min(cursor + windowSize, samples.count)])
-      rms.append(AudioMetrics.rms(samples: chunk))
-      cursor += windowSize
-    }
+    let rms = rmsTimeline(samples: samples, sampleRate: sampleRate)
     let ranges = splitRanges(rms: rms, windowDuration: defaultWindowDuration, config: config)
     guard !ranges.isEmpty else { return [] }
 
@@ -260,33 +347,81 @@ public enum AudioSegmenter {
       samples.count
     )
 
-    var result: [AudioSegment] = []
+    var result: [AudioSegmentSpec] = []
+    result.reserveCapacity(ranges.count)
     for (index, range) in ranges.enumerated() {
       let bodyStart = range.lowerBound * windowSize
       let bodyEnd = min(range.upperBound * windowSize, samples.count)
-      let body = Array(samples[bodyStart..<bodyEnd])
-
-      var segSamples = body
+      var overlapRange: Range<Int>?
       var overlapSeconds: TimeInterval = 0
       if index > 0 {
         // Overlap taken from previous segment's BODY TAIL (speech),
         // not region near bodyStart (may be pause silence).
         let prevEnd = min(ranges[index - 1].upperBound * windowSize, samples.count)
         let overlapFrom = max(0, prevEnd - overlapCount)
-        segSamples = Array(samples[overlapFrom..<prevEnd]) + body
+        if overlapFrom < prevEnd {
+          overlapRange = overlapFrom..<prevEnd
+        }
         // Actually glued min(overlapCount, prevEnd) samples —
         // short previous body caps configured overlap.
         overlapSeconds = TimeInterval(prevEnd - overlapFrom) / Double(sampleRate)
       }
-
       result.append(
-        AudioSegment(
+        AudioSegmentSpec(
+          index: index,
           start: TimeInterval(bodyStart) / Double(sampleRate),
           end: TimeInterval(bodyEnd) / Double(sampleRate),
-          samples: segSamples,
+          bodyRange: bodyStart..<bodyEnd,
+          overlapRange: overlapRange,
           overlapSeconds: overlapSeconds
         ))
     }
     return result
+  }
+
+  /// STT request count for a computed plan: one request per segment plus one
+  /// final whole-recording pass when more than one segment exists. A single
+  /// segment (or empty plan) needs no final pass; empty plan needs no request
+  /// at all. Use this on an already-computed plan — never rerun segmentation
+  /// solely to estimate watchdog limits.
+  public static func requestCount(for plan: [AudioSegmentSpec]) -> Int {
+    switch plan.count {
+    case 0:
+      return 0
+    case 1:
+      return 1
+    default:
+      return plan.count + 1
+    }
+  }
+
+  /// Watchdog request estimate preserving the legacy agent formula
+  /// (`segments.count <= 1 ? 1 : count + 1`): an empty recording still arms a
+  /// single-request timeout. Prefer `requestCount(for:)` for pipeline logic.
+  public static func watchdogRequestCount(for plan: [AudioSegmentSpec]) -> Int {
+    plan.count <= 1 ? 1 : plan.count + 1
+  }
+
+  // MARK: - Разбиение по сэмплам (legacy owned-PCM wrapper)
+
+  /// Split Int16 PCM samples (16 kHz) into segments with overlap.
+  /// Samples treated as continuous from recording start.
+  /// Legacy owned-PCM wrapper over `plan(samples:)`: boundaries are computed
+  /// once via the single-pass plan, then each segment materializes its own
+  /// PCM. New code should use `plan` + on-demand materialization instead.
+  public static func segments(
+    samples: [Int16],
+    sampleRate: Int = 16000,
+    config: AudioSegmenterConfig = .defaults
+  ) -> [AudioSegment] {
+    let specs = plan(samples: samples, sampleRate: sampleRate, config: config)
+    return specs.map { spec in
+      AudioSegment(
+        start: spec.start,
+        end: spec.end,
+        samples: spec.samples(from: samples),
+        overlapSeconds: spec.overlapSeconds
+      )
+    }
   }
 }
