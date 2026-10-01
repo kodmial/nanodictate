@@ -63,11 +63,20 @@ final class FakeEngine: AudioEngineLike {
     var hangStart: DispatchSemaphore?
     var failSetup = false
     var overrideNode: AudioInputNodeLike?
+    /// Test gate for the pre-arm race window: when set, `makeInputNode`
+    /// blocks until signalled, letting a test interleave a configuration
+    /// change mid-preparation. `onMakeInputNode` fires on entry.
+    var makeInputGate: DispatchSemaphore?
+    var onMakeInputNode: (() -> Void)?
     private(set) var prepareCount = 0
     private(set) var startCount = 0
     private(set) var stopCount = 0
 
     func makeInputNode() -> AudioInputNodeLike {
+        onMakeInputNode?()
+        if let gate = makeInputGate {
+            gate.wait()
+        }
         if failSetup {
             // NSException under gateway; see testEngineExceptionGuardConvertsExceptionToError.
             NanoDictateRaiseAudioEngineTestException()

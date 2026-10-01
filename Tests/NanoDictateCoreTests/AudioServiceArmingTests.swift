@@ -151,6 +151,64 @@ final class AudioServiceArmingTests: XCTestCase {
         _ = service.stop()
     }
 
+    @objc func testConfigurationChangeDiscardsPendingArm() {
+        let engine = FakeEngine()
+        let service = AudioService(logLevel: "info", engine: engine)
+        var readyCount = 0
+        service.onCaptureReady = { _ in readyCount += 1 }
+
+        service.armForImminentStart()
+        drainEngineQueue()
+        XCTAssertTrue(service.isArmedForTests(), "arm must be pending before device change")
+
+        service.simulateConfigurationChangeForTests()
+        XCTAssertFalse(service.isArmedForTests(), "device change must discard the arm")
+
+        guard case .success = runStart(service) else {
+            XCTFail("start after device change must succeed via full bring-up")
+            return
+        }
+        engine.node.emit(makeToneBuffer(engine: engine))
+        XCTAssertTrue(eventually { readyCount == 1 }, "session after device change reaches readiness")
+        _ = service.stop()
+    }
+
+    @objc func testRacingArmPublicationAfterConfigurationChangeIsRejected() {
+        let engine = FakeEngine()
+        let service = AudioService(logLevel: "info", engine: engine)
+        var readyCount = 0
+        service.onCaptureReady = { _ in readyCount += 1 }
+
+        let entered = expectation(description: "arm entered input setup")
+        engine.onMakeInputNode = { entered.fulfill() }
+        engine.makeInputGate = DispatchSemaphore(value: 0)
+        service.armForImminentStart()
+        wait(for: [entered], timeout: 5)
+        // Device change lands while the arm is blocked mid-preparation on the
+        // same input format: the late publication must be rejected even
+        // though the generation and hardware signature are unchanged.
+        service.simulateConfigurationChangeForTests()
+        engine.makeInputGate?.signal()
+        engine.makeInputGate = nil
+        drainEngineQueue()
+        XCTAssertFalse(
+            service.isArmedForTests(),
+            "arm preparation racing a device change must not publish stale state")
+        XCTAssertEqual(engine.node.tapCount, 0, "rejected arm must install no tap")
+
+        let preparesBeforeStart = engine.prepareCount
+        guard case .success = runStart(service) else {
+            XCTFail("start after raced device change must succeed")
+            return
+        }
+        XCTAssertGreaterThan(
+            engine.prepareCount, preparesBeforeStart,
+            "start must perform a full prepare instead of consuming a stale arm")
+        engine.node.emit(makeToneBuffer(engine: engine))
+        XCTAssertTrue(eventually { readyCount == 1 }, "fresh session reaches readiness independently")
+        _ = service.stop()
+    }
+
     // MARK: - Helpers
 
     private func makeToneBuffer(engine: FakeEngine) -> AVAudioPCMBuffer {

@@ -311,11 +311,18 @@ public final class AudioService {
   /// any new start that does not consume it.
   private struct ArmedState {
     var generation: Int
+    var configEpoch: UInt64
     var hwSignature: String
     var prepared: Bool
   }
 
   private var pendingArm: ArmedState?
+  /// Device-configuration epoch: bumped on every configuration-change
+  /// notification. A pre-arm captures it before preparation and publishes
+  /// only when it is unchanged, so an arm that raced a same-format device
+  /// swap (generation untouched, signature identical) cannot republish stale
+  /// preparation. Guarded by `lock`.
+  private var configEpoch: UInt64 = 0
   /// Session-store capacity target (60 s at 16 kHz). Preallocated once and
   /// preserved across sessions via removeAll(keepingCapacity:) so the
   /// latency-critical start path never grows under the shared lock.
@@ -623,12 +630,19 @@ public final class AudioService {
     return pendingArm != nil
   }
 
+  /// Synchronous test hook: runs the device-change invalidation path
+  /// (epoch bump + arm discard) on the calling thread. For unit tests only.
+  func simulateConfigurationChangeForTests() {
+    handleConfigurationChange()
+  }
+
   /// Pre-arm body — strictly on the given engine's queue.
   private func armOnEngineQueue(using engine: AudioEngineLike, generation: Int) {
     guard !isRecordingLocked else { return }
     guard isCurrentGeneration(generation) else { return }
     lock.lock()
-    if pendingArm?.generation == generation {
+    let armEpoch = configEpoch
+    if pendingArm?.generation == generation, pendingArm?.configEpoch == armEpoch {
       lock.unlock()
       return
     }
@@ -668,7 +682,7 @@ public final class AudioService {
     // Preallocate bounded session buffers now so the confirmed start path
     // performs no growth under the shared lock.
     lock.lock()
-    if isCurrentGeneration(generation), !isRecordingLocked {
+    if isCurrentGeneration(generation), !isRecordingLocked, configEpoch == armEpoch {
       if collectedSamples.capacity < sessionStoreCapacity {
         collectedSamples.reserveCapacity(sessionStoreCapacity)
       }
@@ -678,7 +692,8 @@ public final class AudioService {
       if scratchInt16.capacity < 4096 {
         scratchInt16.reserveCapacity(4096)
       }
-      pendingArm = ArmedState(generation: generation, hwSignature: signature, prepared: true)
+      pendingArm = ArmedState(
+        generation: generation, configEpoch: armEpoch, hwSignature: signature, prepared: true)
     }
     lock.unlock()
   }
@@ -853,8 +868,10 @@ public final class AudioService {
       let signature = Self.hwSignature(sampleRate: fmt.sampleRate, channels: fmt.channelCount)
       lock.lock()
       let warmed = (warmedHWSignature == signature) ? warmedConverter : nil
+      let currentEpoch = configEpoch
       let armedMatches =
         pendingArm?.generation == startGeneration && pendingArm?.hwSignature == signature
+        && pendingArm?.configEpoch == currentEpoch
       if armedMatches {
         // Consume the pre-arm exactly once: a late duplicate start must not
         // reuse the same prepared graph.
@@ -1435,8 +1452,12 @@ public final class AudioService {
   /// idempotent through the same isRecording guard).
   private func handleConfigurationChange() {
     // A device change invalidates any non-capturing pre-arm even when idle:
-    // the armed converter/prepare belong to the old input format.
+    // the armed converter/prepare belong to the old input format. The epoch
+    // bump additionally rejects an arm whose preparation raced this
+    // notification (it publishes only on an unchanged epoch) and stops an
+    // already-queued start from consuming stale preparation.
     lock.lock()
+    configEpoch &+= 1
     pendingArm = nil
     lock.unlock()
     // isRecording read without NSLock: the notification may arrive on a
