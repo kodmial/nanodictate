@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.16] - 2026-10-01
+
+### Bug Fixes
+
+* First-Alt pre-arm speeds mic startup ([fdc31bb](https://github.com/kodmial/nanodictate/commit/fdc31bbda518a2a8056678c7387d7b1a65f984dd))
+
+
 ## [0.1.15] - 2026-10-01
 
 ### Changed
