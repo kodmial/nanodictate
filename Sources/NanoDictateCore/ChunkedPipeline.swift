@@ -108,20 +108,31 @@ public struct ChunkedPipeline {
 
   // MARK: - Отдельные шаги конвейера (reuse live-диктовкой)
 
-  /// Recognize ONE speech segment: WAV → STT (prompt = prior context) →
-  /// finalize. Returns text FOR INSERT (space-prefixed for i>0) and clean
-  /// text for prompt accumulation.
-  public static func recognizeSegment(
-    samples: [Int16],
+  /// Single segmentation entry for the legacy chunked path: computed once per
+  /// recording for the pipeline policy. Returns range-based specs; PCM stays
+  /// in the source buffer until per-segment encode.
+  public func plan(samples: [Int16]) -> [AudioSegmentSpec] {
+    AudioSegmenter.plan(samples: samples, sampleRate: sampleRate, config: segmenterConfig)
+  }
+
+  /// STT request count for an already-computed plan (segments + final pass).
+  /// Never reruns segmentation to estimate limits.
+  public static func requestCount(for plan: [AudioSegmentSpec]) -> Int {
+    AudioSegmenter.requestCount(for: plan)
+  }
+
+  /// Recognize ONE speech segment from already-encoded WAV bytes.
+  /// Shared core for slice and pre-materialized callers; overlap dedup and
+  /// separator semantics are identical.
+  public static func recognizeWAV(
+    _ bytes: Data,
     index: Int,
-    sampleRate: Int = 16000,
     insertedText: String,
     prompt: String?,
     stt: STTHandler,
     filename: String = "segment.wav",
     overlap: TimeInterval = 0
   ) async throws -> (insertText: String, promptText: String) {
-    let bytes = WAVEncoder.encode(samples: samples, sampleRate: sampleRate)
     let result = try await stt(bytes, filename, prompt)
     // Segment head (i>0): AudioSegmenter glues overlap — prior segment
     // tail. STT may duplicate seam word: drop overlap words by timestamps;
@@ -136,6 +147,32 @@ public struct ChunkedPipeline {
       insertText = " " + text
     }
     return (insertText, text)
+  }
+
+  /// Recognize ONE speech segment: WAV → STT (prompt = prior context) →
+  /// finalize. Returns text FOR INSERT (space-prefixed for i>0) and clean
+  /// text for prompt accumulation. Legacy owned-PCM entry; the pipeline run
+  /// path encodes directly from source ranges via `recognizeWAV`.
+  public static func recognizeSegment(
+    samples: [Int16],
+    index: Int,
+    sampleRate: Int = 16000,
+    insertedText: String,
+    prompt: String?,
+    stt: STTHandler,
+    filename: String = "segment.wav",
+    overlap: TimeInterval = 0
+  ) async throws -> (insertText: String, promptText: String) {
+    let bytes = WAVEncoder.encode(samples: samples, sampleRate: sampleRate)
+    return try await recognizeWAV(
+      bytes,
+      index: index,
+      insertedText: insertedText,
+      prompt: prompt,
+      stt: stt,
+      filename: filename,
+      overlap: overlap
+    )
   }
 
   /// Final pass over WHOLE WAV: one STT request (no prompt), word diff with
@@ -161,17 +198,35 @@ public struct ChunkedPipeline {
     return (finalText, true)
   }
 
-  // MARK: - Прогон
+  // MARK: - Прогон (single-pass, lazy materialization)
 
+  /// Run with segmentation computed once inside: single RMS scan via
+  /// `AudioSegmenter.plan`, then per-segment WAV encode straight from the
+  /// source buffer. Only the segment being sent is materialized.
   public func run(
     samples: [Int16],
     stt: STTHandler,
     insert: InsertHandler,
     onPhase: PhaseHandler? = nil
   ) async throws -> Outcome {
-    let segments = AudioSegmenter.segments(
+    let specs = AudioSegmenter.plan(
       samples: samples, sampleRate: sampleRate, config: segmenterConfig
     )
+    return try await run(
+      samples: samples, plannedSegments: specs, stt: stt, insert: insert, onPhase: onPhase)
+  }
+
+  /// Run with a precomputed plan (e.g. already built for watchdog limits):
+  /// segmentation is NOT rerun. Specs must come from the same `samples` and
+  /// policy; ordering and overlap semantics are identical to `run(samples:)`.
+  public func run(
+    samples: [Int16],
+    plannedSegments: [AudioSegmentSpec],
+    stt: STTHandler,
+    insert: InsertHandler,
+    onPhase: PhaseHandler? = nil
+  ) async throws -> Outcome {
+    let segments = plannedSegments
 
     // Empty recording (no segments) — empty insert, no final pass:
     // transcribing silence pointless and costly.
@@ -182,19 +237,27 @@ public struct ChunkedPipeline {
     var insertedText = ""
     var promptParts: [String] = []
 
-    for (index, segment) in segments.enumerated() {
+    for spec in segments {
+      let index = spec.index
       onPhase?(.segment(index))
-      let result = try await Self.recognizeSegment(
-        samples: segment.samples,
+      // Materialize/encode only the segment being sent: overlap tail + body
+      // straight from the source buffer, no retained per-segment PCM arrays.
+      let bytes = WAVEncoder.encodeSegment(
+        source: samples,
+        bodyRange: spec.bodyRange,
+        overlapRange: spec.overlapRange,
+        sampleRate: sampleRate
+      )
+      let result = try await Self.recognizeWAV(
+        bytes,
         index: index,
-        sampleRate: sampleRate,
         insertedText: insertedText,
         prompt: promptParts.isEmpty ? nil : Self.truncatedPrompt(promptParts),
         stt: stt,
         filename: "segment-\(index + 1).wav",
         // ACTUAL glued overlap (min(config.overlap, prior segment body)),
         // not config: overlap > minSegment would cut new segment words.
-        overlap: segment.overlapSeconds
+        overlap: spec.overlapSeconds
       )
       insert(.appendSegment(index: index, text: result.insertText))
       insertedText += result.insertText

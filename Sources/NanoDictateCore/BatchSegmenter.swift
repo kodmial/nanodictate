@@ -30,6 +30,17 @@ public protocol PCMBatchContent: AnyObject {
   /// недоборе реальных данных (усечённый/конкурентно изменённый файл)
   /// бросает ошибку — молчаливый обрубок окна недопустим.
   func readSamples(_ range: Range<Int>) throws -> [Int16]
+  /// RMS окна без материализации `[Int16]` на вызывающей стороне.
+  /// Дефолт — readSamples + buffer RMS; in-memory и файловые источники
+  /// перекрывают без промежуточного массива.
+  func rms(_ range: Range<Int>) throws -> Float
+}
+
+extension PCMBatchContent {
+  public func rms(_ range: Range<Int>) throws -> Float {
+    let samples = try readSamples(range)
+    return samples.withUnsafeBufferPointer { AudioMetrics.rms(buffer: $0) }
+  }
 }
 
 /// In-memory источник (массив сэмплов + sampleRate). Для тестов и legacy-пути.
@@ -50,6 +61,14 @@ public final class ArrayPCMBatchContent: PCMBatchContent {
     guard low < high else { return [] }
     let clamped = low..<high
     return Array(samples[clamped])
+  }
+
+  public func rms(_ range: Range<Int>) throws -> Float {
+    let low = max(0, range.lowerBound)
+    let high = min(sampleCount, range.upperBound)
+    guard low < high else { return 0 }
+    // Non-copying view into the bounded buffer; no per-window Array.
+    return AudioMetrics.rms(samples: samples[low..<high])
   }
 }
 
@@ -156,6 +175,41 @@ public final class WAVFilePCMBatchContent: PCMBatchContent {
       throw WAVFileError.invalidWAV  // недобор: файл короче объявленного dataSize
     }
     return out
+  }
+
+  /// RMS окна прямо из файловых байтов: без промежуточного `[Int16]`.
+  /// Математика идентична `AudioMetrics.rms` (full scale 32767).
+  public func rms(_ range: Range<Int>) throws -> Float {
+    let low = max(0, range.lowerBound)
+    let high = min(sampleCount, range.upperBound)
+    guard low < high else { return 0 }
+    let expected = high - low
+    readLock.lock()
+    defer { readLock.unlock() }
+    var sum: Float = 0
+    var readSamples = 0
+    var remainingBytes = expected * 2
+    do {
+      try handle.seek(toOffset: UInt64(dataOffset + low * 2))
+      while remainingBytes > 0 {
+        guard let data = try handle.read(upToCount: remainingBytes), !data.isEmpty else { break }
+        var i = 0
+        while i + 1 < data.count {
+          let raw = UInt16(data[i]) | (UInt16(data[i + 1]) << 8)
+          let value = Float(Int16(bitPattern: raw)) / 32767.0
+          sum += value * value
+          readSamples += 1
+          i += 2
+        }
+        remainingBytes -= data.count
+      }
+    } catch {
+      throw WAVFileError.ioError(error.localizedDescription)
+    }
+    guard readSamples == expected else {
+      throw WAVFileError.invalidWAV
+    }
+    return sqrt(sum / Float(expected))
   }
 }
 
@@ -369,8 +423,7 @@ public enum BatchSegmenter {
 
     while cursor < high {
       let winEnd = min(cursor + windowSize, high)
-      let window = try content.readSamples(cursor..<winEnd)
-      let rms = AudioMetrics.rms(samples: window)
+      let rms = try content.rms(cursor..<winEnd)
       let isSilent = rms < AudioMetrics.nearSilenceThreshold
 
       if isSilent, runStart == nil {
