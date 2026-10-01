@@ -131,6 +131,11 @@ public enum ProviderRequestBuilder {
   ///   - batchParams: stable-transcription batch params (contextual prompt
   ///     chaining + temperature + stable fields). nil = batch path unused
   ///     (stepwise dictation): byte-identical behavior.
+  ///   - bias: contextual biasing (reusable vocabulary + extra language hints).
+  ///     Gated by the concrete profile: vocabulary folds into `prompt` where
+  ///     supported, extra languages into `languages[]` where multi-hint is
+  ///     supported; otherwise dropped with a warning diagnostic (never sent
+  ///     as invalid API fields). Empty = byte-identical behavior.
   // swiftlint:disable:next function_parameter_count
   public static func plan(
     adapterID: String,
@@ -142,7 +147,8 @@ public enum ProviderRequestBuilder {
     filename: String = "audio.wav",
     prompt: String? = nil,
     needsWordTimestamps: Bool = false,
-    batchParams: BatchSTTParams? = nil
+    batchParams: BatchSTTParams? = nil,
+    bias: STTContextualBias = .none
   ) -> STTRequestSpec {
     // Empty config baseURL/model resolve to adapter defaults; re-resolve of
     // already non-empty values is a no-op — caller may resolve in advance.
@@ -153,10 +159,23 @@ public enum ProviderRequestBuilder {
     // never merely because the provider family supports it on another model.
     let profile = STTModelRegistry.resolve(adapterID: adapterID, model: resolvedModel)
     let caps = profile.capabilities
-    // Batch chaining prompt wins over explicit; gated by prompt support.
+    // Batch chaining prompt wins over explicit; contextual bias (vocabulary)
+    // is appended after the chain context where prompt is supported.
     // Language hint routing: none — never sent; single — `language` field;
     // multi (gpt-transcribe) — `languages[]` array (never both).
-    let effectivePrompt = caps.supportsPrompt ? (batchParams?.prompt ?? prompt) : nil
+    let chainPrompt = batchParams?.prompt ?? prompt
+    let applied = STTContextualBiasing.apply(
+      bias: bias,
+      chainPrompt: caps.supportsPrompt ? chainPrompt : chainPrompt,
+      primaryLanguage: language,
+      capabilities: caps,
+      adapterID: adapterID,
+      model: resolvedModel
+    )
+    STTContextualBiasing.logDiagnostic(applied)
+    // Prompt is sent only where the profile supports it; the bias layer
+    // already folded vocabulary into it (or dropped it deterministically).
+    let effectivePrompt = caps.supportsPrompt ? applied.effectivePrompt : nil
     let effectiveLanguage: String
     let effectiveLanguages: [String]
     switch caps.languageHint {
@@ -164,11 +183,11 @@ public enum ProviderRequestBuilder {
       effectiveLanguage = ""
       effectiveLanguages = []
     case .single:
-      effectiveLanguage = language
+      effectiveLanguage = applied.effectiveLanguage
       effectiveLanguages = []
     case .multi:
       effectiveLanguage = ""
-      effectiveLanguages = language.isEmpty ? [] : [language]
+      effectiveLanguages = applied.effectiveLanguages
     }
     let stable = BatchStableMultipartFields.stableFields(
       for: adapterID, model: resolvedModel, params: batchParams)
@@ -188,7 +207,8 @@ public enum ProviderRequestBuilder {
         prompt: effectivePrompt,
         needsWordTimestamps: needsWordTimestamps,
         stable: stable,
-        capabilities: caps
+        capabilities: caps,
+        keywords: applied.keywordsField ?? []
       )
     case .streamingSession:
       // Reserved for future WebSocket streaming (non-goal): no profile uses
@@ -205,7 +225,8 @@ public enum ProviderRequestBuilder {
         prompt: effectivePrompt,
         needsWordTimestamps: needsWordTimestamps,
         stable: stable,
-        capabilities: caps
+        capabilities: caps,
+        keywords: applied.keywordsField ?? []
       )
     }
   }
@@ -338,12 +359,14 @@ extension ProviderRequestBuilder {
   /// OpenAI-compatible multipart/form-data: file first, then model,
   /// language (if non-empty) or `languages[]` entries (multi-hint profiles
   /// such as `gpt-transcribe` — never both), prompt (if non-empty),
-  /// optionally response_format / timestamp_granularities[] (word
-  /// timestamps, only when explicitly required by the processing mode), then
-  /// stable-transcription fields (temperature/vad_filter/thresholds — only
-  /// non-nil, post-gating), closing boundary. THE single source of truth for
-  /// the body format — openai/groq adapters produce byte-identical data
-  /// (timestamp and stable fields added only by explicit params).
+  /// optionally `keywords[]` (only profiles with `supportsKeywordBiasing`;
+  /// no built-in profile uses it today — reserved), response_format /
+  /// timestamp_granularities[] (word timestamps, only when explicitly
+  /// required by the processing mode), then stable-transcription fields
+  /// (temperature/vad_filter/thresholds — only non-nil, post-gating),
+  /// closing boundary. THE single source of truth for the body format —
+  /// openai/groq adapters produce byte-identical data (timestamp and
+  /// stable fields added only by explicit params).
   // swiftlint:disable:next function_parameter_count
   public static func multipartBody(
     wav: Data,
@@ -353,6 +376,7 @@ extension ProviderRequestBuilder {
     prompt: String?,
     boundary: String,
     languages: [String] = [],
+    keywords: [String] = [],
     responseFormat: String? = nil,
     timestampGranularities: [String] = [],
     stable: BatchStableMultipartFields? = nil
@@ -395,8 +419,16 @@ extension ProviderRequestBuilder {
     }
 
     // Field: prompt — context of already-recognized segments (stepwise dictation)
+    // plus the folded technical-vocabulary hint (contextual biasing).
     if let prompt, !prompt.isEmpty {
       appendField("prompt", value: prompt)
+    }
+
+    // Fields: keywords[] — dedicated vocabulary biasing (reserved: only
+    // profiles with supportsKeywordBiasing; no built-in profile emits it).
+    // Terms are pre-sanitized by STTContextualBiasing (no CR/LF injection).
+    for keyword in keywords where !keyword.isEmpty {
+      appendField("keywords[]", value: keyword)
     }
 
     // Field: response_format — request verbose_json (yields word timestamps)
@@ -456,16 +488,18 @@ extension ProviderRequestBuilder {
     prompt: String?,
     needsWordTimestamps: Bool = false,
     stable: BatchStableMultipartFields? = nil,
-    capabilities: STTCapabilities? = nil
+    capabilities: STTCapabilities? = nil,
+    keywords: [String] = []
   ) -> STTRequestSpec {
     let boundary = "Boundary-\(UUID().uuidString)"
     // Word timestamps (verbose_json) — only where the concrete model profile
     // guarantees support AND the processing mode requires them (chunked/live
     // segment overlap stitching). Normal single-request push-to-talk sends
-    // plain transcription.
+    // plain transcription. Keywords — only where supportsKeywordBiasing.
     let caps = capabilities ?? STTModelRegistry.resolve(adapterID: adapterID, model: model).capabilities
     let timestamps = needsWordTimestamps && caps.supportsWordTimestamps
     let verbose = needsWordTimestamps && caps.supportsVerboseJSON
+    let effectiveKeywords = caps.supportsKeywordBiasing ? keywords : []
     let multipart = multipartBody(
       wav: wav,
       filename: filename,
@@ -474,6 +508,7 @@ extension ProviderRequestBuilder {
       prompt: prompt,
       boundary: boundary,
       languages: languages,
+      keywords: effectiveKeywords,
       responseFormat: verbose ? "verbose_json" : nil,
       timestampGranularities: timestamps ? ["word"] : [],
       stable: stable
