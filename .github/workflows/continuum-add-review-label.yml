@@ -1,0 +1,19 @@
+name: mark-ready-for-coderabbit
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  actions: write
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  call:
+    uses: kodmial/continuum/.github/workflows/add-review-label.yml@main
+    secrets: inherit
+    with:
+      continuum_ref: main

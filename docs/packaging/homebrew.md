@@ -4,7 +4,7 @@ The NanoDictate Homebrew formula is a **binary formula**: `brew` downloads the
 prebuilt tarball attached to the GitHub Release and installs the binaries
 as-is. Nothing is compiled on the user's machine — **no Xcode and no Swift
 toolchain are required**. The tarballs are built self-signed by
-`.github/workflows/release.yml` (NanoDictate CI Signing identity) on every
+`.github/workflows/continuum-release.yml` (NanoDictate CI Signing identity) on every
 `v*` tag. This page is the
 user-facing install guide plus the maintainer release drill. For the template
 layout, the generator and cross-package notes see

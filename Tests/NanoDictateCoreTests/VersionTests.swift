@@ -113,6 +113,202 @@ final class VersionTests: XCTestCase {
         }
     }
 
+    @objc func testPackagingManifestsCarryCurrentVersion() {
+        // Regression for the 0.1.14 production packaging smoke failure:
+        // Homebrew served 0.1.14 while the MacPorts channel still installed
+        // 0.1.13 (verify-package: `nanodictate --version` did not carry the
+        // expected version). The generated manifests lagged Version.swift on
+        // main, so the documented `curl install-macports.sh` path installed a
+        // stale tree. Every generated manifest must carry a released version
+        // and no unfilled __VERSION__ placeholder may remain.
+        //
+        // Release-lag window: release-please bumps NanoDictateVersion.string
+        // to the next version before the Release workflow publishes the tag
+        // and regenerates the manifests (scripts/release-prep.rb needs the
+        // published assets for real checksums). Until publication the
+        // manifests correctly remain at the previous release (the latest
+        // published tag). The test therefore accepts a fully consistent
+        // manifest set at either the current or the previous CHANGELOG
+        // release, but still fails when channels diverge from each other.
+        let version = NanoDictateVersion.string
+        let releases = Self.changelogReleases()
+        let previousRelease: String? = releases.count >= 2 ? releases[1] : nil
+        let files = [
+            "packaging/macports/Portfile",
+            "packaging/homebrew/nanodictate.rb",
+            "packaging/homebrew/Casks/nanodictate.rb",
+            "nanodictate.rb",
+        ]
+        var contents: [String: String] = [:]
+        for relative in files {
+            guard let source = Self.repoFile(relative) else {
+                XCTFail("Could not read \(relative) relative to the package root")
+                return
+            }
+            contents[relative] = source
+            XCTAssertFalse(
+                source.contains("__VERSION__"),
+                "\(relative) still contains an unfilled __VERSION__ placeholder"
+            )
+            let carriesCurrent = source.contains(version)
+            let carriesPrevious = previousRelease.map { source.contains($0) } ?? false
+            XCTAssertTrue(
+                carriesCurrent || carriesPrevious,
+                "\(relative) does not carry the current version \(version)"
+                    + (previousRelease.map { " nor the previous release \($0)" } ?? "")
+            )
+        }
+        guard contents.count == files.count else { return }
+
+        // All channels must agree on one manifest version: a split (e.g.
+        // Homebrew at 0.1.14 while the Portfile is still at 0.1.13) is the
+        // stale-channel bug this test guards against.
+        let allCarryCurrent = contents.values.allSatisfy { $0.contains(version) }
+        let allCarryPrevious = previousRelease.map { prev in
+            contents.values.allSatisfy { $0.contains(prev) }
+        } ?? false
+        let manifestVersion: String
+        if allCarryCurrent {
+            manifestVersion = version
+        } else if allCarryPrevious, let prev = previousRelease {
+            manifestVersion = prev
+        } else {
+            XCTFail(
+                "packaging manifests diverge: they must all carry \(version)"
+                    + (previousRelease.map { " or all carry \($0)" } ?? "")
+                    + " (stale channel)"
+            )
+            return
+        }
+
+        // MacPorts: the port version line, the release download URL and the
+        // arch-specific distfile name must all target the manifest version.
+        if let portfile = contents["packaging/macports/Portfile"] {
+            XCTAssertTrue(
+                portfile.contains("github.setup        kodmial nanodictate \(manifestVersion) v"),
+                "Portfile github.setup does not target \(manifestVersion)"
+            )
+            XCTAssertTrue(
+                portfile.contains("releases/download/v\(manifestVersion)"),
+                "Portfile master_sites does not target v\(manifestVersion)"
+            )
+            XCTAssertTrue(
+                portfile.contains("nanodictate-\(manifestVersion)-macos-"),
+                "Portfile distfiles do not target \(manifestVersion)"
+            )
+        }
+        // Homebrew formula + cask + root mirror: explicit version stanza and
+        // arch-specific asset URLs must target the manifest version.
+        for relative in [
+            "packaging/homebrew/nanodictate.rb",
+            "packaging/homebrew/Casks/nanodictate.rb",
+            "nanodictate.rb",
+        ] {
+            guard let source = contents[relative] else { continue }
+            XCTAssertTrue(
+                source.contains("version \"\(manifestVersion)\""),
+                "\(relative) version stanza does not declare \(manifestVersion)"
+            )
+            XCTAssertTrue(
+                source.contains("releases/download/v\(manifestVersion)/nanodictate-\(manifestVersion)-macos-"),
+                "\(relative) asset URLs do not target v\(manifestVersion)"
+            )
+        }
+        // The formula and the port install the same tarballs: their pinned
+        // tarball checksums must agree, otherwise the channels ship different
+        // bytes for the same version.
+        if let formula = contents["packaging/homebrew/nanodictate.rb"],
+           let portfile = contents["packaging/macports/Portfile"]
+        {
+            let formulaSHAs = Self.hexTokens(
+                in: formula,
+                pattern: "sha256\\s+\"([0-9a-f]{64})\""
+            )
+            let portSHAs = Self.hexTokens(
+                in: portfile,
+                pattern: "set distfile_sha256\\s+([0-9a-f]{64})"
+            )
+            XCTAssertEqual(formulaSHAs.count, 2, "formula must pin exactly 2 tarball checksums")
+            XCTAssertEqual(portSHAs.count, 2, "Portfile must pin exactly 2 tarball checksums")
+            XCTAssertEqual(
+                Set(formulaSHAs), Set(portSHAs),
+                "Homebrew formula and MacPorts Portfile pin different tarball checksums"
+            )
+        }
+        // The MacPorts installer pins the canonical tree to an exact revision;
+        // a missing or malformed pin would leave the documented install path
+        // untethered from the synced tree.
+        guard let installer = Self.repoFile("scripts/install-macports.sh") else {
+            XCTFail("Could not read scripts/install-macports.sh relative to the package root")
+            return
+        }
+        let pinFound: Bool = {
+            guard let regex = try? NSRegularExpression(pattern: "PIN_REV=\"[0-9a-f]{40}\"") else {
+                return false
+            }
+            let range = NSRange(installer.startIndex..., in: installer)
+            return regex.firstMatch(in: installer, range: range) != nil
+        }()
+        XCTAssertTrue(pinFound, "scripts/install-macports.sh must pin PIN_REV to a 40-char git revision")
+    }
+
+    private static func changelogReleases() -> [String] {
+        // Release headers `## [<semver>]` after `## [Unreleased]`, newest
+        // first. The first entry is the current release (mirrors
+        // testVersionStringEqualsCurrentRelease); the second, when present,
+        // is the previous release — the latest published tag while the
+        // current release still awaits publication.
+        guard let changelog = Self.repoFile("CHANGELOG.md") else { return [] }
+        var foundUnreleased = false
+        var releases: [String] = []
+        for line in changelog.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if !foundUnreleased {
+                if trimmed.hasPrefix("## [Unreleased]") {
+                    foundUnreleased = true
+                }
+                continue
+            }
+            guard trimmed.hasPrefix("## ["),
+                let open = trimmed.firstIndex(of: "["),
+                let close = trimmed.firstIndex(of: "]") else { continue }
+            let candidate = String(trimmed[trimmed.index(after: open)..<close])
+            let parts = candidate.split(separator: ".")
+            if parts.count == 3, parts.allSatisfy({ !$0.isEmpty && $0.allSatisfy { $0.isNumber } }) {
+                releases.append(candidate)
+            }
+        }
+        return releases
+    }
+
+    private static func repoFile(_ relative: String) -> String? {
+        let fileDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let candidates = [
+            fileDir.deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent(relative),
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent(relative),
+        ]
+        guard let sourceURL = candidates.first(where: {
+            FileManager.default.fileExists(atPath: $0.path)
+        }) else {
+            return nil
+        }
+        return try? String(contentsOf: sourceURL, encoding: .utf8)
+    }
+
+    private static func hexTokens(in source: String, pattern: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let range = NSRange(source.startIndex..., in: source)
+        return regex.matches(in: source, range: range).compactMap { match in
+            guard match.numberOfRanges > 1,
+                  let tokenRange = Range(match.range(at: 1), in: source)
+            else { return nil }
+            return String(source[tokenRange])
+        }
+    }
+
     private static func overlayControllerSource() -> String? {
         let fileDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         let candidates = [
