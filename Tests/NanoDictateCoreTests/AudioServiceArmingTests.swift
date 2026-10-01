@@ -279,6 +279,8 @@ final class AudioServiceArmingTests: XCTestCase {
     @objc func testConfigurationChangeDuringArmedStartAbortsStaleStartup() {
         let engine = FakeEngine()
         let service = AudioService(logLevel: "info", engine: engine)
+        var readyCount = 0
+        service.onCaptureReady = { _ in readyCount += 1 }
 
         service.armForImminentStart()
         drainEngineQueue()
@@ -312,12 +314,16 @@ final class AudioServiceArmingTests: XCTestCase {
             engine.prepareCount, preparesAfterArm,
             "aborted stale startup must not silently reuse the arm's prepare")
         XCTAssertFalse(service.isArmedForTests(), "aborted startup must leave no pending arm")
+        XCTAssertEqual(readyCount, 0, "aborted stale start must not become capture-ready")
+        XCTAssertEqual(service.stop(), [], "aborted stale start must capture no audio")
         drainEngineQueue()
 
         guard case .success = runStart(service) else {
             XCTFail("start after aborted stale startup must succeed via full bring-up")
             return
         }
+        engine.node.emit(makeToneBuffer(engine: engine))
+        XCTAssertTrue(eventually { readyCount == 1 }, "retry reaches readiness independently")
         _ = service.stop()
     }
 

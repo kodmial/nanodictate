@@ -323,6 +323,15 @@ public final class AudioService {
   /// swap (generation untouched, signature identical) cannot republish stale
   /// preparation. Guarded by `lock`.
   private var configEpoch: UInt64 = 0
+  /// Startup fence for a consumed pre-arm: the epoch the in-progress startup
+  /// relies on while its `engine.prepare()` is skipped. Set under `lock`
+  /// when an arm is consumed, cleared when the startup commits to a fresh
+  /// prepare or finishes (success or failure). Lets `handleConfigurationChange`
+  /// distinguish "idle bump, no startup affected" from "startup in progress":
+  /// clearing `pendingArm` alone cannot invalidate an arm already copied into
+  /// the start's locals, so the post-start check compares this fence against
+  /// `configEpoch`. Guarded by `lock`.
+  private var startupArmedEpoch: UInt64? = nil
   /// Session-store capacity target (60 s at 16 kHz). Preallocated once and
   /// preserved across sessions via removeAll(keepingCapacity:) so the
   /// latency-critical start path never grows under the shared lock.
@@ -884,9 +893,17 @@ public final class AudioService {
         // Consume the pre-arm exactly once: a late duplicate start must not
         // reuse the same prepared graph. The epoch is kept so a device change
         // after consumption can still invalidate the skipped prepare below.
+        // The fence mirrors the consumed epoch for the post-start check:
+        // clearing pendingArm alone cannot reach the start's locals.
         usedArmedFastPath = pendingArm?.prepared ?? false
         consumedArmEpoch = pendingArm?.configEpoch ?? currentEpoch
+        startupArmedEpoch = consumedArmEpoch
         pendingArm = nil
+      } else {
+        // This start consumed nothing (no arm, or an arm for another
+        // generation/format): no skipped prepare depends on the epoch, so
+        // the startup fence stays clear.
+        startupArmedEpoch = nil
       }
       // Stage stamp: input node/format resolved (whether armed or fresh).
       if isCurrentGeneration(startGeneration) {
@@ -918,7 +935,10 @@ public final class AudioService {
       // down, else the next Alt+Alt crashes on a repeat installTap. Generation
       // guard first: if the engine that started was already wedge-swapped —
       // new-session state (session.end()/buffer reset) is off-limits, tear
-      // down only the stale engine itself.
+      // down only the stale engine itself. The startup fence dies here too.
+      lock.lock()
+      startupArmedEpoch = nil
+      lock.unlock()
       guard isCurrentGeneration(startGeneration) else {
         teardownEngineOnly(using: engine)
         return .failure(setupFailure)
@@ -1043,12 +1063,49 @@ public final class AudioService {
         failure = guardedEngineCall {
           engine.prepare()
         }
+        // Fresh prepare re-baselines the startup: no skipped prepare remains,
+        // so the fence clears and the atomic commit below needs no epoch.
+        lock.lock()
+        startupArmedEpoch = nil
+        lock.unlock()
       }
     }
-    if failure == nil {
+    // Atomic commit for the skipped-prepare path: the final epoch re-check
+    // and the recording-begin transition happen under one `lock` hold
+    // (session.begin takes a separate unfair lock: NSLock outer, ledger
+    // inner — the same order handleConfigurationChange uses, so no
+    // deadlock). A configuration change racing here either bumps the epoch
+    // before this hold (commit sees it and falls back to a fresh prepare) or
+    // blocks on `lock` until begin completes (then it observes isRecording
+    // and schedules a stop). The split check-then-begin this replaces left a
+    // window where a bump landed after the check but before begin, and the
+    // handler's early return (recording still false) let stale preparation
+    // reach engine.start() as success.
+    var committedFastPath = false
+    if failure == nil, usedArmedFastPath {
+      lock.lock()
+      if isCurrentGeneration(startGeneration), configEpoch == consumedArmEpoch {
+        session.begin()
+        committedFastPath = true
+      } else {
+        usedArmedFastPath = false
+      }
+      lock.unlock()
+      if !committedFastPath, failure == nil {
+        failure = guardedEngineCall {
+          engine.prepare()
+        }
+        lock.lock()
+        startupArmedEpoch = nil
+        lock.unlock()
+      }
+    }
+    if failure == nil, !committedFastPath {
       if isCurrentGeneration(startGeneration) {
         setRecording(true)
       }
+    }
+    if failure == nil {
       failure = guardedEngineCall {
         try engine.start()
       }
@@ -1057,36 +1114,49 @@ public final class AudioService {
         startupEngineStartedNanos = Self.monotonicNanos()
         lock.unlock()
       }
-      // Startup invalidation for the armed fast path: a configuration change
-      // can land after the final epoch check above (the handler then sees
-      // recording as still false and only bumps the epoch) or during the
-      // blocking engine.start(). Clearing pendingArm cannot invalidate an arm
-      // already consumed into a local flag, so re-validate the consumed epoch
-      // after start completes. On mismatch the graph was rebuilt after the
-      // arm's prepare(): tear down and fail so the caller retries with a full
-      // bring-up instead of recording on stale preparation. A change landing
-      // after this check is covered by the handler's recording-stop path.
-      if failure == nil, usedArmedFastPath, isCurrentGeneration(startGeneration) {
+    }
+    // Post-start startup invalidation: a device change that landed after the
+    // atomic commit (lock released, engine.start() in flight) bumps the epoch
+    // while recording already reads true, so the handler schedules a stop —
+    // but this start already called engine.start() on the rebuilt graph with
+    // a skipped prepare. Clearing pendingArm cannot reach the consumed local
+    // flag, so compare the shared fence instead: on mismatch, tear down here
+    // and report failure rather than a stale success. The handler's queued
+    // stop then observes !isRecording and stays idempotent.
+    if failure == nil, committedFastPath, isCurrentGeneration(startGeneration) {
+      lock.lock()
+      let staleAfterCommit =
+        configEpoch != consumedArmEpoch || startupArmedEpoch != consumedArmEpoch
+      lock.unlock()
+      if staleAfterCommit {
+        setRecording(false)
+        teardownOnEngineQueue(using: engine)
         lock.lock()
-        let startupStale = configEpoch != consumedArmEpoch
+        startupArmedEpoch = nil
         lock.unlock()
-        if startupStale {
-          setRecording(false)
-          teardownOnEngineQueue(using: engine)
-          Logger.log(
-            "record engine: configuration changed during armed startup — aborted",
-            level: "warn"
-          )
-          return .failure(AudioServiceError.deviceChanged)
-        }
+        Logger.log("record engine: device changed during start — aborted stale fast path", level: "warn")
+        return .failure(AudioServiceError.deviceChanged)
       }
     }
+    lock.lock()
+    // The startup fence served the commit/post-start checks above: a fresh
+    // success owns no skipped prepare, a fast-path success just proved its
+    // epoch survived through engine.start().
+    if failure == nil {
+      startupArmedEpoch = nil
+    }
+    lock.unlock()
     if let failure {
       // Terminal branch: the engine MUST be torn down (tap removed, engine
       // stopped, buffers cleared) — else the next Alt+Alt crashes on a repeat
       // installTap on a busy bus. Generation guard, as in the setup-failure
       // branch: a start unblocked AFTER the swap does not touch the new
       // session's state — only tears down the stale engine itself.
+      // The startup fence dies with the attempt either way: a retry consumes
+      // a fresh arm (or none) and sets its own fence.
+      lock.lock()
+      startupArmedEpoch = nil
+      lock.unlock()
       guard isCurrentGeneration(startGeneration) else {
         teardownEngineOnly(using: engine)
         return .failure(failure)
@@ -1515,14 +1585,22 @@ public final class AudioService {
     // the armed converter/prepare belong to the old input format. The epoch
     // bump additionally rejects an arm whose preparation raced this
     // notification (it publishes only on an unchanged epoch) and stops an
-    // already-queued start from consuming stale preparation.
+    // already-queued start from consuming stale preparation. The bump and the
+    // recording-state read are atomic under `lock` (NSLock outer, session
+    // ledger inner): a start committing its skipped-prepare path holds the
+    // same lock across its final epoch check and recording-begin, so the two
+    // sides serialize. Bump-first means the start sees the new epoch and
+    // takes a fresh prepare (no stop needed); begin-first means the handler
+    // observes recording and schedules a stop, while the start's post-start
+    // fence check converts its stale success into an explicit failure.
+    // Reading isRecording after unlock (as before) allowed a bump-then-begin
+    // interleaving to schedule a stop against a now-valid fresh prepare.
     lock.lock()
     configEpoch &+= 1
     pendingArm = nil
+    let recording = session.isRecording
     lock.unlock()
-    // isRecording read without NSLock: the notification may arrive on a
-    // foreign queue, and the `session` ledger holds no state lock.
-    guard isRecordingLocked else { return }
+    guard recording else { return }
     Logger.log("record engine: configuration changed — stopping, user must restart", level: "warn")
     // Whole finalization on the main queue: the notification arrives on the
     // poster's thread (system AVFAudio thread), while the stop()/
