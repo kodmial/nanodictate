@@ -1,17 +1,24 @@
 name: macOS 12 compat
 
 # Repeatable compatibility gate for the oldest supported macOS major version.
-# Static floor checks run on hosted macos-15 (no runtime claim); the runtime
-# gate runs ONLY on actual macOS 12 execution via a self-hosted runner
-# labelled [self-hosted, macos-12]. A newer runner is never treated as
-# equivalent: --full refuses non-12 hosts unless --allow-non12-runtime is
-# given, and that diagnostics-only path never counts as a release pass.
+# Static floor checks run on hosted macos-15 (no runtime claim). Actual macOS 12
+# runtime validation (--full) runs on an isolated macOS 12 machine or VM
+# OUTSIDE GitHub Actions: since September 23, 2026 runners use Node 24 for
+# JavaScript actions, Node 20 is no longer available, and Node 24 is
+# incompatible with macOS 13.4 and earlier, so no `uses:` action (checkout,
+# upload-artifact, ...) can execute on a macOS 12 host. Every Actions job below
+# therefore runs on a supported hosted runner; the isolated macOS 12 run is
+# performed out-of-band and its results are collected back on the supported
+# runner (see docs/compatibility/macos-12-validation.md).
+#
+# A newer runner is never treated as equivalent: --full refuses non-12 hosts
+# unless --allow-non12-runtime is given, and that diagnostics-only path never
+# counts as a release pass.
 #
 # Security: no secrets are requested or inherited (contents: read only), no
-# STT network calls, and fork-PR code never executes on the self-hosted
-# runner (runtime job is limited to same-repo events; see the `if:`
-# condition). Manual TCC/UI checks are documented in
-# docs/compatibility/macos-12-validation.md.
+# STT network calls, and every Actions job runs on hosted runners, so fork PRs
+# are safe by construction (no self-hosted execution). Manual TCC/UI checks are
+# documented in docs/compatibility/macos-12-validation.md.
 
 on:
   pull_request:
@@ -39,19 +46,12 @@ on:
     # without code changes (runner-image drift, toolchain drift).
     - cron: '23 4 * * 1'
   workflow_dispatch:
-    inputs:
-      allow_non12_runtime:
-        description: 'Run --full with --allow-non12-runtime (diagnostics only, never a release pass)'
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
 
-# Keep only the newest compatibility run for a PR/ref. A self-hosted macOS 12
-# runner may be offline for hours; stale heads must not queue ahead of the
-# current commit when it returns.
+# Keep only the newest compatibility run for a PR/ref so stale heads never
+# queue ahead of the current commit.
 concurrency:
   group: macos12-compat-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -62,65 +62,61 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - name: Static macOS 12 floor checks
         run: bash scripts/macos12-compat-check.sh --static-only
       - name: Upload static results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: macos12-static-${{ github.run_id }}
           path: .opencode-tmp/macos12-compat-results/
           if-no-files-found: warn
 
   runtime-gate:
-    name: runtime (actual macOS 12)
-    # Self-hosted macOS 12 hardware. GitHub-hosted macos-12 runners are
-    # retired, so there is intentionally no hosted fallback here.
-    runs-on: [self-hosted, macos-12]
-    timeout-minutes: 45
-    # Never run untrusted fork code on the self-hosted machine. Fork PRs get
-    # the static gate plus a skipped note; maintainers re-validate via
-    # workflow_dispatch after review.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    name: runtime handoff (isolated macOS 12)
+    # Supported host only. JavaScript actions require Node 24 (Node 20 was
+    # removed on September 23, 2026) and Node 24 cannot run on macOS 13.4 or
+    # earlier, so checkout/upload-artifact cannot execute on macOS 12. The
+    # --full runtime probe runs on an isolated macOS 12 machine or VM
+    # out-of-band; this job records the handoff and collects results back on
+    # the supported runner instead of pretending a newer host is equivalent.
+    runs-on: macos-15
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - name: Full macOS 12 runtime checks
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Prepare isolated macOS 12 runtime handoff
         run: |
-          if [ "${{ inputs.allow_non12_runtime || false }}" = "true" ]; then
-            bash scripts/macos12-compat-check.sh --full --allow-non12-runtime
-          else
-            bash scripts/macos12-compat-check.sh --full
-          fi
-      - name: Summarize runtime host
+          bash -n scripts/macos12-compat-check.sh
+          bash scripts/macos12-compat-check.sh --help >/dev/null
+          mkdir -p .opencode-tmp/macos12-compat-results
+          {
+            echo "result=needs-macos12-host"
+            echo "runtime_claim=none"
+            echo "reason=actions-host-is-supported-only-node24"
+          } > .opencode-tmp/macos12-compat-results/result.txt
+          echo "Recorded handoff marker: run scripts/macos12-compat-check.sh --full on an isolated macOS 12 host, then collect the results back on this supported runner."
+          echo "See docs/compatibility/macos-12-validation.md."
+      - name: Summarize runtime handoff
         if: always()
         run: |
           {
             echo "## macOS 12 runtime gate"
             echo ""
-            cat .opencode-tmp/macos12-compat-results/environment.txt 2>/dev/null || echo "environment.txt missing"
+            echo "Actions host is macos-15 (supported). Actual macOS 12 execution happens on an isolated host/VM out-of-band."
             echo ""
             cat .opencode-tmp/macos12-compat-results/result.txt 2>/dev/null || echo "result.txt missing"
+            echo ""
+            echo "To validate: run scripts/macos12-compat-check.sh --full on isolated macOS 12 hardware or a VM, then collect .opencode-tmp/macos12-compat-results/ back on a supported machine. See docs/compatibility/macos-12-validation.md."
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Upload runtime results
+      - name: Upload runtime handoff results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: macos12-runtime-${{ github.run_id }}
           path: .opencode-tmp/macos12-compat-results/
           if-no-files-found: warn
-
-  fork-note:
-    name: fork PR note
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
-    steps:
-      - run: |
-          {
-            echo "## macOS 12 runtime gate"
-            echo ""
-            echo "Skipped on the self-hosted macOS 12 runner: this PR comes from a fork and untrusted code never executes there."
-            echo "The static floor gate above still runs. Maintainers re-validate via workflow_dispatch after review."
-            echo "See docs/compatibility/macos-12-validation.md."
-          } >> "$GITHUB_STEP_SUMMARY"

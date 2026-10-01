@@ -11,8 +11,8 @@
 #   * the runtime host gate that only a macOS 12 host may pass (pure function),
 #   * --skip-build rejection in --full mode (no result file, non-zero exit),
 #   * the declared-floor assertions against the real repository files,
-#   * the workflow contract (self-hosted macos-12 only, no secrets, fork
-#     PRs never reach the self-hosted runner),
+#   * the workflow contract (supported hosted runners only with Node 24
+#     actions, isolated macOS 12 execution out-of-band, no secrets),
 #   * the --full non-12 refusal (a newer runner is never equivalent),
 #   * the source contracts behind the CLI/linkage, audio, Accessibility, and
 #     documentation claims so they cannot drift back into over-claiming.
@@ -127,14 +127,31 @@ assert_grep 'floor: cask template keeps :monterey' \
   "${REPO_ROOT}/packaging/homebrew/Casks/nanodictate.rb.tpl" 'depends_on macos: :monterey'
 
 # --- 4. Workflow contract -----------------------------------------------------
+# No JavaScript action can execute on macOS 12 after the Node 24 migration
+# (Node 20 removed September 23, 2026; Node 24 incompatible with macOS 13.4
+# and earlier), so every Actions job must run on a supported hosted runner
+# and the --full probe must run on an isolated host out-of-band.
 
 assert_ok 'workflow: file exists' test -f "$WORKFLOW"
-assert_grep 'workflow: runtime uses self-hosted macos-12' \
-  "$WORKFLOW" 'self-hosted, macos-12'
+assert_not_ok 'workflow: no self-hosted execution (unsupported for JS actions on macOS 12)' \
+  grep -qE 'runs-on:.*self-hosted' "$WORKFLOW"
 assert_not_ok 'workflow: no hosted macos-12 fallback' \
   grep -qE 'runs-on: macos-12' "$WORKFLOW"
-assert_grep 'workflow: fork PRs are excluded from the self-hosted runner' \
-  "$WORKFLOW" 'head\.repo\.full_name'
+assert_grep 'workflow: runtime handoff runs on supported macos-15' \
+  "$WORKFLOW" 'runs-on: macos-15'
+assert_grep 'workflow: checkout uses Node 24 (v5)' \
+  "$WORKFLOW" 'actions/checkout@v5'
+assert_not_ok 'workflow: checkout no longer uses Node 20 (v4 removed)' \
+  grep -qE 'actions/checkout@v4' "$WORKFLOW"
+assert_grep 'workflow: artifacts use Node 24 (v6)' \
+  "$WORKFLOW" 'actions/upload-artifact@v6'
+assert_not_ok 'workflow: artifacts no longer use Node 20 (v4 removed)' \
+  grep -qE 'actions/upload-artifact@v4' "$WORKFLOW"
+assert_grep 'workflow: checkout does not persist credentials' \
+  "$WORKFLOW" 'persist-credentials: false'
+assert_grep 'workflow: runtime records an isolated-host handoff instead of claiming a pass' \
+  "$WORKFLOW" 'needs-macos12-host'
+
 # `secrets:` catches both a secrets block and `secrets: inherit`;
 # `secrets.` additionally catches direct references like `${{ secrets.TOKEN }}`.
 assert_not_ok 'workflow: requests no secrets' \
@@ -209,6 +226,12 @@ assert_grep 'lifecycle: final stop fails the gate instead of suppressing' \
   "$CHECK_SCRIPT" 'fail "nanodictate final stop failed"'
 assert_grep 'lifecycle: final stop verifies job removal' \
   "$CHECK_SCRIPT" 'service still registered 30s after final stop'
+assert_grep 'lifecycle: original HOME saved before isolation' \
+  "$CHECK_SCRIPT" 'ORIGINAL_HOME="\$\{HOME:-/\}"'
+assert_grep 'lifecycle: original HOME restored after the probe' \
+  "$CHECK_SCRIPT" 'export HOME="\$ORIGINAL_HOME"'
+assert_not_ok 'lifecycle: probe no longer retains the isolated HOME' \
+  grep -qF 'export HOME="${HOME:-/}"' "$CHECK_SCRIPT"
 
 # --- 7. Documentation must not claim more than the gate automates ------------
 
@@ -229,6 +252,14 @@ assert_grep 'docs: Accessibility insertion is stated as manual' \
   "$COMPAT_DOC" 'Accessibility insertion are deliberately \*\*not\*\* automated'
 assert_grep 'docs: --skip-build documented as static-only only' \
   "$COMPAT_DOC" '\-\-static-only` only'
+assert_grep 'docs: Node 24 host constraint documented' \
+  "$COMPAT_DOC" 'Node 24'
+assert_grep 'docs: isolated macOS 12 execution documented' \
+  "$COMPAT_DOC" 'isolated macOS 12'
+assert_not_ok 'docs: no self-hosted macOS 12 runner strategy remains' \
+  grep -qE 'self-hosted, macos-12' "$COMPAT_DOC"
+assert_grep 'docs: results collected back on a supported machine' \
+  "$COMPAT_DOC" 'collect the results back on a supported'
 
 # --- 8. --full on a non-12 host refuses (never a silent pass) -----------------
 # Only meaningful on macOS; on Linux the script exits 2 (macOS-only), which

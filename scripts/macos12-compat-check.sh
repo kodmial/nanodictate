@@ -215,6 +215,7 @@ if [ "$SKIP_BUILD" = "1" ]; then
   log "skip-build requested, launchd lifecycle skipped"
 else
   BIN="$REPO_ROOT/.build/debug/nanodictate"
+  ORIGINAL_HOME="${HOME:-/}"
   ISOLATED_HOME="$(mktemp -d "$RESULT_DIR/isolated-home.XXXXXX")"
   export HOME="$ISOLATED_HOME"
   log "isolated HOME: $ISOLATED_HOME"
@@ -286,7 +287,7 @@ else
   LIFECYCLE_STARTED=0
   trap - EXIT
   log "launchd lifecycle ok (start/stop/restart, isolated HOME, real user config untouched)"
-  export HOME="${HOME:-/}"
+  export HOME="$ORIGINAL_HOME"
 fi
 
 # --- 6. Audio HAL enumeration (no capture, no TCC grant, best-effort) ---------
