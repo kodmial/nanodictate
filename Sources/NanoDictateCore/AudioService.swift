@@ -621,9 +621,10 @@ public final class AudioService {
       self.lock.lock()
       if let arm = self.pendingArm, arm.generation == generation {
         self.pendingArm = nil
-      } else if self.pendingArm == nil {
-        // No arm: still clear stale Alt stamps so a lone single-Alt leaves no
-        // persistent timing residue.
+      }
+      if self.pendingArm == nil {
+        // No arm remains: clear stale Alt stamps so a lone single-Alt leaves
+        // no persistent timing residue.
         self.pendingFirstAltNanos = nil
         self.pendingSecondAltNanos = nil
       }
