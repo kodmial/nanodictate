@@ -1264,9 +1264,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     // "Processing" phase watchdog: several segments + final pass — each
     // request up to networkRequestTimeout; the guard counts by request number
     // (N segments, count > 1 ⇒ one more final). Same session-token mechanism
-    // as processSingleRequest.
-    let segments = AudioSegmenter.segments(samples: samples)
-    let requestCount = segments.count <= 1 ? 1 : segments.count + 1
+    // as processSingleRequest. Segmentation runs once per recording: the plan
+    // below is reused by the pipeline run (no rerun for watchdog limits).
+    let chunkedPlan = AudioSegmenter.plan(samples: samples)
+    let requestCount = AudioSegmenter.watchdogRequestCount(for: chunkedPlan)
     let chunkedMaxDuration = Double(requestCount) * Transcriber.networkRequestTimeout + 5
 
     processingSession += 1
@@ -1285,6 +1286,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       do {
         let outcome = try await ChunkedPipeline().run(
           samples: samples,
+          plannedSegments: chunkedPlan,
           stt: { wav, filename, prompt in
             // Roles from [routing]: segments (filename "segment-N.wav") go to
             // segment_provider, the final pass over the whole WAV

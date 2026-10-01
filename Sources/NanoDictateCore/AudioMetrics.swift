@@ -70,13 +70,31 @@ public enum AudioMetrics {
 
   /// RMS over Int16 samples (0…1, full scale 32767); empty → 0. Same array as goes to WAV/STT.
   public static func rms(samples: [Int16]) -> Float {
-    guard !samples.isEmpty else { return 0 }
+    samples.withUnsafeBufferPointer { rms(buffer: $0) }
+  }
+
+  /// RMS over a non-owning slice view; no per-window Array allocation.
+  /// Used by single-pass segmentation to scan the bounded recording buffer
+  /// in place.
+  public static func rms(samples slice: ArraySlice<Int16>) -> Float {
+    guard !slice.isEmpty else { return 0 }
     var sum: Float = 0
-    for sample in samples {
+    for sample in slice {
       let value = Float(sample) / 32767.0
       sum += value * value
     }
-    return sqrt(sum / Float(samples.count))
+    return sqrt(sum / Float(slice.count))
+  }
+
+  /// RMS over a raw buffer view; zero-copy core for windowed scans.
+  public static func rms(buffer: UnsafeBufferPointer<Int16>) -> Float {
+    guard buffer.count > 0 else { return 0 }
+    var sum: Float = 0
+    for i in 0..<buffer.count {
+      let value = Float(buffer[i]) / 32767.0
+      sum += value * value
+    }
+    return sqrt(sum / Float(buffer.count))
   }
 
   /// Near-silence: avgRMS strictly < threshold (boundary not silence).
