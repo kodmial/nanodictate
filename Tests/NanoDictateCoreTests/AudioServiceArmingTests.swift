@@ -276,6 +276,51 @@ final class AudioServiceArmingTests: XCTestCase {
         _ = service.stop()
     }
 
+    @objc func testConfigurationChangeDuringArmedStartAbortsStaleStartup() {
+        let engine = FakeEngine()
+        let service = AudioService(logLevel: "info", engine: engine)
+
+        service.armForImminentStart()
+        drainEngineQueue()
+        XCTAssertTrue(service.isArmedForTests(), "arm must be pending before confirm")
+        let preparesAfterArm = engine.prepareCount
+        XCTAssertGreaterThan(preparesAfterArm, 0, "arm must have prepared the graph")
+
+        // Device change lands in the final race window: after the last epoch
+        // check, before engine.start() completes. Clearing pendingArm cannot
+        // invalidate the already-consumed arm, so the post-startup check must
+        // abort the stale startup instead of returning success on a rebuilt
+        // graph.
+        engine.onStart = { [weak service] in
+            service?.simulateConfigurationChangeForTests()
+        }
+        let result = runStart(service)
+        engine.onStart = nil
+        switch result {
+        case .failure(AudioServiceError.deviceChanged):
+            break
+        case .failure(let error):
+            XCTFail("stale armed startup must abort with deviceChanged, got \(error)")
+            _ = service.stop()
+            return
+        case .success:
+            XCTFail("armed start racing a device change must abort, not succeed on stale preparation")
+            _ = service.stop()
+            return
+        }
+        XCTAssertEqual(
+            engine.prepareCount, preparesAfterArm,
+            "aborted stale startup must not silently reuse the arm's prepare")
+        XCTAssertFalse(service.isArmedForTests(), "aborted startup must leave no pending arm")
+        drainEngineQueue()
+
+        guard case .success = runStart(service) else {
+            XCTFail("start after aborted stale startup must succeed via full bring-up")
+            return
+        }
+        _ = service.stop()
+    }
+
     // MARK: - Helpers
 
     private func makeToneBuffer(engine: FakeEngine) -> AVAudioPCMBuffer {

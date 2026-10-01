@@ -1057,6 +1057,29 @@ public final class AudioService {
         startupEngineStartedNanos = Self.monotonicNanos()
         lock.unlock()
       }
+      // Startup invalidation for the armed fast path: a configuration change
+      // can land after the final epoch check above (the handler then sees
+      // recording as still false and only bumps the epoch) or during the
+      // blocking engine.start(). Clearing pendingArm cannot invalidate an arm
+      // already consumed into a local flag, so re-validate the consumed epoch
+      // after start completes. On mismatch the graph was rebuilt after the
+      // arm's prepare(): tear down and fail so the caller retries with a full
+      // bring-up instead of recording on stale preparation. A change landing
+      // after this check is covered by the handler's recording-stop path.
+      if failure == nil, usedArmedFastPath, isCurrentGeneration(startGeneration) {
+        lock.lock()
+        let startupStale = configEpoch != consumedArmEpoch
+        lock.unlock()
+        if startupStale {
+          setRecording(false)
+          teardownOnEngineQueue(using: engine)
+          Logger.log(
+            "record engine: configuration changed during armed startup — aborted",
+            level: "warn"
+          )
+          return .failure(AudioServiceError.deviceChanged)
+        }
+      }
     }
     if let failure {
       // Terminal branch: the engine MUST be torn down (tap removed, engine
