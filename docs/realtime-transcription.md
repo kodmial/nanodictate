@@ -1,0 +1,93 @@
+# Realtime vs batch transcription
+
+This document defines the two transcription modes, the session lifecycle and
+the error/reconnect policy for the stateful realtime backend. It was written
+before coding (DoR requirement) and verified against the official OpenAI
+realtime-transcription guide on 2026-10-01.
+
+## Modes
+
+| | Batch | Realtime (stateful) |
+|---|---|---|
+| Transport | One HTTP request per audio (`batchMultipart`, `batchRawAudio`) | One WebSocket session per dictation (`streamingSession`) |
+| Audio | 16 kHz mono WAV (`STTAudioProfile.batchMono16k`) | 24 kHz mono raw PCM16 (`STTAudioProfile.realtimeMono24kPCM`), base64 chunks, no WAV header |
+| Model state | None across chunks; overlap/deduplication + optional final full-recording pass | Model keeps state for the whole session; earlier turns are automatic context |
+| Events | Single `{"text": ...}` response | `conversation.item.input_audio_transcription.delta` (partial) + `.completed` (final, authoritative) per `item_id` |
+| Providers | All batch profiles (OpenAI `whisper-1`/`gpt-transcribe`/`gpt-4o-*`, Groq, Cloudflare, custom) | OpenAI `gpt-live-transcribe` family only (today) |
+
+Batch behavior is unchanged. Realtime is selected by the model profile
+(`STTModelRegistry.isRealtime(adapterID:model:)`), never by a runtime sniff.
+
+## Provider requirements (realtime)
+
+- Provider id `openai`, model `gpt-live-transcribe` (or `gpt-live-*` snapshot).
+- WebSocket endpoint `wss://api.openai.com/v1/realtime?intent=transcription`
+  with `Authorization: Bearer <key>`.
+- Session configuration (`session.update`, type `transcription`):
+  `audio.input.format = {"type": "audio/pcm", "rate": 24000}`,
+  `audio.input.transcription = {model, prompt?, keywords?, languages?, delay?}`,
+  `audio.input.turn_detection = null` (client-side VAD; server VAD unsupported
+  for `gpt-live-transcribe`).
+- `gpt-transcribe` stays a **batch** profile. It can technically run inside a
+  realtime session for committed-turn transcription, but this codebase keeps it
+  on the batch path so existing behavior (multipart, `languages[]`, prompt
+  chaining, final pass) is preserved. Use `gpt-live-transcribe` for streaming.
+- `gpt-live-transcribe` returns no word timestamps, speaker labels, or
+  confidence scores. Applications needing them must use a batch/file model.
+
+## Session lifecycle (one per dictation)
+
+```
+idle --connect()--> connecting --ack--> ready --appendAudio()--> streaming
+  --commit()--> committing --completed--> closed --close()--> (transport closed)
+```
+
+- `connect()`: sends `session.update`, waits for `session.created` /
+  `session.updated` within `RealtimeSessionPolicy.connectTimeout`.
+- `appendAudio(_:sourceSampleRate:)`: resamples to 24 kHz (linear), splits
+  into `maxSamplesPerAppend` chunks, sends ordered
+  `input_audio_buffer.append` messages. No WAV files are written.
+- `commit()`: sends `input_audio_buffer.commit` (end of turn).
+- `waitForFinal()` / `runToCompletion()`: consumes delta/completed events
+  until the deterministic final transcript.
+- `close()` / `cancel()`: deterministic teardown, transport closed exactly
+  once. `cancel()` from any state moves to `.cancelled` and blocks further
+  append/commit.
+
+Partial display text (`partialText`) is completed items plus pending deltas in
+first-seen `item_id` order. A `completed` transcript replaces its item's delta
+buffer, so partials never duplicate committed text. The final transcript
+(`finalText`) joins completed items with single spaces in first-seen order and
+is deterministic after stop/session completion.
+
+## Error / reconnect / timeout policy
+
+- Every wait is bounded (`connectTimeout`, `commitTimeout`, `closeTimeout`).
+  Timeouts throw `RealtimeTranscriptionError.timeout`; Task cancellation
+  throws `.cancelled`. Neither wedges `AudioService` nor the UI.
+- Provider errors (`error` event, `...transcription.failed`) move the session
+  to `.failed` with `lastErrorMessage` preserved and surface
+  `.sessionFailed`. The failed session never retries the same audio silently.
+- Reconnect is explicit and bounded by
+  `RealtimeSessionPolicy.maxReconnectAttempts` with exponential backoff
+  (`reconnectBaseDelay * 2^n`). Already-sent audio is NOT re-uploaded on
+  reconnect; the caller decides whether to restart the dictation.
+- **No silent batch fallback.** `ProviderRequestBuilder.plan` for a streaming
+  profile returns an invalid spec (`url == nil`) instead of a multipart body.
+  `RealtimeFallbackPolicy` defaults to `.failClosed`: a failed realtime
+  session surfaces an error. Batch transcription of the full audio happens
+  only when the caller explicitly selects `.allowBatch` for that dictation.
+
+## Implementation map
+
+- `Sources/NanoDictateCore/RealtimeTranscription.swift`: transport protocol,
+  event parser, accumulator, PCM converter/resampler, client event builders,
+  endpoint, `RealtimeTranscriptionSession` actor, `URLSessionWebSocketTransport`.
+- `Sources/NanoDictateCore/STTCapabilities.swift`: `STTUploadFormat.pcm16`,
+  `STTAudioProfile.realtimeMono24kPCM`, `STTTransportKind.streamingSession`
+  (now implemented), `gpt-live-transcribe` registry entry.
+- `Sources/NanoDictateCore/STTAdapter.swift`: batch `plan` refuses streaming
+  profiles (nil URL) so the batch path cannot duplicate realtime audio.
+- `Tests/NanoDictateCoreTests/RealtimeTranscriptionTests.swift`: event parsing,
+  accumulator, payload builders, resampling, and session state with a mocked
+  transport.
