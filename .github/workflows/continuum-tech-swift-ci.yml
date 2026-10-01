@@ -17,7 +17,9 @@ permissions:
 
 jobs:
   call:
-    uses: kodmial/continuum/.github/workflows/continuum-tech-swift-ci.yml@6c285dcd47f13919bb1af3be694bcc92c9f42356
+    uses: kodmial/continuum/.github/workflows/continuum-tech-swift-ci.yml@main
     secrets: inherit
     with:
-      continuum_ref: 6c285dcd47f13919bb1af3be694bcc92c9f42356
+      continuum_ref: "main"
+      native_prepare_command: "${{ vars.CONTINUUM_NATIVE_PREPARE_COMMAND || '' }}"
+      static_archive_path: "${{ vars.CONTINUUM_STATIC_ARCHIVE_PATH || '' }}"
