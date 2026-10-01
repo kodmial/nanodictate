@@ -259,11 +259,11 @@ public enum FLACEncoder {
       return
     }
     var groups: [UInt32] = []
-    var v = scalar
+    var remainingValue = scalar
     repeat {
-      groups.insert(v & 0x3F, at: 0)
-      v >>= 6
-    } while v != 0
+      groups.insert(remainingValue & 0x3F, at: 0)
+      remainingValue >>= 6
+    } while remainingValue != 0
     let count = groups.count
     // L-byte marker: L ones followed by a zero (110/1110/11110).
     let marker = (UInt32(0xFF) << UInt32(8 - count)) & 0xFF
@@ -326,40 +326,40 @@ public enum FLACEncoder {
   }
 
   static func fixedResiduals(block: [Int16]) -> BlockResiduals {
-    let n = block.count
-    if n > 0, block.allSatisfy({ $0 == block[0] }) {
+    let sampleCount = block.count
+    if sampleCount > 0, block.allSatisfy({ $0 == block[0] }) {
       return BlockResiduals(
-        values: [[Int32]](repeating: [Int32](repeating: 0, count: n), count: 5),
+        values: [[Int32]](repeating: [Int32](repeating: 0, count: sampleCount), count: 5),
         constantValue: block[0])
     }
     var values: [[Int32]] = []
-    let s = block.map { Int32($0) }
+    let pcmSamples = block.map { Int32($0) }
     for order in 0...4 {
-      var r = [Int32](repeating: 0, count: n)
-      if order < n {
-        for i in order..<n {
+      var residualRow = [Int32](repeating: 0, count: sampleCount)
+      if order < sampleCount {
+        for i in order..<sampleCount {
           let predicted: Int32
           switch order {
           case 0: predicted = 0
-          case 1: predicted = s[i - 1]
-          case 2: predicted = 2 * s[i - 1] - s[i - 2]
-          case 3: predicted = 3 * s[i - 1] - 3 * s[i - 2] + s[i - 3]
-          default: predicted = 4 * s[i - 1] - 6 * s[i - 2] + 4 * s[i - 3] - s[i - 4]
+          case 1: predicted = pcmSamples[i - 1]
+          case 2: predicted = 2 * pcmSamples[i - 1] - pcmSamples[i - 2]
+          case 3: predicted = 3 * pcmSamples[i - 1] - 3 * pcmSamples[i - 2] + pcmSamples[i - 3]
+          default: predicted = 4 * pcmSamples[i - 1] - 6 * pcmSamples[i - 2] + 4 * pcmSamples[i - 3] - pcmSamples[i - 4]
           }
-          r[i] = s[i] &- predicted
+          residualRow[i] = pcmSamples[i] &- predicted
         }
       }
-      values.append(r)
+      values.append(residualRow)
     }
     return BlockResiduals(values: values, constantValue: nil)
   }
 
-  static func bestOrder(residuals: BlockResiduals, count n: Int) -> OrderChoice {
-    let verbatimBits = 8 + n * 16
+  static func bestOrder(residuals: BlockResiduals, count sampleCount: Int) -> OrderChoice {
+    let verbatimBits = 8 + sampleCount * 16
     var best = OrderChoice(order: 0, riceParam: 0, useVerbatim: true)
     var bestBits = verbatimBits
     for order in 0...4 {
-      guard order < n else { continue }
+      guard order < sampleCount else { continue }
       let tail = Array(residuals.values[order].dropFirst(order))
       let (param, escape, bits) = riceCost(residuals: tail)
       let total = 8 + order * 16 + 10 + bits
@@ -379,8 +379,8 @@ public enum FLACEncoder {
   static func riceCost(residuals: [Int32]) -> (Int, Int, Int) {
     guard !residuals.isEmpty else { return (0, -1, 0) }
     var maxAbs: UInt32 = 0
-    for r in residuals {
-      let folded = fold(r)
+    for residual in residuals {
+      let folded = fold(residual)
       if folded > maxAbs { maxAbs = folded }
     }
     // Exact bit cost for every Rice parameter: cheap integer scan, so heavy
@@ -396,8 +396,8 @@ public enum FLACEncoder {
       var bits = 0
       var index = 0
       while index < residuals.count {
-        let u = fold(residuals[index])
-        bits += Int(u >> UInt32(param)) + 1 + param
+        let unsignedValue = fold(residuals[index])
+        bits += Int(unsignedValue >> UInt32(param)) + 1 + param
         index += stride
       }
       bits *= stride
@@ -422,17 +422,17 @@ public enum FLACEncoder {
       let rawBits = max(escapeBits, 1)
       writer.writeBits(0b1111, count: 4)
       writer.writeBits(UInt32(rawBits), count: 5)
-      for r in residuals {
-        writer.writeBits(UInt32(bitPattern: r) & mask(rawBits), count: rawBits)
+      for residual in residuals {
+        writer.writeBits(UInt32(bitPattern: residual) & mask(rawBits), count: rawBits)
       }
       return
     }
     writer.writeBits(UInt32(riceParam), count: 4)
-    for r in residuals {
-      let u = fold(r)
-      writer.writeUnary(Int(u >> UInt32(riceParam)))
+    for residual in residuals {
+      let unsignedValue = fold(residual)
+      writer.writeUnary(Int(unsignedValue >> UInt32(riceParam)))
       if riceParam > 0 {
-        writer.writeBits(u & mask(riceParam), count: riceParam)
+        writer.writeBits(unsignedValue & mask(riceParam), count: riceParam)
       }
     }
   }
@@ -536,83 +536,9 @@ public enum FLACDecoder {
   ) throws -> Int {
     var reader = FLACBitReader(bytes: bytes, bitPos: cursor * 8)
     let frameStart = cursor
-    // RFC 9639 section 9.1: 15-bit sync + strategy 0 (fixed) = 0xFFF8.
-    guard let sync = reader.readBits(15), sync == 0b111111111111100,
-      let strategy = reader.readBits(1), strategy == 0
-    else { throw DecodeError.invalidMagic }
-    guard let blockSizeBits = reader.readBits(4), blockSizeBits == 0b0111,
-      let sampleRateBits = reader.readBits(4),
-      let channelBits = reader.readBits(4), channelBits == 0,
-      let bitDepthBits = reader.readBits(3),
-      bitDepthBits == 0b000 || bitDepthBits == 0b100,
-      let reserved2 = reader.readBits(1), reserved2 == 0
-    else { throw DecodeError.unsupported("frame header flags") }
-    if let tableRate = FLACEncoder.sampleRateFromBits(sampleRateBits) {
-      guard tableRate == streamSampleRate else {
-        throw DecodeError.unsupported("sample rate change")
-      }
-    } else if sampleRateBits != 0 {
-      throw DecodeError.unsupported("sample rate bits")
-    }
-    // Else 0b0000: rate from STREAMINFO (valid, not streamable-subset).
-    _ = try readUTF8(&reader)
-    guard let blockMinusOne = reader.readBits(16) else { throw DecodeError.truncated }
-    let blockSize = Int(blockMinusOne) + 1
-    // CRC-8 over header bytes.
-    let headerEndByte = (reader.bitPos + 7) / 8
-    guard headerEndByte <= bytes.count else { throw DecodeError.truncated }
-    let headerBytes = Array(bytes[frameStart..<headerEndByte])
-    guard let crc8 = reader.readBits(8), UInt8(crc8) == FLACCRC.crc8(headerBytes) else {
-      throw DecodeError.crcMismatch
-    }
-    guard let pad = reader.readBits(1), pad == 0,
-      let predictor = reader.readBits(6),
-      let wasted = reader.readBits(1), wasted == 0
-    else { throw DecodeError.truncated }
-    var block: [Int16] = []
-    // RFC 9639 Table 19: 0b000000 = constant, 0b000001 = verbatim.
-    switch predictor {
-    case 0b000001:
-      for _ in 0..<blockSize {
-        guard let v = reader.readSigned(bits: 16) else { throw DecodeError.truncated }
-        block.append(Int16(v))
-      }
-    case 0b000000:
-      guard let v = reader.readSigned(bits: 16) else { throw DecodeError.truncated }
-      block = [Int16](repeating: Int16(v), count: blockSize)
-    case 0b001000...0b001100:
-      let order = Int(predictor) - 0b001000
-      var warmup: [Int32] = []
-      for _ in 0..<order {
-        guard let v = reader.readSigned(bits: 16) else { throw DecodeError.truncated }
-        warmup.append(v)
-      }
-      guard let method = reader.readBits(2), method == 0,
-        let partitionOrder = reader.readBits(4), partitionOrder == 0,
-        let param = reader.readBits(4)
-      else { throw DecodeError.unsupported("residual coding") }
-      var residuals: [Int32] = []
-      if param == 15 {
-        guard let rawBits = reader.readBits(5) else { throw DecodeError.truncated }
-        for _ in 0..<(blockSize - order) {
-          guard let v = reader.readSigned(bits: Int(rawBits)) else { throw DecodeError.truncated }
-          residuals.append(v)
-        }
-      } else {
-        for _ in 0..<(blockSize - order) {
-          guard let q = reader.readUnary() else { throw DecodeError.truncated }
-          var u = UInt32(q) << UInt32(param)
-          if param > 0 {
-            guard let rem = reader.readBits(Int(param)) else { throw DecodeError.truncated }
-            u |= rem
-          }
-          residuals.append(FLACEncoder.unfold(u))
-        }
-      }
-      block = reconstructFixed(warmup: warmup, residuals: residuals, order: order)
-    default:
-      throw DecodeError.unsupported("predictor \(predictor)")
-    }
+    let blockSize = try decodeFrameHeader(
+      &reader, bytes: bytes, frameStart: frameStart, streamSampleRate: streamSampleRate)
+    let block = try decodeSubframeSamples(&reader, blockSize: blockSize)
     // Byte-align, then CRC-16 over the whole frame.
     let endBit = ((reader.bitPos + 7) / 8) * 8
     reader.bitPos = endBit
@@ -623,6 +549,129 @@ public enum FLACDecoder {
     guard FLACCRC.crc16(frameBytes) == stored else { throw DecodeError.crcMismatch }
     samples += block
     return (frameEndByte + 2) - frameStart
+  }
+
+  static func decodeFrameHeader(
+    _ reader: inout FLACBitReader, bytes: [UInt8], frameStart: Int, streamSampleRate: Int
+  ) throws -> Int {
+    // RFC 9639 section 9.1: 15-bit sync + strategy 0 (fixed) = 0xFFF8.
+    guard let sync = reader.readBits(15), sync == 0b111111111111100,
+      let strategy = reader.readBits(1), strategy == 0
+    else { throw DecodeError.invalidMagic }
+    guard let blockSizeBits = reader.readBits(4), blockSizeBits == 0b0111,
+      let sampleRateBits = reader.readBits(4),
+      let channelBits = reader.readBits(4), channelBits == 0,
+      let bitDepthBits = reader.readBits(3),
+      bitDepthBits == 0b000 || bitDepthBits == 0b100,
+      let reservedBit = reader.readBits(1), reservedBit == 0
+    else { throw DecodeError.unsupported("frame header flags") }
+    try validateSampleRateBits(sampleRateBits, streamSampleRate: streamSampleRate)
+    // Else 0b0000: rate from STREAMINFO (valid, not streamable-subset).
+    _ = try readUTF8(&reader)
+    guard let blockMinusOne = reader.readBits(16) else { throw DecodeError.truncated }
+    // CRC-8 over header bytes.
+    let headerEndByte = (reader.bitPos + 7) / 8
+    guard headerEndByte <= bytes.count else { throw DecodeError.truncated }
+    let headerBytes = Array(bytes[frameStart..<headerEndByte])
+    guard let crcByte = reader.readBits(8), UInt8(crcByte) == FLACCRC.crc8(headerBytes) else {
+      throw DecodeError.crcMismatch
+    }
+    return Int(blockMinusOne) + 1
+  }
+
+  static func validateSampleRateBits(_ sampleRateBits: UInt32, streamSampleRate: Int) throws {
+    if let tableRate = FLACEncoder.sampleRateFromBits(sampleRateBits) {
+      guard tableRate == streamSampleRate else {
+        throw DecodeError.unsupported("sample rate change")
+      }
+    } else if sampleRateBits != 0 {
+      throw DecodeError.unsupported("sample rate bits")
+    }
+  }
+
+  static func decodeSubframeSamples(_ reader: inout FLACBitReader, blockSize: Int) throws -> [Int16] {
+    guard let padding = reader.readBits(1), padding == 0,
+      let predictor = reader.readBits(6),
+      let wasted = reader.readBits(1), wasted == 0
+    else { throw DecodeError.truncated }
+    // RFC 9639 Table 19: 0b000000 = constant, 0b000001 = verbatim.
+    switch predictor {
+    case 0b000001:
+      return try decodeVerbatimBlock(&reader, blockSize: blockSize)
+    case 0b000000:
+      return try decodeConstantBlock(&reader, blockSize: blockSize)
+    case 0b001000...0b001100:
+      let order = Int(predictor) - 0b001000
+      return try decodeFixedBlock(&reader, blockSize: blockSize, order: order)
+    default:
+      throw DecodeError.unsupported("predictor \(predictor)")
+    }
+  }
+
+  static func decodeVerbatimBlock(_ reader: inout FLACBitReader, blockSize: Int) throws -> [Int16] {
+    var block: [Int16] = []
+    block.reserveCapacity(blockSize)
+    for _ in 0..<blockSize {
+      guard let decodedSample = reader.readSigned(bits: 16) else { throw DecodeError.truncated }
+      block.append(Int16(decodedSample))
+    }
+    return block
+  }
+
+  static func decodeConstantBlock(_ reader: inout FLACBitReader, blockSize: Int) throws -> [Int16] {
+    guard let decodedSample = reader.readSigned(bits: 16) else { throw DecodeError.truncated }
+    return [Int16](repeating: Int16(decodedSample), count: blockSize)
+  }
+
+  static func decodeFixedBlock(
+    _ reader: inout FLACBitReader, blockSize: Int, order: Int
+  ) throws -> [Int16] {
+    var warmup: [Int32] = []
+    warmup.reserveCapacity(order)
+    for _ in 0..<order {
+      guard let decodedSample = reader.readSigned(bits: 16) else { throw DecodeError.truncated }
+      warmup.append(decodedSample)
+    }
+    guard let method = reader.readBits(2), method == 0,
+      let partitionOrder = reader.readBits(4), partitionOrder == 0,
+      let riceParam = reader.readBits(4)
+    else { throw DecodeError.unsupported("residual coding") }
+    let residualCount = blockSize - order
+    let residuals: [Int32]
+    if riceParam == 15 {
+      residuals = try decodeRawResiduals(&reader, count: residualCount)
+    } else {
+      residuals = try decodeRiceValues(&reader, count: residualCount, riceParam: Int(riceParam))
+    }
+    return reconstructFixed(warmup: warmup, residuals: residuals, order: order)
+  }
+
+  static func decodeRawResiduals(_ reader: inout FLACBitReader, count residualCount: Int) throws -> [Int32] {
+    guard let rawBits = reader.readBits(5) else { throw DecodeError.truncated }
+    var residuals: [Int32] = []
+    residuals.reserveCapacity(residualCount)
+    for _ in 0..<residualCount {
+      guard let decodedSample = reader.readSigned(bits: Int(rawBits)) else { throw DecodeError.truncated }
+      residuals.append(decodedSample)
+    }
+    return residuals
+  }
+
+  static func decodeRiceValues(
+    _ reader: inout FLACBitReader, count residualCount: Int, riceParam: Int
+  ) throws -> [Int32] {
+    var residuals: [Int32] = []
+    residuals.reserveCapacity(residualCount)
+    for _ in 0..<residualCount {
+      guard let quotient = reader.readUnary() else { throw DecodeError.truncated }
+      var unsignedValue = UInt32(quotient) << UInt32(riceParam)
+      if riceParam > 0 {
+        guard let remainder = reader.readBits(riceParam) else { throw DecodeError.truncated }
+        unsignedValue |= remainder
+      }
+      residuals.append(FLACEncoder.unfold(unsignedValue))
+    }
+    return residuals
   }
 
   static func readUTF8(_ reader: inout FLACBitReader) throws -> Int {
@@ -643,20 +692,20 @@ public enum FLACDecoder {
   }
 
   static func reconstructFixed(warmup: [Int32], residuals: [Int32], order: Int) -> [Int16] {
-    var s = warmup
-    for r in residuals {
-      let i = s.count
+    var output = warmup
+    for residual in residuals {
+      let i = output.count
       let predicted: Int32
       switch order {
       case 0: predicted = 0
-      case 1: predicted = s[i - 1]
-      case 2: predicted = 2 * s[i - 1] - s[i - 2]
-      case 3: predicted = 3 * s[i - 1] - 3 * s[i - 2] + s[i - 3]
-      default: predicted = 4 * s[i - 1] - 6 * s[i - 2] + 4 * s[i - 3] - s[i - 4]
+      case 1: predicted = output[i - 1]
+      case 2: predicted = 2 * output[i - 1] - output[i - 2]
+      case 3: predicted = 3 * output[i - 1] - 3 * output[i - 2] + output[i - 3]
+      default: predicted = 4 * output[i - 1] - 6 * output[i - 2] + 4 * output[i - 3] - output[i - 4]
       }
-      s.append(r &+ predicted)
+      output.append(residual &+ predicted)
     }
-    return s.map { Int16(clamping: $0) }
+    return output.map { Int16(clamping: $0) }
   }
 }
 
