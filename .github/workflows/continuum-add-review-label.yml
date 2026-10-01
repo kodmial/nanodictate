@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   call:
-    uses: kodmial/continuum/.github/workflows/continuum-add-review-label.yml@v.0.0.2
+    uses: kodmial/continuum/.github/workflows/continuum-add-review-label.yml@main
     secrets: inherit
     # `require_coderabbit` is deliberately NOT pinned here. CodeRabbit is an
     # optional integration whose enabling value lives in the consumer's
@@ -21,4 +21,4 @@ jobs:
     # the installed caller override that variable and silently re-enable
     # CodeRabbit for a repository that never asked for it.
     with:
-      continuum_ref: "v.0.0.2"
+      continuum_ref: "main"

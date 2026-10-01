@@ -56,10 +56,10 @@ permissions:
 
 jobs:
   call:
-    uses: kodmial/continuum/.github/workflows/continuum-tech-swift-packaging-smoke.yml@v.0.0.2
+    uses: kodmial/continuum/.github/workflows/continuum-tech-swift-packaging-smoke.yml@main
     secrets: inherit
     with:
-      continuum_ref: "v.0.0.2"
+      continuum_ref: "main"
       native_prepare_command: "${{ vars.CONTINUUM_NATIVE_PREPARE_COMMAND || '' }}"
       static_archive_path: "${{ vars.CONTINUUM_STATIC_ARCHIVE_PATH || '' }}"
       mode: "${{ inputs.mode || 'both' }}"

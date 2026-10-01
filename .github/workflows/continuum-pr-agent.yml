@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   call:
-    uses: kodmial/continuum/.github/workflows/continuum-pr-agent.yml@v.0.0.2
+    uses: kodmial/continuum/.github/workflows/continuum-pr-agent.yml@main
     secrets: inherit
     with:
-      continuum_ref: "v.0.0.2"
+      continuum_ref: "main"

@@ -54,10 +54,10 @@ permissions: {}
 
 jobs:
   call:
-    uses: kodmial/continuum/.github/workflows/continuum-opencode-repair.yml@v.0.0.2
+    uses: kodmial/continuum/.github/workflows/continuum-opencode-repair.yml@main
     secrets: inherit
     with:
-      continuum_ref: "v.0.0.2"
+      continuum_ref: "main"
       # Bare passthroughs: an empty value is what lets the engine fall through
       # to its `vars.` fallback, so pinning any of these here would override
       # the consumer's own repository variable on every installed caller.

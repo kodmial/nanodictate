@@ -107,10 +107,10 @@ jobs:
       (github.actor == github.repository_owner &&
        (contains(github.event.comment.body, '/oc') ||
         contains(github.event.comment.body, '/opencode')))
-    uses: kodmial/continuum/.github/workflows/continuum-issue-scheduler.yml@v.0.0.2
+    uses: kodmial/continuum/.github/workflows/continuum-issue-scheduler.yml@main
     secrets: inherit
     with:
-      continuum_ref: "v.0.0.2"
+      continuum_ref: "main"
       # Every knob below is forwarded as a bare `inputs.*` passthrough, never a
       # literal. An empty passthrough is what lets the engine fall back to the
       # consumer's `vars.AUTOMATION_*` value; pinning a literal here would
