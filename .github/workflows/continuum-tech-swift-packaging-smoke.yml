@@ -56,6 +56,8 @@ permissions:
 
 jobs:
   call:
+    # Continuum main selects the Swift 6.1 toolchain already bundled with the
+    # GitHub macOS runner, avoiding a network-dependent setup step in the release gate.
     uses: kodmial/continuum/.github/workflows/continuum-tech-swift-packaging-smoke.yml@main
     secrets: inherit
     with:
