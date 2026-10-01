@@ -15,6 +15,12 @@ permissions:
   contents: read
   pull-requests: read
 
+# A superseded PR head cannot satisfy required checks. Cancel its CI run
+# immediately instead of letting stale macOS jobs occupy the shared queue.
+concurrency:
+  group: nanodictate-ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   call:
     uses: kodmial/continuum/.github/workflows/continuum-tech-swift-ci.yml@main
