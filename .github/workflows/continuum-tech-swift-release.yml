@@ -13,14 +13,15 @@ on:
       - 'scripts/**'
       - 'Resources/**'
       - 'config.example.toml'
-      - '.github/workflows/continuum-packaging-smoke.yml'
-      - '.github/workflows/continuum-release.yml'
+      - 'rust/**'
+      - '.github/workflows/continuum-tech-swift-packaging-smoke.yml'
+      - '.github/workflows/continuum-tech-swift-release.yml'
   workflow_dispatch:
     inputs:
       version:
         description: >-
           Version to publish (e.g. 0.0.2 or v0.0.2). Leave empty to derive it
-          from Sources/NanoDictateCore/Version.swift.
+          from the consumer's CONTINUUM_VERSION_FILE.
         required: false
         type: string
         default: ''
@@ -38,9 +39,11 @@ permissions:
 
 jobs:
   call:
-    uses: kodmial/continuum/.github/workflows/release.yml@main
+    uses: kodmial/continuum/.github/workflows/continuum-tech-swift-release.yml@6c285dcd47f13919bb1af3be694bcc92c9f42356
     secrets: inherit
     with:
-      continuum_ref: main
+      continuum_ref: 'main'
       version: "${{ inputs.version || '' }}"
       dry_run: "${{ inputs.dry_run || false }}"
+      native_prepare_command: 'bash scripts/build-rust-core.sh --release'
+      static_archive_path: 'rust/target/release/libnanodictate_core.a'

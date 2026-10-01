@@ -87,7 +87,7 @@ generated files get concrete values.
   therefore ships as a copy source in `share/nanodictate/`.
 - **Resources.** Entitlements (`com.nanodictate.agent.entitlements`,
   `com.nanodictate.ctl.entitlements`) are applied at CI codesign (code signing
-  in `.github/workflows/continuum-release.yml`). The CLI tarballs and the port ship
+  in `.github/workflows/continuum-tech-swift-release.yml`). The CLI tarballs and the port ship
   binaries + config only; the app bundle carries `Contents/Resources/` copies
   for reference.
 - **The cask ships the app bundle.** `brew install --cask nanodictate`
@@ -150,7 +150,7 @@ generated files get concrete values.
 
 ## Packaging lifecycle smoke
 
-`.github/workflows/continuum-packaging-smoke.yml` runs one reusable black-box macOS
+`.github/workflows/continuum-tech-swift-packaging-smoke.yml` runs one reusable black-box macOS
 lifecycle smoke (`scripts/packaging-smoke/*-lifecycle.sh`) in three modes
 sharing the same assertions:
 

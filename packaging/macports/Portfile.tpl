@@ -12,7 +12,7 @@ PortGroup           github 1.0
 # attached to the tag is installed as-is — NO Xcode / Swift toolchain needed
 # on the user's machine. Tarball name is arch-dependent
 # (nanodictate-__VERSION__-macos-<arm64|x86_64>.tar.gz, built by
-# .github/workflows/release.yml), so distfile + checksum are chosen by
+# .github/workflows/continuum-tech-swift-release.yml), so distfile + checksum are chosen by
 # ${os.arch}; the download URL is derived from the tag v__VERSION__.
 # master_sites points at the GitHub release assets (needed to fetch the
 # arch-specific distfile itself, not just for livecheck); livecheck.type
