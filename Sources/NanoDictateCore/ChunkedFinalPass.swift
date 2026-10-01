@@ -90,6 +90,8 @@ public enum ChunkedFinalReason: String, Equatable, Codable {
   case uncertainEmptySegment
   /// A segment with glued overlap had no word timestamps to verify the seam.
   case uncertainMissingTimestamps
+  /// A segment failed and the full pass recovers it (error recovery, not reconciliation).
+  case segmentFailed
 }
 
 /// Per-segment quality signal used to decide whether reconciliation is needed.

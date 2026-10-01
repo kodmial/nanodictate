@@ -1439,9 +1439,10 @@ func cmdBenchmarkLocal(jsonPath: String?, markdownPath: String?) -> Int32 {
     let chunkedConfig = configs[0]
     if let longFixture = fixtures.first(where: { $0.durationBucket == .long }) {
       let chunkedRows = chunkedComparisonRows(fixture: longFixture, config: chunkedConfig)
-      print("")
-      print(ChunkedBenchmark.markdown(fixtureID: longFixture.id, rows: chunkedRows))
       let chunkedMarkdown = ChunkedBenchmark.markdown(fixtureID: longFixture.id, rows: chunkedRows)
+      print(report.markdown())
+      print("")
+      print(chunkedMarkdown)
       let fullMarkdown = report.markdown() + "\n" + chunkedMarkdown
       if let markdownPath {
         do {
@@ -1463,8 +1464,6 @@ func cmdBenchmarkLocal(jsonPath: String?, markdownPath: String?) -> Int32 {
           eprint("benchmark: failed to write JSON: \(error)")
           return 1
         }
-      } else {
-        print(report.markdown())
       }
       return 0
     }

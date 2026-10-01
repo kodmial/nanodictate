@@ -1649,9 +1649,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             let transcriber = self.roleTranscriber(self.segmentRoleProviderID) ?? self.transcriber
             let segmentResult = try await transcriber.transcribe(
               wav: wav, filename: filename, prompt: prompt, needsWordTimestamps: true)
-            if segmentResult.words.isEmpty {
-              runState.anySegmentMissingTimestamps = true
-            }
+            // Live batches carry no glued overlap: missing timestamps cannot
+            // leave an unverifiable seam (mirrors ChunkedSegmentReport rule).
             return ChunkedPipeline.SttResult(text: segmentResult.text, words: segmentResult.words)
           },
           filename: "live-segment-\(index + 1).wav"
@@ -1907,7 +1906,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     }
     let liveFinalReason: ChunkedFinalReason =
       runState.anySegmentFailed
-      ? (liveReason ?? .uncertainEmptySegment) : (liveReason ?? .policyAlways)
+      ? (liveReason ?? .segmentFailed) : (liveReason ?? .policyAlways)
 
     do {
       let result = try await ChunkedPipeline.finalize(
