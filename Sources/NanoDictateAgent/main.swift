@@ -946,8 +946,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     pendingCaptureInfo = nil
     // Deferred starting UI: only show when bring-up exceeds the grace window
     // and the session is still waiting for capture readiness.
-    DispatchQueue.main.asyncAfter(deadline: .now() + OverlayLifecycle.StartingUIDefer.graceInterval) {
-      [weak self] in
+    DispatchQueue.main.asyncAfter(deadline: .now() + OverlayLifecycle.StartingUIDefer.graceInterval) { [weak self] in
       guard let self, self.startSession == session, self.isStarting else { return }
       // Starting phase: engine bring-up, capture NOT yet ready. No start
       // sound and no recording timer here by design — they fire only on
@@ -1037,8 +1036,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         if self.isDebug {
           Logger.log("record engine started, waiting for first buffer", level: "debug")
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.captureReadyTimeout) {
-          [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.captureReadyTimeout) { [weak self] in
           guard let self, self.startSession == session, self.isStarting else { return }
           Logger.log(
             "record capture-ready timed out after \(Int(Self.captureReadyTimeout)) s — no microphone buffer",
@@ -1112,6 +1110,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     // Alt+Alt.
     let showFeedback = micErrorCooldown.allow(at: CFAbsoluteTimeGetCurrent())
     if showFeedback {
+      overlay.show()
       overlay.setStatus(message)
       sounds.playError()
     } else if isDebug {
