@@ -56,7 +56,7 @@ permissions:
 
 jobs:
   call:
-    uses: kodmial/continuum/.github/workflows/continuum-tech-swift-packaging-smoke.yml@main
+    uses: kodmial/continuum/.github/workflows/continuum-tech-swift-packaging-smoke.yml@6c285dcd47f13919bb1af3be694bcc92c9f42356
     secrets: inherit
     with:
       continuum_ref: 'main'
