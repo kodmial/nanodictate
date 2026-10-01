@@ -16,6 +16,7 @@ final class FakeInputNode: AudioInputNodeLike {
     var onInstallTap: (() -> Void)?
     private(set) var tapCount = 0
     private(set) var removeTapCount = 0
+    private(set) var lastBufferSize: AVAudioFrameCount = 0
 
     init(format: AVAudioFormat? = nil, sampleRate: Double = 44100) {
         if let format = format {
@@ -38,6 +39,7 @@ final class FakeInputNode: AudioInputNodeLike {
     ) {
         onInstallTap?()
         tapCount += 1
+        lastBufferSize = bufferSize
         self.tapBlock = tapBlock
     }
 
@@ -61,11 +63,25 @@ final class FakeEngine: AudioEngineLike {
     var hangStart: DispatchSemaphore?
     var failSetup = false
     var overrideNode: AudioInputNodeLike?
+    /// Test gate for the pre-arm race window: when set, `makeInputNode`
+    /// blocks until signalled, letting a test interleave a configuration
+    /// change mid-preparation. `onMakeInputNode` fires on entry.
+    var makeInputGate: DispatchSemaphore?
+    var onMakeInputNode: (() -> Void)?
+    /// Test hook fired synchronously inside start() (on the engine queue,
+    /// after setRecording(true)): lets a test interleave a device change in
+    /// the final armed-startup window (after the last epoch check, before
+    /// start completes). nil = no hook.
+    var onStart: (() -> Void)?
     private(set) var prepareCount = 0
     private(set) var startCount = 0
     private(set) var stopCount = 0
 
     func makeInputNode() -> AudioInputNodeLike {
+        onMakeInputNode?()
+        if let gate = makeInputGate {
+            gate.wait()
+        }
         if failSetup {
             // NSException under gateway; see testEngineExceptionGuardConvertsExceptionToError.
             NanoDictateRaiseAudioEngineTestException()
@@ -79,6 +95,7 @@ final class FakeEngine: AudioEngineLike {
 
     func start() throws {
         startCount += 1
+        onStart?()
         if let hangStart = hangStart {
             // Blocks before failStart check: startCount already grew — test
             // distinguishes "hung" from "never started".

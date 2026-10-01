@@ -21,6 +21,26 @@ public enum OverlayLifecycle {
     }
   }
 
+  /// Deferred "starting" UI: fast successful starts (ready within the UX
+  /// threshold) transition directly to recording without visibly flashing the
+  /// transient starting state. Slow starts still show it so the user knows
+  /// the microphone is not ready yet. Pure and unit-testable.
+  public enum StartingUIDefer {
+    /// Grace window before the starting phase becomes visible (seconds).
+    /// 0.12 s: below the ~100-150 ms perceptual flash boundary, above
+    /// typical armed fast-path bring-up.
+    public static let graceInterval: TimeInterval = 0.12
+
+    /// True when the starting phase should be shown: still starting after
+    /// the grace interval and not yet recording-ready.
+    public static func shouldShowStarting(
+      elapsed: TimeInterval,
+      threshold: TimeInterval = graceInterval
+    ) -> Bool {
+      elapsed >= threshold
+    }
+  }
+
   /// Hide after delay, re-checking state at fire: new cycle keeps overlay visible.
   /// `isCurrentCycle` ties the delayed hide to the dictation cycle that scheduled
   /// it — if a new cycle began meanwhile, the stale hide is dropped (the new
