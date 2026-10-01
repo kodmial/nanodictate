@@ -29,3 +29,5 @@ jobs:
     secrets: inherit
     with:
       continuum_ref: main
+      required_workflow_gate_label: 'gate:macos12'
+      required_workflow_gate_name: 'macOS 12 compat'
