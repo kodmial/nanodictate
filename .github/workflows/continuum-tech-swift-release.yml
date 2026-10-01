@@ -36,6 +36,11 @@ permissions:
   issues: write
   pull-requests: write
 
+# Serialize release publication. A newer pending run replaces an older pending
+# run, while an already-publishing run is allowed to finish atomically.
+concurrency:
+  group: nanodictate-release-${{ github.ref }}
+
 jobs:
   call:
     uses: kodmial/continuum/.github/workflows/continuum-tech-swift-release.yml@main
