@@ -64,7 +64,7 @@ concurrency:
 
 jobs:
   call:
-    # Continuum main uses the runner-bundled Swift 6.1 toolchain and gives
+    # Continuum main uses the runner-bundled Swift 6.1.x toolchain and gives
     # the exact-head main candidate priority over speculative PR packaging.
     uses: kodmial/continuum/.github/workflows/continuum-tech-swift-packaging-smoke.yml@main
     secrets: inherit
