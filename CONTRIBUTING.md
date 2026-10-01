@@ -66,7 +66,7 @@ docs: clarify local verification
 
 ## Releases
 
-Release automation is owned by `.github/workflows/continuum-release-pr.yml` and `scripts/release-policy.sh`.
+Release automation is owned by `.github/workflows/continuum-tech-swift-release-pr.yml` and `scripts/release-policy.sh`.
 
 Ordinary feature and fix PRs do not bump versions. After releasable changes land in `main`, release-please creates or updates the automated Release PR. Merging that Release PR publishes the release through `release.yml`; post-release automation then prepares packaging-manifest updates.
 

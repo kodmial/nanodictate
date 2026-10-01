@@ -1446,7 +1446,7 @@ export interface CertPublishResult {
 }
 
 /**
- * Mirrors the certificate recipe used by .github/workflows/release.yml:
+ * Mirrors the certificate recipe used by .github/workflows/continuum-tech-swift-release.yml:
  * self-signed RSA-2048 X.509 with the codeSigning extended key usage, exported
  * as a password-protected p12. certtool cannot express the codeSigning EKU and
  * the system openssl is LibreSSL without -addext, so the generation goes
