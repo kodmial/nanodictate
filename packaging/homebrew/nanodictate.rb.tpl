@@ -2,7 +2,7 @@
 # Placeholders __VERSION__, __SHA256_ARM64__, __SHA256_X86_64__ are filled by
 # scripts/release-prep.rb — do not hand-edit the generated nanodictate.rb.
 # This is a binary formula: Homebrew downloads the prebuilt tarball attached
-# to the GitHub Release (built by .github/workflows/release.yml) and installs
+# to the GitHub Release (built by .github/workflows/continuum-tech-swift-release.yml) and installs
 # it as-is. No Xcode / Swift toolchain is needed on the user's machine.
 
 class Nanodictate < Formula
@@ -17,7 +17,7 @@ class Nanodictate < Formula
   depends_on macos: :monterey
 
   # Release tarballs are attached to the tag v__VERSION__ (the tag keeps the
-  # "v" prefix; the archive filename does not — see .github/workflows/release.yml).
+  # "v" prefix; the archive filename does not — see .github/workflows/continuum-tech-swift-release.yml).
   if Hardware::CPU.arm?
     url "https://github.com/kodmial/nanodictate/releases/download/v__VERSION__/nanodictate-__VERSION__-macos-arm64.tar.gz"
     sha256 "__SHA256_ARM64__"
