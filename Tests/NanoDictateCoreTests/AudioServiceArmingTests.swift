@@ -209,6 +209,73 @@ final class AudioServiceArmingTests: XCTestCase {
         _ = service.stop()
     }
 
+    @objc func testPreArmObservesConfigurationChangeNotification() {
+        let engine = FakeEngine()
+        let service = AudioService(logLevel: "info", engine: engine)
+        var readyCount = 0
+        service.onCaptureReady = { _ in readyCount += 1 }
+
+        service.armForImminentStart()
+        drainEngineQueue()
+        XCTAssertTrue(service.isArmedForTests(), "arm must be pending before device change")
+
+        // The pre-arm window itself must observe device changes: without an
+        // observer installed before preparation, a same-format swap would
+        // leave the epoch unchanged and allow stale preparation to be
+        // consumed. FakeEngine posts with a nil object, matching the
+        // nil-object subscription, so a real notification must invalidate.
+        NotificationCenter.default.post(
+            name: .AVAudioEngineConfigurationChange, object: nil)
+        XCTAssertFalse(
+            service.isArmedForTests(),
+            "pre-arm observer must discard the arm on device-change notification")
+
+        let preparesBeforeStart = engine.prepareCount
+        guard case .success = runStart(service) else {
+            XCTFail("start after observed device change must succeed")
+            return
+        }
+        XCTAssertGreaterThan(
+            engine.prepareCount, preparesBeforeStart,
+            "start must perform a full prepare instead of consuming a stale arm")
+        engine.node.emit(makeToneBuffer(engine: engine))
+        XCTAssertTrue(eventually { readyCount == 1 }, "fresh session reaches readiness independently")
+        _ = service.stop()
+    }
+
+    @objc func testConfigurationChangeAfterArmConsumptionForcesPrepare() {
+        let engine = FakeEngine()
+        let service = AudioService(logLevel: "info", engine: engine)
+        var readyCount = 0
+        service.onCaptureReady = { _ in readyCount += 1 }
+
+        service.armForImminentStart()
+        drainEngineQueue()
+        XCTAssertTrue(service.isArmedForTests(), "arm must be pending before confirm")
+        let preparesAfterArm = engine.prepareCount
+        XCTAssertGreaterThan(preparesAfterArm, 0, "arm must have prepared the graph")
+
+        // Device change lands after arm consumption (during format bring-up,
+        // before tap install) but before the prepare-skipping decision: the
+        // consumed epoch is stale, so the start must fall back to a fresh
+        // prepare instead of skipping it.
+        engine.node.onInstallTap = { [weak service] in
+            service?.simulateConfigurationChangeForTests()
+        }
+        guard case .success = runStart(service) else {
+            engine.node.onInstallTap = nil
+            XCTFail("start after post-consumption device change must succeed")
+            return
+        }
+        engine.node.onInstallTap = nil
+        XCTAssertGreaterThan(
+            engine.prepareCount, preparesAfterArm,
+            "post-consumption device change must invalidate the skipped prepare")
+        engine.node.emit(makeToneBuffer(engine: engine))
+        XCTAssertTrue(eventually { readyCount == 1 }, "session after invalidation reaches readiness")
+        _ = service.stop()
+    }
+
     // MARK: - Helpers
 
     private func makeToneBuffer(engine: FakeEngine) -> AVAudioPCMBuffer {

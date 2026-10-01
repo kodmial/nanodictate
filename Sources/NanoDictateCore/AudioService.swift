@@ -640,6 +640,13 @@ public final class AudioService {
   private func armOnEngineQueue(using engine: AudioEngineLike, generation: Int) {
     guard !isRecordingLocked else { return }
     guard isCurrentGeneration(generation) else { return }
+    // Observe device changes for the pre-arm window before capturing the
+    // epoch: without this, a same-format swap during preparation would leave
+    // configEpoch unchanged and allow stale preparation to be consumed. The
+    // confirmed-start path replaces this subscription; a stale arm never
+    // subscribes (generation guard above) so it cannot clobber the live
+    // session's observer.
+    observeConfigurationChanges(for: engine)
     lock.lock()
     let armEpoch = configEpoch
     if pendingArm?.generation == generation, pendingArm?.configEpoch == armEpoch {
@@ -864,6 +871,7 @@ public final class AudioService {
     // the device-change protection. No microphone capture involved.
     var reusedWarmedConverter = false
     var usedArmedFastPath = false
+    var consumedArmEpoch: UInt64 = 0
     if setupFailure == nil, let fmt = capturedHWFormat {
       let signature = Self.hwSignature(sampleRate: fmt.sampleRate, channels: fmt.channelCount)
       lock.lock()
@@ -874,8 +882,10 @@ public final class AudioService {
         && pendingArm?.configEpoch == currentEpoch
       if armedMatches {
         // Consume the pre-arm exactly once: a late duplicate start must not
-        // reuse the same prepared graph.
+        // reuse the same prepared graph. The epoch is kept so a device change
+        // after consumption can still invalidate the skipped prepare below.
         usedArmedFastPath = pendingArm?.prepared ?? false
+        consumedArmEpoch = pendingArm?.configEpoch ?? currentEpoch
         pendingArm = nil
       }
       // Stage stamp: input node/format resolved (whether armed or fresh).
@@ -991,6 +1001,18 @@ public final class AudioService {
     // Pre-armed sessions already called engine.prepare() during the first-Alt
     // window on the same generation and format: skip the redundant second
     // prepare and go straight to engine.start(). Fresh sessions prepare here.
+    // A configuration change after arm consumption (epoch bump on the still
+    // installed pre-arm observer) rebuilds the graph: the skipped prepare is
+    // no longer valid, so fall back to a fresh prepare.
+    if failure == nil, usedArmedFastPath {
+      lock.lock()
+      let fastPathStillValid =
+        isCurrentGeneration(startGeneration) && configEpoch == consumedArmEpoch
+      lock.unlock()
+      if !fastPathStillValid {
+        usedArmedFastPath = false
+      }
+    }
     if failure == nil, !usedArmedFastPath {
       failure = guardedEngineCall {
         engine.prepare()
@@ -1008,6 +1030,21 @@ public final class AudioService {
     // after the audio stream starts must not be dropped. Capture readiness
     // still fires only on the first valid buffer (see process()), never here:
     // engine.start() success alone does not prove microphone data flows.
+    // A change between the prepare decision and start invalidates a still
+    // skipped prepare the same way: re-prepare so start never runs on a
+    // rebuilt graph.
+    if failure == nil, usedArmedFastPath {
+      lock.lock()
+      let fastPathStillValid =
+        isCurrentGeneration(startGeneration) && configEpoch == consumedArmEpoch
+      lock.unlock()
+      if !fastPathStillValid {
+        usedArmedFastPath = false
+        failure = guardedEngineCall {
+          engine.prepare()
+        }
+      }
+    }
     if failure == nil {
       if isCurrentGeneration(startGeneration) {
         setRecording(true)
