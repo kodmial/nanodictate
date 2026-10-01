@@ -76,6 +76,9 @@ case "$(uname -s)" in
 esac
 
 mkdir -p "$RESULT_DIR"
+# Clear stale markers so a previous green (or failure) cannot survive into
+# this run's artifacts and contradict the new outcome.
+rm -f "$RESULT_DIR/result.txt" "$RESULT_DIR/failure-summary.txt"
 PHASE="init"
 CHECK=""
 
@@ -217,6 +220,23 @@ else
   log "isolated HOME: $ISOLATED_HOME"
   LABEL="com.nanodictate.agent"
   UID_NUM="$(id -u)"
+  # Never disturb a real agent: `start` boots out the canonical target before
+  # bootstrapping the probe plist, and `stop` unloads the same target, so the
+  # probe only runs when nothing is currently loaded in this gui domain.
+  if /bin/launchctl print "gui/$UID_NUM/$LABEL" >/dev/null 2>&1; then
+    fail "existing $LABEL job already loaded in gui/$UID_NUM — unload it before running the lifecycle probe so the probe cannot boot out or replace the real agent"
+  fi
+  # Tear down the test-owned job on failure paths after it starts. The guard
+  # above guarantees any job registered from here on is probe-owned, so the
+  # cleanup stop cannot harm a pre-existing agent.
+  LIFECYCLE_STARTED=0
+  lifecycle_cleanup() {
+    if [ "${LIFECYCLE_STARTED:-0}" = "1" ]; then
+      "$BIN" stop >/dev/null 2>&1 || true
+    fi
+  }
+  trap lifecycle_cleanup EXIT
+  LIFECYCLE_STARTED=1
   set_check "nanodictate config init in isolated HOME"
   "$BIN" config init >/dev/null 2>&1 || fail "config init failed in isolated HOME"
   [ -f "$ISOLATED_HOME/.config/nanodictate/config.toml" ] \
@@ -246,9 +266,25 @@ else
   set_check "restart: start again after stop"
   "$BIN" start >/dev/null 2>&1 || fail "restart start failed"
   sleep 3
-  /bin/launchctl print "gui/$UID_NUM/$LABEL" >/dev/null 2>&1 \
-    || fail "job not registered after restart"
-  "$BIN" stop >/dev/null 2>&1 || true
+  RESTART_PRINTOUT="$(/bin/launchctl print "gui/$UID_NUM/$LABEL" 2>&1)" \
+    || fail "launchctl print gui/$UID_NUM/$LABEL failed after restart: $RESTART_PRINTOUT"
+  RESTART_PID="$(printf '%s\n' "$RESTART_PRINTOUT" | sed -n 's/^[[:space:]]*pid = //p' | head -n1)"
+  [ -n "$RESTART_PID" ] && [ "$RESTART_PID" != "0" ] || fail "restarted job has no live pid: $RESTART_PRINTOUT"
+  ps -p "$RESTART_PID" -o pid=,comm= >/dev/null 2>&1 || fail "restarted pid $RESTART_PID has no process"
+  log "restarted job ok: pid=$RESTART_PID"
+  set_check "nanodictate stop removes the gui-domain job after restart"
+  "$BIN" stop >/dev/null 2>&1 || fail "nanodictate final stop failed"
+  FINAL_STOPPED=0
+  for _ in $(seq 1 15); do
+    if ! /bin/launchctl print "gui/$UID_NUM/$LABEL" >/dev/null 2>&1; then
+      FINAL_STOPPED=1
+      break
+    fi
+    sleep 2
+  done
+  [ "$FINAL_STOPPED" = "1" ] || fail "service still registered 30s after final stop"
+  LIFECYCLE_STARTED=0
+  trap - EXIT
   log "launchd lifecycle ok (start/stop/restart, isolated HOME, real user config untouched)"
   export HOME="${HOME:-/}"
 fi

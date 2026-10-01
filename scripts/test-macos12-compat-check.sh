@@ -192,6 +192,24 @@ assert_not_ok 'accessibility: no unused Python ApplicationServices probe' \
 assert_not_ok 'accessibility: script no longer claims a trust-state query' \
   grep -q 'Accessibility trust-state query' "$CHECK_SCRIPT"
 
+# --- 6b. Lifecycle safety: stale evidence, existing agent, restart liveness, teardown ---
+assert_grep 'lifecycle: stale result markers cleared during init' \
+  "$CHECK_SCRIPT" 'rm -f "\$RESULT_DIR/result\.txt" "\$RESULT_DIR/failure-summary\.txt"'
+assert_grep 'lifecycle: probe refuses when an agent is already loaded' \
+  "$CHECK_SCRIPT" 'existing .* already loaded in gui/'
+assert_grep 'lifecycle: exit trap installed before the probe job starts' \
+  "$CHECK_SCRIPT" 'trap lifecycle_cleanup EXIT'
+assert_grep 'lifecycle: exit trap removed after verified final stop' \
+  "$CHECK_SCRIPT" 'trap - EXIT'
+assert_grep 'lifecycle: restart repeats the live-pid check' \
+  "$CHECK_SCRIPT" 'restarted job has no live pid'
+assert_grep 'lifecycle: restart repeats the process-liveness check' \
+  "$CHECK_SCRIPT" 'restarted pid .* has no process'
+assert_grep 'lifecycle: final stop fails the gate instead of suppressing' \
+  "$CHECK_SCRIPT" 'fail "nanodictate final stop failed"'
+assert_grep 'lifecycle: final stop verifies job removal' \
+  "$CHECK_SCRIPT" 'service still registered 30s after final stop'
+
 # --- 7. Documentation must not claim more than the gate automates ------------
 
 assert_ok 'docs: file exists' test -f "$COMPAT_DOC"
