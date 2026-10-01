@@ -1,0 +1,119 @@
+name: macOS 12 compat
+
+# Repeatable compatibility gate for the oldest supported macOS major version.
+# Static floor checks run on hosted macos-15 (no runtime claim); the runtime
+# gate runs ONLY on actual macOS 12 execution via a self-hosted runner
+# labelled [self-hosted, macos-12]. A newer runner is never treated as
+# equivalent: --full refuses non-12 hosts unless --allow-non12-runtime is
+# given, and that diagnostics-only path never counts as a release pass.
+#
+# Security: no secrets are requested or inherited (contents: read only), no
+# STT network calls, and fork-PR code never executes on the self-hosted
+# runner (runtime job is limited to same-repo events; see the `if:`
+# condition). Manual TCC/UI checks are documented in
+# docs/compatibility/macos-12-validation.md.
+
+on:
+  pull_request:
+    paths:
+      - 'Sources/**'
+      - 'Package.swift'
+      - 'packaging/**'
+      - 'scripts/**'
+      - 'Resources/**'
+      - 'config.example.toml'
+      - '.github/workflows/macos-12-compat.yml'
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - 'Sources/**'
+      - 'Package.swift'
+      - 'packaging/**'
+      - 'scripts/**'
+      - 'Resources/**'
+      - 'config.example.toml'
+      - '.github/workflows/macos-12-compat.yml'
+  schedule:
+    # Weekly canary (Monday 04:23 UTC): proves the floor still holds even
+    # without code changes (runner-image drift, toolchain drift).
+    - cron: '23 4 * * 1'
+  workflow_dispatch:
+    inputs:
+      allow_non12_runtime:
+        description: 'Run --full with --allow-non12-runtime (diagnostics only, never a release pass)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  static-gate:
+    name: static floor (hosted)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Static macOS 12 floor checks
+        run: bash scripts/macos12-compat-check.sh --static-only
+      - name: Upload static results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos12-static-${{ github.run_id }}
+          path: .opencode-tmp/macos12-compat-results/
+          if-no-files-found: warn
+
+  runtime-gate:
+    name: runtime (actual macOS 12)
+    # Self-hosted macOS 12 hardware. GitHub-hosted macos-12 runners are
+    # retired, so there is intentionally no hosted fallback here.
+    runs-on: [self-hosted, macos-12]
+    timeout-minutes: 45
+    # Never run untrusted fork code on the self-hosted machine. Fork PRs get
+    # the static gate plus a skipped note; maintainers re-validate via
+    # workflow_dispatch after review.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+      - name: Full macOS 12 runtime checks
+        run: |
+          if [ "${{ inputs.allow_non12_runtime || false }}" = "true" ]; then
+            bash scripts/macos12-compat-check.sh --full --allow-non12-runtime
+          else
+            bash scripts/macos12-compat-check.sh --full
+          fi
+      - name: Summarize runtime host
+        if: always()
+        run: |
+          {
+            echo "## macOS 12 runtime gate"
+            echo ""
+            cat .opencode-tmp/macos12-compat-results/environment.txt 2>/dev/null || echo "environment.txt missing"
+            echo ""
+            cat .opencode-tmp/macos12-compat-results/result.txt 2>/dev/null || echo "result.txt missing"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload runtime results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos12-runtime-${{ github.run_id }}
+          path: .opencode-tmp/macos12-compat-results/
+          if-no-files-found: warn
+
+  fork-note:
+    name: fork PR note
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+    steps:
+      - run: |
+          {
+            echo "## macOS 12 runtime gate"
+            echo ""
+            echo "Skipped on the self-hosted macOS 12 runner: this PR comes from a fork and untrusted code never executes there."
+            echo "The static floor gate above still runs. Maintainers re-validate via workflow_dispatch after review."
+            echo "See docs/compatibility/macos-12-validation.md."
+          } >> "$GITHUB_STEP_SUMMARY"
