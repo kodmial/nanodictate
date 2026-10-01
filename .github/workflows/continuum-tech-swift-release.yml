@@ -37,17 +37,18 @@ permissions:
   issues: write
   pull-requests: write
 
-# Serialize release publication. A newer pending run replaces an older pending
-# run, while an already-publishing run is allowed to finish atomically.
+# Serialize release runs per ref: two releases racing on one tag or branch
+# produce duplicate or conflicting tags and manifests. Cancellation is
+# deliberately absent — a release that is already publishing must finish.
 concurrency:
-  group: nanodictate-release-${{ github.ref }}
+  group: continuum-swift-release-${{ github.repository }}-${{ github.ref }}
 
 jobs:
   call:
     uses: kodmial/continuum/.github/workflows/continuum-tech-swift-release.yml@main
     secrets: inherit
     with:
-      continuum_ref: "main"
+      continuum_ref: main
       native_prepare_command: "${{ vars.CONTINUUM_NATIVE_PREPARE_COMMAND || 'bash scripts/build-rust-core.sh --release' }}"
       static_archive_path: "${{ vars.CONTINUUM_STATIC_ARCHIVE_PATH || 'rust/target/release/libnanodictate_core.a' }}"
       version: "${{ inputs.version || '' }}"
