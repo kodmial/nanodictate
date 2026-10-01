@@ -59,7 +59,7 @@ permissions:
 # Collapse repeated runs for the same PR/ref before they can consume scarce
 # macOS runner slots. The reusable workflow has the same policy internally.
 concurrency:
-  group: nanodictate-packaging-${{ github.event.pull_request.number || github.ref }}
+  group: nanodictate-packaging-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:
