@@ -55,14 +55,24 @@ on:
 permissions:
   contents: read
   issues: write
+  pull-requests: read
+  actions: write
+
+# Collapse repeated runs for the same PR/ref before they can consume scarce
+# macOS runner slots. The reusable workflow has the same policy internally.
+concurrency:
+  group: nanodictate-packaging-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   call:
-    uses: kodmial/continuum/.github/workflows/continuum-tech-swift-packaging-smoke.yml@6c285dcd47f13919bb1af3be694bcc92c9f42356
+    # Continuum main uses the runner-bundled Swift 6.1.x toolchain and gives
+    # the exact-head main candidate priority over speculative PR packaging.
+    uses: kodmial/continuum/.github/workflows/continuum-tech-swift-packaging-smoke.yml@main
     secrets: inherit
     with:
-      continuum_ref: 6c285dcd47f13919bb1af3be694bcc92c9f42356
+      continuum_ref: "main"
+      native_prepare_command: "${{ vars.CONTINUUM_NATIVE_PREPARE_COMMAND || 'bash scripts/build-rust-core.sh --release' }}"
+      static_archive_path: "${{ vars.CONTINUUM_STATIC_ARCHIVE_PATH || 'rust/target/release/libnanodictate_core.a' }}"
       mode: "${{ inputs.mode || 'both' }}"
       version: "${{ inputs.version || '' }}"
-      native_prepare_command: 'bash scripts/build-rust-core.sh --release'
-      static_archive_path: 'rust/target/release/libnanodictate_core.a'

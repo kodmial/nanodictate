@@ -15,11 +15,17 @@ permissions:
   contents: read
   pull-requests: read
 
+# A superseded PR head cannot satisfy required checks. Cancel its CI run
+# immediately instead of letting stale macOS jobs occupy the shared queue.
+concurrency:
+  group: nanodictate-ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   call:
-    uses: kodmial/continuum/.github/workflows/continuum-tech-swift-ci.yml@6c285dcd47f13919bb1af3be694bcc92c9f42356
+    uses: kodmial/continuum/.github/workflows/continuum-tech-swift-ci.yml@main
     secrets: inherit
     with:
-      continuum_ref: 6c285dcd47f13919bb1af3be694bcc92c9f42356
-      native_prepare_command: 'bash scripts/build-rust-core.sh --release'
-      static_archive_path: 'rust/target/release/libnanodictate_core.a'
+      continuum_ref: "main"
+      native_prepare_command: "${{ vars.CONTINUUM_NATIVE_PREPARE_COMMAND || 'bash scripts/build-rust-core.sh --release' }}"
+      static_archive_path: "${{ vars.CONTINUUM_STATIC_ARCHIVE_PATH || 'rust/target/release/libnanodictate_core.a' }}"
