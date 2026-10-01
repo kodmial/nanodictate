@@ -7,6 +7,12 @@ import CoreGraphics
 
 public protocol HotkeyDelegate: AnyObject {
   func altDoubleTapped()
+  /// First Alt tap opened the double-tap window (non-capturing pre-arm hint).
+  /// The agent may prepare non-capturing audio state; no microphone capture.
+  func altFirstTapDetected()
+  /// Pending first Alt tap was cancelled or expired (timeout, foreign key,
+  /// Escape/Enter, other modifier). Any pre-armed state must be discarded.
+  func altPendingCancelled()
   /// Escape (53) is the only cancel key; Enter/Keypad Enter are not.
   func cancelKeyPressed()
   /// Enter (36/76): agent decides by state — .recording stops + latches
@@ -16,6 +22,11 @@ public protocol HotkeyDelegate: AnyObject {
   /// .recording/.transcribing swallow (no newline in input field),
   /// .idle passes. Called synchronously from event tap on main run loop.
   func shouldSwallowReturnKeyEvent() -> Bool
+}
+
+extension HotkeyDelegate {
+  public func altFirstTapDetected() {}
+  public func altPendingCancelled() {}
 }
 
 // MARK: - HotkeyService
@@ -39,6 +50,19 @@ public final class HotkeyService {
   private var lastEventTime: CFAbsoluteTime?
   /// Last Option-down timestamp — debug-only delta; duplicates detector state.
   private var lastOptionDownAt: CFAbsoluteTime?
+
+  /// Pending first-Alt expiry token: scheduled on the main queue for
+  /// doubleTapMaxInterval after the first tap. Fires altPendingCancelled when
+  /// no second tap arrived. Invalidated on confirm/cancel/teardown.
+  private var pendingExpiryWorkItem: DispatchWorkItem?
+  /// Monotonic generation of the pending first tap (cancels stale expiries).
+  private var pendingGeneration = 0
+
+  /// True while a first Alt tap awaits a confirming second tap inside the
+  /// double-tap window. Main-thread only (event tap + delegate callbacks).
+  public var isAltPending: Bool {
+    optionDetector.lastTimestamp != nil
+  }
 
   // MARK: - Init
 
@@ -90,6 +114,9 @@ public final class HotkeyService {
   }
 
   public func stop() {
+    // Teardown invalidates any pending first-Alt arm even when no event tap
+    // exists (tests, teardown races): no half-open pre-arm may survive.
+    cancelPendingAltNotifyIfNeeded()
     guard let tap = eventTap else { return }
 
     CGEvent.tapEnable(tap: tap, enable: false)
@@ -222,7 +249,7 @@ public final class HotkeyService {
       if isDebug, optionDetector.lastTimestamp != nil {
         Logger.log("other modifier keyCode=\(keyCode) — pending Alt tap cancelled", level: "debug")
       }
-      optionDetector.cancelPendingTap()
+      cancelPendingAltNotifyIfNeeded()
     }
   }
 
@@ -240,7 +267,7 @@ public final class HotkeyService {
         Logger.log(
           "cancel key pressed keyCode=\(keyCode) — pending Alt tap cancelled", level: "debug")
       }
-      optionDetector.cancelPendingTap()
+      cancelPendingAltNotifyIfNeeded()
       delegate?.cancelKeyPressed()
     case 36, 76:  // Return (36), Keypad Enter (76) — not cancel keys
       if isDebug, optionDetector.lastTimestamp != nil {
@@ -253,14 +280,14 @@ public final class HotkeyService {
       // recording).
       let isOwnSynthetic = event.map { isOwnSyntheticReturnEvent($0) } ?? false
       if !isOwnSynthetic {
-        optionDetector.cancelPendingTap()
+        cancelPendingAltNotifyIfNeeded()
         delegate?.enterKeyPressed()
       }
     default:
       if isDebug, optionDetector.lastTimestamp != nil {
         Logger.log("foreign key keyCode=\(keyCode) — pending Alt tap cancelled", level: "debug")
       }
-      optionDetector.cancelPendingTap()
+      cancelPendingAltNotifyIfNeeded()
     }
   }
 
@@ -278,14 +305,72 @@ public final class HotkeyService {
   }
 
   /// Alt tap at `now`; time passed in so tests control the detect window.
+  /// First tap opens the window and notifies altFirstTapDetected (pre-arm
+  /// hint); second tap confirms and fires altDoubleTapped. A late tap past
+  /// the window restarts the window and re-notifies first-tap (the previous
+  /// pending arm already expired or is superseded).
   private func handleOptionTap(at now: TimeInterval) {
     logOptionTapState(at: now)
+    let hadPending = optionDetector.lastTimestamp != nil
     if optionDetector.registerTap(at: now) {
+      invalidatePendingExpiry()
       if isDebug {
         Logger.log("ALT+ALT fired — delegate.altDoubleTapped()", level: "debug")
       }
       delegate?.altDoubleTapped()
+      return
     }
+    // First tap (or window restart after timeout): notify pre-arm hint.
+    // A restarted window after timeout supersedes the previous pending arm;
+    // the expiry of the old generation is invalidated above via the new
+    // schedule below.
+    if hadPending, isDebug {
+      Logger.log(
+        "option tap: window restarted after timeout — previous pending superseded", level: "debug")
+    }
+    delegate?.altFirstTapDetected()
+    schedulePendingExpiry()
+  }
+
+  /// Cancels the pending first tap if one exists and notifies the delegate so
+  /// a pre-armed audio state is discarded. Idempotent, no-op without pending.
+  private func cancelPendingAltNotifyIfNeeded() {
+    guard optionDetector.lastTimestamp != nil else { return }
+    optionDetector.cancelPendingTap()
+    invalidatePendingExpiry()
+    delegate?.altPendingCancelled()
+  }
+
+  /// Schedules pending-expiry notification after the double-tap window.
+  /// Main queue only (event tap + delegate callbacks share the run loop).
+  private func schedulePendingExpiry() {
+    invalidatePendingExpiry()
+    pendingGeneration += 1
+    let generation = pendingGeneration
+    let workItem = DispatchWorkItem { [weak self] in
+      guard let self else { return }
+      guard self.pendingGeneration == generation else { return }
+      guard self.optionDetector.lastTimestamp != nil else { return }
+      self.optionDetector.cancelPendingTap()
+      self.pendingExpiryWorkItem = nil
+      if self.isDebug {
+        Logger.log("option tap: window expired — pending Alt tap cancelled", level: "debug")
+      }
+      self.delegate?.altPendingCancelled()
+    }
+    pendingExpiryWorkItem = workItem
+    DispatchQueue.main.asyncAfter(deadline: .now() + doubleTapMaxInterval, execute: workItem)
+  }
+
+  private func invalidatePendingExpiry() {
+    pendingExpiryWorkItem?.cancel()
+    pendingExpiryWorkItem = nil
+  }
+
+  /// Deterministic expiry for tests (no wall-clock wait): expires the pending
+  /// first tap immediately if one exists, mirroring the scheduled timeout.
+  func expirePendingAltForTests() {
+    cancelPendingAltNotifyIfNeeded()
   }
 
   /// Read-only debug log of detector state before registering the tap.
