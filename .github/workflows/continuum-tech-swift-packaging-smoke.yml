@@ -61,7 +61,7 @@ jobs:
     uses: kodmial/continuum/.github/workflows/continuum-tech-swift-packaging-smoke.yml@6c285dcd47f13919bb1af3be694bcc92c9f42356
     secrets: inherit
     with:
-      continuum_ref: 'main'
+      continuum_ref: 6c285dcd47f13919bb1af3be694bcc92c9f42356
       mode: "${{ inputs.mode || 'both' }}"
       version: "${{ inputs.version || '' }}"
       native_prepare_command: 'bash scripts/build-rust-core.sh --release'
