@@ -840,7 +840,7 @@ export function registerTools(server: McpServer): void {
     {
       title: "Create the local CI signing identity",
       description:
-        "Mirrors the certificate recipe of .github/workflows/release.yml locally: a self-signed RSA-2048 X.509 certificate with the codeSigning extended key usage, named \"" +
+        "Mirrors the certificate recipe of .github/workflows/continuum-tech-swift-release.yml locally: a self-signed RSA-2048 X.509 certificate with the codeSigning extended key usage, named \"" +
         CI_SIGNING_IDENTITY +
         "\", generated with python3 + cryptography (certtool cannot express the EKU; the system openssl is LibreSSL without -addext), then imported with `security import -T /usr/bin/codesign` and given a key partition list so codesign can use it. Never overwrites: if an identity with that name already exists the tool is a no-op. The dev identity \"" +
         SIGNING_IDENTITY +

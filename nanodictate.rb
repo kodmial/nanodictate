@@ -2,7 +2,7 @@
 # Placeholders 0.1.14, 8d04948b9ebabc0d4a91296a5afab8849c3eda9ad5293202a275016d6ef7cd14, 5a3c445a9bffcf1227276d3f21ae4ef01c778bf32cd44305d401900c259b1f4f are filled by
 # scripts/release-prep.rb — do not hand-edit the generated nanodictate.rb.
 # This is a binary formula: Homebrew downloads the prebuilt tarball attached
-# to the GitHub Release (built by .github/workflows/continuum-release.yml) and installs
+# to the GitHub Release (built by .github/workflows/continuum-tech-swift-release.yml) and installs
 # it as-is. No Xcode / Swift toolchain is needed on the user's machine.
 
 class Nanodictate < Formula
@@ -17,7 +17,7 @@ class Nanodictate < Formula
   depends_on macos: :monterey
 
   # Release tarballs are attached to the tag v0.1.14 (the tag keeps the
-  # "v" prefix; the archive filename does not — see .github/workflows/continuum-release.yml).
+  # "v" prefix; the archive filename does not — see .github/workflows/continuum-tech-swift-release.yml).
   if Hardware::CPU.arm?
     url "https://github.com/kodmial/nanodictate/releases/download/v0.1.14/nanodictate-0.1.14-macos-arm64.tar.gz"
     sha256 "8d04948b9ebabc0d4a91296a5afab8849c3eda9ad5293202a275016d6ef7cd14"

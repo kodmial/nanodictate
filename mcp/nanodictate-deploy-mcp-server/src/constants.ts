@@ -141,7 +141,7 @@ export const OUTPUT_TAIL_LINES = 40;
 // ── CI signing identity ─────────────────────────────────────────────────────
 
 /**
- * CI signing identity used by .github/workflows/release.yml ("NanoDictate CI
+ * CI signing identity used by .github/workflows/continuum-tech-swift-release.yml ("NanoDictate CI
  * Signing" — a self-signed RSA-2048 X.509 codeSigning certificate, material
  * stored only in GitHub secrets NANODICTATE_SIGNING_P12 / _PASSWORD).
  *
