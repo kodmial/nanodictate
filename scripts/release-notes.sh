@@ -231,7 +231,7 @@ release_notes_extract_section() {
     return 1
   fi
   awk -v version="$version" '
-    $0 == "## [" version "]" || $0 ~ "^## \\[" version "\\] - " { capture = 1; print; next }
+    $0 == "## [" version "]" || index($0, "## [" version "] - ") == 1 { capture = 1; print; next }
     capture && /^## / { exit }
     capture && /^\[[^]]+\]:/ { exit }
     capture { print }

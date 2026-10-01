@@ -23,6 +23,7 @@
     ".": {
       "release-type": "go",
       "versioning": "always-bump-patch",
+      "skip-changelog": true,
       "skip-github-release": true,
       "include-component-in-tag": false,
       "include-v-in-tag": true,

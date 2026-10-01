@@ -17,13 +17,21 @@ Rules:
 
 1. Release notes are visible on the Release PR **before** it is merged. A release
    is never published first and documented afterward.
-2. release-please owns the changelog natively (`release-please-config.json` has
-   no `skip-changelog`; `changelog-sections` maps conventional types to Keep a
-   Changelog sections). No scraping of free-form PR prose at publication time.
-3. The GitHub Release body is the already-reviewed canonical section extracted
-   from the release commit — never an independently generated text. A link to
-   the full changelog or comparison may be appended after the notes, never
-   instead of them. The old static `See CHANGELOG.md` placeholder body is gone.
+2. `release-please-config.json` keeps the `changelog-sections` mapping prepared
+   (conventional types to Keep a Changelog sections), but native changelog
+   updates stay disabled (`skip-changelog: true`) until the Release PR
+   producer integrates the footer-aware renderer (`scripts/release-notes.sh`):
+   it must apply explicit `Release note:` text and honor `Release note: None`
+   suppression. No scraping of free-form PR prose at publication time.
+3. The GitHub Release body must be the already-reviewed canonical section
+   extracted from the release commit — never an independently generated text.
+   A link to the full changelog or comparison may be appended after the
+   notes, never instead of them. The `gate --body-file` check enforces this
+   equivalence when wired, but publication wiring is a pending follow-up:
+   the external Continuum workflow does not yet consume the canonical
+   section, and this repository does not publish a real release body through
+   `release_notes_gate_publish` with `--body-file`, so the fail-closed
+   guarantee does not yet apply at publication time.
 4. Re-running the pipeline over the same merged history produces byte-identical
    notes: entries deduplicate by commit SHA, prior entries keep their order,
    and already-released sections are never rewritten.

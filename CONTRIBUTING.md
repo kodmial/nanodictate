@@ -86,9 +86,10 @@ Use `Release note: None` for intentionally note-free changes (pure refactor
 without behavior change, test-only, CI-only, docs-only). Without the footer,
 the cleaned conventional-commit subject is used as a fallback. Never paste
 the full PR body, review threads, or `Co-authored-by` lines into release
-notes. The full pipeline — single canonical notes, Keep a Changelog
-categories, native release-please changelog ownership, and the fail-closed
-publication gate — is documented in `docs/release-notes.md`
+ notes. The full pipeline — single canonical notes, Keep a Changelog
+ categories, prepared release-please changelog sections (native ownership
+ pending footer-aware integration), and the fail-closed publication gate
+ mechanism — is documented in `docs/release-notes.md`
 (`scripts/release-notes.sh` implements it; `scripts/test-release-notes.sh`
 covers it).
 
