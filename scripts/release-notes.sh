@@ -330,7 +330,7 @@ release_notes_gate_publish() {
   local content section
   content=$(cat; printf 'x') || return 1
   content=${content%x}
-  if ! section=$(printf '%s' "$content" | release_notes_extract_section "$version"); then
+  if ! section=$(release_notes_extract_section "$version" <<< "$content"); then
     echo "release_notes_gate_publish: CHANGELOG.md has no '## [$version]' section" >&2
     return 1
   fi
@@ -374,10 +374,18 @@ release_notes_cli() {
       local version="" swift_version="" releasable="0" body_file=""
       while [[ $# -gt 0 ]]; do
         case "$1" in
-          --version) version=${2:-}; shift 2 ;;
-          --swift-version) swift_version=${2:-}; shift 2 ;;
-          --releasable) releasable=${2:-}; shift 2 ;;
-          --body-file) body_file=${2:-}; shift 2 ;;
+          --version)
+            if [[ $# -lt 2 ]]; then echo "gate: --version requires a value" >&2; return 1; fi
+            version=$2; shift 2 ;;
+          --swift-version)
+            if [[ $# -lt 2 ]]; then echo "gate: --swift-version requires a value" >&2; return 1; fi
+            swift_version=$2; shift 2 ;;
+          --releasable)
+            if [[ $# -lt 2 ]]; then echo "gate: --releasable requires a value" >&2; return 1; fi
+            releasable=$2; shift 2 ;;
+          --body-file)
+            if [[ $# -lt 2 ]]; then echo "gate: --body-file requires a value" >&2; return 1; fi
+            body_file=$2; shift 2 ;;
           *) echo "unknown gate flag: $1" >&2; return 1 ;;
         esac
       done

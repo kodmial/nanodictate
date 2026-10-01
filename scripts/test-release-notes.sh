@@ -329,6 +329,45 @@ fi
 assert_ok 'repo: current version passes the publication gate' \
   release_notes_gate_publish "$REPO_SWIFT" "$REPO_SWIFT" 1 < "${REPO_ROOT}/CHANGELOG.md"
 
+# --- 13. Terminal gate option without a value fails fast ----------------------
+# A trailing option with no value must return an argument error instead of
+# retrying `shift 2` on unchanged arguments (which previously looped forever
+# because the script does not enable `errexit`). Each case runs with a
+# watchdog so a regression fails the suite instead of hanging it.
+
+run_gate_cli_watchdog() {
+  local out_file="${TMP_DIR}/gate-missing-value.out"
+  rm -f "$out_file"
+  bash "${REPO_ROOT}/scripts/release-notes.sh" gate "$@" < /dev/null >"$out_file" 2>&1 &
+  local pid=$!
+  local i
+  for ((i = 0; i < 50; i++)); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "13: gate $* terminates (timed out, possible option-parsing loop)"
+    return 0
+  fi
+  wait "$pid"
+  local status=$?
+  if [[ "$status" -eq 0 ]]; then
+    fail "13: gate $* without a value fails" "command unexpectedly succeeded"
+  else
+    pass "13: gate $* without a value fails"
+  fi
+  local out
+  out=$(cat "$out_file" 2>/dev/null || true)
+  assert_contains "13: gate $* reports a missing value" "$out" "requires a value"
+}
+
+run_gate_cli_watchdog --version
+run_gate_cli_watchdog --swift-version
+run_gate_cli_watchdog --releasable
+run_gate_cli_watchdog --body-file
+
 # --- summary -----------------------------------------------------------------
 
 printf '\n%s passed, %s failed\n' "$PASSED" "$FAILED"
