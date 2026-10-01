@@ -49,6 +49,13 @@ on:
 permissions:
   contents: read
 
+# Keep only the newest compatibility run for a PR/ref. A self-hosted macOS 12
+# runner may be offline for hours; stale heads must not queue ahead of the
+# current commit when it returns.
+concurrency:
+  group: macos12-compat-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   static-gate:
     name: static floor (hosted)
