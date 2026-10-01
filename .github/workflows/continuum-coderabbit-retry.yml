@@ -26,4 +26,4 @@ jobs:
     uses: kodmial/continuum/.github/workflows/coderabbit-retry.yml@6c285dcd47f13919bb1af3be694bcc92c9f42356
     secrets: inherit
     with:
-      continuum_ref: '6c285dcd47f13919bb1af3be694bcc92c9f42356'
+      continuum_ref: 6c285dcd47f13919bb1af3be694bcc92c9f42356
