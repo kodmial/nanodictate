@@ -228,6 +228,75 @@ final class ChunkedPipelineTests: XCTestCase {
         XCTAssertEqual(mockSTT.calls.count, 3)
     }
 
+    // MARK: - Precomputed plan reuses single segmentation (no rerun)
+
+    @objc func testPrecomputedPlanMatchesFreshRun() throws {
+        // Same samples + same policy: precomputed plan path must give identical
+        // ordering, filenames, prompts and outcome as the fresh-plan run.
+        // The watchdog caller computes the plan once and reuses it here.
+        let pipeline = ChunkedPipeline(sampleRate: 16000, segmenterConfig: self.segConfig)
+        let samples = self.twoSegmentSamples()
+        let plan = pipeline.plan(samples: samples)
+        XCTAssertEqual(plan.count, 2)
+        XCTAssertEqual(ChunkedPipeline.requestCount(for: plan), 3)
+
+        func runWith(planOrNil: [AudioSegmentSpec]?) throws -> (
+            ChunkedPipeline.Outcome, [RecordedOperation], [(String, String?)]) {
+            let mockSTT = MockSTT(results: ["Один два.", "Три четыре.", "Один два три четыре."])
+            var steps: [RecordedOperation] = []
+            let outcome = try self.runAsync {
+                if let planOrNil {
+                    return try await pipeline.run(
+                        samples: samples,
+                        plannedSegments: planOrNil,
+                        stt: { wav, filename, prompt in try await mockSTT.call(wav, filename, prompt) },
+                        insert: { op in
+                            switch op {
+                            case .appendSegment(let index, let text): steps.append(.appendSegment(index: index, text: text))
+                            case .replaceTail(let old, let new): steps.append(.replaceTail(old: old, new: new))
+                            }
+                        }
+                    )
+                } else {
+                    return try await pipeline.run(
+                        samples: samples,
+                        stt: { wav, filename, prompt in try await mockSTT.call(wav, filename, prompt) },
+                        insert: { op in
+                            switch op {
+                            case .appendSegment(let index, let text): steps.append(.appendSegment(index: index, text: text))
+                            case .replaceTail(let old, let new): steps.append(.replaceTail(old: old, new: new))
+                            }
+                        }
+                    )
+                }
+            }
+            return (outcome, steps, mockSTT.calls)
+        }
+
+        let (freshOutcome, freshSteps, freshCalls) = try runWith(planOrNil: nil)
+        let (reusedOutcome, reusedSteps, reusedCalls) = try runWith(planOrNil: plan)
+        XCTAssertEqual(freshOutcome, reusedOutcome)
+        XCTAssertEqual(freshSteps, reusedSteps)
+        XCTAssertEqual(freshCalls.map { $0.0 }, reusedCalls.map { $0.0 })
+        XCTAssertEqual(freshCalls.map { $0.1 }, reusedCalls.map { $0.1 })
+    }
+
+    @objc func testEmptyPlanRunMakesNoRequests() throws {
+        let pipeline = ChunkedPipeline(sampleRate: 16000, segmenterConfig: self.segConfig)
+        let mockSTT = MockSTT(results: [String]())
+        let outcome = try runAsync {
+            try await pipeline.run(
+                samples: [],
+                plannedSegments: [],
+                stt: { wav, filename, prompt in try await mockSTT.call(wav, filename, prompt) },
+                insert: { _ in }
+            )
+        }
+        XCTAssertEqual(outcome.segmentCount, 0)
+        XCTAssertTrue(mockSTT.calls.isEmpty)
+        XCTAssertEqual(ChunkedPipeline.requestCount(for: []), 0)
+    }
+
     // MARK: - Вставка/фаза вызываются синхронно в контексте вызывающего
 
     @objc func testInsertAndPhaseAreSynchronous() throws {
