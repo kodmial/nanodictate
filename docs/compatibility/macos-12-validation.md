@@ -23,9 +23,10 @@ equivalent. The repeatable gate is:
 2. **Runtime gate (self-hosted macOS 12 machine).**
    Runs `scripts/macos12-compat-check.sh --full` on **actual macOS 12
    execution**. This is the only pass that validates install/startup,
-   permissions behavior, microphone engine start/stop/restart, basic
-   dictation plumbing, Accessibility insertion readiness, and package
-   installation on the oldest supported major version.
+   LaunchAgent registration, best-effort audio HAL enumeration, and basic
+   dictation plumbing on the oldest supported major version. Microphone
+   capture, Accessibility insertion, and package installation are **manual
+   checklist items** (below), not automated phases.
 
 ### Runner strategy (explicitly selected)
 
@@ -70,8 +71,13 @@ Automated by `scripts/macos12-compat-check.sh --full` on macOS 12:
 | 3 | CLI sanity | `--version`, `--help`, `minos 12.x` linkage | Wrong SDK/minos ships wrong floor |
 | 4 | Install/startup | `config init` in isolated HOME | First-launch paths differ by OS |
 | 5 | LaunchAgent lifecycle | `start` → live `launchctl print gui/$UID` + PID → `stop` → gone → restart | `launchctl`/`gui` domain behavior varies |
-| 6 | Microphone engine | Audio HAL enumeration without capture; engine start/stop/restart covered by unit tests + manual capture check | AVAudioEngine/HAL quirks are version-specific |
-| 7 | Package install | Homebrew/MacPorts lifecycle smoke on the 12 host (candidate mode) | Bottle/tarball install paths are OS-gated |
+| 6 | Audio HAL | Best-effort `system_profiler SPAudioDataType` enumeration, no capture (non-fatal when the probe is unavailable) | AVAudioEngine/HAL quirks are version-specific |
+| 7 | Accessibility | Status recorded as `accessibility=manual-check-required`; no trust query and no insertion | Granting needs manual TCC approval |
+
+Package installation (Homebrew formula/cask, MacPorts), microphone capture,
+and Accessibility insertion are deliberately **not** automated: they need
+install privileges, TCC grants, or UI interaction. They live in the manual
+checklist below.
 
 Manual-only checks (TCC/UI constraints prevent full automation):
 
@@ -101,13 +107,17 @@ Full gate (only meaningful on actual macOS 12):
 scripts/macos12-compat-check.sh --full
 ```
 
-Diagnostics on a newer host without claiming a pass:
+Diagnostics on a newer host without claiming a pass (`--full` still refuses a
+non-12 host before the build unless this flag is given, and the run never
+records a runtime claim):
 
 ```sh
 scripts/macos12-compat-check.sh --full --allow-non12-runtime
 ```
 
-Skip the build when iterating on checklist docs (CI still builds):
+Skip the build when iterating on checklist docs (`--static-only` only; `--full
+--skip-build` exits 2 because it could still print `result=full-green` without
+the build, CLI probes, or LaunchAgent lifecycle):
 
 ```sh
 scripts/macos12-compat-check.sh --static-only --skip-build

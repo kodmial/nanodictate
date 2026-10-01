@@ -14,13 +14,18 @@
 #   --full          Everything in --static-only PLUS live runtime probes that
 #                   are only meaningful on an actual macOS 12 machine:
 #                   install/startup, LaunchAgent start/stop/restart liveness,
-#                   audio HAL enumeration (no capture, no TCC grant required),
-#                   Accessibility trust-state query (no grant required),
-#                   package min-OS metadata. On a non-12 host --full still runs
-#                   the static checks and then FAILS with a clear message that
-#                   runtime validation requires actual macOS 12 execution,
-#                   unless --allow-non12-runtime is given (diagnostics only,
-#                   never a release gate pass).
+#                   best-effort audio HAL enumeration (no capture, no TCC grant
+#                   required; unavailable probe is non-fatal), package min-OS
+#                   metadata. Accessibility status is only recorded here:
+#                   granting and insertion stay in the manual checklist. On a
+#                   non-12 host --full verifies the declared floor and then
+#                   FAILS right away, before the build, with a clear message
+#                   that runtime validation requires actual macOS 12
+#                   execution, unless --allow-non12-runtime is given
+#                   (diagnostics only, never a release gate pass).
+#
+#                   Package installation and Accessibility insertion are
+#                   manual-checklist items, never automated phases.
 #
 # Safety: black-box, low-side-effect. No microphone capture, no TCC prompt
 # automation, no STT network calls, no secrets. The LaunchAgent lifecycle uses
@@ -29,6 +34,10 @@
 # Usage:
 #   scripts/macos12-compat-check.sh [--static-only | --full]
 #       [--allow-non12-runtime] [--result-dir DIR] [--skip-build]
+#
+# --skip-build is only accepted with --static-only: --full without the build,
+# the CLI probes and the LaunchAgent lifecycle could still print
+# result=full-green on release evidence, so the combination is rejected.
 #
 # Exit 0 on green, non-zero with a failure summary otherwise.
 # macOS-only script: exits 2 immediately on other operating systems.
@@ -49,12 +58,17 @@ while [ $# -gt 0 ]; do
     --result-dir) RESULT_DIR="$2"; shift 2 ;;
     --skip-build) SKIP_BUILD=1; shift ;;
     -h|--help)
-      sed -n '1,40p' "$0"
+      sed -n '1,43p' "$0"
       exit 0
       ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+if [ "$MODE" = "full" ] && [ "$SKIP_BUILD" = "1" ]; then
+  echo "[macos12-compat][FAIL] --skip-build is only valid with --static-only: --full would report full-green without the build, CLI probes or LaunchAgent lifecycle" >&2
+  exit 2
+fi
 
 case "$(uname -s)" in
   Darwin) ;;
@@ -80,6 +94,22 @@ sw_vers_product() { /usr/bin/sw_vers -productVersion 2>/dev/null || echo unknown
 # Pure function, unit-tested in scripts/test-macos12-compat-check.sh.
 compat_macos_major() {
   printf '%s' "${1:-}" | grep -oE '^[0-9]+' || true
+}
+
+# compat_runtime_gate <macosMajor> <allowNon12Runtime> -> run|refuse|diagnostics.
+# Pure function, unit-tested in scripts/test-macos12-compat-check.sh.
+# Only "run" can ever lead to result=full-green; "diagnostics" records no
+# runtime claim and "refuse" fails the gate.
+compat_runtime_gate() {
+  if [ "${1:-}" = "12" ]; then
+    printf 'run'
+    return 0
+  fi
+  if [ "${2:-0}" = "1" ]; then
+    printf 'diagnostics'
+    return 0
+  fi
+  printf 'refuse'
 }
 
 MACOS_VERSION="$(sw_vers_product)"
@@ -108,7 +138,29 @@ grep -q 'depends_on macos: :monterey' "$REPO_ROOT/packaging/homebrew/Casks/nanod
   || fail "packaging/homebrew/Casks/nanodictate.rb.tpl lost depends_on macos: :monterey"
 log "declared floor ok (Package.swift .v12, Info.plist 12.0, brew :monterey)"
 
-# --- 2. Deployment-target build ----------------------------------------------
+# --- 2. Full mode requires actual macOS 12 -----------------------------------
+# Evaluated before the build: a newer host is refused immediately instead of
+# after a multi-minute deployment-target build, and the refusal never depends
+# on the build succeeding. --static-only is skipped here on purpose: the
+# compile-time floor gate must run on any macOS runner, including macos-15.
+if [ "$MODE" != "static-only" ]; then
+  phase "runtime-host"
+  set_check "host is actually macOS 12"
+  case "$(compat_runtime_gate "$MACOS_MAJOR" "$ALLOW_NON12_RUNTIME")" in
+    run)
+      log "runtime host ok: macOS ${MACOS_VERSION}"
+      ;;
+    diagnostics)
+      log "warning: host is macOS ${MACOS_VERSION}, not 12 — continuing as diagnostics-only (NOT a release pass)"
+      printf 'result=diagnostics-only\nruntime_claim=none\nreason=non-12-host\n' > "$RESULT_DIR/result.txt"
+      ;;
+    *)
+      fail "runtime validation requires actual macOS 12 execution (host is ${MACOS_VERSION}); refusing to pretend macos-15 == macos-12. See docs/compatibility/macos-12-validation.md"
+      ;;
+  esac
+fi
+
+# --- 3. Deployment-target build ----------------------------------------------
 phase "deployment-target-build"
 if [ "$SKIP_BUILD" = "1" ]; then
   log "skip-build requested, deployment-target build not executed"
@@ -119,7 +171,7 @@ else
   log "deployment-target build ok"
 fi
 
-# --- 3. Freshly built CLI sanity (no hardware, no TCC) -----------------------
+# --- 4. Freshly built CLI sanity (no hardware, no TCC) -----------------------
 phase "cli-sanity"
 if [ "$SKIP_BUILD" = "1" ]; then
   log "skip-build requested, CLI sanity probes skipped"
@@ -140,10 +192,10 @@ else
     printf '%s\n' "$VTOOL_OUT" | grep -qE 'minos 12\.' \
       || fail "vtool minos is not 12.x: $(printf '%s' "$VTOOL_OUT" | head -n 5)"
   else
-    OTOOL_OUT="$(otool -l "$BIN" 2>/dev/null | grep -A3 'LC_BUILD_VERSION' | head -n 12 || true)"
+    OTOOL_OUT="$(otool -l "$BIN" 2>/dev/null | grep -A5 'LC_BUILD_VERSION' | head -n 12 || true)"
     printf '%s\n' "$OTOOL_OUT" > "$RESULT_DIR/otool-build-version.txt"
     printf '%s\n' "$OTOOL_OUT" | grep -qE 'minos 12\.' \
-      || log "warning: could not confirm minos 12.x via otool (non-fatal on this host)"
+      || fail "otool minos is not 12.x: $(printf '%s' "$OTOOL_OUT" | head -n 5)"
   fi
   [ -x "$AGENT_BIN" ] || log "warning: agent binary missing at $AGENT_BIN (non-fatal)"
 fi
@@ -152,20 +204,6 @@ if [ "$MODE" = "static-only" ]; then
   log "STATIC-ONLY GREEN (no runtime claim: run --full on actual macOS 12 for release validation)"
   printf 'result=static-only-green\nruntime_claim=none\n' > "$RESULT_DIR/result.txt"
   exit 0
-fi
-
-# --- 4. Full mode requires actual macOS 12 -----------------------------------
-phase "runtime-host"
-set_check "host is actually macOS 12"
-if [ "$MACOS_MAJOR" != "12" ]; then
-  if [ "$ALLOW_NON12_RUNTIME" = "1" ]; then
-    log "warning: host is macOS ${MACOS_VERSION}, not 12 — continuing as diagnostics-only (NOT a release pass)"
-    printf 'result=diagnostics-only\nruntime_claim=none\nreason=non-12-host\n' > "$RESULT_DIR/result.txt"
-  else
-    fail "runtime validation requires actual macOS 12 execution (host is ${MACOS_VERSION}); refusing to pretend macos-15 == macos-12. See docs/compatibility/macos-12-validation.md"
-  fi
-else
-  log "runtime host ok: macOS ${MACOS_VERSION}"
 fi
 
 # --- 5. LaunchAgent lifecycle with isolated HOME (no TCC grant needed) --------
@@ -215,23 +253,19 @@ else
   export HOME="${HOME:-/}"
 fi
 
-# --- 6. Audio HAL enumeration (no capture, no TCC grant) ----------------------
+# --- 6. Audio HAL enumeration (no capture, no TCC grant, best-effort) ---------
 phase "audio-hal"
-set_check "audio output/input devices enumerable without capture"
 if system_profiler SPAudioDataType >/dev/null 2>&1; then
+  set_check "audio output/input devices enumerable without capture"
   system_profiler SPAudioDataType 2>/dev/null | head -n 30 > "$RESULT_DIR/audio-devices.txt" || true
-  log "audio HAL enumeration ok"
+  log "audio HAL enumeration ok (enumeration only: no capture, no engine start/stop)"
 else
-  log "warning: system_profiler SPAudioDataType unavailable (non-fatal, manual check remains)"
+  log "warning: system_profiler SPAudioDataType unavailable (non-fatal, manual capture check remains)"
 fi
 
-# --- 7. Accessibility trust-state query (no grant, no insertion) --------------
+# --- 7. Accessibility manual check (no grant, no insertion) -------------------
 phase "accessibility-state"
-set_check "Accessibility trust API reachable (query only, grants are manual)"
-OSX_TRUSTED="unknown"
-if /usr/bin/python3 -c 'import ApplicationServices' 2>/dev/null; then
-  log "warning: python ApplicationServices bridge present but unused; trust state is a manual check"
-fi
+set_check "Accessibility insertion readiness recorded for manual checklist"
 log "accessibility trust query skipped by design: granting requires manual TCC approval; see manual checklist"
 printf 'accessibility=manual-check-required\n' >> "$RESULT_DIR/environment.txt"
 
