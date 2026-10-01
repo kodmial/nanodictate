@@ -686,6 +686,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// (no microphone capture, no audio stored). Cancelled by
   /// altPendingCancelled on timeout/foreign key.
   func altFirstTapDetected() {
+    guard state == .idle, !isStarting else { return }
     audio.noteFirstAltTap()
     audio.armForImminentStart()
   }
