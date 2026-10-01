@@ -38,10 +38,11 @@ permissions:
 
 jobs:
   call:
-    uses: kodmial/continuum/.github/workflows/opencode.yml@main
+    uses: kodmial/continuum/.github/workflows/opencode.yml@73976fd7c2e3336fe4c3f1dda1a79c74c01bd4d7
     secrets: inherit
     with:
-      continuum_ref: main
+      continuum_ref: '73976fd7c2e3336fe4c3f1dda1a79c74c01bd4d7'
+      pause_on_failure: 'false'
       mode: "${{ inputs.mode }}"
       pr_number: "${{ inputs.pr_number }}"
       head_ref: "${{ inputs.head_ref }}"
