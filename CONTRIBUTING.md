@@ -72,6 +72,26 @@ Ordinary feature and fix PRs do not bump versions. After releasable changes land
 
 A PR whose changes must merge without updating the Release PR can use the `skip-release` label. Apply it before merge. Path-only documentation, repository metadata, and packaging changes may also be classified as non-releasable by the release policy.
 
+### Release notes
+
+Every releasable PR needs a deterministic, human-readable description of its
+user/developer impact. Add a footer to the PR description (kept in the
+squash-merge commit message):
+
+```text
+Release note: <one or two sentences describing the user/developer impact>
+```
+
+Use `Release note: None` for intentionally note-free changes (pure refactor
+without behavior change, test-only, CI-only, docs-only). Without the footer,
+the cleaned conventional-commit subject is used as a fallback. Never paste
+the full PR body, review threads, or `Co-authored-by` lines into release
+notes. The full pipeline — single canonical notes, Keep a Changelog
+categories, native release-please changelog ownership, and the fail-closed
+publication gate — is documented in `docs/release-notes.md`
+(`scripts/release-notes.sh` implements it; `scripts/test-release-notes.sh`
+covers it).
+
 Do not bypass the release workflow with manual version bumps or direct pushes to `main`.
 
 ## Issues
