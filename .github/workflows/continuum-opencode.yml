@@ -47,3 +47,4 @@ jobs:
       head_ref: "${{ inputs.head_ref }}"
       review_id: "${{ inputs.review_id }}"
       run_id: "${{ inputs.run_id }}"
+      pause_on_failure: 'false'
