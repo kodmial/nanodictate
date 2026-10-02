@@ -287,7 +287,9 @@ final class ChunkedFinalPassTests: XCTestCase {
   @objc func testChunkedBenchmarkStitchedUsesProductionDedupe() throws {
     // Seam duplicate inside the glued overlap must be excluded from scoring,
     // mirroring ChunkedPipeline.recognizeWAV (dedupeOverlap + finalize).
-    let samples = twoSegments()
+    // Blocks are 4s so the pause cuts under .defaults (minSegment 3s);
+    // twoSegments() 2s blocks would merge into one segment there.
+    let samples = makeSamples([(0.1, 4.0), (0.0, 1.5), (0.1, 4.0)])
     let fixture = BenchmarkFixture(
       id: "dedupe-check", category: .normal, durationBucket: .short,
       description: "Seam duplicate check.",
@@ -328,7 +330,9 @@ final class ChunkedFinalPassTests: XCTestCase {
   @objc func testChunkedBenchmarkLiveComparisonWithActualResults() throws {
     // Live quality evidence shape: actual (imperfect) segment/final STT
     // results on transcript-bearing speech, not transcript-derived slices.
-    let samples = twoSegments()
+    // Blocks are 4s so the pause cuts under .defaults (minSegment 3s);
+    // twoSegments() 2s blocks would merge into one segment there.
+    let samples = makeSamples([(0.1, 4.0), (0.0, 1.5), (0.1, 4.0)])
     let fixture = BenchmarkFixture(
       id: "live-check", category: .normal, durationBucket: .short,
       description: "Actual STT results comparison.",

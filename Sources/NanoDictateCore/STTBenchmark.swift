@@ -743,7 +743,8 @@ public enum ChunkedBenchmark {
         let duration =
           index < segments.count
           ? Double(segments[index].samples.count) / Double(max(1, fixture.sampleRate)) : 0
-        words = Self.syntheticWords(for: text, segmentDuration: duration)
+        words = Self.syntheticWords(
+          for: text, segmentDuration: duration, overlapSeconds: overlap)
       } else {
         words = []
       }
@@ -789,19 +790,26 @@ public enum ChunkedBenchmark {
   }
 
   /// Synthetic timed words for scripted segment text: uniform slicing of the
-  /// segment duration across whitespace-separated tokens. Lets the benchmark
-  /// exercise production `dedupeOverlap` without a real STT response: words
-  /// ending inside `overlapSeconds` are treated as seam duplicates.
-  public static func syntheticWords(for text: String, segmentDuration: Double) -> [TimedWord] {
+  /// segment body across whitespace-separated tokens, offset past the glued
+  /// overlap. Lets the benchmark exercise production `dedupeOverlap` without
+  /// a real STT response: only an explicit seam duplicate placed inside
+  /// `overlapSeconds` is treated as a duplicate. Disjoint slices (no seam
+  /// repeat) score without false drops because every synthesized word starts
+  /// after the overlap.
+  public static func syntheticWords(
+    for text: String, segmentDuration: Double, overlapSeconds: Double = 0
+  ) -> [TimedWord] {
     let tokens = text.split { $0.isWhitespace }.map(String.init).filter { !$0.isEmpty }
     guard !tokens.isEmpty else { return [] }
+    let overlap = max(0, overlapSeconds)
     let duration = max(0.01, segmentDuration)
-    let perWord = duration / Double(tokens.count)
+    let bodyDuration = max(0.01, duration - min(overlap, duration - 0.001))
+    let perWord = bodyDuration / Double(tokens.count)
     return tokens.enumerated().map { index, token in
       TimedWord(
         word: token,
-        start: Double(index) * perWord,
-        end: Double(index + 1) * perWord)
+        start: overlap + Double(index) * perWord,
+        end: overlap + Double(index + 1) * perWord)
     }
   }
 

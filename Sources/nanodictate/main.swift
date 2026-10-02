@@ -1526,7 +1526,10 @@ func chunkedComparisonRows(
     let duration =
       index < segments.count
       ? Double(segments[index].samples.count) / Double(max(1, fixture.sampleRate)) : 0
-    segmentWords.append(ChunkedBenchmark.syntheticWords(for: text, segmentDuration: duration))
+    let overlap = index < segments.count ? segments[index].overlapSeconds : 0
+    segmentWords.append(
+      ChunkedBenchmark.syntheticWords(
+        for: text, segmentDuration: duration, overlapSeconds: overlap))
   }
   return ChunkedBenchmark.compare(
     fixture: fixture,
