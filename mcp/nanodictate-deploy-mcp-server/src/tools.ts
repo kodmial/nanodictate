@@ -699,7 +699,7 @@ export function registerTools(server: McpServer): void {
     {
       title: "Build dictation agent binaries",
       description:
-        "Runs `swift build -c <configuration>` for the dictation macOS app and reports the resulting binary path. Does not sign or restart the agent — combine with dictation_sign / dictation_deploy." +
+        "Builds the Rust engine (scripts/build-rust-core.sh --release) then runs `swift build -c <configuration> -Xlinker <root>/rust/target/release/libnanodictate_core.a` (or under `CARGO_TARGET_DIR` if set) for the dictation macOS app and reports the resulting binary path. Does not sign or restart the agent — combine with dictation_sign / dictation_deploy." +
         SHARED_FOOTER,
       inputSchema: BuildInputSchema,
       outputSchema: BuildOutputSchema,
@@ -739,7 +739,7 @@ export function registerTools(server: McpServer): void {
     {
       title: "Build, sign and restart the dictation agent",
       description:
-        "Full workflow in one call: swift build → codesign both binaries with the stable identity → restart the LaunchAgent (launchctl kickstart -k gui/<uid>/com.nanodictate.agent). Each step runs only if the previous one succeeded, so a failed build never restarts the running agent with a broken binary." +
+        "Full workflow in one call: Rust engine build → swift build with the Rust static archive → codesign both binaries with the stable identity → restart the LaunchAgent (launchctl kickstart -k gui/<uid>/com.nanodictate.agent). Each step runs only if the previous one succeeded, so a failed build never restarts the running agent with a broken binary." +
         SHARED_FOOTER,
       inputSchema: DeployInputSchema,
       outputSchema: DeployOutputSchema,

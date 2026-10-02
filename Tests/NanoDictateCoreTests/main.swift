@@ -6,7 +6,8 @@ setenv("NANODICTATE_TESTS", "1", 1)
 
 // MARK: - Раннер тестов (мини-XCTest без Xcode)
 // Suites explicit (objc_copyClassList clumsy in Swift); any failure → non-zero exit + names.
-// Run: `swift run NanoDictateCoreTests`.
+// Run: `scripts/build-rust-core.sh --release`, then
+// `swift run -Xlinker rust/target/release/libnanodictate_core.a NanoDictateCoreTests`.
 
 // Swift-методы `@objc func testX() throws` выставляются рантайму как селектор
 // `<testX>AndReturnError:` с сигнатурой `(BOOL)AndReturnError:(NSError **)err`.
@@ -81,6 +82,7 @@ let suites: [XCTestCase.Type] = [
     STTContextualBiasTests.self,
     WAVDecoderTests.self,
     AgentPlistTests.self,
+    RustParityTests.self,
 ]
 
 var passed = 0

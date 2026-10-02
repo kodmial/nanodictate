@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.19] - 2026-10-02
+
+
+
+### Features
+
+* include shared Rust engine foundation in release train ([#125](https://github.com/kodmial/nanodictate/issues/125)) ([cc16b93](https://github.com/kodmial/nanodictate/commit/cc16b937c33a602b9a63a7e639194a524ef4e1f0))
+
 ## [0.1.18] - 2026-10-01
 
 
@@ -436,7 +444,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.18...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.19...HEAD
+[0.1.19]: https://github.com/kodmial/nanodictate/compare/v0.1.18...v0.1.19
 [0.1.18]: https://github.com/kodmial/nanodictate/compare/v0.1.17...v0.1.18
 [0.1.17]: https://github.com/kodmial/nanodictate/compare/v0.1.16...v0.1.17
 [0.1.15]: https://github.com/kodmial/nanodictate/compare/v0.1.14...v0.1.15

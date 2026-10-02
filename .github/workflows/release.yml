@@ -13,8 +13,9 @@ on:
       - 'scripts/**'
       - 'Resources/**'
       - 'config.example.toml'
-      - '.github/workflows/continuum-tech-swift-packaging-smoke.yml'
-      - '.github/workflows/continuum-tech-swift-release.yml'
+      - 'rust/**'
+      - '.github/workflows/packaging-smoke.yml'
+      - '.github/workflows/release.yml'
   workflow_dispatch:
     inputs:
       version:
@@ -47,11 +48,11 @@ concurrency:
 
 jobs:
   call:
-    uses: kodmial/continuum/.github/workflows/continuum-tech-swift-release.yml@main
+    uses: ./.github/workflows/nanodictate-release-engine.yml
     secrets: inherit
     with:
       continuum_ref: main
-      native_prepare_command: "${{ vars.CONTINUUM_NATIVE_PREPARE_COMMAND || '' }}"
-      static_archive_path: "${{ vars.CONTINUUM_STATIC_ARCHIVE_PATH || '' }}"
+      native_prepare_command: "${{ vars.CONTINUUM_NATIVE_PREPARE_COMMAND || 'bash scripts/build-rust-core.sh --release' }}"
+      static_archive_path: "${{ vars.CONTINUUM_STATIC_ARCHIVE_PATH || 'rust/target/release/libnanodictate_core.a' }}"
       version: "${{ inputs.version || '' }}"
       dry_run: "${{ inputs.dry_run || false }}"
