@@ -11,7 +11,7 @@ realtime-transcription guide on 2026-10-01.
 |---|---|---|
 | Transport | One HTTP request per audio (`batchMultipart`, `batchRawAudio`) | One WebSocket session per dictation (`streamingSession`) |
 | Audio | 16 kHz mono WAV (`STTAudioProfile.batchMono16k`) | 24 kHz mono raw PCM16 (`STTAudioProfile.realtimeMono24kPCM`), base64 chunks, no WAV header |
-| Model state | None across chunks; overlap/deduplication + optional final full-recording pass | Model keeps state for the whole session; earlier turns are automatic context |
+| Model state | None across chunks; overlap/deduplication + optional final full-recording pass | Model keeps state for the whole session; earlier-turn context is not documented as automatic; use `prompt` and `keywords` as transcription hints |
 | Events | Single `{"text": ...}` response | `conversation.item.input_audio_transcription.delta` (partial) + `.completed` (final, authoritative) per `item_id` |
 | Providers | All batch profiles (OpenAI `whisper-1`/`gpt-transcribe`/`gpt-4o-*`, Groq, Cloudflare, custom) | OpenAI `gpt-live-transcribe` family only (today) |
 
@@ -84,9 +84,11 @@ is deterministic after stop/session completion.
 
 ## Implementation map
 
-- `Sources/NanoDictateCore/RealtimeTranscription.swift`: transport protocol,
-  event parser, accumulator, PCM converter/resampler, client event builders,
-  endpoint, `RealtimeTranscriptionSession` actor, `URLSessionWebSocketTransport`.
+- `Sources/NanoDictateCore/RealtimeTranscription.swift`: event parser,
+  accumulator, PCM converter/resampler, client event builders, endpoint,
+  `RealtimeTranscriptionSession` actor.
+- `Sources/NanoDictateCore/RealtimeTransport.swift`: `RealtimeTransport`
+  protocol, `RealtimeReceiveChannel` receive channel, `URLSessionWebSocketTransport`.
 - `Sources/NanoDictateCore/STTCapabilities.swift`: `STTUploadFormat.pcm16`,
   `STTAudioProfile.realtimeMono24kPCM`, `STTTransportKind.streamingSession`
   (now implemented), `gpt-live-transcribe` registry entry.

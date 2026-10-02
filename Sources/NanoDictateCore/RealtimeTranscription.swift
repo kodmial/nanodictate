@@ -695,47 +695,61 @@ public actor RealtimeTranscriptionSession {
       let item = await receiveChannel?.dequeue()
       guard let item else {
         // Stream finished before completion: return buffered transcript when
-        // available; otherwise fail the session closed.
+        // available; otherwise fail the session closed. Tear down the pump
+        // and transport so an unclosed session cannot leave runPump
+        // appending outcomes indefinitely.
         if let final = accumulator.finalText {
+          await closeTransportOnce()
           return final
         }
         let partial = accumulator.partialText
         if !partial.isEmpty {
+          await closeTransportOnce()
           return partial
         }
         state = .failed
         lastError = "transport closed before completion"
+        await closeTransportOnce()
         throw RealtimeTranscriptionError.transport("transport closed before completion")
       }
       switch item {
       case .text(let text):
         guard let text else {
           // Clean EOF before completion: return buffered transcript when
-          // available; otherwise fail the session closed.
+          // available; otherwise fail the session closed. Tear down the
+          // pump and transport (see above); runPump itself keeps running
+          // on EOF so waitForAck can read until its deadline.
           if let final = accumulator.finalText {
+            await closeTransportOnce()
             return final
           }
           let partial = accumulator.partialText
           if !partial.isEmpty {
+            await closeTransportOnce()
             return partial
           }
           state = .failed
           lastError = "transport closed before completion"
+          await closeTransportOnce()
           throw RealtimeTranscriptionError.transport("transport closed before completion")
         }
         _ = handleMessage(text)
         onPartial?(accumulator.partialText)
       case .failure(let transportError):
         if case .transport(let message) = transportError {
+          // Terminal transport failure: same teardown as EOF above.
           if let final = accumulator.finalText {
+            await closeTransportOnce()
             return final
           }
           let partial = accumulator.partialText
           if !partial.isEmpty {
+            await closeTransportOnce()
             return partial
           }
           state = .failed
           lastError = message
+          await closeTransportOnce()
         }
         throw transportError
       }
