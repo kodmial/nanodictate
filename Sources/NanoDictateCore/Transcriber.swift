@@ -246,6 +246,10 @@ public final class Transcriber {
   /// OpenAI-compatible adapter when a baseURL is set, else an error; unknown —
   /// OpenAI-compatible request with own baseURL/model.
   private let adapterID: String?
+  /// Contextual biasing (reusable vocabulary + extra language hints from
+  /// config `vocabulary` / `extra_languages`). Gated per model profile in
+  /// ProviderRequestBuilder.plan; empty = previous behavior.
+  private let contextualBias: STTContextualBias
 
   /// Retry candidate (see `shouldRetry`): HTTP 429/5xx and transport
   /// (non-timeout) network errors. Everything else terminal.
@@ -330,6 +334,7 @@ public final class Transcriber {
     proxyUser: String = "",
     proxyPassword: String = "",
     adapterID: String? = nil,
+    contextualBias: STTContextualBias = .none,
     retrySleep: ((TimeInterval) async -> Void)? = nil
   ) {
     // Empty config baseURL/model resolve to adapter defaults
@@ -349,6 +354,7 @@ public final class Transcriber {
     self.proxyUser = proxyUser
     self.proxyPassword = proxyPassword
     self.adapterID = adapterID
+    self.contextualBias = contextualBias
     // Injected sleep between retries: tests run backoff without real
     // pauses. Default — real Task.sleep (seconds > 0).
     self.retrySleep =
@@ -433,7 +439,8 @@ public final class Transcriber {
       wav: wav,
       filename: filename,
       prompt: prompt,
-      needsWordTimestamps: needsWordTimestamps
+      needsWordTimestamps: needsWordTimestamps,
+      bias: contextualBias
     )
     guard let url = spec.url else {
       Logger.log("STT error: invalid base URL", level: "error")
@@ -591,6 +598,17 @@ extension Transcriber {
     if let prompt = context.prompt, !prompt.isEmpty {
       fields.append(
         (name: "prompt", value: String(prompt.prefix(80)) + (prompt.count > 80 ? "…" : "")))
+    }
+    // Contextual bias: counts only, never the terms themselves (config
+    // privacy: vocabulary may contain product names; debug log must not
+    // become a vocabulary dump).
+    let normalizedVocabulary = STTContextualBiasing.normalizeVocabulary(contextualBias.vocabulary)
+    if !normalizedVocabulary.isEmpty {
+      fields.append((name: "vocabulary_terms", value: "\(normalizedVocabulary.count)"))
+    }
+    let normalizedExtras = STTContextualBiasing.normalizeExtraLanguages(contextualBias.extraLanguages)
+    if !normalizedExtras.isEmpty {
+      fields.append((name: "extra_languages", value: normalizedExtras.joined(separator: ",")))
     }
 
     let filePart = DebugDump.FilePart(
