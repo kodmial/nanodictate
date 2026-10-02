@@ -1242,6 +1242,39 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       // dictation) or the loop already ended with a terminal event (the
       // "STT timeout" watchdog set state to .idle) — terminal calls become
       // no-ops; a repeated failTranscription/completeInsertion is impossible.
+      // Realtime profiles (`.streamingSession`, today `gpt-live-transcribe`)
+      // stream raw PCM via RealtimeTranscriptionSession — never as a WAV
+      // batch upload through Transcriber (which rejects realtime profiles
+      // with an invalid spec). Fail-closed: no implicit batch fallback.
+      if let realtimeProvider = self.effectiveOrdinaryProvider(),
+        self.isRealtimeOrdinaryProvider(realtimeProvider)
+      {
+        do {
+          let result = try await self.transcribeRealtime(
+            samples: samples, provider: realtimeProvider)
+          let text = TextRefinement.finalize(result.text)
+          DispatchQueue.main.async {
+            guard
+              NanoDictateFlow.shouldDeliverResult(
+                isCancelled: self.cancelRecognition,
+                sessionActive: self.processingSession == session && self.state == .transcribing
+              )
+            else { return }
+            self.completeInsertion(text)
+          }
+        } catch {
+          let networkText = OverlayErrorText.text(for: error)
+          let message = networkText ?? Self.message(for: error)
+          DispatchQueue.main.async {
+            guard
+              self.processingSession == session,
+              self.state == .transcribing
+            else { return }
+            self.failTranscription(message, isNetworkFailure: networkText != nil)
+          }
+        }
+        return
+      }
       let wav = WAVEncoder.encode(samples: samples)
       // Last WAV kept in memory (RetryProvider): manual retry with another
       // provider (`nanodictate retry`) and auto-failover reuse it.
@@ -2051,11 +2084,63 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     return makeTranscriber(provider)
   }
 
+  /// Effective provider for ordinary (single-request) dictation: the final
+  /// routing role when set to another provider, else the active provider.
+  /// Mirrors the provider choice in `transcribeAutomatically` so the realtime
+  /// check and the realtime run agree on the same provider.
+  private func effectiveOrdinaryProvider() -> AppConfig.Provider? {
+    if let finalRoleProviderID,
+      finalRoleProviderID != activeProviderID,
+      let roleProvider = providersByID[finalRoleProviderID]
+    {
+      return roleProvider
+    }
+    guard let activeProviderID, let active = providersByID[activeProviderID] else {
+      return nil
+    }
+    return active
+  }
+
+  /// Whether an ordinary-dictation provider streams via a stateful realtime
+  /// session (today: `gpt-live-transcribe` family).
+  private func isRealtimeOrdinaryProvider(_ provider: AppConfig.Provider) -> Bool {
+    let resolvedModel = ProviderRequestBuilder.resolveModel(provider.model, for: provider.id)
+    return ProviderRequestBuilder.isRealtime(adapterID: provider.id, model: resolvedModel)
+  }
+
+  /// Ordinary dictation for realtime profiles: raw PCM streams through
+  /// `RealtimeTranscriptionSession` (connect -> append -> commit -> final).
+  /// Fail-closed: a realtime failure surfaces and never falls back to batch.
+  private func transcribeRealtime(
+    samples: [Int16], provider: AppConfig.Provider
+  ) async throws -> TranscriptionResult {
+    let resolvedModel = ProviderRequestBuilder.resolveModel(provider.model, for: provider.id)
+    let apiKey = RetryProvider.resolveAPIKey(for: provider, activeProviderID: activeProviderID)
+    guard let url = RealtimeEndpoint.transcriptionURL() else {
+      throw TranscribeError.network("Invalid base URL")
+    }
+    let transport = URLSessionWebSocketTransport(url: url, apiKey: apiKey)
+    let config = RealtimeSessionConfig(
+      model: resolvedModel,
+      language: resolvedConfig.language,
+      prompt: nil,
+      keywords: [],
+      sourceSampleRate: 16000)
+    return try await RealtimeDictationRunner.transcribe(
+      samples: samples,
+      sourceSampleRate: 16000,
+      config: config,
+      transport: transport)
+  }
+
   /// Recognition with automatic failover (auto_failover = true): the primary
   /// provider is self.transcriber (the active one from the config); on a
   /// TranscribeError the candidates from the failover order are tried. An
   /// error NOT related to the provider (microphone etc.) does not start a
   /// failover. Returns (result, id of the failover provider; nil — primary).
+  /// Batch-only: realtime (`.streamingSession`) profiles never reach here —
+  /// `processSingleRequest` routes them through `transcribeRealtime` before
+  /// any WAV encoding.
   private func transcribeAutomatically(wav: Data) async throws -> (TranscriptionResult, String?) {
     // The final role from [routing] (whole recording non-chunked): set and
     // different from the active — the direct role provider WITHOUT a

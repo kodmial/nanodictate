@@ -696,4 +696,52 @@ final class RealtimeTranscriptionTests: XCTestCase {
             await session.close()
         }
     }
+
+    @objc func testRealtimeDictationRunnerTranscribesViaSession() {
+        runAsync("realtime dictation runner one-shot") {
+            let transport = MockRealtimeTransport(incoming: [
+                self.json(["type": "session.updated"]),
+                self.json([
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "item_id": "item_1", "content_index": 0,
+                    "transcript": "hello realtime",
+                ]),
+            ])
+            let result = try await RealtimeDictationRunner.transcribe(
+                samples: [0, 1000, 2000, 3000],
+                sourceSampleRate: 16000,
+                config: RealtimeSessionConfig(model: "gpt-live-transcribe", sourceSampleRate: 16000),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5),
+                transport: transport)
+            XCTAssertEqual(result.text, "hello realtime")
+            XCTAssertEqual(String(data: result.rawData, encoding: .utf8), "hello realtime")
+            XCTAssertTrue(transport.sent.first?.contains("session.update") ?? false)
+            XCTAssertTrue(transport.sent.contains(where: { $0.contains("input_audio_buffer.append") }))
+            XCTAssertTrue(transport.sent.contains(where: { $0.contains("input_audio_buffer.commit") }))
+            XCTAssertFalse(transport.sent.joined().contains("RIFF"))
+            XCTAssertEqual(transport.closedCount, 1)
+        }
+    }
+
+    @objc func testRealtimeDictationRunnerFailureSurfacesWithoutBatchFallback() {
+        let expectation = self.expectation(description: "realtime runner failure")
+        Task {
+            let transport = MockRealtimeTransport(incoming: [
+                self.json(["type": "error", "error": ["message": "boom"]] as [String: Any])
+            ])
+            do {
+                _ = try await RealtimeDictationRunner.transcribe(
+                    samples: [1, 2, 3],
+                    sourceSampleRate: 16000,
+                    config: RealtimeSessionConfig(model: "gpt-live-transcribe"),
+                    policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 2),
+                    transport: transport)
+                XCTFail("Expected realtime failure")
+            } catch {
+                XCTAssertTrue(transport.closedCount >= 1)
+            }
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 15)
+    }
 }
