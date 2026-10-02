@@ -700,15 +700,35 @@ public actor RealtimeTranscriptionSession {
         continue
       } catch let error as RealtimeTranscriptionError {
         // Transport drop during receive fails the session closed so a later
-        // `lastErrorMessage` reflects the drop.
+        // `lastErrorMessage` reflects the drop. When a final or partial
+        // transcript is already buffered it is returned instead of throwing
+        // (same close-out as clean EOF below).
         if case .transport(let message) = error {
+          if let final = self.accumulator.finalText {
+            return final
+          }
+          let partial = self.accumulator.partialText
+          if !partial.isEmpty {
+            return partial
+          }
           state = .failed
           lastError = message
         }
         throw error
       } catch {
-        // Per-receive timeout: keep waiting until the commit deadline.
-        continue
+        // Unknown receive errors are transport drops, not per-receive
+        // expiries: return buffered text when available, otherwise fail
+        // closed so `lastErrorMessage` reflects the drop.
+        if let final = self.accumulator.finalText {
+          return final
+        }
+        let partial = self.accumulator.partialText
+        if !partial.isEmpty {
+          return partial
+        }
+        state = .failed
+        lastError = error.localizedDescription
+        throw RealtimeTranscriptionError.transport(error.localizedDescription)
       }
     }
   }
@@ -735,14 +755,29 @@ public actor RealtimeTranscriptionSession {
       } catch is CancellationError {
         throw RealtimeTranscriptionError.cancelled
       } catch let error as RealtimeTranscriptionError {
-        // Transport drop during receive fails the session closed so a later
-        // `lastErrorMessage` reflects the drop.
+        // Transport drop during receive: return buffered text when available
+        // (same close-out as clean EOF below), otherwise fail closed so a
+        // later `lastErrorMessage` reflects the drop.
         if case .transport(let message) = error {
+          if let final = accumulator.finalText {
+            return final
+          }
+          let partial = accumulator.partialText
+          if !partial.isEmpty {
+            return partial
+          }
           state = .failed
           lastError = message
         }
         throw error
       } catch {
+        if let final = accumulator.finalText {
+          return final
+        }
+        let partial = accumulator.partialText
+        if !partial.isEmpty {
+          return partial
+        }
         state = .failed
         lastError = error.localizedDescription
         throw RealtimeTranscriptionError.transport(error.localizedDescription)

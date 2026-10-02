@@ -8,6 +8,9 @@ final class MockRealtimeTransport: RealtimeTransport {
     var incoming: [String?]
     var closedCount = 0
     var sendError: Error?
+    /// When non-empty, thrown (in order) from `receive()` before `incoming`
+    /// is consulted. Lets tests script transport and generic failures.
+    var receiveErrors: [Error] = []
 
     init(incoming: [String?] = []) {
         self.incoming = incoming
@@ -21,6 +24,9 @@ final class MockRealtimeTransport: RealtimeTransport {
     }
 
     func receive() async throws -> String? {
+        if !receiveErrors.isEmpty {
+            throw receiveErrors.removeFirst()
+        }
         if incoming.isEmpty {
             // Park briefly so wait loops can observe cancellation/timeout
             // without hot-spinning; then report no message yet via nil only
@@ -405,6 +411,89 @@ final class RealtimeTranscriptionTests: XCTestCase {
             XCTAssertEqual(state, .failed)
             let lastError = await session.lastErrorMessage
             XCTAssertEqual(lastError, "transport closed before completion")
+        }
+    }
+
+    @objc func testWaitForFinalReturnsBufferedPartialOnTransportError() {
+        runAsync("realtime waitForFinal returns buffered partial on transport error") {
+            let transport = MockRealtimeTransport(incoming: [
+                self.json(["type": "session.updated"])
+            ])
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5))
+            try await session.connect()
+            transport.receiveErrors = [RealtimeTranscriptionError.transport("socket reset")]
+            try await session.appendAudio([1, 2, 3], sourceSampleRate: 24000)
+            try await session.commit()
+            _ = await session.handleMessage(
+                self.json([
+                    "type": "conversation.item.input_audio_transcription.delta",
+                    "item_id": "item_1", "content_index": 0, "delta": "Hello,",
+                ]))
+            let text = try await session.waitForFinal()
+            XCTAssertEqual(text, "Hello,")
+            // Buffered close-out does not fail the session.
+            let state = await session.currentState
+            XCTAssertNotEqual(state, .failed)
+        }
+    }
+
+    @objc func testRunToCompletionReturnsBufferedPartialOnTransportError() {
+        runAsync("realtime runToCompletion returns buffered partial on transport error") {
+            let transport = MockRealtimeTransport(incoming: [
+                self.json(["type": "session.updated"])
+            ])
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5))
+            try await session.connect()
+            transport.receiveErrors = [RealtimeTranscriptionError.transport("socket reset")]
+            try await session.appendAudio([1, 2, 3], sourceSampleRate: 24000)
+            try await session.commit()
+            _ = await session.handleMessage(
+                self.json([
+                    "type": "conversation.item.input_audio_transcription.delta",
+                    "item_id": "item_1", "content_index": 0, "delta": "Hello,",
+                ]))
+            let text = try await session.runToCompletion()
+            XCTAssertEqual(text, "Hello,")
+            let state = await session.currentState
+            XCTAssertNotEqual(state, .failed)
+        }
+    }
+
+    @objc func testWaitForFinalUnknownReceiveErrorFailsClosed() {
+        struct Boom: Error {}
+        return runAsync("realtime waitForFinal unknown error fails closed") {
+            let transport = MockRealtimeTransport(incoming: [
+                self.json(["type": "session.updated"])
+            ])
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5))
+            try await session.connect()
+            transport.receiveErrors = [Boom()]
+            try await session.appendAudio([1, 2, 3], sourceSampleRate: 24000)
+            try await session.commit()
+            do {
+                _ = try await session.waitForFinal()
+                XCTFail("unknown receive error must throw")
+            } catch let error as RealtimeTranscriptionError {
+                if case .transport = error {
+                } else {
+                    XCTFail("expected transport error, got \(error)")
+                }
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+            let state = await session.currentState
+            XCTAssertEqual(state, .failed)
+            let lastError = await session.lastErrorMessage
+            XCTAssertNotNil(lastError)
         }
     }
 }
