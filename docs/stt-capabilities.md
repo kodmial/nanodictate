@@ -95,6 +95,42 @@ entry if the old parameter set is required.
   `gpt-4o-transcribe` family: existing integrations keep working through the same
   capability gating; prefer `gpt-transcribe` for new setups.
 
+### Contextual biasing (technical vocabulary + code-switching)
+
+Reusable bias list (`vocabulary`) plus extra language hints
+(`extra_languages`) are configured once at the top level and gated by the
+concrete model profile — unsupported providers/models never receive invalid
+API fields (the bias is folded into supported fields or dropped with a
+warning diagnostic):
+
+```toml
+language = "ru"
+vocabulary = ["Kubernetes", "Whisper", "NanoDictate", "пул реквест"]
+extra_languages = ["en", "ru"]
+```
+
+- Vocabulary: normalized (trimmed, whitespace-collapsed, de-duplicated,
+  capped at 50 terms / 64 chars per term / 400 chars total) and appended to
+  `prompt` after the previous-transcript chain context where the profile
+  supports `prompt` (`openai`, `groq`, conservative fallback). Cloudflare
+  (`supportsPrompt == false`) drops it with a warning.
+- Extra languages: normalized codes (lowercased, capped at 4) are sent as
+  `languages[]` only where the profile declares multi-hint mode
+  (`gpt-transcribe`); single-hint models keep `language` only, `none`
+  profiles send nothing.
+- Dedicated `keywords[]` multipart serialization exists but no built-in
+  profile emits it today (`supportsKeywordBiasing == false` everywhere) —
+  it is reserved for future models with a native keywords field.
+- Limits and escaping are covered by request-builder tests; debug logs
+  record only `vocabulary_terms=N` counts, never the terms themselves.
+
+Technical-dictation benchmark: `technical-codeswitch-short` and
+`technical-codeswitch-long` fixtures carry mixed Russian/English
+transcripts and can be compared with and without bias via
+`BenchmarkSTTConfig(..., bias: STTContextualBias(vocabulary: [...],
+extraLanguages: ["en", "ru"]))`; upload-byte accounting includes the bias
+fields.
+
 Manual integration validation (no secrets in CI): set the OpenAI key via
 `nanodictate config set-key openai`, select the provider
 (`nanodictate provider use openai`), keep `log_level = "debug"` for

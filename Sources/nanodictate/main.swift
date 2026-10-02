@@ -998,6 +998,8 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
     : config.activeProvider
   let apiKey = RetryProvider.resolveAPIKey(for: provider, activeProviderID: activeAdapterID)
   let language = config.language
+  let bias = STTContextualBias(
+    vocabulary: config.vocabulary, extraLanguages: config.extraLanguages)
   let sendOne: BatchTranscriber.SendOne = { _, wav, chunkIndex, prompt in
     guard
       let prepared = BatchRequestBuilder.makeRequest(
@@ -1010,7 +1012,8 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
         batchParams: BatchSTTParams(prompt: prompt),
         proxyKey: provider.proxyKey,
         proxyKeyHeader: provider.proxyKeyHeader.isEmpty
-          ? config.proxyKeyHeader : provider.proxyKeyHeader
+          ? config.proxyKeyHeader : provider.proxyKeyHeader,
+        bias: bias
       )
     else {
       throw BatchHTTPError.invalidResponse(
@@ -1203,7 +1206,9 @@ func cmdTranscribeLegacy(_ file: String, json: Bool) -> Int32 {
     httpProxy: config.httpProxy,
     proxyUser: config.proxyUser,
     proxyPassword: config.proxyPassword,
-    adapterID: activeAdapterID
+    adapterID: activeAdapterID,
+    contextualBias: STTContextualBias(
+      vocabulary: config.vocabulary, extraLanguages: config.extraLanguages)
   )
   // Data is always WAV (non-WAV is converted above); the server is strict
   // about the extension, so the multipart file field always sends
@@ -1664,7 +1669,9 @@ func cmdBenchmarkLive(
     httpProxy: config.httpProxy,
     proxyUser: config.proxyUser,
     proxyPassword: config.proxyPassword,
-    adapterID: activeAdapterID
+    adapterID: activeAdapterID,
+    contextualBias: STTContextualBias(
+      vocabulary: config.vocabulary, extraLanguages: config.extraLanguages)
   )
   let envWavDir = ProcessInfo.processInfo.environment[
     "NANODICTATE_BENCHMARK_LIVE_WAV_DIR"]
@@ -1709,7 +1716,9 @@ func cmdBenchmarkLive(
     name: activeAdapterID ?? "active",
     adapterID: resolvedAdapter,
     model: ProviderRequestBuilder.resolveModel(config.model, for: resolvedAdapter),
-    language: config.language
+    language: config.language,
+    bias: STTContextualBias(
+      vocabulary: config.vocabulary, extraLanguages: config.extraLanguages)
   )
   Task {
     do {
