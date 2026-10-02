@@ -1545,6 +1545,90 @@ func chunkedComparisonRows(
 /// NANODICTATE_BENCHMARK_LIVE_WAV_DIR. Fixtures without readable speech
 /// audio are skipped (never scored) so reported WER/CER only reflect
 /// recognition quality on audio that speaks each transcript.
+func liveChunkedSection(
+  fixture: BenchmarkFixture,
+  fullHypothesis: String,
+  transcriber: Transcriber,
+  benchmarkConfig: BenchmarkSTTConfig
+) async -> String? {
+  let segments = AudioSegmenter.segments(
+    samples: fixture.samples, sampleRate: fixture.sampleRate)
+  guard segments.count > 1 else { return nil }
+  var segmentTexts: [String] = []
+  var segmentHasTimestamps: [Bool] = []
+  var segmentWords: [[TimedWord]] = []
+  var promptParts: [String] = []
+  for (index, segment) in segments.enumerated() {
+    let segmentWAV = WAVEncoder.encode(
+      samples: segment.samples, sampleRate: fixture.sampleRate)
+    let prompt: String? =
+      promptParts.isEmpty ? nil : ChunkedPipeline.truncatedPrompt(promptParts)
+    do {
+      let segmentResult = try await transcriber.transcribe(
+        wav: segmentWAV, filename: "segment-\(index + 1).wav", prompt: prompt,
+        needsWordTimestamps: true)
+      segmentTexts.append(segmentResult.text)
+      segmentHasTimestamps.append(!segmentResult.words.isEmpty)
+      segmentWords.append(segmentResult.words)
+      promptParts.append(TextRefinement.finalize(segmentResult.text))
+    } catch {
+      eprint(
+        "benchmark: live chunked segment \(index + 1) for \(fixture.id) failed: \(error); skipping chunked comparison for this fixture."
+      )
+      return nil
+    }
+  }
+  let rows = ChunkedBenchmark.compare(
+    fixture: fixture,
+    config: benchmarkConfig,
+    segmentTexts: segmentTexts,
+    segmentHasTimestamps: segmentHasTimestamps,
+    segmentWords: segmentWords,
+    finalText: fullHypothesis)
+  let alwaysRow = rows.first { $0.policy == ChunkedFinalPassPolicy.always.configValue }
+  let defaultRow = rows.first {
+    $0.policy == ChunkedFinalPassPolicy.default.configValue
+  }
+  let stitchedHypothesis = defaultRow?.hypothesis ?? fullHypothesis
+  let boundary = ChunkedBenchmark.boundaryDiagnostics(
+    stitched: stitchedHypothesis, final: fullHypothesis)
+  let matchNote =
+    ChunkedBenchmark.defaultMatchesAlways(rows: rows)
+    ? "no segment-boundary regression (default matches always)"
+    : "REGRESSION: default hypothesis differs from always; inspect boundary"
+  var section = ChunkedBenchmark.markdown(fixtureID: "\(fixture.id) (live)", rows: rows)
+  if let alwaysRow, let defaultRow {
+    let alwaysWER = BenchmarkFormat.ratio(alwaysRow.wer)
+    let defaultWER = BenchmarkFormat.ratio(defaultRow.wer)
+    let alwaysCER = BenchmarkFormat.ratio(alwaysRow.cer)
+    let defaultCER = BenchmarkFormat.ratio(defaultRow.cer)
+    section += "- live WER always \(alwaysWER) vs default \(defaultWER)\n"
+    section += "- live CER always \(alwaysCER) vs default \(defaultCER)\n"
+  }
+  section += "- boundary: \(boundary)\n- \(matchNote)\n"
+  return section
+}
+
+func liveChunkedSections(
+  fixtures: [BenchmarkFixture],
+  results: [BenchmarkCaseResult],
+  transcriber: Transcriber,
+  benchmarkConfig: BenchmarkSTTConfig
+) async -> [String] {
+  var sections: [String] = []
+  for fixture in fixtures {
+    guard let fullHypothesis = results.first(where: { $0.fixtureID == fixture.id })?.hypothesis
+    else { continue }
+    if let section = await liveChunkedSection(
+      fixture: fixture, fullHypothesis: fullHypothesis, transcriber: transcriber,
+      benchmarkConfig: benchmarkConfig)
+    {
+      sections.append(section)
+    }
+  }
+  return sections
+}
+
 func cmdBenchmarkLive(
   jsonPath: String?, markdownPath: String?, liveWavDir: String? = nil
 ) -> Int32 {
@@ -1666,66 +1750,9 @@ func cmdBenchmarkLive(
       // `always` vs default `on-uncertainty` with those real segment/final
       // results. WER/CER per policy plus a boundary omission/duplication
       // check replace the scripted local table as quality evidence.
-      var chunkedSections: [String] = []
-      for fixture in fixtures {
-        let segments = AudioSegmenter.segments(
-          samples: fixture.samples, sampleRate: fixture.sampleRate)
-        guard segments.count > 1 else { continue }
-        var segmentTexts: [String] = []
-        var segmentHasTimestamps: [Bool] = []
-        var segmentWords: [[TimedWord]] = []
-        var promptParts: [String] = []
-        var segmentFailed = false
-        for (index, segment) in segments.enumerated() {
-          let segmentWAV = WAVEncoder.encode(
-            samples: segment.samples, sampleRate: fixture.sampleRate)
-          let prompt: String? =
-            promptParts.isEmpty ? nil : ChunkedPipeline.truncatedPrompt(promptParts)
-          do {
-            let segmentResult = try await transcriber.transcribe(
-              wav: segmentWAV, filename: "segment-\(index + 1).wav", prompt: prompt,
-              needsWordTimestamps: true)
-            segmentTexts.append(segmentResult.text)
-            segmentHasTimestamps.append(!segmentResult.words.isEmpty)
-            segmentWords.append(segmentResult.words)
-            promptParts.append(TextRefinement.finalize(segmentResult.text))
-          } catch {
-            eprint(
-              "benchmark: live chunked segment \(index + 1) for \(fixture.id) failed: \(error); skipping chunked comparison for this fixture."
-            )
-            segmentFailed = true
-            break
-          }
-        }
-        if segmentFailed { continue }
-        guard let fullHypothesis = results.first(where: { $0.fixtureID == fixture.id })?.hypothesis
-        else { continue }
-        let rows = ChunkedBenchmark.compare(
-          fixture: fixture,
-          config: benchmarkConfig,
-          segmentTexts: segmentTexts,
-          segmentHasTimestamps: segmentHasTimestamps,
-          segmentWords: segmentWords,
-          finalText: fullHypothesis)
-        let alwaysWER = rows.first { $0.policy == ChunkedFinalPassPolicy.always.configValue }
-        let defaultRow = rows.first {
-          $0.policy == ChunkedFinalPassPolicy.default.configValue
-        }
-        let stitchedHypothesis = defaultRow?.hypothesis ?? fullHypothesis
-        let boundary = ChunkedBenchmark.boundaryDiagnostics(
-          stitched: stitchedHypothesis, final: fullHypothesis)
-        let matchNote =
-          ChunkedBenchmark.defaultMatchesAlways(rows: rows)
-          ? "no segment-boundary regression (default matches always)"
-          : "REGRESSION: default hypothesis differs from always; inspect boundary"
-        var section = ChunkedBenchmark.markdown(fixtureID: "\(fixture.id) (live)", rows: rows)
-        if let alwaysWER, let defaultRow {
-          section +=
-            "- live WER always \(BenchmarkFormat.ratio(alwaysWER.wer)) vs default \(BenchmarkFormat.ratio(defaultRow.wer)); CER always \(BenchmarkFormat.ratio(alwaysWER.cer)) vs default \(BenchmarkFormat.ratio(defaultRow.cer))\n"
-        }
-        section += "- boundary: \(boundary)\n- \(matchNote)\n"
-        chunkedSections.append(section)
-      }
+      let chunkedSections = await liveChunkedSections(
+        fixtures: fixtures, results: results, transcriber: transcriber,
+        benchmarkConfig: benchmarkConfig)
       if chunkedSections.isEmpty {
         eprint(
           "benchmark: no multi-segment live fixtures for chunked comparison (single-segment audio needs no final pass)."
