@@ -700,12 +700,17 @@ public enum ChunkedBenchmark {
   /// for one fixture with scripted segment/final hypotheses.
   /// - `segmentTexts`: one hypothesis per AudioSegmenter segment, in order.
   /// - `segmentHasTimestamps`: per-segment timestamp presence, in order.
+  /// - `segmentWords`: optional per-segment timed words, in order. When nil,
+  ///   words are synthesized with uniform timings for segments that report
+  ///   timestamps, so production overlap deduplication can run. Pass explicit
+  ///   words when the seam timing matters.
   /// - `finalText`: hypothesis of the full-recording pass.
   public static func compare(
     fixture: BenchmarkFixture,
     config: BenchmarkSTTConfig,
     segmentTexts: [String],
     segmentHasTimestamps: [Bool],
+    segmentWords: [[TimedWord]]? = nil,
     finalText: String,
     segmenterConfig: AudioSegmenterConfig = .defaults,
     simulatedFinalLatencyMs: Double = Self.simulatedFinalLatencyMs
@@ -721,16 +726,37 @@ public enum ChunkedBenchmark {
     let fullWAV = WAVEncoder.encode(samples: fixture.samples, sampleRate: fixture.sampleRate)
     let finalUpload = BenchmarkRunner.uploadBytes(config: config, wav: fullWAV)
 
-    // Stitched text mirrors ChunkedPipeline joining (space between segments).
+    // Stitched text mirrors ChunkedPipeline.recognizeWAV per segment:
+    // overlap dedupe by timestamps, then finalization, then space join.
+    // Scoring the raw joined text would keep seam duplicates that production
+    // removes (for example "hello world" + "world again" must score as
+    // "hello world again", not with the repeated seam word).
     var stitched = ""
     for (index, text) in segmentTexts.enumerated() {
-      let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
-      guard !clean.isEmpty else { continue }
+      let overlap = index < segments.count ? segments[index].overlapSeconds : 0
+      let hasStamps =
+        index < segmentHasTimestamps.count ? segmentHasTimestamps[index] : false
+      let words: [TimedWord]
+      if let provided = segmentWords, index < provided.count {
+        words = provided[index]
+      } else if hasStamps {
+        let duration =
+          index < segments.count
+          ? Double(segments[index].samples.count) / Double(max(1, fixture.sampleRate)) : 0
+        words = Self.syntheticWords(for: text, segmentDuration: duration)
+      } else {
+        words = []
+      }
+      let deduped = ChunkedPipeline.dedupeOverlap(
+        text: text, words: words, overlapSeconds: overlap)
+      let finalized = TextRefinement.finalize(deduped)
+      guard !finalized.isEmpty else { continue }
       if index > 0, !stitched.isEmpty, !stitched.hasSuffix(" ") {
         stitched += " "
       }
-      stitched += clean
+      stitched += finalized
     }
+    let finalizedFinal = TextRefinement.finalize(finalText)
     let reports: [ChunkedSegmentReport] = (0..<segmentCount).map { index in
       let text = index < segmentTexts.count ? segmentTexts[index] : ""
       let overlap = index < segments.count ? segments[index].overlapSeconds : 0
@@ -745,7 +771,7 @@ public enum ChunkedBenchmark {
     return policies.map { policy in
       let decision = ChunkedFinalDecision.shouldRunFinalPass(
         segmentCount: segmentCount, reports: reports, policy: policy)
-      let hypothesis = decision.run ? finalText : stitched
+      let hypothesis = decision.run ? finalizedFinal : stitched
       let requests = segmentCount + (decision.run ? 1 : 0)
       return ChunkedPolicyComparison(
         policy: policy.configValue,
@@ -759,6 +785,23 @@ public enum ChunkedBenchmark {
         hypothesis: hypothesis,
         finalRan: decision.run,
         reason: decision.reason.rawValue)
+    }
+  }
+
+  /// Synthetic timed words for scripted segment text: uniform slicing of the
+  /// segment duration across whitespace-separated tokens. Lets the benchmark
+  /// exercise production `dedupeOverlap` without a real STT response: words
+  /// ending inside `overlapSeconds` are treated as seam duplicates.
+  public static func syntheticWords(for text: String, segmentDuration: Double) -> [TimedWord] {
+    let tokens = text.split { $0.isWhitespace }.map(String.init).filter { !$0.isEmpty }
+    guard !tokens.isEmpty else { return [] }
+    let duration = max(0.01, segmentDuration)
+    let perWord = duration / Double(tokens.count)
+    return tokens.enumerated().map { index, token in
+      TimedWord(
+        word: token,
+        start: Double(index) * perWord,
+        end: Double(index + 1) * perWord)
     }
   }
 

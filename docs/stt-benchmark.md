@@ -139,9 +139,11 @@ provider section) and are never written to the report or the repo.
 
 The local run also prints a `Chunked final-pass` section for the long
 fixture (`normal-long`): real `AudioSegmenter` segments, scripted confident
-hypotheses (correct transcript slice + word timestamps per segment, correct
-full transcript for the final pass), exact multipart upload bytes via
-`ProviderRequestBuilder.plan`.
+hypotheses (correct transcript slice + synthetic uniform word timings per
+segment, correct full transcript for the final pass), exact multipart upload
+bytes via `ProviderRequestBuilder.plan`. The stitched hypothesis runs the
+production `dedupeOverlap` + finalization path (`ChunkedPipeline.recognizeWAV`),
+so seam duplicates inside glued overlaps are excluded from scoring.
 
 | policy | meaning |
 | --- | --- |
@@ -149,10 +151,17 @@ full transcript for the final pass), exact multipart upload bytes via
 | `on-uncertainty` (default) | Skip the full re-upload when all segments look acceptable; fall back on empty segments or seams without timestamps. |
 | `never` | Never re-upload after successful segments (failed segments still recover via the full pass). |
 
-With confident segments the default reaches the same WER/CER as `always`
-while saving the whole final upload plus one request of tail latency
-(`ChunkedBenchmark.simulatedFinalLatencyMs`). With an empty segment or a
-seam without timestamps the default falls back to the final pass, matching
-`always` on quality. Decision: default `on-uncertainty`; keep `always` as
-the quality-first option; use `never` with true streaming providers, where
-the stream's own final hypothesis already carries full context.
+With confident segments the default saves the whole final upload plus one
+request of tail latency (`ChunkedBenchmark.simulatedFinalLatencyMs`) at the
+same scripted WER/CER as `always`. That WER equality is deterministic
+accounting, not recognition-quality evidence: both hypotheses derive from the
+reference transcript and synthetic audio does not speak it. Quality trade-off
+evidence requires transcript-bearing speech with actual segment and final STT
+results (opt-in live benchmark with `--live-wav-dir`, which scores only
+speech fixtures); no segment-boundary regression is covered by the
+`ChunkedPipeline` dedupe unit tests exercising the same production stitching
+path. With an empty segment or a seam without timestamps the default falls
+back to the final pass, matching `always` on quality. Decision: default
+`on-uncertainty`; keep `always` as the quality-first option; use `never` with
+true streaming providers, where the stream's own final hypothesis already
+carries full context.

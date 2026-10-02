@@ -1865,8 +1865,12 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     // isCancelled guard blocks segment inserts the same way.
     guard !runState.isCancelled else { return }
     // Empty recording — no extra STT request (reachable only in a contrived
-    // process, but symmetric to offline chunking).
-    if runState.segmentCount == 0 {
+    // process, but symmetric to offline chunking). An all-failed run with
+    // recorded audio falls through to the full-pass recovery below instead
+    // of failing immediately: a transient segment failure can still recover
+    // through a successful full-recording request under any policy.
+    let needsFullRecovery = runState.segmentCount == 0 && runState.anySegmentFailed && !samples.isEmpty
+    if runState.segmentCount == 0, !needsFullRecovery {
       // Full failure of all segments (STT unavailable: disconnected network /
       // provider): the user actually spoke, but no segment was recognized.
       // This is an STT error, NOT an "empty dictation" — an explicit
@@ -1997,8 +2001,14 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         self.completeChunkedInsertion(outcome: outcome)
       }
     } catch {
+      // Recovery failure for an all-failed run: report the stored segment
+      // error so the user sees why dictation failed, not just the final
+      // request's error. Otherwise report the final request's error.
+      let storedMessage: String? =
+        (runState.segmentCount == 0 && runState.anySegmentFailed)
+        ? runState.lastErrorText : nil
       let networkText = OverlayErrorText.text(for: error)
-      let message = networkText ?? Self.message(for: error)
+      let message = storedMessage ?? networkText ?? Self.message(for: error)
       DispatchQueue.main.async {
         guard self.processingSession == session, self.state == .transcribing else { return }
         self.failTranscription(message, isNetworkFailure: networkText != nil)

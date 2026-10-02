@@ -1431,11 +1431,19 @@ func cmdBenchmarkLocal(jsonPath: String?, markdownPath: String?) -> Int32 {
     let report = try BenchmarkRunner.run(
       fixtures: fixtures, configs: configs,
       provider: BenchmarkRunner.scriptedProvider(hypotheses: hypotheses))
-    // Chunked final-pass evidence (always vs default on-uncertainty): the
-    // long fixture is segmented for real; scripted segment hypotheses are
-    // confident (correct slice + timestamps) so the default skips the final
-    // full-recording upload at identical WER. Printed after the main report;
-    // file outputs append the section.
+    // Chunked final-pass accounting (always vs default on-uncertainty): the
+    // long fixture is segmented for real and upload bytes use the exact
+    // multipart bodies. Scripted segment hypotheses are confident slices of
+    // the reference with synthetic uniform word timings, so the stitched
+    // text runs the production dedupeOverlap + finalize path; the default
+    // skips the final full-recording upload here. WER equality in this
+    // deterministic table is tautological (both hypotheses derive from the
+    // reference transcript) and is NOT recognition-quality evidence:
+    // synthetic tones do not speak the transcript. Real quality trade-off
+    // and no-boundary-regression evidence come from transcript-bearing
+    // speech with actual segment/final STT results (opt-in live benchmark
+    // with --live-wav-dir, plus ChunkedPipeline dedupe unit tests).
+    // Printed after the main report; file outputs append the section.
     let chunkedConfig = configs[0]
     if let longFixture = fixtures.first(where: { $0.durationBucket == .long }) {
       let chunkedRows = chunkedComparisonRows(fixture: longFixture, config: chunkedConfig)
@@ -1474,10 +1482,19 @@ func cmdBenchmarkLocal(jsonPath: String?, markdownPath: String?) -> Int32 {
   }
 }
 
-/// Scripted chunked hypotheses for the local benchmark: split the fixture
-/// transcript across the real AudioSegmenter segments so each segment is
-/// confident (correct words + timestamps) and the final hypothesis equals
-/// the ground truth. Deterministic, no network.
+/// Scripted chunked hypotheses for local policy/byte accounting: split the
+/// fixture transcript across the real AudioSegmenter segments and attach
+/// synthetic uniform word timings per segment so the stitched hypothesis runs
+/// the production dedupeOverlap + finalize path (the same code
+/// ChunkedPipeline.recognizeWAV uses). Deterministic, no network.
+///
+/// The resulting WER equality is tautological — both the stitched and final
+/// hypotheses derive from the reference transcript — and must not be read as
+/// recognition-quality proof (synthetic audio is tones, not speech). Quality
+/// trade-off evidence requires transcript-bearing speech plus actual segment
+/// and final STT results (opt-in live benchmark via transcript-bearing WAVs);
+/// no segment-boundary regression is covered by ChunkedPipeline dedupe tests
+/// exercising the same production path.
 func chunkedComparisonRows(
   fixture: BenchmarkFixture,
   config: BenchmarkSTTConfig
@@ -1501,11 +1518,22 @@ func chunkedComparisonRows(
     }
   }
   let hasTimestamps = Array(repeating: true, count: max(1, segmentTexts.count))
+  // Explicit timed words with uniform timings over each segment duration so
+  // the comparison scores the text the pipeline would insert (seam duplicates
+  // inside glued overlaps removed, same finalization as recognizeWAV).
+  var segmentWords: [[TimedWord]] = []
+  for (index, text) in segmentTexts.enumerated() {
+    let duration =
+      index < segments.count
+      ? Double(segments[index].samples.count) / Double(max(1, fixture.sampleRate)) : 0
+    segmentWords.append(ChunkedBenchmark.syntheticWords(for: text, segmentDuration: duration))
+  }
   return ChunkedBenchmark.compare(
     fixture: fixture,
     config: config,
     segmentTexts: segmentTexts,
     segmentHasTimestamps: hasTimestamps,
+    segmentWords: segmentWords,
     finalText: fixture.transcript)
 }
 

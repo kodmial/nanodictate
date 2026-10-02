@@ -283,4 +283,45 @@ final class ChunkedFinalPassTests: XCTestCase {
       XCTAssertEqual(decision.reason, .uncertainMissingTimestamps)
     }
   }
+
+  @objc func testChunkedBenchmarkStitchedUsesProductionDedupe() throws {
+    // Seam duplicate inside the glued overlap must be excluded from scoring,
+    // mirroring ChunkedPipeline.recognizeWAV (dedupeOverlap + finalize).
+    let samples = twoSegments()
+    let fixture = BenchmarkFixture(
+      id: "dedupe-check", category: .normal, durationBucket: .short,
+      description: "Seam duplicate check.",
+      transcript: "hello world again",
+      samples: samples)
+    let config = BenchmarkSTTConfig(name: "a", adapterID: "openai", model: "whisper-1")
+    let segments = AudioSegmenter.segments(
+      samples: samples, sampleRate: 16000, config: .defaults)
+    XCTAssertGreaterThanOrEqual(segments.count, 2, "needs a glued overlap to test dedupe")
+    let overlap = segments.count > 1 ? segments[1].overlapSeconds : 0
+    XCTAssertGreaterThan(overlap, 0, "second segment must carry glued overlap")
+    let texts = ["hello world", "world again"]
+    let words: [[TimedWord]] = [
+      [
+        TimedWord(word: "hello", start: 0.1, end: 0.4),
+        TimedWord(word: "world", start: 0.5, end: 0.9),
+      ],
+      [
+        // Seam repeat ends inside the glued overlap: production drops it.
+        TimedWord(word: "world", start: 0.1, end: min(0.5, max(0.1, overlap - 0.1))),
+        TimedWord(word: "again", start: overlap + 0.1, end: overlap + 0.5),
+      ],
+    ]
+    let rows = ChunkedBenchmark.compare(
+      fixture: fixture, config: config,
+      segmentTexts: texts,
+      segmentHasTimestamps: [true, true],
+      segmentWords: words,
+      finalText: "hello world again")
+    let def = rows.first { $0.policy == ChunkedFinalPassPolicy.default.configValue }!
+    XCTAssertFalse(def.finalRan, "timestamps verify the seam, no replay needed")
+    XCTAssertEqual(
+      BenchmarkText.words(def.hypothesis), ["hello", "world", "again"],
+      "stitched hypothesis must exclude the seam duplicate")
+    XCTAssertEqual(def.wer, 0)
+  }
 }
