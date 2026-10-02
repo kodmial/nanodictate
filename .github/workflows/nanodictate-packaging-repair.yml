@@ -1,0 +1,15 @@
+name: Packaging smoke repair
+
+on:
+  workflow_run:
+    workflows: ["Packaging smoke"]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  call:
+    uses: kodmial/continuum/.github/workflows/continuum-opencode-repair.yml@main
+    secrets: inherit
+    with:
+      continuum_ref: main
