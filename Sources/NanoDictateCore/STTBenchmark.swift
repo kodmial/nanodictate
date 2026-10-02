@@ -822,4 +822,52 @@ public enum ChunkedBenchmark {
     }
     return lines.joined(separator: "\n") + "\n"
   }
+
+  /// Whether the default policy hypothesis matches the `always` hypothesis
+  /// (normalized word comparison). Used as live quality evidence that
+  /// skipping the final pass introduces no segment-boundary regression for
+  /// the measured fixture with actual STT results.
+  public static func defaultMatchesAlways(rows: [ChunkedPolicyComparison]) -> Bool {
+    guard
+      let always = rows.first(where: { $0.policy == ChunkedFinalPassPolicy.always.configValue }),
+      let def = rows.first(where: {
+        $0.policy == ChunkedFinalPassPolicy.default.configValue
+      })
+    else { return false }
+    return BenchmarkText.words(always.hypothesis) == BenchmarkText.words(def.hypothesis)
+  }
+
+  /// Boundary diagnostics for live quality evidence: compare the stitched
+  /// segment hypothesis (production dedupe path) against the full-recording
+  /// hypothesis from actual STT results on transcript-bearing speech.
+  /// Flags omissions or duplication at segment boundaries in one human line.
+  public static func boundaryDiagnostics(stitched: String, final: String) -> String {
+    let stitchedWords = BenchmarkText.words(stitched)
+    let finalWords = BenchmarkText.words(final)
+    if stitchedWords == finalWords {
+      return
+        "match: stitched equals final (\(stitchedWords.count) words, no boundary omission/duplication)"
+    }
+    var notes: [String] = []
+    notes.append("stitched \(stitchedWords.count) words vs final \(finalWords.count) words")
+    var adjacentDuplicates: [String] = []
+    for index in stitchedWords.indices.dropFirst() {
+      if stitchedWords[index] == stitchedWords[index - 1],
+        !adjacentDuplicates.contains(stitchedWords[index])
+      {
+        adjacentDuplicates.append(stitchedWords[index])
+      }
+    }
+    if !adjacentDuplicates.isEmpty {
+      notes.append("possible seam duplication: \(adjacentDuplicates.joined(separator: ", "))")
+    }
+    if stitchedWords.count < finalWords.count {
+      notes.append("possible omission at boundary (\(finalWords.count - stitchedWords.count) fewer words)")
+    } else if stitchedWords.count > finalWords.count {
+      notes.append("possible duplication at boundary (\(stitchedWords.count - finalWords.count) extra words)")
+    } else {
+      notes.append("same word count, wording differs (substitution at boundary)")
+    }
+    return "diff: " + notes.joined(separator: "; ")
+  }
 }

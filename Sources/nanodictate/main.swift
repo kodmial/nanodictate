@@ -1660,9 +1660,102 @@ func cmdBenchmarkLive(
       }
       let report = BenchmarkReport(
         results: results, summaries: BenchmarkRunner.summarize(results: results))
-      let code = writeBenchmarkOutputs(
-        report: report, jsonPath: jsonPath, markdownPath: markdownPath)
-      exit(code)
+      // Live chunked quality evidence on transcript-bearing speech: re-run
+      // segmentation for real, transcribe each segment with actual STT
+      // (timestamps requested, prompt chained like production), then compare
+      // `always` vs default `on-uncertainty` with those real segment/final
+      // results. WER/CER per policy plus a boundary omission/duplication
+      // check replace the scripted local table as quality evidence.
+      var chunkedSections: [String] = []
+      for fixture in fixtures {
+        let segments = AudioSegmenter.segments(
+          samples: fixture.samples, sampleRate: fixture.sampleRate)
+        guard segments.count > 1 else { continue }
+        var segmentTexts: [String] = []
+        var segmentHasTimestamps: [Bool] = []
+        var segmentWords: [[TimedWord]] = []
+        var promptParts: [String] = []
+        var segmentFailed = false
+        for (index, segment) in segments.enumerated() {
+          let segmentWAV = WAVEncoder.encode(
+            samples: segment.samples, sampleRate: fixture.sampleRate)
+          let prompt: String? =
+            promptParts.isEmpty ? nil : ChunkedPipeline.truncatedPrompt(promptParts)
+          do {
+            let segmentResult = try await transcriber.transcribe(
+              wav: segmentWAV, filename: "segment-\(index + 1).wav", prompt: prompt,
+              needsWordTimestamps: true)
+            segmentTexts.append(segmentResult.text)
+            segmentHasTimestamps.append(!segmentResult.words.isEmpty)
+            segmentWords.append(segmentResult.words)
+            promptParts.append(TextRefinement.finalize(segmentResult.text))
+          } catch {
+            eprint(
+              "benchmark: live chunked segment \(index + 1) for \(fixture.id) failed: \(error); skipping chunked comparison for this fixture."
+            )
+            segmentFailed = true
+            break
+          }
+        }
+        if segmentFailed { continue }
+        guard let fullHypothesis = results.first(where: { $0.fixtureID == fixture.id })?.hypothesis
+        else { continue }
+        let rows = ChunkedBenchmark.compare(
+          fixture: fixture,
+          config: benchmarkConfig,
+          segmentTexts: segmentTexts,
+          segmentHasTimestamps: segmentHasTimestamps,
+          segmentWords: segmentWords,
+          finalText: fullHypothesis)
+        let alwaysWER = rows.first { $0.policy == ChunkedFinalPassPolicy.always.configValue }
+        let defaultRow = rows.first {
+          $0.policy == ChunkedFinalPassPolicy.default.configValue
+        }
+        let stitchedHypothesis = defaultRow?.hypothesis ?? fullHypothesis
+        let boundary = ChunkedBenchmark.boundaryDiagnostics(
+          stitched: stitchedHypothesis, final: fullHypothesis)
+        let matchNote =
+          ChunkedBenchmark.defaultMatchesAlways(rows: rows)
+          ? "no segment-boundary regression (default matches always)"
+          : "REGRESSION: default hypothesis differs from always; inspect boundary"
+        var section = ChunkedBenchmark.markdown(fixtureID: "\(fixture.id) (live)", rows: rows)
+        if let alwaysWER, let defaultRow {
+          section +=
+            "- live WER always \(BenchmarkFormat.ratio(alwaysWER.wer)) vs default \(BenchmarkFormat.ratio(defaultRow.wer)); CER always \(BenchmarkFormat.ratio(alwaysWER.cer)) vs default \(BenchmarkFormat.ratio(defaultRow.cer))\n"
+        }
+        section += "- boundary: \(boundary)\n- \(matchNote)\n"
+        chunkedSections.append(section)
+      }
+      if chunkedSections.isEmpty {
+        eprint(
+          "benchmark: no multi-segment live fixtures for chunked comparison (single-segment audio needs no final pass)."
+        )
+      }
+      var fullMarkdown = report.markdown()
+      for section in chunkedSections {
+        fullMarkdown += "\n" + section
+      }
+      print(fullMarkdown)
+      if let jsonPath {
+        do {
+          try report.jsonData().write(to: URL(fileURLWithPath: jsonPath), options: .atomic)
+          eprint("benchmark: JSON written to \(jsonPath)")
+        } catch {
+          eprint("benchmark: failed to write JSON: \(error)")
+          exit(1)
+        }
+      }
+      if let markdownPath {
+        do {
+          try fullMarkdown.write(
+            to: URL(fileURLWithPath: markdownPath), atomically: true, encoding: .utf8)
+          eprint("benchmark: Markdown written to \(markdownPath)")
+        } catch {
+          eprint("benchmark: failed to write Markdown: \(error)")
+          exit(1)
+        }
+      }
+      exit(0)
     } catch {
       eprint("benchmark: live run failed: \(error)")
       exit(1)

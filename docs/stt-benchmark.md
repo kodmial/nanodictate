@@ -156,12 +156,18 @@ request of tail latency (`ChunkedBenchmark.simulatedFinalLatencyMs`) at the
 same scripted WER/CER as `always`. That WER equality is deterministic
 accounting, not recognition-quality evidence: both hypotheses derive from the
 reference transcript and synthetic audio does not speak it. Quality trade-off
-evidence requires transcript-bearing speech with actual segment and final STT
-results (opt-in live benchmark with `--live-wav-dir`, which scores only
-speech fixtures); no segment-boundary regression is covered by the
-`ChunkedPipeline` dedupe unit tests exercising the same production stitching
-path. With an empty segment or a seam without timestamps the default falls
-back to the final pass, matching `always` on quality. Decision: default
-`on-uncertainty`; keep `always` as the quality-first option; use `never` with
-true streaming providers, where the stream's own final hypothesis already
-carries full context.
+evidence comes from the opt-in live benchmark on transcript-bearing speech:
+for each multi-segment speech fixture it transcribes every segment with
+actual STT (word timestamps requested, prompt chained like production) plus
+the full recording, then runs `ChunkedBenchmark.compare` on those real
+segment/final results. The live `Chunked final-pass: <id> (live)` section
+reports WER/CER for `always` vs default `on-uncertainty`, a boundary check
+(`ChunkedBenchmark.boundaryDiagnostics`: omission/duplication at seams), and
+whether the default hypothesis matches `always`
+(`ChunkedBenchmark.defaultMatchesAlways`). No segment-boundary regression is
+additionally covered by the `ChunkedPipeline` dedupe unit tests exercising
+the same production stitching path. With an empty segment or a seam without
+timestamps the default falls back to the final pass, matching `always` on
+quality. Decision: default `on-uncertainty`; keep `always` as the
+quality-first option; use `never` with true streaming providers, where the
+stream's own final hypothesis already carries full context.

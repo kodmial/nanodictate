@@ -324,4 +324,80 @@ final class ChunkedFinalPassTests: XCTestCase {
       "stitched hypothesis must exclude the seam duplicate")
     XCTAssertEqual(def.wer, 0)
   }
+
+  @objc func testChunkedBenchmarkLiveComparisonWithActualResults() throws {
+    // Live quality evidence shape: actual (imperfect) segment/final STT
+    // results on transcript-bearing speech, not transcript-derived slices.
+    let samples = twoSegments()
+    let fixture = BenchmarkFixture(
+      id: "live-check", category: .normal, durationBucket: .short,
+      description: "Actual STT results comparison.",
+      transcript: "hello world again",
+      samples: samples)
+    let config = BenchmarkSTTConfig(name: "a", adapterID: "openai", model: "whisper-1")
+    let segments = AudioSegmenter.segments(
+      samples: samples, sampleRate: 16000, config: .defaults)
+    XCTAssertGreaterThanOrEqual(segments.count, 2)
+    let overlap = segments.count > 1 ? segments[1].overlapSeconds : 0
+    XCTAssertGreaterThan(overlap, 0)
+    // Simulated provider output: second segment repeats the seam word with
+    // timestamps inside the glued overlap; final pass heard the full audio.
+    let segmentTexts = ["hello world", "world again"]
+    let segmentWords: [[TimedWord]] = [
+      [
+        TimedWord(word: "hello", start: 0.1, end: 0.4),
+        TimedWord(word: "world", start: 0.5, end: 0.9),
+      ],
+      [
+        TimedWord(word: "world", start: 0.1, end: max(0.1, overlap - 0.1)),
+        TimedWord(word: "again", start: overlap + 0.1, end: overlap + 0.5),
+      ],
+    ]
+    let rows = ChunkedBenchmark.compare(
+      fixture: fixture, config: config,
+      segmentTexts: segmentTexts,
+      segmentHasTimestamps: [true, true],
+      segmentWords: segmentWords,
+      finalText: "hello world again")
+    let always = rows.first { $0.policy == "always" }!
+    let def = rows.first { $0.policy == ChunkedFinalPassPolicy.default.configValue }!
+    XCTAssertTrue(always.finalRan)
+    XCTAssertFalse(def.finalRan)
+    // Both policies score real WER/CER against the transcript.
+    XCTAssertEqual(always.wer, 0)
+    XCTAssertEqual(def.wer, 0)
+    XCTAssertTrue(ChunkedBenchmark.defaultMatchesAlways(rows: rows))
+    XCTAssertTrue(
+      ChunkedBenchmark.boundaryDiagnostics(stitched: def.hypothesis, final: always.hypothesis)
+        .hasPrefix("match:"))
+  }
+
+  @objc func testChunkedBenchmarkBoundaryDiagnosticsFlagsSeams() throws {
+    XCTAssertTrue(
+      ChunkedBenchmark.boundaryDiagnostics(stitched: "hello world", final: "hello world")
+        .hasPrefix("match:"))
+    let dup = ChunkedBenchmark.boundaryDiagnostics(
+      stitched: "hello world world again", final: "hello world again")
+    XCTAssertTrue(dup.hasPrefix("diff:"))
+    XCTAssertTrue(dup.contains("duplication"))
+    let omit = ChunkedBenchmark.boundaryDiagnostics(stitched: "hello again", final: "hello world again")
+    XCTAssertTrue(omit.hasPrefix("diff:"))
+    XCTAssertTrue(omit.contains("omission"))
+    // Default vs always mismatch is a boundary regression signal.
+    let rows = [
+      ChunkedPolicyComparison(
+        policy: "always", requests: 3, segmentUploadBytes: 10, finalUploadBytes: 5,
+        totalUploadBytes: 15, finalLatencyMs: 800, wer: 0, cer: 0,
+        hypothesis: "hello world again", finalRan: true, reason: "policyAlways"),
+      ChunkedPolicyComparison(
+        policy: "on-uncertainty", requests: 2, segmentUploadBytes: 10, finalUploadBytes: 0,
+        totalUploadBytes: 10, finalLatencyMs: 0, wer: 0.33, cer: 0.1,
+        hypothesis: "hello again", finalRan: false, reason: "confidentSkip"),
+      ChunkedPolicyComparison(
+        policy: "never", requests: 2, segmentUploadBytes: 10, finalUploadBytes: 0,
+        totalUploadBytes: 10, finalLatencyMs: 0, wer: 0.33, cer: 0.1,
+        hypothesis: "hello again", finalRan: false, reason: "policyNever"),
+    ]
+    XCTAssertFalse(ChunkedBenchmark.defaultMatchesAlways(rows: rows))
+  }
 }
