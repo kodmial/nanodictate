@@ -528,6 +528,37 @@ final class RealtimeTranscriptionTests: XCTestCase {
         }
     }
 
+    @objc func testAckSurvivesMultipleEmptyPollsBeforeArrival() {
+        runAsync("realtime ack survives multiple empty polls") {
+            // Each receive takes 0.7s while the session polls every 0.2s, so
+            // connect() observes several per-poll timeouts with zero messages
+            // before the ack arrives. Timed-out waiters must cancel only
+            // themselves: the later ack must still be delivered, not lost.
+            let transport = DelayedRealtimeTransport(
+                messages: [
+                    self.json(["type": "session.updated"]),
+                    self.json([
+                        "type": "conversation.item.input_audio_transcription.completed",
+                        "item_id": "item_1", "content_index": 0,
+                        "transcript": "late ack win",
+                    ]),
+                ],
+                delayNanoseconds: 700_000_000)
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5))
+            try await session.connect()
+            let readyState = await session.currentState
+            XCTAssertEqual(readyState, .ready)
+            try await session.appendAudio([1, 2, 3], sourceSampleRate: 24000)
+            try await session.commit()
+            let final = try await session.waitForFinal()
+            XCTAssertEqual(final, "late ack win")
+            await session.close()
+        }
+    }
+
     @objc func testSlowReceiveIsBufferedAcrossPollTimeout() {
         runAsync("realtime slow receive buffered across poll timeout") {
             let transport = DelayedRealtimeTransport(messages: [

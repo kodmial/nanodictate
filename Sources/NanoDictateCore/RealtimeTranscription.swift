@@ -37,7 +37,7 @@ import Foundation
 // MARK: - Errors
 
 /// Failures of a realtime transcription session.
-public enum RealtimeTranscriptionError: Error, Equatable {
+public enum RealtimeTranscriptionError: Error, Equatable, Sendable {
   case notConnected
   case alreadyConnected
   case invalidState(String)
@@ -495,75 +495,133 @@ private enum RealtimeWaitTimeout: Error {
 /// One item produced by the single long-lived receive loop.
 /// `.text(nil)` is a clean transport EOF; `.failure` preserves the transport
 /// error so callers apply the same close-out as a direct `receive()` error.
-private enum RealtimeReceiveItem {
+private enum RealtimeReceiveItem: Sendable {
   case text(String?)
   case failure(RealtimeTranscriptionError)
+}
+
+/// Thread-safe waiter registry for the receive channel. Held by the channel
+/// actor but safe to touch from the non-isolated continuation closures, so
+/// timed waits cancel only their own waiter and never the underlying stream.
+private final class RealtimeWaiterStore: @unchecked Sendable {
+  private let lock = NSLock()
+  private var waiters: [UUID: CheckedContinuation<RealtimeReceiveItem?, Never>] = [:]
+  private var order: [UUID] = []
+
+  func add(id: UUID, continuation: CheckedContinuation<RealtimeReceiveItem?, Never>) {
+    lock.lock()
+    waiters[id] = continuation
+    order.append(id)
+    lock.unlock()
+  }
+
+  func popFirst() -> CheckedContinuation<RealtimeReceiveItem?, Never>? {
+    lock.lock()
+    defer { lock.unlock() }
+    guard let id = order.first else { return nil }
+    order.removeFirst()
+    return waiters.removeValue(forKey: id)
+  }
+
+  @discardableResult
+  func remove(id: UUID) -> CheckedContinuation<RealtimeReceiveItem?, Never>? {
+    lock.lock()
+    defer { lock.unlock() }
+    order.removeAll { $0 == id }
+    return waiters.removeValue(forKey: id)
+  }
+
+  func removeAll() -> [CheckedContinuation<RealtimeReceiveItem?, Never>] {
+    lock.lock()
+    defer { lock.unlock() }
+    let all = Array(waiters.values)
+    waiters.removeAll()
+    order.removeAll()
+    return all
+  }
 }
 
 /// Single long-lived receive loop per session.
 ///
 /// The pump task calls `transport.receive()` continuously for the session
-/// lifetime and yields every outcome to an unbounded `AsyncStream`. Waiters
-/// apply timeouts to the stream (never to `transport.receive()` itself), so
-/// expiring a wait never cancels a pending WebSocket receive. A message
-/// consumed after a timeout is buffered in `pending` and returned by the next
+/// lifetime and delivers every outcome to the channel. Waiters suspend on
+/// per-waiter continuations (never on `transport.receive()` or on a shared
+/// `AsyncStream.Iterator`, whose cancellation would terminate the stream per
+/// SE-0314), so expiring a wait cancels only that waiter. A message that
+/// arrives after a timeout is appended to `pending` and returned by the next
 /// wait instead of being discarded.
 private actor RealtimeReceiveChannel {
   private let transport: RealtimeTransport
-  private var continuation: AsyncStream<RealtimeReceiveItem>.Continuation?
-  private var iterator: AsyncStream<RealtimeReceiveItem>.Iterator?
+  private let waiterStore = RealtimeWaiterStore()
   private var pending: [RealtimeReceiveItem] = []
   private var pump: Task<Void, Never>?
   private var stopped = false
 
   init(transport: RealtimeTransport) {
     self.transport = transport
-    var continuation: AsyncStream<RealtimeReceiveItem>.Continuation!
-    let stream = AsyncStream<RealtimeReceiveItem>(bufferingPolicy: .unbounded) { streamContinuation in
-      continuation = streamContinuation
-    }
-    self.continuation = continuation
-    self.iterator = stream.makeAsyncIterator()
   }
 
   /// Start the background pump (idempotent; one loop per session).
   func start() {
     guard pump == nil, !stopped else { return }
-    let transport = self.transport
-    let continuation = self.continuation
-    pump = Task {
-      await Self.runPump(transport: transport, continuation: continuation)
+    pump = Task { [transport, channel = self] in
+      await Self.runPump(transport: transport, channel: channel)
     }
   }
 
-  /// Stop the pump and finish the stream (idempotent).
+  /// Stop the pump and resume pending waiters with nil (idempotent).
   func stop() {
     stopped = true
     pump?.cancel()
     pump = nil
-    continuation?.finish()
-    continuation = nil
+    for waiter in waiterStore.removeAll() {
+      waiter.resume(returning: nil)
+    }
   }
 
-  /// Next buffered item without a timeout (nil = stream finished).
+  /// Deliver one pump outcome: resume the oldest waiter or buffer it.
+  func deliver(_ item: RealtimeReceiveItem) {
+    guard !stopped else { return }
+    if let waiter = waiterStore.popFirst() {
+      waiter.resume(returning: item)
+    } else {
+      pending.append(item)
+    }
+  }
+
+  /// Resume and drop one waiter without delivering (timeout/cancel path).
+  func cancelWaiter(id: UUID) {
+    if let waiter = waiterStore.remove(id: id) {
+      waiter.resume(returning: nil)
+    }
+  }
+
+  /// Next buffered item without a timeout (nil = stopped/finished).
   func dequeue() async -> RealtimeReceiveItem? {
     if !pending.isEmpty {
       return pending.removeFirst()
     }
-    guard var iterator = self.iterator else { return nil }
-    let next = await iterator.next()
-    self.iterator = iterator
-    return next
+    if stopped { return nil }
+    let id = UUID()
+    let store = waiterStore
+    return await withTaskCancellationHandler {
+      await withCheckedContinuation { (continuation: CheckedContinuation<RealtimeReceiveItem?, Never>) in
+        store.add(id: id, continuation: continuation)
+      }
+    } onCancel: {
+      Task { await self.cancelWaiter(id: id) }
+    }
   }
 
   /// Next item with a bounded wait. Throws `RealtimeWaitTimeout.timedOut`
-  /// when no item arrives first; a late arrival is buffered for the next
-  /// call so it is never discarded.
+  /// when no item arrives first. Cancelling the timeout waiter never cancels
+  /// the pump or terminates a shared stream; a late arrival is buffered in
+  /// `pending` (via `deliver` or via requeue of a won race) for the next call.
   func next(timeout: TimeInterval) async throws -> RealtimeReceiveItem? {
     if !pending.isEmpty {
       return pending.removeFirst()
     }
-    guard iterator != nil else { return nil }
+    if stopped { return nil }
     if timeout <= 0 {
       return await dequeue()
     }
@@ -578,6 +636,7 @@ private actor RealtimeReceiveChannel {
       do {
         guard let first = try await group.next() else {
           group.cancelAll()
+          _ = try? await group.next()
           return nil
         }
         group.cancelAll()
@@ -585,12 +644,20 @@ private actor RealtimeReceiveChannel {
         return first
       } catch is RealtimeWaitTimeout {
         group.cancelAll()
+        var late: RealtimeReceiveItem?? = nil
         do {
-          if let late = try await group.next(), let item = late {
-            pending.append(item)
+          if let other = try await group.next() {
+            late = other
           }
         } catch {
-          // Late waiter reports only values; ignore cancellation noise.
+          // Sleeper cancellation noise; the dequeue child reports values only.
+        }
+        // If the dequeue waiter won the race just as the timeout fired, its
+        // item was consumed by this call and must be requeued, not discarded.
+        // If delivery happened after cancel, `deliver` already buffered it in
+        // `pending`, so there is nothing extra to do here.
+        if let item = late ?? nil {
+          pending.append(item)
         }
         throw RealtimeWaitTimeout.timedOut
       }
@@ -601,26 +668,25 @@ private actor RealtimeReceiveChannel {
   /// Never cancelled by a wait timeout; only by `stop()` / task cancellation.
   private static func runPump(
     transport: RealtimeTransport,
-    continuation: AsyncStream<RealtimeReceiveItem>.Continuation?
+    channel: RealtimeReceiveChannel
   ) async {
-    guard let continuation else { return }
     while true {
       if Task.isCancelled { break }
       do {
         let text = try await transport.receive()
-        continuation.yield(.text(text))
+        await channel.deliver(.text(text))
         if text == nil {
           // Clean EOF: pause so a closed transport does not hot-spin.
           try? await Task.sleep(nanoseconds: 5_000_000)
         }
       } catch is CancellationError {
-        continuation.yield(.failure(.cancelled))
+        await channel.deliver(.failure(.cancelled))
         break
       } catch let error as RealtimeTranscriptionError {
-        continuation.yield(.failure(error))
+        await channel.deliver(.failure(error))
         try? await Task.sleep(nanoseconds: 5_000_000)
       } catch {
-        continuation.yield(.failure(.transport(error.localizedDescription)))
+        await channel.deliver(.failure(.transport(error.localizedDescription)))
         try? await Task.sleep(nanoseconds: 5_000_000)
       }
     }
