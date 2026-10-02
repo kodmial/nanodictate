@@ -509,6 +509,22 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     }
     super.init()
 
+    // Composition-boundary check for the shared Rust session engine: every
+    // shipping dictation drives a `RustSession` (see AudioService), so an
+    // ABI/link mismatch must be loud at startup instead of silently leaving
+    // Rust unused. A mismatch never falls back to a Swift-only session —
+    // session creation fails and dictation start reports the error.
+    do {
+      try RustEngine.checkAvailable()
+      Logger.log(
+        "rust session engine available — shipping dictation drives RustSession", level: "info")
+    } catch {
+      Logger.log(
+        "rust session engine unavailable: \(error.localizedDescription)"
+          + " — dictation start will fail loudly",
+        level: "error")
+    }
+
     // Cookie-relay token warm-up: first Alt+Alt must not go out with a stale or
     // empty cookie — background token prep starts right away (non-blocking).
     if let cookieRelayProvider {
@@ -1086,6 +1102,18 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         format: "record ready: capture flowing (request->firstBuffer=%.1f ms), start cue emitted",
         info.requestToFirstBufferMs),
       level: "info")
+    // Concise engine-active proof at the shipped cue point (generation/state
+    // only, never dictation content): the cue above fired on the Rust
+    // session decision consumed from AudioService.
+    if let generation = audio.activeRustGeneration,
+      let rustState = audio.rustSessionStateForDiagnostics
+    {
+      Logger.log(
+        "record ready: rust session engine active (generation=\(generation), state=\(rustState))",
+        level: "info")
+    } else {
+      Logger.log("record ready: rust session engine missing at cue time", level: "error")
+    }
     state = .recording
     if chunked {
       // Live dictation: each utterance (pause ≥ pauseDuration) is
@@ -1096,6 +1124,16 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     if isDebug {
       Logger.log("record started: state = .recording", level: "debug")
     }
+  }
+
+  /// Forwards the native transcription-done event for the transcribed
+  /// session into the shared Rust engine (Transcribing -> Idle). The
+  /// generation gate inside AudioService keeps a stale completion from
+  /// touching a newer live session. Call at every terminal transcription
+  /// point of the main dictation loop (insert / empty / failure / Esc);
+  /// manual retry runs outside the session lifecycle and never calls this.
+  private func notifyRustTranscriptionDone() {
+    audio.notifyTranscriptionDone(rustGeneration: audio.activeRustGeneration)
   }
 
   /// Terminal mic error: clear message in the overlay + error sound (Basso).
@@ -1453,6 +1491,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       hideAfter(0.8, reason: "chunked review cancelled")
       state = .idle
       Logger.log("chunked transcription cancelled by review gate")
+      notifyRustTranscriptionDone()
       return
     }
 
@@ -1477,6 +1516,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     // Final piece inserted and finalized — only now the synthetic
     // Enter (not mid-stream of pieces).
     postSyntheticReturnIfPending()
+    notifyRustTranscriptionDone()
   }
 
   /// Recording stopped by the hard limit (60 s / 960 000 samples) —
@@ -1931,6 +1971,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         self.hideAfter(0.8, reason: "review cancelled")
         self.state = .idle
         Logger.log("transcription cancelled by review gate")
+        self.notifyRustTranscriptionDone()
         return
       }
 
@@ -1954,6 +1995,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       // state is already .idle — by posting time (~250 ms) the swallow
       // predicate returns false, the synthetic Return reaches the app.
       self.postSyntheticReturnIfPending()
+      self.notifyRustTranscriptionDone()
     }
 
     if reviewBeforeInsert, hasInteractiveStdin {
@@ -2231,6 +2273,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     hideAfter(0.8, reason: "empty result")
     state = .idle
     Logger.log("empty transcription result — not inserted", level: "info")
+    notifyRustTranscriptionDone()
   }
 
   /// Rollback of the last insertion by double Alt within undoMaxInterval.
@@ -2276,6 +2319,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     hideAfter(2.0, reason: "transcription failed")
     state = .idle
     Logger.log("transcription failed: \(message)", level: "error")
+    notifyRustTranscriptionDone()
   }
 
   /// Esc: cancels the current phase. The state branches differ only in the
@@ -2320,6 +2364,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       // the already printed text is NOT removed here — cancel only blocks
       // unprocessed inserts (handleLiveSegment's isCancelled/session guards).
       Logger.log("recognition cancelled by Esc")
+      // The transcription lifecycle ends here (the pending STT completion is
+      // dropped by the cancel guards above): close the Rust session too.
+      notifyRustTranscriptionDone()
     case .idle:
       // Esc during engine bring-up (state still .idle, start in flight):
       // abort the pending startup race-safely. The session token is
