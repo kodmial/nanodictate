@@ -10,8 +10,8 @@ on:
       - 'Resources/**'
       - 'config.example.toml'
       - 'rust/**'
-      - '.github/workflows/continuum-tech-swift-packaging-smoke.yml'
-      - '.github/workflows/continuum-tech-swift-release.yml'
+      - '.github/workflows/packaging-smoke.yml'
+      - '.github/workflows/release.yml'
   push:
     branches:
       - main
@@ -25,8 +25,8 @@ on:
       - 'Resources/**'
       - 'config.example.toml'
       - 'rust/**'
-      - '.github/workflows/continuum-tech-swift-packaging-smoke.yml'
-      - '.github/workflows/continuum-tech-swift-release.yml'
+      - '.github/workflows/packaging-smoke.yml'
+      - '.github/workflows/release.yml'
   workflow_run:
     workflows:
       - Release
@@ -71,7 +71,7 @@ concurrency:
 
 jobs:
   call:
-    uses: kodmial/continuum/.github/workflows/continuum-tech-swift-packaging-smoke.yml@main
+    uses: ./.github/workflows/nanodictate-packaging-smoke-engine.yml
     secrets: inherit
     with:
       continuum_ref: main
