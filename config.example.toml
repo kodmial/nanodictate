@@ -80,6 +80,14 @@ api_key = ""
 # segment_provider = "cloudflare"
 # final_provider = "groq"
 
+# Contextual biasing for technical dictation (reusable vocabulary +
+# code-switching hints). Gated per model profile: vocabulary folds into
+# `prompt` where supported, extra languages into `languages[]` where
+# multi-hint is supported (gpt-transcribe); otherwise ignored with a
+# warning diagnostic (no invalid API fields sent).
+# Example for mixed Russian/English technical dictation:
+# vocabulary = ["Kubernetes", "Whisper", "NanoDictate", "пул реквест"]
+# extra_languages = ["en", "ru"]
 # Extra top-level options (defaults):
 # double_alt_max_interval = 0.4
 # undo_max_interval = 2.0
@@ -97,3 +105,5 @@ api_key = ""
 # until benchmark evidence is documented. Per-provider override:
 # [providers.groq] upload_format = "flac".
 # upload_format = "auto"
+# vocabulary = []
+# extra_languages = []

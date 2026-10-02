@@ -25,6 +25,17 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
   public var language: String
   public var uiLanguage: String
 
+  /// Reusable technical vocabulary for contextual STT biasing (top-level key
+  /// `vocabulary = ["Kubernetes", "Whisper"]`). Normalized and folded into
+  /// the `prompt` field where the model profile supports it (see
+  /// STTContextualBias); never sent as an unsupported API field.
+  public var vocabulary: [String] = []
+  /// Extra expected languages for code-switching (top-level key
+  /// `extra_languages = ["en", "ru"]`). Applied only where the model profile
+  /// supports multi-language hints (`gpt-transcribe` -> `languages[]`);
+  /// single-hint profiles use `language` only, `none` profiles send nothing.
+  public var extraLanguages: [String] = []
+
   /// Заголовок для передачи proxy_key (по умолчанию `X-Proxy-Key`).
   public var proxyKeyHeader: String = "X-Proxy-Key"
 
@@ -609,6 +620,8 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
     var insertMethod: InsertMethod = base.insertMethod
     var reviewBeforeInsert: Bool = base.reviewBeforeInsert
     var uploadFormat: STTUploadPreference = base.uploadFormat
+    var vocabulary: [String] = base.vocabulary
+    var extraLanguages: [String] = base.extraLanguages
 
     // Маршрутизация STT по ролям ([routing]): пусто — роль играет активный.
     var segmentProvider = ""
@@ -832,6 +845,10 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
           throw AppConfigError.invalidValue(key, valuePart, index + 1)
         }
         uploadFormat = preference
+      case "vocabulary":
+        vocabulary = try parseStringArray(valuePart, line: index + 1, rawLine: rawLine)
+      case "extra_languages":
+        extraLanguages = try parseStringArray(valuePart, line: index + 1, rawLine: rawLine)
       default:
         // Unknown key — ignore
         break
@@ -850,6 +867,8 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
       logLevel: logLevel,
       language: language,
       uiLanguage: uiLanguage,
+      vocabulary: vocabulary,
+      extraLanguages: extraLanguages,
       proxyKeyHeader: proxyKeyHeader,
       transport: transport,
       httpProxy: httpProxy,
@@ -1028,6 +1047,8 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
 
   /// Разбор массива строк: `providers = ["groq", "gigaam"]`.
   /// Допускает пробелы между элементами и после запятых.
+  /// Запятые внутри кавычек сохраняются как часть термина
+  /// (`vocabulary = ["foo, bar"]` — один термин, а не два).
   private static func parseStringArray(_ raw: String, line: Int, rawLine: String) throws -> [String]
   {  // swiftlint:disable:this opening_brace
     let trimmed = raw.trimmingCharacters(in: .whitespaces)
@@ -1035,13 +1056,31 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
       throw AppConfigError.invalidLine(line, rawLine)
     }
     let inner = trimmed.dropFirst().dropLast()
-    let result =
-      inner
-      .components(separatedBy: ",")
-      .map { $0.trimmingCharacters(in: .whitespaces) }
-      .filter { !$0.isEmpty }
+    // Split only on commas outside quoted strings so commas inside
+    // a quoted term are preserved verbatim (see serializeVocabularyHint).
+    var segments: [String] = []
+    var current = ""
+    var inQuotes = false
+    for char in inner {
+      if char == "\"" {
+        inQuotes.toggle()
+        current.append(char)
+      } else if char == "," && !inQuotes {
+        let candidate = current.trimmingCharacters(in: .whitespaces)
+        if !candidate.isEmpty {
+          segments.append(candidate)
+        }
+        current = ""
+      } else {
+        current.append(char)
+      }
+    }
+    let tail = current.trimmingCharacters(in: .whitespaces)
+    if !tail.isEmpty {
+      segments.append(tail)
+    }
     var values: [String] = []
-    for item in result {
+    for item in segments {
       try values.append(parseString(item, line: line, rawLine: rawLine))
     }
     return values

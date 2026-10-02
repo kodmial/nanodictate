@@ -449,6 +449,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     // fully initialized before super.init (retryProvider/roles assigned
     // below), and the closure is captured by the makeTranscriber property.
     let builderActiveID = activeProviderID
+    let bias = STTContextualBias(
+      vocabulary: config.vocabulary, extraLanguages: config.extraLanguages)
     let makeTranscriber = { (provider: AppConfig.Provider) -> Transcriber in
       Transcriber(
         baseURL: provider.baseURL,
@@ -465,7 +467,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         proxyUser: provider.proxyUser.isEmpty ? config.proxyUser : provider.proxyUser,
         proxyPassword: provider.proxyPassword.isEmpty
           ? config.proxyPassword : provider.proxyPassword,
-        adapterID: provider.id
+        adapterID: provider.id,
+        contextualBias: bias
       )
     }
     self.makeTranscriber = makeTranscriber
@@ -489,7 +492,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         httpProxy: config.httpProxy,
         proxyUser: config.proxyUser,
         proxyPassword: config.proxyPassword,
-        adapterID: activeProviderID
+        adapterID: activeProviderID,
+        contextualBias: bias
       )
     }
     // Routing roles from [routing]: resolvers fall back to the active provider;
