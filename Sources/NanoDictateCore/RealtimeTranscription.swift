@@ -779,9 +779,12 @@ public actor RealtimeTranscriptionSession {
   }
 
   /// Wait up to `timeout` for a session ack message. Returns true when
-  /// `session.created`/`session.updated` arrived; false on timeout/EOF.
-  /// A per-poll stream expiry keeps waiting until the deadline; only a `nil`
-  /// stream result (clean EOF) returns `false` early. Timeouts apply to the
+  /// `session.created`/`session.updated` arrived; false on timeout.
+  /// A per-poll stream expiry keeps waiting until the deadline, as does a
+  /// clean EOF or transport noise observed before the ack: the ack and the
+  /// EOF are delivered back-to-back by the single pump, so an EOF surfacing
+  /// first around a poll expiry must not fail fast while the ack may still
+  /// be buffered right behind it. Timeouts apply to the
   /// stream, never to a pending `transport.receive()`.
   private func waitForAck(timeout: TimeInterval) async -> Bool {
     await ensureReceiveChannel()
@@ -802,7 +805,11 @@ public actor RealtimeTranscriptionSession {
           continue
         }
         guard let text else {
-          return false
+          // Clean EOF before the ack: keep waiting until the ack deadline
+          // (same as transport noise above). Failing fast here loses a
+          // back-to-back ack buffered right behind the EOF around a
+          // per-poll stream expiry.
+          continue
         }
         let event = RealtimeEventParser.parse(text)
         switch event {

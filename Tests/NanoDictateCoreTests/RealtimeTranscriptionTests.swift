@@ -423,6 +423,28 @@ final class RealtimeTranscriptionTests: XCTestCase {
         }
     }
 
+    @objc func testConnectAckBufferedBehindEOFStillAcknowledges() {
+        runAsync("realtime ack buffered behind EOF still acknowledges") {
+            // Regression coverage for the ack-phase EOF race: a clean EOF
+            // observed before the session ack (back-to-back pump delivery
+            // around a per-poll stream expiry, as in [ack, nil] transports
+            // that close immediately after the ack) must not fail connect
+            // fast; the ack buffered right behind it still acknowledges.
+            let transport = MockRealtimeTransport(incoming: [
+                nil,
+                self.json(["type": "session.updated"]),
+            ])
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5))
+            try await session.connect()
+            let readyState = await session.currentState
+            XCTAssertEqual(readyState, .ready)
+            await session.close()
+        }
+    }
+
     @objc func testWaitForFinalTransportDropFailsClosed() {
         runAsync("realtime waitForFinal transport drop") {
             let transport = MockRealtimeTransport(incoming: [
