@@ -108,19 +108,24 @@ for line in sys.stdin:
     if found:
         break
 print(found)' 2>/dev/null || true)"
+  if [[ -z "${ARCHIVE:-}" ]]; then
+    # Python-independent extraction for environments without python3: the
+    # artifact messages embed the exact archive path Cargo produced,
+    # including any <triple> subdirectory.
+    ARCHIVE="$(printf '%s' "$BUILD_JSON" | grep -o '"[^"]*libnanodictate_core\.a"' | tr -d '"' | head -n 1 || true)"
+  fi
 fi
-if [[ -z "${ARCHIVE:-}" || ! -f "$ARCHIVE" ]]; then
-  ARCHIVE="$TARGET_DIR/$PROFILE/$ARCHIVE_NAME"
+# Fail clearly when artifact discovery fails instead of guessing a path: a
+# reconstructed "$TARGET_DIR/$PROFILE/..." fallback or a first-match
+# "$TARGET_DIR/*/$PROFILE/..." scan can report a stale archive from an
+# unrelated target triple when CARGO_BUILD_TARGET or build.target is set.
+if [[ -z "${ARCHIVE:-}" ]]; then
+  echo "error: could not locate $ARCHIVE_NAME in cargo build artifact messages (TARGET_DIR=$TARGET_DIR PROFILE=$PROFILE)" >&2
+  exit 1
 fi
-# Last-resort triple fallback when JSON discovery is unavailable (e.g. no
-# python3): accept $TARGET_DIR/<triple>/$PROFILE/$ARCHIVE_NAME.
 if [[ ! -f "$ARCHIVE" ]]; then
-  for candidate in "$TARGET_DIR"/*/"$PROFILE/$ARCHIVE_NAME"; do
-    if [[ -f "$candidate" ]]; then
-      ARCHIVE="$candidate"
-      break
-    fi
-  done
+  echo "error: reported Rust archive does not exist: $ARCHIVE (TARGET_DIR=$TARGET_DIR PROFILE=$PROFILE)" >&2
+  exit 1
 fi
 
 echo "Rust engine built: $ARCHIVE"
