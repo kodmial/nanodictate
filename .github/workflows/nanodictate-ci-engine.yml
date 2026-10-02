@@ -24,8 +24,10 @@ on:
         required: false
 
 permissions:
+  actions: write
   contents: read
   pull-requests: read
+  statuses: write
 
 # Keep only the newest CI for each PR/branch. Automatic main synchronization can
 # create several short-lived heads in quick succession; stale macOS jobs must
