@@ -12,8 +12,10 @@ on:
   pull_request:
 
 permissions:
+  actions: write
   contents: read
   pull-requests: read
+  statuses: write
 
 # A superseded PR head cannot satisfy required checks, so cancel its CI run
 # immediately instead of letting stale macOS jobs occupy the shared queue. This
