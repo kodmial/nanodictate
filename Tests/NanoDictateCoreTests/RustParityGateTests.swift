@@ -71,6 +71,128 @@ final class RustParityGateTests: XCTestCase {
       "reasons must flag invalid measurements: \(verdict.reasons)")
   }
 
+  @objc func testGateRejectsNaNMeasurements() {
+    var nanStartup = passingMeasurements()
+    nanStartup.startupLatencyMs = .nan
+    var nanMax = passingMeasurements()
+    nanMax.maxBlockCallMs = .nan
+    var nanMean = passingMeasurements()
+    nanMean.meanBlockCallMs = .nan
+    var nanCPU = passingMeasurements()
+    nanCPU.cpuRatio = .nan
+    var nanMemory = passingMeasurements()
+    nanMemory.memoryRatio = .nan
+    var nanCopy = passingMeasurements()
+    nanCopy.copyAllocationRatio = .nan
+    let cases: [(String, RustParityGate.Measurements)] = [
+      ("startupLatencyMs", nanStartup),
+      ("maxBlockCallMs", nanMax),
+      ("meanBlockCallMs", nanMean),
+      ("cpuRatio", nanCPU),
+      ("memoryRatio", nanMemory),
+      ("copyAllocationRatio", nanCopy),
+    ]
+    for (field, measurements) in cases {
+      let verdict = RustParityGate.evaluate(
+        passedItems: fullChecklist(),
+        measurements: measurements,
+        supersededSwiftRemoved: false
+      )
+      XCTAssertFalse(verdict.passed, "NaN \(field) must fail the gate")
+      XCTAssertTrue(
+        verdict.reasons.contains { $0.contains("invalid performance measurement") && $0.contains(field) },
+        "NaN \(field) must produce a field-specific reason: \(verdict.reasons)")
+    }
+  }
+
+  @objc func testGateRejectsInvalidBlockDurations() {
+    var negativeMax = passingMeasurements()
+    negativeMax.maxBlockCallMs = -1
+    var negativeMean = passingMeasurements()
+    negativeMean.meanBlockCallMs = -1
+    var infiniteMax = passingMeasurements()
+    infiniteMax.maxBlockCallMs = .infinity
+    var infiniteMean = passingMeasurements()
+    infiniteMean.meanBlockCallMs = .infinity
+    let cases: [(String, RustParityGate.Measurements)] = [
+      ("maxBlockCallMs", negativeMax),
+      ("meanBlockCallMs", negativeMean),
+      ("maxBlockCallMs", infiniteMax),
+      ("meanBlockCallMs", infiniteMean),
+    ]
+    for (field, measurements) in cases {
+      let verdict = RustParityGate.evaluate(
+        passedItems: fullChecklist(),
+        measurements: measurements,
+        supersededSwiftRemoved: false
+      )
+      XCTAssertFalse(verdict.passed, "invalid \(field)=\(field == "maxBlockCallMs" ? measurements.maxBlockCallMs : measurements.meanBlockCallMs) must fail the gate")
+      XCTAssertTrue(
+        verdict.reasons.contains { $0.contains("invalid performance measurement") && $0.contains(field) },
+        "invalid \(field) must produce a field-specific reason: \(verdict.reasons)")
+    }
+  }
+
+  @objc func testGateRejectsInvalidMemoryAndCopyRatios() {
+    var zeroMemory = passingMeasurements()
+    zeroMemory.memoryRatio = 0
+    var negativeCopy = passingMeasurements()
+    negativeCopy.copyAllocationRatio = -0.5
+    var nanMemory = passingMeasurements()
+    nanMemory.memoryRatio = .nan
+    var infiniteCopy = passingMeasurements()
+    infiniteCopy.copyAllocationRatio = .infinity
+    let cases: [(String, RustParityGate.Measurements)] = [
+      ("memoryRatio", zeroMemory),
+      ("copyAllocationRatio", negativeCopy),
+      ("memoryRatio", nanMemory),
+      ("copyAllocationRatio", infiniteCopy),
+    ]
+    for (field, measurements) in cases {
+      let verdict = RustParityGate.evaluate(
+        passedItems: fullChecklist(),
+        measurements: measurements,
+        supersededSwiftRemoved: false
+      )
+      XCTAssertFalse(verdict.passed, "invalid \(field) must fail the gate")
+      XCTAssertTrue(
+        verdict.reasons.contains { $0.contains("invalid performance measurement") && $0.contains(field) },
+        "invalid \(field) must produce a field-specific reason: \(verdict.reasons)")
+    }
+  }
+
+  @objc func testGateFailsOnEachOverBudgetBranch() {
+    var overStartup = passingMeasurements()
+    overStartup.startupLatencyMs = RustParityGate.Budgets.default.maxStartupLatencyMs + 1
+    var overMax = passingMeasurements()
+    overMax.maxBlockCallMs = RustParityGate.Budgets.default.maxBlockCallMs + 1
+    var overMean = passingMeasurements()
+    overMean.maxBlockCallMs = RustParityGate.Budgets.default.maxBlockCallMs
+    overMean.meanBlockCallMs = RustParityGate.Budgets.default.maxMeanBlockCallMs + 1
+    var overCPU = passingMeasurements()
+    overCPU.cpuRatio = RustParityGate.Budgets.default.maxCPURatio + 0.1
+    var overMemory = passingMeasurements()
+    overMemory.memoryRatio = RustParityGate.Budgets.default.maxMemoryRatio + 0.1
+    let cases: [(String, RustParityGate.Measurements, String)] = [
+      ("startupLatencyMs", overStartup, "startup latency regression"),
+      ("maxBlockCallMs", overMax, "realtime block regression: max"),
+      ("meanBlockCallMs", overMean, "realtime block regression: mean"),
+      ("cpuRatio", overCPU, "CPU regression"),
+      ("memoryRatio", overMemory, "memory regression"),
+    ]
+    for (field, measurements, reason) in cases {
+      let verdict = RustParityGate.evaluate(
+        passedItems: fullChecklist(),
+        measurements: measurements,
+        supersededSwiftRemoved: false
+      )
+      XCTAssertFalse(verdict.passed, "over-budget \(field) must fail the gate")
+      XCTAssertTrue(
+        verdict.reasons.contains { $0.contains(reason) },
+        "over-budget \(field) must report '\(reason)': \(verdict.reasons)")
+    }
+  }
+
   @objc func testGateFailsOnCopyAllocationRegression() {
     var bad = passingMeasurements()
     bad.copyAllocationRatio = RustParityGate.Budgets.default.maxCopyAllocationRatio + 0.1
