@@ -436,7 +436,7 @@ final class RealtimeTranscriptionTests: XCTestCase {
             XCTAssertEqual(text, "Hello,")
             // Buffered close-out does not fail the session.
             let state = await session.currentState
-            XCTAssertNotEqual(state, .failed)
+            XCTAssertFalse(state == .failed)
         }
     }
 
@@ -461,7 +461,7 @@ final class RealtimeTranscriptionTests: XCTestCase {
             let text = try await session.runToCompletion()
             XCTAssertEqual(text, "Hello,")
             let state = await session.currentState
-            XCTAssertNotEqual(state, .failed)
+            XCTAssertFalse(state == .failed)
         }
     }
 
