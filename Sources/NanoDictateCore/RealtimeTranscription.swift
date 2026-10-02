@@ -492,6 +492,141 @@ private enum RealtimeWaitTimeout: Error {
   case timedOut
 }
 
+/// One item produced by the single long-lived receive loop.
+/// `.text(nil)` is a clean transport EOF; `.failure` preserves the transport
+/// error so callers apply the same close-out as a direct `receive()` error.
+private enum RealtimeReceiveItem {
+  case text(String?)
+  case failure(RealtimeTranscriptionError)
+}
+
+/// Single long-lived receive loop per session.
+///
+/// The pump task calls `transport.receive()` continuously for the session
+/// lifetime and yields every outcome to an unbounded `AsyncStream`. Waiters
+/// apply timeouts to the stream (never to `transport.receive()` itself), so
+/// expiring a wait never cancels a pending WebSocket receive. A message
+/// consumed after a timeout is buffered in `pending` and returned by the next
+/// wait instead of being discarded.
+private actor RealtimeReceiveChannel {
+  private let transport: RealtimeTransport
+  private var continuation: AsyncStream<RealtimeReceiveItem>.Continuation?
+  private var iterator: AsyncStream<RealtimeReceiveItem>.Iterator?
+  private var pending: [RealtimeReceiveItem] = []
+  private var pump: Task<Void, Never>?
+  private var stopped = false
+
+  init(transport: RealtimeTransport) {
+    self.transport = transport
+    var continuation: AsyncStream<RealtimeReceiveItem>.Continuation!
+    let stream = AsyncStream<RealtimeReceiveItem>(bufferingPolicy: .unbounded) { streamContinuation in
+      continuation = streamContinuation
+    }
+    self.continuation = continuation
+    self.iterator = stream.makeAsyncIterator()
+  }
+
+  /// Start the background pump (idempotent; one loop per session).
+  func start() {
+    guard pump == nil, !stopped else { return }
+    let transport = self.transport
+    let continuation = self.continuation
+    pump = Task {
+      await Self.runPump(transport: transport, continuation: continuation)
+    }
+  }
+
+  /// Stop the pump and finish the stream (idempotent).
+  func stop() {
+    stopped = true
+    pump?.cancel()
+    pump = nil
+    continuation?.finish()
+    continuation = nil
+  }
+
+  /// Next buffered item without a timeout (nil = stream finished).
+  func dequeue() async -> RealtimeReceiveItem? {
+    if !pending.isEmpty {
+      return pending.removeFirst()
+    }
+    guard var iterator = self.iterator else { return nil }
+    let next = await iterator.next()
+    self.iterator = iterator
+    return next
+  }
+
+  /// Next item with a bounded wait. Throws `RealtimeWaitTimeout.timedOut`
+  /// when no item arrives first; a late arrival is buffered for the next
+  /// call so it is never discarded.
+  func next(timeout: TimeInterval) async throws -> RealtimeReceiveItem? {
+    if !pending.isEmpty {
+      return pending.removeFirst()
+    }
+    guard iterator != nil else { return nil }
+    if timeout <= 0 {
+      return await dequeue()
+    }
+    return try await withThrowingTaskGroup(of: RealtimeReceiveItem?.self) { group in
+      group.addTask {
+        await self.dequeue()
+      }
+      group.addTask {
+        try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+        throw RealtimeWaitTimeout.timedOut
+      }
+      do {
+        guard let first = try await group.next() else {
+          group.cancelAll()
+          return nil
+        }
+        group.cancelAll()
+        _ = try? await group.next()
+        return first
+      } catch is RealtimeWaitTimeout {
+        group.cancelAll()
+        do {
+          if let late = try await group.next(), let item = late {
+            pending.append(item)
+          }
+        } catch {
+          // Late waiter reports only values; ignore cancellation noise.
+        }
+        throw RealtimeWaitTimeout.timedOut
+      }
+    }
+  }
+
+  /// Background pump: the only place that calls `transport.receive()`.
+  /// Never cancelled by a wait timeout; only by `stop()` / task cancellation.
+  private static func runPump(
+    transport: RealtimeTransport,
+    continuation: AsyncStream<RealtimeReceiveItem>.Continuation?
+  ) async {
+    guard let continuation else { return }
+    while true {
+      if Task.isCancelled { break }
+      do {
+        let text = try await transport.receive()
+        continuation.yield(.text(text))
+        if text == nil {
+          // Clean EOF: pause so a closed transport does not hot-spin.
+          try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+      } catch is CancellationError {
+        continuation.yield(.failure(.cancelled))
+        break
+      } catch let error as RealtimeTranscriptionError {
+        continuation.yield(.failure(error))
+        try? await Task.sleep(nanoseconds: 5_000_000)
+      } catch {
+        continuation.yield(.failure(.transport(error.localizedDescription)))
+        try? await Task.sleep(nanoseconds: 5_000_000)
+      }
+    }
+  }
+}
+
 /// One stateful realtime transcription session per dictation.
 ///
 /// Usage:
@@ -519,6 +654,10 @@ public actor RealtimeTranscriptionSession {
   private var lastError: String?
   private var closedTransport = false
   private var connectAttempts = 0
+  /// Single long-lived receive loop for this session. The pump is the only
+  /// caller of `transport.receive()`; waits consume the stream with a short
+  /// per-poll timeout so no wait ever cancels a pending WebSocket receive.
+  private var receiveChannel: RealtimeReceiveChannel?
 
   /// Latest display text (committed + pending deltas, no duplication).
   public var partialText: String { accumulator.partialText }
@@ -652,7 +791,7 @@ public actor RealtimeTranscriptionSession {
   /// as a deterministic fallback (documented, not a silent batch upload).
   public func waitForFinal() async throws -> String {
     let deadline = Date().addingTimeInterval(policy.commitTimeout)
-    let transport = self.transport
+    await ensureReceiveChannel()
     while true {
       try Task.checkCancellation()
       if state == .cancelled {
@@ -675,12 +814,8 @@ public actor RealtimeTranscriptionSession {
         throw RealtimeTranscriptionError.timeout("no completion within commit timeout")
       }
       do {
-        guard let text = try await withTimeout(seconds: 0.2, operation: {
-          try await transport.receive()
-        }) else {
-          // Clean EOF before completion: deterministic close-out. When a
-          // final or partial transcript is already available it is returned
-          // (no failure); otherwise the drop fails the session closed.
+        guard let item = try await receiveChannel?.next(timeout: 0.2) else {
+          // Stream finished before completion: same close-out as clean EOF.
           if let final = self.accumulator.finalText {
             return final
           }
@@ -692,11 +827,31 @@ public actor RealtimeTranscriptionSession {
           lastError = "transport closed before completion"
           throw RealtimeTranscriptionError.transport("transport closed before completion")
         }
-        _ = handleMessage(text)
+        switch item {
+        case .text(let text):
+          guard let text else {
+            // Clean EOF before completion: deterministic close-out. When a
+            // final or partial transcript is already available it is returned
+            // (no failure); otherwise the drop fails the session closed.
+            if let final = self.accumulator.finalText {
+              return final
+            }
+            let partial = self.accumulator.partialText
+            if !partial.isEmpty {
+              return partial
+            }
+            state = .failed
+            lastError = "transport closed before completion"
+            throw RealtimeTranscriptionError.transport("transport closed before completion")
+          }
+          _ = handleMessage(text)
+        case .failure(let transportError):
+          throw transportError
+        }
       } catch is CancellationError {
         throw RealtimeTranscriptionError.cancelled
       } catch is RealtimeWaitTimeout {
-        // Per-receive expiry (not EOF): keep waiting until the commit deadline.
+        // Per-poll expiry (not EOF): keep waiting until the commit deadline.
         continue
       } catch let error as RealtimeTranscriptionError {
         // Transport drop during receive fails the session closed so a later
@@ -716,7 +871,7 @@ public actor RealtimeTranscriptionSession {
         }
         throw error
       } catch {
-        // Unknown receive errors are transport drops, not per-receive
+        // Unknown receive errors are transport drops, not per-poll
         // expiries: return buffered text when available, otherwise fail
         // closed so `lastErrorMessage` reflects the drop.
         if let final = self.accumulator.finalText {
@@ -738,6 +893,7 @@ public actor RealtimeTranscriptionSession {
   public func runToCompletion(
     onPartial: ((String) -> Void)? = nil
   ) async throws -> String {
+    await ensureReceiveChannel()
     while true {
       try Task.checkCancellation()
       if state == .cancelled {
@@ -749,41 +905,9 @@ public actor RealtimeTranscriptionSession {
       if let final = accumulator.finalText {
         return final
       }
-      let text: String?
-      do {
-        text = try await transport.receive()
-      } catch is CancellationError {
-        throw RealtimeTranscriptionError.cancelled
-      } catch let error as RealtimeTranscriptionError {
-        // Transport drop during receive: return buffered text when available
-        // (same close-out as clean EOF below), otherwise fail closed so a
-        // later `lastErrorMessage` reflects the drop.
-        if case .transport(let message) = error {
-          if let final = accumulator.finalText {
-            return final
-          }
-          let partial = accumulator.partialText
-          if !partial.isEmpty {
-            return partial
-          }
-          state = .failed
-          lastError = message
-        }
-        throw error
-      } catch {
-        if let final = accumulator.finalText {
-          return final
-        }
-        let partial = accumulator.partialText
-        if !partial.isEmpty {
-          return partial
-        }
-        state = .failed
-        lastError = error.localizedDescription
-        throw RealtimeTranscriptionError.transport(error.localizedDescription)
-      }
-      guard let text else {
-        // Clean EOF before completion: return buffered transcript when
+      let item = await receiveChannel?.dequeue()
+      guard let item else {
+        // Stream finished before completion: return buffered transcript when
         // available; otherwise fail the session closed.
         if let final = accumulator.finalText {
           return final
@@ -796,8 +920,38 @@ public actor RealtimeTranscriptionSession {
         lastError = "transport closed before completion"
         throw RealtimeTranscriptionError.transport("transport closed before completion")
       }
-      _ = handleMessage(text)
-      onPartial?(accumulator.partialText)
+      switch item {
+      case .text(let text):
+        guard let text else {
+          // Clean EOF before completion: return buffered transcript when
+          // available; otherwise fail the session closed.
+          if let final = accumulator.finalText {
+            return final
+          }
+          let partial = accumulator.partialText
+          if !partial.isEmpty {
+            return partial
+          }
+          state = .failed
+          lastError = "transport closed before completion"
+          throw RealtimeTranscriptionError.transport("transport closed before completion")
+        }
+        _ = handleMessage(text)
+        onPartial?(accumulator.partialText)
+      case .failure(let transportError):
+        if case .transport(let message) = transportError {
+          if let final = accumulator.finalText {
+            return final
+          }
+          let partial = accumulator.partialText
+          if !partial.isEmpty {
+            return partial
+          }
+          state = .failed
+          lastError = message
+        }
+        throw transportError
+      }
     }
   }
 
@@ -820,7 +974,18 @@ public actor RealtimeTranscriptionSession {
 
   // MARK: - Private
 
+  /// Start the single long-lived receive loop (idempotent).
+  private func ensureReceiveChannel() async {
+    if receiveChannel == nil {
+      receiveChannel = RealtimeReceiveChannel(transport: transport)
+    }
+    await receiveChannel?.start()
+  }
+
   private func closeTransportOnce() async {
+    if let receiveChannel {
+      await receiveChannel.stop()
+    }
     guard !closedTransport else { return }
     closedTransport = true
     await transport.close()
@@ -828,19 +993,28 @@ public actor RealtimeTranscriptionSession {
 
   /// Wait up to `timeout` for a session ack message. Returns true when
   /// `session.created`/`session.updated` arrived; false on timeout/EOF.
-  /// A per-receive expiry keeps waiting until the deadline; only a `nil`
-  /// transport result (clean EOF) returns `false` early.
+  /// A per-poll stream expiry keeps waiting until the deadline; only a `nil`
+  /// stream result (clean EOF) returns `false` early. Timeouts apply to the
+  /// stream, never to a pending `transport.receive()`.
   private func waitForAck(timeout: TimeInterval) async -> Bool {
+    await ensureReceiveChannel()
     let deadline = Date().addingTimeInterval(timeout)
-    let transport = self.transport
     while Date() < deadline {
       if Task.isCancelled { return false }
       do {
-        guard
-          let text = try await withTimeout(seconds: 0.2, operation: {
-            try await transport.receive()
-          })
-        else {
+        guard let item = try await receiveChannel?.next(timeout: 0.2) else {
+          return false
+        }
+        let text: String?
+        switch item {
+        case .text(let message):
+          text = message
+        case .failure:
+          // Transport noise while waiting for ack: keep waiting until the
+          // ack deadline (same as unknown messages below).
+          continue
+        }
+        guard let text else {
           return false
         }
         let event = RealtimeEventParser.parse(text)
@@ -864,49 +1038,13 @@ public actor RealtimeTranscriptionSession {
           continue
         }
       } catch is RealtimeWaitTimeout {
-        // Per-receive expiry: keep waiting until the ack deadline.
+        // Per-poll stream expiry: keep waiting until the ack deadline.
         continue
       } catch {
         continue
       }
     }
     return false
-  }
-
-  /// Race `operation` against a timeout.
-  /// - Returns: the operation result, where `nil` always means the operation
-  ///   itself returned `nil` (clean transport EOF).
-  /// - Throws: `RealtimeWaitTimeout.timedOut` when the timeout expires first;
-  ///   callers handle it with `continue` to keep waiting until their own
-  ///   deadline. Operation and cancellation errors propagate unchanged.
-  private func withTimeout<T>(
-    seconds: TimeInterval, operation: @escaping () async throws -> T?
-  ) async throws -> T? {
-    if seconds <= 0 {
-      return try await operation()
-    }
-    return try await withThrowingTaskGroup(of: T?.self) { group in
-      group.addTask {
-        try await operation()
-      }
-      group.addTask {
-        try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-        throw RealtimeWaitTimeout.timedOut
-      }
-      do {
-        if let result = try await group.next() {
-          group.cancelAll()
-          _ = try? await group.next()
-          return result
-        } else {
-          group.cancelAll()
-          return nil
-        }
-      } catch is RealtimeWaitTimeout {
-        group.cancelAll()
-        throw RealtimeWaitTimeout.timedOut
-      }
-    }
   }
 }
 

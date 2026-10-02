@@ -43,6 +43,37 @@ final class MockRealtimeTransport: RealtimeTransport {
     }
 }
 
+/// Transport whose `receive()` is slower than the session's per-poll stream
+/// wait (0.2s). Proves a message consumed after a poll timeout is buffered
+/// for the next wait instead of being discarded.
+final class DelayedRealtimeTransport: RealtimeTransport {
+    var sent: [String] = []
+    var messages: [String?]
+    var delayNanoseconds: UInt64
+    var closedCount = 0
+
+    init(messages: [String?], delayNanoseconds: UInt64 = 300_000_000) {
+        self.messages = messages
+        self.delayNanoseconds = delayNanoseconds
+    }
+
+    func send(text: String) async throws {
+        sent.append(text)
+    }
+
+    func receive() async throws -> String? {
+        try await Task.sleep(nanoseconds: delayNanoseconds)
+        if messages.isEmpty {
+            return nil
+        }
+        return messages.removeFirst()
+    }
+
+    func close() async {
+        closedCount += 1
+    }
+}
+
 final class RealtimeTranscriptionTests: XCTestCase {
     private func runAsync(_ name: String, _ body: @escaping () async throws -> Void) {
         let expectation = expectation(description: name)
@@ -494,6 +525,32 @@ final class RealtimeTranscriptionTests: XCTestCase {
             XCTAssertEqual(state, .failed)
             let lastError = await session.lastErrorMessage
             XCTAssertNotNil(lastError)
+        }
+    }
+
+    @objc func testSlowReceiveIsBufferedAcrossPollTimeout() {
+        runAsync("realtime slow receive buffered across poll timeout") {
+            let transport = DelayedRealtimeTransport(messages: [
+                self.json(["type": "session.updated"]),
+                self.json([
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "item_id": "item_1", "content_index": 0,
+                    "transcript": "late win",
+                ]),
+            ])
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5))
+            // Each receive takes 0.3s, longer than the 0.2s per-poll stream
+            // wait. The ack and the completion each arrive after a poll
+            // expiry and must still be delivered (never discarded).
+            try await session.connect()
+            try await session.appendAudio([1, 2, 3], sourceSampleRate: 24000)
+            try await session.commit()
+            let final = try await session.waitForFinal()
+            XCTAssertEqual(final, "late win")
+            await session.close()
         }
     }
 }
