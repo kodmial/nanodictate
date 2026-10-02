@@ -240,20 +240,18 @@ public enum STTContextualBiasing {
         if let chain = chainPrompt, !chain.isEmpty {
           var combined = chain + "\n" + hint
           if combined.count > STTContextualBiasLimits.maxCombinedPromptLength {
-            // Keep the vocabulary hint intact; shrink the chain context
-            // from the front (most recent context is at the tail).
-            let keepHint = hint.count + 1
-            let maxChain = STTContextualBiasLimits.maxCombinedPromptLength - keepHint
-            if maxChain > 0 {
-              let truncated = String(chain.suffix(maxChain))
-              // Avoid starting mid-word like BatchPromptChain.tail.
-              if let space = truncated.firstIndex(of: " "), truncated.count == maxChain {
-                combined = String(truncated[truncated.index(after: space)...]) + "\n" + hint
+            // Preserve the chain context and trim only the optional hint.
+            let maxHint =
+              STTContextualBiasLimits.maxCombinedPromptLength - chain.count - 1
+            if maxHint > 0 {
+              let prefix = String(hint.prefix(maxHint))
+              if let space = prefix.lastIndex(of: " ") {
+                combined = chain + "\n" + String(prefix[..<space])
               } else {
-                combined = truncated + "\n" + hint
+                combined = chain
               }
             } else {
-              combined = String(hint.suffix(STTContextualBiasLimits.maxCombinedPromptLength))
+              combined = chain
             }
           }
           effectivePrompt = combined

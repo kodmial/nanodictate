@@ -87,6 +87,37 @@ final class STTContextualBiasTests: XCTestCase {
         XCTAssertFalse(applied.vocabularyDropped)
     }
 
+    @objc func testCombinedPromptOverflowPreservesChainAndTrimsHint() {
+        let caps = STTModelRegistry.resolve(adapterID: "openai", model: "whisper-1").capabilities
+        // Chain + hint exceeds the combined limit: chain must survive intact,
+        // only complete hint words that fit are kept.
+        let chain = String(repeating: "c", count: 980)
+        let applied = STTContextualBiasing.apply(
+            bias: STTContextualBias(
+                vocabulary: ["alpha", "beta", "gamma", "delta"], extraLanguages: []),
+            chainPrompt: chain,
+            primaryLanguage: "",
+            capabilities: caps)
+        let prompt = applied.effectivePrompt ?? ""
+        XCTAssertTrue(prompt.hasPrefix(chain + "\n") || prompt == chain)
+        XCTAssertTrue(prompt.hasPrefix(chain))
+        XCTAssertLessThanOrEqual(prompt.count, STTContextualBiasLimits.maxCombinedPromptLength)
+        // No partial word: the hint suffix after the chain never ends mid-word
+        // beyond what fits, and the chain prefix is byte-identical.
+        XCTAssertEqual(String(prompt.prefix(chain.count)), chain)
+    }
+
+    @objc func testCombinedPromptOverflowOmitsHintWhenNothingFits() {
+        let caps = STTModelRegistry.resolve(adapterID: "openai", model: "whisper-1").capabilities
+        let chain = String(repeating: "c", count: 999)
+        let applied = STTContextualBiasing.apply(
+            bias: STTContextualBias(vocabulary: ["Kubernetes"], extraLanguages: []),
+            chainPrompt: chain,
+            primaryLanguage: "",
+            capabilities: caps)
+        XCTAssertEqual(applied.effectivePrompt, chain)
+    }
+
     @objc func testEmptyBiasPreservesChainByteIdentical() {
         let caps = STTModelRegistry.resolve(adapterID: "openai", model: "whisper-1").capabilities
         let applied = STTContextualBiasing.apply(
