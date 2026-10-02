@@ -111,12 +111,16 @@ actor RealtimeReceiveChannel {
   }
 
   /// Deliver one pump outcome: resume the oldest waiter or buffer it.
+  /// FIFO is preserved: when items are already buffered, a newly arrived
+  /// item never jumps ahead of them to a waiter. The waiter receives the
+  /// oldest buffered item instead, so back-to-back deliveries (for example
+  /// a session ack immediately followed by EOF) keep receive order.
   func deliver(_ item: RealtimeReceiveItem) {
     guard !stopped else { return }
+    pending.append(item)
     if let waiter = waiterStore.popFirst() {
-      waiter.resume(returning: item)
-    } else {
-      pending.append(item)
+      let oldest = pending.removeFirst()
+      waiter.resume(returning: oldest)
     }
   }
 
