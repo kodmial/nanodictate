@@ -975,17 +975,20 @@ public enum BatchRequestBuilder {
     proxyKeyHeader: String = "X-Proxy-Key",
     audioFormat: STTUploadFormat = .wav
   ) -> BatchPreparedRequest? {
+    let prepared = Transcriber.prepareUpload(
+      wav: wav, filename: "segment-\(chunkIndex + 1).wav", audioFormat: audioFormat,
+      adapterID: provider.id, model: provider.model)
     let spec = ProviderRequestBuilder.plan(
       adapterID: provider.id,
       baseURL: provider.baseURL,
       model: provider.model,
       apiKey: apiKey.isEmpty ? "" : apiKey,
       language: language,
-      wav: wav,
-      filename: "segment-\(chunkIndex + 1).wav",
+      wav: prepared.data,
+      filename: prepared.filename,
       needsWordTimestamps: needsWordTimestamps,
       batchParams: batchParams,
-      audioFormat: audioFormat
+      audioFormat: prepared.effectiveFormat
     )
     guard let url = spec.url else { return nil }
     var request = URLRequest(url: url)

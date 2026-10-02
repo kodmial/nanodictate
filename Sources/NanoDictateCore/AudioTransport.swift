@@ -103,7 +103,8 @@ public struct EncodedAudioPayload: Equatable {
   public init(data: Data, format: STTUploadFormat, filename: String? = nil) {
     self.data = data
     self.format = format
-    self.filename = filename ?? format.defaultFilename
+    self.filename = filename.map { AudioTransportEncoder.coercedFilename($0, for: format) }
+      ?? format.defaultFilename
     self.contentType = format.contentType
   }
 }

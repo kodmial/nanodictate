@@ -220,6 +220,22 @@ final class AudioTransportTests: XCTestCase {
             AudioTransportEncoder.coercedFilename("recording", for: .flac), "recording")
     }
 
+    @objc func testEncodedAudioPayloadCoercesFilename() {
+        let flac = EncodedAudioPayload(
+            data: Data("FLAC".utf8), format: .flac, filename: "segment-1.wav")
+        XCTAssertEqual(flac.filename, "segment-1.flac")
+        XCTAssertEqual(flac.contentType, "audio/flac")
+        let wav = EncodedAudioPayload(
+            data: Data("WAVE".utf8), format: .wav, filename: "segment-1.flac")
+        XCTAssertEqual(wav.filename, "segment-1.wav")
+        XCTAssertEqual(wav.contentType, "audio/wav")
+        let fallback = EncodedAudioPayload(data: Data("WAVE".utf8), format: .wav)
+        XCTAssertEqual(fallback.filename, "audio.wav")
+        let untouched = EncodedAudioPayload(
+            data: Data("FLAC".utf8), format: .flac, filename: "recording")
+        XCTAssertEqual(untouched.filename, "recording")
+    }
+
     // MARK: - Request builder wiring
 
     private func multipartText(_ spec: STTRequestSpec) -> String? {
@@ -359,6 +375,45 @@ final class AudioTransportTests: XCTestCase {
         XCTAssertEqual(prepared.filename, "audio.wav")
     }
 
+    @objc func testBatchMakeRequestEncodesFlacBytes() {
+        let samples = BenchmarkSynth.samples(seed: 9, durationSeconds: 1, kind: .normal)
+        let wav = WAVEncoder.encode(samples: samples, sampleRate: 16000)
+        let provider = AppConfig.Provider(
+            id: "openai", name: "", baseURL: "", model: "whisper-1",
+            apiKey: "", apiKeyFile: nil, proxyKey: "")
+        guard let prepared = BatchRequestBuilder.makeRequest(
+            provider: provider, apiKey: "k", language: "", timeout: 60,
+            wav: wav, chunkIndex: 0, audioFormat: .flac)
+        else {
+            XCTFail("FLAC batch request must build")
+            return
+        }
+        let body = prepared.request.httpBody ?? Data()
+        XCTAssertNotNil(body.range(of: Data([0x66, 0x4C, 0x61, 0x43])), "FLAC bytes in body")
+        XCTAssertNil(body.range(of: wav), "WAV bytes must be converted, not relabelled")
+        XCTAssertNotNil(body.range(of: Data("segment-1.flac".utf8)), "FLAC filename in body")
+        XCTAssertNotNil(body.range(of: Data("audio/flac".utf8)), "FLAC content type in body")
+    }
+
+    @objc func testBatchMakeRequestFlacFallsBackOnWavOnlyProfile() {
+        let samples = BenchmarkSynth.samples(seed: 9, durationSeconds: 1, kind: .normal)
+        let wav = WAVEncoder.encode(samples: samples, sampleRate: 16000)
+        let provider = AppConfig.Provider(
+            id: "my-custom", name: "", baseURL: "https://stt.example/v1", model: "m",
+            apiKey: "", apiKeyFile: nil, proxyKey: "")
+        guard let prepared = BatchRequestBuilder.makeRequest(
+            provider: provider, apiKey: "k", language: "", timeout: 60,
+            wav: wav, chunkIndex: 0, audioFormat: .flac)
+        else {
+            XCTFail("fallback batch request must build")
+            return
+        }
+        let body = prepared.request.httpBody ?? Data()
+        XCTAssertNotNil(body.range(of: wav), "fallback keeps WAV bytes")
+        XCTAssertNotNil(body.range(of: Data("segment-1.wav".utf8)), "WAV filename in body")
+        XCTAssertNotNil(body.range(of: Data("audio/wav".utf8)), "WAV content type in body")
+    }
+
     private func runAsync(_ testName: String, _ body: @escaping () async throws -> Void) {
         let expectation = expectation(description: testName)
         Task {
@@ -475,6 +530,22 @@ final class AudioTransportTests: XCTestCase {
         XCTAssertEqual(
             config.effectiveUploadPreference(providerID: "openai"), .wav,
             "provider without override inherits top level")
+    }
+
+    @objc func testConfigUploadPreferenceFallsBackToFirstProvider() throws {
+        // Sections only, no active_provider and no top-level key: the first
+        // provider is the active one, so its section override applies.
+        let config = try AppConfig.parse(
+            """
+            [providers.groq]
+            model = "whisper-large-v3"
+            upload_format = "flac"
+            [providers.openai]
+            model = "whisper-1"
+            """)
+        XCTAssertEqual(config.effectiveUploadPreference(), .flac)
+        XCTAssertEqual(config.effectiveUploadPreference(providerID: ""), .flac)
+        XCTAssertEqual(config.effectiveUploadPreference(providerID: "openai"), .auto)
     }
 
     @objc func testFlacFrameNumbersBeyond2048RoundTrip() throws {

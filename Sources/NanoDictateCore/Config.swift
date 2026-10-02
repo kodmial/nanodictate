@@ -186,7 +186,12 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
   /// unknown to the parser (hand-edited past validation) falls back to the
   /// top level.
   public func effectiveUploadPreference(providerID: String? = nil) -> STTUploadPreference {
-    let id = (providerID?.isEmpty == false) ? providerID! : activeProvider
+    let id: String
+    if let providerID, !providerID.isEmpty {
+      id = providerID
+    } else {
+      id = activeProvider.isEmpty ? (providers.first?.id ?? "") : activeProvider
+    }
     if !id.isEmpty,
       let provider = providers.first(where: { $0.id == id }),
       !provider.uploadFormat.isEmpty,
