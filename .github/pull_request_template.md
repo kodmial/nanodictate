@@ -8,8 +8,8 @@
 
 ## Как проверял
 
-- [ ] `swift build` (debug/release)
-- [ ] `swift run NanoDictateCoreTests`
+- [ ] `scripts/build-rust-core.sh --release` (use the absolute archive path it prints; default `rust/target/release/libnanodictate_core.a` when `CARGO_TARGET_DIR` is unset) + `swift build -Xlinker "$ARCHIVE"` (debug/release)
+- [ ] `swift run -Xlinker "$ARCHIVE" NanoDictateCoreTests`
 - [ ] Ручная проверка (опиши):
 
 ## Чек-лист
