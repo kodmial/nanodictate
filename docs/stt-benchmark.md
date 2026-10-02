@@ -46,10 +46,14 @@ Per fixture × config:
 
 ## WAV vs FLAC transport comparison
 
-`BenchmarkRunner.compareTransportFormats(fixtures:config:)` encodes every
+`BenchmarkRunner.compareTransportFormats(fixtures:config:provider:)` encodes every
 fixture as WAV and FLAC and reports per fixture: raw bytes, local encode
-time, multipart upload bytes for a reference config, and lossless
-verification (FLAC decodes back to the exact source samples). The local
+time, multipart upload bytes for a reference config (both `uploadWavBytes`
+and `uploadFlacBytes`, shown as `wav upload` / `flac upload` columns), and lossless
+verification (FLAC decodes back to the exact source samples). When the
+config's model profile does not accept FLAC, the row reports
+`flacSupported == false` with `uploadFlacBytes == 0` and `n/a` in the
+table instead of a WAV-metadata/FLAC-body hybrid request. The local
 benchmark command prints this table on every run (short and near-60-second
 fixtures are both in the built-in corpus):
 
@@ -57,11 +61,15 @@ fixtures are both in the built-in corpus):
 swift run nanodictate benchmark --local
 ```
 
-Recognition regression is measured, not assumed: run the same fixtures
-through `BenchmarkRunner.run` (or a live provider) per format and compare
+Recognition regression is measured, not assumed: pass a transport provider
+to `compareTransportFormats` (local scripted provider) or use the live
+benchmark path, which transcribes the same transcript-bearing speech in
+both WAV and FLAC through the live provider and compares per-format
 WER/CER. FLAC is lossless, so a deterministic provider must score
 identically on both transports; any deviation is investigated before a
-default change. No default changes on benchmark evidence in this cycle:
+default change. Without a provider the recognition fields stay empty
+(unmeasured): size and lossless round-trip alone never imply recognition
+quality. No default changes on benchmark evidence in this cycle:
 `auto` still resolves to WAV everywhere.
 
 ## Fixture strategy (no recordings in repo)

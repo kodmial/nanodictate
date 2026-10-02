@@ -645,17 +645,40 @@ public enum BenchmarkRunner {
 
   // MARK: - WAV vs FLAC transport comparison
 
+  /// Per-format recognition provider for transport comparison: receives the
+  /// fixture, the benchmark config, the upload container under test and the
+  /// encoded payload that would be uploaded, and returns the hypothesis.
+  /// Local deterministic runs use a scripted closure; live runs wrap a real
+  /// `Transcriber` (WAV payload with `.wav`, FLAC payload with `.flac`).
+  public typealias TransportProviderRun = (
+    BenchmarkFixture, BenchmarkSTTConfig, STTUploadFormat, Data
+  ) throws -> BenchmarkHypothesis
+
+  /// True when the config's model profile accepts a FLAC upload body.
+  /// `ProviderRequestBuilder.plan` coerces unsupported FLAC requests to WAV
+  /// metadata, so measuring such a request as `uploadFlacBytes` would present
+  /// a WAV-metadata/FLAC-body hybrid as a valid comparison. Callers must
+  /// report FLAC as unsupported for these profiles instead.
+  public static func supportsFLAC(config: BenchmarkSTTConfig) -> Bool {
+    let profile = STTModelRegistry.resolve(adapterID: config.adapterID, model: config.model)
+    return profile.audio.supportedUploadFormats.contains(.flac)
+      && FLACEncoder.canEncode(profile: profile.audio)
+  }
+
   /// Compare upload transports for one fixture set: WAV vs FLAC bytes, local
   /// encode time, and lossless verification (FLAC decodes back to the exact
-  /// source samples). Recognition regression is measured, not assumed: run
-  /// the same fixtures through `run(fixtures:configs:provider:)` (or a live
-  /// provider) and compare WER/CER per format; lossless FLAC must score
+  /// source samples). Size/lossless alone do not measure recognition quality:
+  /// pass `provider` to transcribe the same fixture audio in both containers
+  /// and record per-format WER/CER on the row. Without a provider the
+  /// recognition fields stay nil (unmeasured); lossless FLAC must still score
   /// identically on a deterministic provider.
   public static func compareTransportFormats(
     fixtures: [BenchmarkFixture],
-    config: BenchmarkSTTConfig
+    config: BenchmarkSTTConfig,
+    provider: TransportProviderRun? = nil
   ) -> [BenchmarkTransportComparison] {
-    fixtures.map { fixture in
+    let flacSupported = supportsFLAC(config: config)
+    return fixtures.map { fixture in
       let wavStart = Date()
       let wav = WAVEncoder.encode(samples: fixture.samples, sampleRate: fixture.sampleRate)
       let wavEncodeMs = Date().timeIntervalSince(wavStart) * 1_000.0
@@ -668,8 +691,35 @@ public enum BenchmarkRunner {
         lossless = (try? FLACDecoder.decode(flac))?.samples == fixture.samples
       }
       let uploadWav = uploadBytes(config: config, wav: wav, audioFormat: .wav)
-      let uploadFlac =
-        flac.map { uploadBytes(config: config, wav: $0, audioFormat: .flac) } ?? 0
+      // Exclude unsupported FLAC requests from the comparison: when the
+      // profile would force WAV, a FLAC body with WAV metadata is not a valid
+      // transport sample. Report 0 upload bytes with flacSupported == false.
+      let uploadFlac: Int
+      if flacSupported, let flac {
+        uploadFlac = uploadBytes(config: config, wav: flac, audioFormat: .flac)
+      } else {
+        uploadFlac = 0
+      }
+      var wavWER: Double?
+      var wavCER: Double?
+      var flacWER: Double?
+      var flacCER: Double?
+      var wavHypothesis: String?
+      var flacHypothesis: String?
+      if let provider {
+        if let wavHyp = try? provider(fixture, config, .wav, wav) {
+          wavHypothesis = wavHyp.text
+          wavWER = BenchmarkText.wer(reference: fixture.transcript, hypothesis: wavHyp.text)
+          wavCER = BenchmarkText.cer(reference: fixture.transcript, hypothesis: wavHyp.text)
+        }
+        if flacSupported, let flac {
+          if let flacHyp = try? provider(fixture, config, .flac, flac) {
+            flacHypothesis = flacHyp.text
+            flacWER = BenchmarkText.wer(reference: fixture.transcript, hypothesis: flacHyp.text)
+            flacCER = BenchmarkText.cer(reference: fixture.transcript, hypothesis: flacHyp.text)
+          }
+        }
+      }
       return BenchmarkTransportComparison(
         fixtureID: fixture.id,
         category: fixture.category.rawValue,
@@ -681,7 +731,14 @@ public enum BenchmarkRunner {
         flacEncodeMs: flacEncodeMs,
         uploadWavBytes: uploadWav,
         uploadFlacBytes: uploadFlac,
-        lossless: lossless
+        lossless: lossless,
+        flacSupported: flacSupported,
+        wavWER: wavWER,
+        wavCER: wavCER,
+        flacWER: flacWER,
+        flacCER: flacCER,
+        wavHypothesis: wavHypothesis,
+        flacHypothesis: flacHypothesis
       )
     }
   }
@@ -691,6 +748,11 @@ public enum BenchmarkRunner {
 
 /// Per-fixture WAV vs FLAC comparison: size, local encode time, upload body
 /// accounting (multipart overhead included) and lossless verification.
+/// `flacSupported` is false when the config's model profile does not accept
+/// FLAC (uploadFlacBytes is then 0, not a valid comparison sample).
+/// Recognition fields (`wavWER`/`flacWER`/...) are nil unless the caller
+/// supplied a transport provider: size/lossless alone never imply
+/// recognition quality.
 /// Codable for machine output alongside `BenchmarkReport`.
 public struct BenchmarkTransportComparison: Codable, Equatable {
   public var fixtureID: String
@@ -705,6 +767,15 @@ public struct BenchmarkTransportComparison: Codable, Equatable {
   public var uploadFlacBytes: Int
   /// FLAC decodes back to the exact source samples (lossless transport).
   public var lossless: Bool
+  /// The profile accepts a FLAC upload body. False: FLAC is unsupported and
+  /// `uploadFlacBytes`/FLAC recognition are not valid comparison samples.
+  public var flacSupported: Bool
+  public var wavWER: Double?
+  public var wavCER: Double?
+  public var flacWER: Double?
+  public var flacCER: Double?
+  public var wavHypothesis: String?
+  public var flacHypothesis: String?
 
   public init(
     fixtureID: String,
@@ -717,7 +788,14 @@ public struct BenchmarkTransportComparison: Codable, Equatable {
     flacEncodeMs: Double,
     uploadWavBytes: Int,
     uploadFlacBytes: Int,
-    lossless: Bool
+    lossless: Bool,
+    flacSupported: Bool = true,
+    wavWER: Double? = nil,
+    wavCER: Double? = nil,
+    flacWER: Double? = nil,
+    flacCER: Double? = nil,
+    wavHypothesis: String? = nil,
+    flacHypothesis: String? = nil
   ) {
     self.fixtureID = fixtureID
     self.category = category
@@ -730,6 +808,56 @@ public struct BenchmarkTransportComparison: Codable, Equatable {
     self.uploadWavBytes = uploadWavBytes
     self.uploadFlacBytes = uploadFlacBytes
     self.lossless = lossless
+    self.flacSupported = flacSupported
+    self.wavWER = wavWER
+    self.wavCER = wavCER
+    self.flacWER = flacWER
+    self.flacCER = flacCER
+    self.wavHypothesis = wavHypothesis
+    self.flacHypothesis = flacHypothesis
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case fixtureID
+    case category
+    case durationBucket
+    case durationSeconds
+    case wavBytes
+    case flacBytes
+    case wavEncodeMs
+    case flacEncodeMs
+    case uploadWavBytes
+    case uploadFlacBytes
+    case lossless
+    case flacSupported
+    case wavWER
+    case wavCER
+    case flacWER
+    case flacCER
+    case wavHypothesis
+    case flacHypothesis
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    fixtureID = try container.decode(String.self, forKey: .fixtureID)
+    category = try container.decode(String.self, forKey: .category)
+    durationBucket = try container.decode(String.self, forKey: .durationBucket)
+    durationSeconds = try container.decode(Double.self, forKey: .durationSeconds)
+    wavBytes = try container.decode(Int.self, forKey: .wavBytes)
+    flacBytes = try container.decode(Int.self, forKey: .flacBytes)
+    wavEncodeMs = try container.decode(Double.self, forKey: .wavEncodeMs)
+    flacEncodeMs = try container.decode(Double.self, forKey: .flacEncodeMs)
+    uploadWavBytes = try container.decode(Int.self, forKey: .uploadWavBytes)
+    uploadFlacBytes = try container.decode(Int.self, forKey: .uploadFlacBytes)
+    lossless = try container.decode(Bool.self, forKey: .lossless)
+    flacSupported = try container.decodeIfPresent(Bool.self, forKey: .flacSupported) ?? true
+    wavWER = try container.decodeIfPresent(Double.self, forKey: .wavWER)
+    wavCER = try container.decodeIfPresent(Double.self, forKey: .wavCER)
+    flacWER = try container.decodeIfPresent(Double.self, forKey: .flacWER)
+    flacCER = try container.decodeIfPresent(Double.self, forKey: .flacCER)
+    wavHypothesis = try container.decodeIfPresent(String.self, forKey: .wavHypothesis)
+    flacHypothesis = try container.decodeIfPresent(String.self, forKey: .flacHypothesis)
   }
 
   /// FLAC share of WAV bytes (< 1 means FLAC is smaller).
@@ -742,15 +870,43 @@ public struct BenchmarkTransportComparison: Codable, Equatable {
     var lines: [String] = []
     lines.append("## Transport comparison (WAV vs FLAC)")
     lines.append("")
-    lines.append("| fixture | wav | flac | ratio | wav encode | flac encode | lossless |")
-    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
-    for row in rows {
+    let showsRecognition = rows.contains { $0.wavWER != nil || $0.flacWER != nil }
+    if showsRecognition {
       lines.append(
+        "| fixture | wav | flac | ratio | wav upload | flac upload | wav encode | flac encode | lossless | wav WER | flac WER | wav CER | flac CER |")
+      lines.append(
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    } else {
+      lines.append(
+        "| fixture | wav | flac | ratio | wav upload | flac upload | wav encode | flac encode | lossless |")
+      lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    }
+    for row in rows {
+      let flacUpload = row.flacSupported ? "\(row.uploadFlacBytes)B" : "n/a"
+      var line =
         "| \(row.fixtureID) | \(row.wavBytes)B | \(row.flacBytes)B"
-          + " | \(String(format: "%.3f", row.sizeRatio))"
-          + " | \(BenchmarkFormat.ms(row.wavEncodeMs)) | \(BenchmarkFormat.ms(row.flacEncodeMs))"
-          + " | \(row.lossless ? "yes" : "NO") |"
-      )
+        + " | \(String(format: "%.3f", row.sizeRatio))"
+        + " | \(row.uploadWavBytes)B | \(flacUpload)"
+        + " | \(BenchmarkFormat.ms(row.wavEncodeMs)) | \(BenchmarkFormat.ms(row.flacEncodeMs))"
+        + " | \(row.lossless ? "yes" : "NO") |"
+      if showsRecognition {
+        let wavWER = row.wavWER.map { String(format: "%.3f", $0) } ?? "-"
+        let flacWER: String
+        if !row.flacSupported {
+          flacWER = "n/a"
+        } else {
+          flacWER = row.flacWER.map { String(format: "%.3f", $0) } ?? "-"
+        }
+        let wavCER = row.wavCER.map { String(format: "%.3f", $0) } ?? "-"
+        let flacCER: String
+        if !row.flacSupported {
+          flacCER = "n/a"
+        } else {
+          flacCER = row.flacCER.map { String(format: "%.3f", $0) } ?? "-"
+        }
+        line += " \(wavWER) | \(flacWER) | \(wavCER) | \(flacCER) |"
+      }
+      lines.append(line)
     }
     return lines.joined(separator: "\n") + "\n"
   }

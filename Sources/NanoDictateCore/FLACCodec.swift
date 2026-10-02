@@ -251,25 +251,25 @@ public enum FLACEncoder {
   }
 
   static func writeUTF8(_ writer: inout FLACBitWriter, value: Int) {
-    // Coded number per RFC 9639 section 9.1.5 (Table 18): standard UTF-8
-    // for the ranges used here (frame counts are in the hundreds).
     let scalar = UInt32(value)
     if scalar < 0x80 {
       writer.writeBits(scalar, count: 8)
       return
     }
-    var groups: [UInt32] = []
-    var remainingValue = scalar
-    repeat {
-      groups.insert(remainingValue & 0x3F, at: 0)
-      remainingValue >>= 6
-    } while remainingValue != 0
-    let count = groups.count
-    // L-byte marker: L ones followed by a zero (110/1110/11110).
+    // RFC 9639 Table 18: byte count by value range.
+    let count: Int
+    switch scalar {
+    case ..<0x800: count = 2
+    case ..<0x1_0000: count = 3
+    case ..<0x20_0000: count = 4
+    case ..<0x400_0000: count = 5
+    default: count = 6
+    }
+    let contBits = 6 * (count - 1)
     let marker = (UInt32(0xFF) << UInt32(8 - count)) & 0xFF
-    writer.writeBits(marker | groups[0], count: 8)
-    for group in groups.dropFirst() {
-      writer.writeBits(0x80 | group, count: 8)
+    writer.writeBits(marker | (scalar >> UInt32(contBits)), count: 8)
+    for i in stride(from: count - 2, through: 0, by: -1) {
+      writer.writeBits(0x80 | ((scalar >> UInt32(6 * i)) & 0x3F), count: 8)
     }
   }
 
@@ -681,7 +681,9 @@ public enum FLACDecoder {
     var value = 0
     if first & 0xE0 == 0xC0 { extra = 1; value = Int(first & 0x1F) } else if first & 0xF0 == 0xE0 {
       extra = 2; value = Int(first & 0x0F)
-    } else if first & 0xF8 == 0xF0 { extra = 3; value = Int(first & 0x07) } else {
+    } else if first & 0xF8 == 0xF0 { extra = 3; value = Int(first & 0x07) } else if first & 0xFC == 0xF8 {
+      extra = 4; value = Int(first & 0x03)
+    } else if first & 0xFE == 0xFC { extra = 5; value = Int(first & 0x01) } else {
       throw DecodeError.unsupported("frame number encoding")
     }
     for _ in 0..<extra {

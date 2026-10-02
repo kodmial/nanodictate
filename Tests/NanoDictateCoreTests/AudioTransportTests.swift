@@ -350,6 +350,51 @@ final class AudioTransportTests: XCTestCase {
                                          providerID: "groq"), .flac)
     }
 
+    @objc func testConfigUploadFormatActiveOverrideDoesNotLeakToOtherProviders() throws {
+        // Top level wav, active groq overrides to flac: a provider without its
+        // own override (openai, e.g. routing final_provider) must still
+        // inherit the top level, not the active provider's section value.
+        let config = try AppConfig.parse(
+            """
+            active_provider = "groq"
+            upload_format = "wav"
+            [providers.groq]
+            model = "whisper-large-v3"
+            upload_format = "flac"
+            [providers.openai]
+            model = "whisper-1"
+            """)
+        XCTAssertEqual(config.uploadFormat, .wav, "top level stays intact")
+        XCTAssertEqual(config.effectiveUploadPreference(providerID: "groq"), .flac)
+        XCTAssertEqual(
+            config.effectiveUploadPreference(providerID: "openai"), .wav,
+            "provider without override inherits top level")
+    }
+
+    @objc func testFlacFrameNumbersBeyond2048RoundTrip() throws {
+        // RFC 9639 Table 18 boundary values: byte count comes from the value
+        // range, not the 6-bit group count (frame 2048+ used to emit an
+        // invalid 0xFF lead byte).
+        for value in [0, 0x7F, 0x80, 0x7FF, 0x800, 0xFFF, 0x1000, 0xFFFF, 0x10000, 0x1FFFFF] {
+            var writer = FLACBitWriter()
+            FLACEncoder.writeUTF8(&writer, value: value)
+            writer.flush()
+            var reader = FLACBitReader(bytes: writer.bytes, bitPos: 0)
+            XCTAssertEqual(try FLACDecoder.readUTF8(&reader), value, "UTF-8 round trip \(value)")
+        }
+        // More than 2048 x 4096 samples: frame 2048+ headers must decode.
+        // Constant signal keeps the long encode fast.
+        let count = 2048 * 4096 + 100
+        let samples = [Int16](repeating: 100, count: count)
+        guard let flac = FLACEncoder.encode(samples: samples, sampleRate: 16000, channels: 1)
+        else {
+            XCTFail("FLAC encode failed for long recording")
+            return
+        }
+        let decoded = try FLACDecoder.decode(flac)
+        XCTAssertEqual(decoded.samples, samples, "long recording lossless")
+    }
+
     // MARK: - Benchmark WAV vs FLAC
 
     @objc func testBenchmarkTransportComparisonShortAndLong() {
@@ -361,16 +406,70 @@ final class AudioTransportTests: XCTestCase {
         XCTAssertEqual(rows.count, fixtures.count)
         for row in rows {
             XCTAssertTrue(row.lossless, "\(row.fixtureID) FLAC lossless")
+            XCTAssertTrue(row.flacSupported, "\(row.fixtureID) FLAC supported")
             XCTAssertGreaterThan(row.wavBytes, 0)
             XCTAssertGreaterThan(row.flacBytes, 0)
             XCTAssertLessThan(row.flacBytes, row.wavBytes, "\(row.fixtureID) compacts")
             XCTAssertLessThan(row.uploadFlacBytes, row.uploadWavBytes, "\(row.fixtureID) uploads less")
             XCTAssertGreaterThanOrEqual(row.wavEncodeMs, 0)
             XCTAssertGreaterThanOrEqual(row.flacEncodeMs, 0)
+            XCTAssertNil(row.wavWER, "no provider means recognition unmeasured")
+            XCTAssertNil(row.flacWER, "no provider means recognition unmeasured")
         }
         let markdown = BenchmarkTransportComparison.markdown(rows)
         XCTAssertTrue(markdown.contains("normal-long"))
         XCTAssertTrue(markdown.contains("WAV vs FLAC"))
+        XCTAssertTrue(markdown.contains("wav upload"), "upload sizes are visible")
+        XCTAssertTrue(markdown.contains("flac upload"), "upload sizes are visible")
+    }
+
+    @objc func testBenchmarkTransportExcludesUnsupportedFlac() {
+        // WAV-only profile (Cloudflare raw audio): FLAC must be reported as
+        // unsupported instead of a WAV-metadata/FLAC-body hybrid request.
+        let config = BenchmarkSTTConfig(name: "t", adapterID: "cloudflare", model: "")
+        XCTAssertFalse(BenchmarkRunner.supportsFLAC(config: config))
+        let fixtures = BenchmarkFixtures.builtins().filter { $0.durationBucket == .short }
+        let rows = BenchmarkRunner.compareTransportFormats(
+            fixtures: fixtures, config: config,
+            provider: { fixture, _, format, _ in
+                BenchmarkHypothesis(text: fixture.transcript, requestSeconds: 0)
+            })
+        XCTAssertFalse(rows.isEmpty)
+        for row in rows {
+            XCTAssertFalse(row.flacSupported)
+            XCTAssertEqual(row.uploadFlacBytes, 0, "unsupported FLAC has no valid upload sample")
+            XCTAssertNotNil(row.wavWER, "WAV recognition still measured")
+            XCTAssertNil(row.flacWER, "unsupported FLAC recognition unmeasured")
+        }
+        let markdown = BenchmarkTransportComparison.markdown(rows)
+        XCTAssertTrue(markdown.contains("n/a"), "unsupported FLAC shown as n/a")
+    }
+
+    @objc func testBenchmarkTransportRecognitionMeasuredPerFormat() {
+        let fixtures = BenchmarkFixtures.builtins().filter { $0.durationBucket == .short }
+        let config = BenchmarkSTTConfig(name: "t", adapterID: "openai", model: "whisper-1")
+        XCTAssertTrue(BenchmarkRunner.supportsFLAC(config: config))
+        // Perfect WAV hypothesis, degraded FLAC hypothesis: per-format WER
+        // must be recorded separately, not inferred from lossless round-trip.
+        let rows = BenchmarkRunner.compareTransportFormats(
+            fixtures: fixtures, config: config,
+            provider: { fixture, _, format, _ in
+                if format == .wav {
+                    return BenchmarkHypothesis(text: fixture.transcript, requestSeconds: 0)
+                }
+                return BenchmarkHypothesis(
+                    text: fixture.transcript + " extra", requestSeconds: 0)
+            })
+        XCTAssertFalse(rows.isEmpty)
+        for row in rows {
+            XCTAssertTrue(row.flacSupported)
+            XCTAssertEqual(row.wavWER, 0, "\(row.fixtureID) WAV perfect")
+            XCTAssertGreaterThan(row.flacWER ?? 0, 0, "\(row.fixtureID) FLAC degraded")
+            XCTAssertEqual(row.wavHypothesis, fixtures.first { $0.id == row.fixtureID }?.transcript)
+        }
+        let markdown = BenchmarkTransportComparison.markdown(rows)
+        XCTAssertTrue(markdown.contains("wav WER"), "recognition columns shown when measured")
+        XCTAssertTrue(markdown.contains("flac WER"), "recognition columns shown when measured")
     }
 
     @objc func testBenchmarkRecognitionIdenticalAcrossLosslessTransports() throws {

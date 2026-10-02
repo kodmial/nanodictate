@@ -1430,16 +1430,25 @@ func cmdBenchmarkLocal(jsonPath: String?, markdownPath: String?) -> Int32 {
     let report = try BenchmarkRunner.run(
       fixtures: fixtures, configs: configs,
       provider: BenchmarkRunner.scriptedProvider(hypotheses: hypotheses))
-    // WAV vs FLAC transport comparison (size, local encode time, upload
-    // body accounting, lossless check) on the same fixtures: short and
+    // WAV vs FLAC transport comparison on the same fixtures (size, local
+    // encode time, upload body accounting, lossless check): short and
     // near-60-second speech are both covered by the built-in corpus.
-    // Printed to stdout and appended to the markdown file; the JSON file
-    // keeps the historic BenchmarkReport shape (machine-readable
-    // transport rows are available via BenchmarkRunner
-    // .compareTransportFormats for programmatic use).
+    // Recognition is measured per format through the same scripted provider
+    // (both containers carry the identical transcript-bearing fixture audio,
+    // so lossless FLAC must score identically to WAV) rather than inferred
+    // from encoding or the local round trip. Printed to stdout and appended
+    // to the markdown file; the JSON file keeps the historic
+    // BenchmarkReport shape (machine-readable transport rows are available
+    // via BenchmarkRunner.compareTransportFormats for programmatic use).
+    let transportConfig = BenchmarkSTTConfig(
+      name: "transport", adapterID: "openai", model: "whisper-1")
+    let transportProvider: BenchmarkRunner.TransportProviderRun = { fixture, _, _, _ in
+      BenchmarkHypothesis(text: fixture.transcript, requestSeconds: 0)
+    }
     let transport = BenchmarkRunner.compareTransportFormats(
       fixtures: fixtures,
-      config: BenchmarkSTTConfig(name: "transport", adapterID: "openai", model: "whisper-1"))
+      config: transportConfig,
+      provider: transportProvider)
     let code = writeBenchmarkOutputs(report: report, jsonPath: jsonPath, markdownPath: nil)
     print(BenchmarkTransportComparison.markdown(transport))
     if let markdownPath {
@@ -1580,10 +1589,82 @@ func cmdBenchmarkLive(
             hypothesis: outcome.text
           ))
       }
+      // WAV vs FLAC transport recognition on the same transcript-bearing
+      // speech: transcribe each fixture in both containers through the live
+      // provider and report per-format hypotheses plus WER/CER. Size-only or
+      // local round-trip measurements never stand in for recognition quality.
+      let flacSupported = BenchmarkRunner.supportsFLAC(config: benchmarkConfig)
+      var transportRows: [BenchmarkTransportComparison] = []
+      for fixture in fixtures {
+        let wavStart = Date()
+        let wav = WAVEncoder.encode(samples: fixture.samples, sampleRate: fixture.sampleRate)
+        let wavEncodeMs = Date().timeIntervalSince(wavStart) * 1_000.0
+        let flacStart = Date()
+        let flac = FLACEncoder.encode(
+          samples: fixture.samples, sampleRate: fixture.sampleRate, channels: 1)
+        let flacEncodeMs = Date().timeIntervalSince(flacStart) * 1_000.0
+        let lossless =
+          flac.map { (try? FLACDecoder.decode($0))?.samples == fixture.samples } ?? false
+        let uploadWav = BenchmarkRunner.uploadBytes(
+          config: benchmarkConfig, wav: wav, audioFormat: .wav)
+        let uploadFlac: Int
+        if flacSupported, let flac {
+          uploadFlac = BenchmarkRunner.uploadBytes(
+            config: benchmarkConfig, wav: flac, audioFormat: .flac)
+        } else {
+          uploadFlac = 0
+        }
+        let wavOutcome = try await transcriber.transcribe(wav: wav, audioFormat: .wav)
+        var flacOutcomeText: String?
+        if flacSupported, let flac {
+          let flacOutcome = try await transcriber.transcribe(
+            wav: flac, filename: "audio.flac", audioFormat: .flac)
+          flacOutcomeText = flacOutcome.text
+        }
+        transportRows.append(
+          BenchmarkTransportComparison(
+            fixtureID: fixture.id,
+            category: fixture.category.rawValue,
+            durationBucket: fixture.durationBucket.rawValue,
+            durationSeconds: fixture.durationSeconds,
+            wavBytes: wav.count,
+            flacBytes: flac?.count ?? 0,
+            wavEncodeMs: wavEncodeMs,
+            flacEncodeMs: flacEncodeMs,
+            uploadWavBytes: uploadWav,
+            uploadFlacBytes: uploadFlac,
+            lossless: lossless,
+            flacSupported: flacSupported,
+            wavWER: BenchmarkText.wer(
+              reference: fixture.transcript, hypothesis: wavOutcome.text),
+            wavCER: BenchmarkText.cer(
+              reference: fixture.transcript, hypothesis: wavOutcome.text),
+            flacWER: flacOutcomeText.map {
+              BenchmarkText.wer(reference: fixture.transcript, hypothesis: $0)
+            },
+            flacCER: flacOutcomeText.map {
+              BenchmarkText.cer(reference: fixture.transcript, hypothesis: $0)
+            },
+            wavHypothesis: wavOutcome.text,
+            flacHypothesis: flacOutcomeText
+          ))
+      }
+      print(BenchmarkTransportComparison.markdown(transportRows))
       let report = BenchmarkReport(
         results: results, summaries: BenchmarkRunner.summarize(results: results))
       let code = writeBenchmarkOutputs(
-        report: report, jsonPath: jsonPath, markdownPath: markdownPath)
+        report: report, jsonPath: jsonPath, markdownPath: nil)
+      if let markdownPath {
+        do {
+          try (report.markdown() + "\n" + BenchmarkTransportComparison.markdown(transportRows))
+            .write(
+              to: URL(fileURLWithPath: markdownPath), atomically: true, encoding: .utf8)
+          eprint("benchmark: Markdown written to \(markdownPath)")
+        } catch {
+          eprint("benchmark: failed to write Markdown: \(error)")
+          exit(1)
+        }
+      }
       exit(code)
     } catch {
       eprint("benchmark: live run failed: \(error)")

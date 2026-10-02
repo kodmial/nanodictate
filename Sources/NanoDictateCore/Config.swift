@@ -942,12 +942,9 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
     if !provider.proxyKeyHeader.isEmpty {
       config.proxyKeyHeader = provider.proxyKeyHeader
     }
-    // Section upload_format wins over the top level; empty inherits it.
-    if !provider.uploadFormat.isEmpty,
-      let preference = STTUploadPreference.parse(provider.uploadFormat)
-    {
-      config.uploadFormat = preference
-    }
+    // Section upload_format is resolved per provider in
+    // effectiveUploadPreference(providerID:); the top-level value stays
+    // intact so other providers (routing/failover) inherit it correctly.
   }
 
   /// Каноническое значение транспорта: legacy-алиасы старого конфига
