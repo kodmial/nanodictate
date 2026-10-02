@@ -161,19 +161,6 @@ public enum RealtimeFallbackPolicy: String, Equatable {
   case allowBatch
 }
 
-// MARK: - Transport abstraction (mocked in tests)
-
-/// Minimal WebSocket surface used by the session. Production uses
-/// `URLSessionWebSocketTransport`; tests inject `MockRealtimeTransport`.
-public protocol RealtimeTransport: AnyObject {
-  /// Send one JSON text message.
-  func send(text: String) async throws
-  /// Receive one JSON text message; nil = transport closed cleanly.
-  func receive() async throws -> String?
-  /// Deterministic teardown.
-  func close() async
-}
-
 // MARK: - Server events
 
 /// Parsed realtime transcription server event (official schema).
@@ -484,219 +471,6 @@ extension ProviderRequestBuilder {
 
 // MARK: - Stateful session (one per dictation)
 
-/// Signals that a bounded `withTimeout` wait expired without a result.
-/// Distinct from a `nil` operation result (clean transport EOF) so callers
-/// keep waiting until their own deadline instead of treating a short
-/// per-receive expiry as closure.
-private enum RealtimeWaitTimeout: Error {
-  case timedOut
-}
-
-/// One item produced by the single long-lived receive loop.
-/// `.text(nil)` is a clean transport EOF; `.failure` preserves the transport
-/// error so callers apply the same close-out as a direct `receive()` error.
-private enum RealtimeReceiveItem: Sendable {
-  case text(String?)
-  case failure(RealtimeTranscriptionError)
-}
-
-/// Thread-safe waiter registry for the receive channel. Held by the channel
-/// actor but safe to touch from the non-isolated continuation closures, so
-/// timed waits cancel only their own waiter and never the underlying stream.
-private final class RealtimeWaiterStore: @unchecked Sendable {
-  private let lock = NSLock()
-  private var waiters: [UUID: CheckedContinuation<RealtimeReceiveItem?, Never>] = [:]
-  private var order: [UUID] = []
-
-  func add(id: UUID, continuation: CheckedContinuation<RealtimeReceiveItem?, Never>) {
-    lock.lock()
-    waiters[id] = continuation
-    order.append(id)
-    lock.unlock()
-  }
-
-  func popFirst() -> CheckedContinuation<RealtimeReceiveItem?, Never>? {
-    lock.lock()
-    defer { lock.unlock() }
-    guard let id = order.first else { return nil }
-    order.removeFirst()
-    return waiters.removeValue(forKey: id)
-  }
-
-  @discardableResult
-  func remove(id: UUID) -> CheckedContinuation<RealtimeReceiveItem?, Never>? {
-    lock.lock()
-    defer { lock.unlock() }
-    order.removeAll { $0 == id }
-    return waiters.removeValue(forKey: id)
-  }
-
-  func removeAll() -> [CheckedContinuation<RealtimeReceiveItem?, Never>] {
-    lock.lock()
-    defer { lock.unlock() }
-    let all = Array(waiters.values)
-    waiters.removeAll()
-    order.removeAll()
-    return all
-  }
-}
-
-/// Single long-lived receive loop per session.
-///
-/// The pump task calls `transport.receive()` continuously for the session
-/// lifetime and delivers every outcome to the channel. Waiters suspend on
-/// per-waiter continuations (never on `transport.receive()` or on a shared
-/// `AsyncStream.Iterator`, whose cancellation would terminate the stream per
-/// SE-0314), so expiring a wait cancels only that waiter. A message that
-/// arrives after a timeout is appended to `pending` and returned by the next
-/// wait instead of being discarded.
-private actor RealtimeReceiveChannel {
-  private let transport: RealtimeTransport
-  private let waiterStore = RealtimeWaiterStore()
-  private var pending: [RealtimeReceiveItem] = []
-  private var pump: Task<Void, Never>?
-  private var stopped = false
-
-  init(transport: RealtimeTransport) {
-    self.transport = transport
-  }
-
-  /// Start the background pump (idempotent; one loop per session).
-  func start() {
-    guard pump == nil, !stopped else { return }
-    pump = Task { [transport, channel = self] in
-      await Self.runPump(transport: transport, channel: channel)
-    }
-  }
-
-  /// Stop the pump and resume pending waiters with nil (idempotent).
-  func stop() {
-    stopped = true
-    pump?.cancel()
-    pump = nil
-    for waiter in waiterStore.removeAll() {
-      waiter.resume(returning: nil)
-    }
-  }
-
-  /// Deliver one pump outcome: resume the oldest waiter or buffer it.
-  func deliver(_ item: RealtimeReceiveItem) {
-    guard !stopped else { return }
-    if let waiter = waiterStore.popFirst() {
-      waiter.resume(returning: item)
-    } else {
-      pending.append(item)
-    }
-  }
-
-  /// Resume and drop one waiter without delivering (timeout/cancel path).
-  func cancelWaiter(id: UUID) {
-    if let waiter = waiterStore.remove(id: id) {
-      waiter.resume(returning: nil)
-    }
-  }
-
-  /// Next buffered item without a timeout (nil = stopped/finished).
-  func dequeue() async -> RealtimeReceiveItem? {
-    if !pending.isEmpty {
-      return pending.removeFirst()
-    }
-    if stopped { return nil }
-    let id = UUID()
-    let store = waiterStore
-    return await withTaskCancellationHandler {
-      await withCheckedContinuation { (continuation: CheckedContinuation<RealtimeReceiveItem?, Never>) in
-        store.add(id: id, continuation: continuation)
-      }
-    } onCancel: {
-      Task { await self.cancelWaiter(id: id) }
-    }
-  }
-
-  /// Next item with a bounded wait. Throws `RealtimeWaitTimeout.timedOut`
-  /// when no item arrives first. Cancelling the timeout waiter never cancels
-  /// the pump or terminates a shared stream; a late arrival is buffered in
-  /// `pending` (via `deliver` or via requeue of a won race) for the next call.
-  func next(timeout: TimeInterval) async throws -> RealtimeReceiveItem? {
-    if !pending.isEmpty {
-      return pending.removeFirst()
-    }
-    if stopped { return nil }
-    if timeout <= 0 {
-      return await dequeue()
-    }
-    return try await withThrowingTaskGroup(of: RealtimeReceiveItem?.self) { group in
-      group.addTask {
-        await self.dequeue()
-      }
-      group.addTask {
-        try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-        throw RealtimeWaitTimeout.timedOut
-      }
-      do {
-        guard let first = try await group.next() else {
-          group.cancelAll()
-          _ = try? await group.next()
-          return nil
-        }
-        group.cancelAll()
-        _ = try? await group.next()
-        return first
-      } catch is RealtimeWaitTimeout {
-        group.cancelAll()
-        var late: RealtimeReceiveItem?? = nil
-        do {
-          if let other = try await group.next() {
-            late = other
-          }
-        } catch {
-          // Sleeper cancellation noise; the dequeue child reports values only.
-        }
-        // If the dequeue waiter won the race just as the timeout fired, its
-        // item was consumed by this call and must be requeued, not discarded.
-        // If delivery happened after cancel, `deliver` already buffered it in
-        // `pending`, so there is nothing extra to do here.
-        // Requeue at the front: the recovered item arrived before anything
-        // buffered in `pending` while draining the race (e.g. a `.completed`
-        // followed by EOF), so appending would invert receive order and let
-        // EOF be processed before the completion.
-        if let item = late ?? nil {
-          pending.insert(item, at: 0)
-        }
-        throw RealtimeWaitTimeout.timedOut
-      }
-    }
-  }
-
-  /// Background pump: the only place that calls `transport.receive()`.
-  /// Never cancelled by a wait timeout; only by `stop()` / task cancellation.
-  private static func runPump(
-    transport: RealtimeTransport,
-    channel: RealtimeReceiveChannel
-  ) async {
-    while true {
-      if Task.isCancelled { break }
-      do {
-        let text = try await transport.receive()
-        await channel.deliver(.text(text))
-        if text == nil {
-          // Clean EOF: pause so a closed transport does not hot-spin.
-          try? await Task.sleep(nanoseconds: 5_000_000)
-        }
-      } catch is CancellationError {
-        await channel.deliver(.failure(.cancelled))
-        break
-      } catch let error as RealtimeTranscriptionError {
-        await channel.deliver(.failure(error))
-        try? await Task.sleep(nanoseconds: 5_000_000)
-      } catch {
-        await channel.deliver(.failure(.transport(error.localizedDescription)))
-        try? await Task.sleep(nanoseconds: 5_000_000)
-      }
-    }
-  }
-}
-
 /// One stateful realtime transcription session per dictation.
 ///
 /// Usage:
@@ -863,60 +637,19 @@ public actor RealtimeTranscriptionSession {
     let deadline = Date().addingTimeInterval(policy.commitTimeout)
     await ensureReceiveChannel()
     while true {
-      try Task.checkCancellation()
-      if state == .cancelled {
-        throw RealtimeTranscriptionError.cancelled
-      }
-      if state == .failed {
-        throw RealtimeTranscriptionError.sessionFailed(lastError ?? "session failed")
-      }
+      try throwIfWaitTerminal()
       if let final = accumulator.finalText {
         return final
       }
-      if Date() >= deadline {
-        // Deterministic close-out: prefer completed text; else expose the
-        // accumulated partial so the caller never hangs. Batch fallback is
-        // NOT triggered here (see RealtimeFallbackPolicy).
-        let partial = accumulator.partialText
-        if !partial.isEmpty {
-          return partial
-        }
-        throw RealtimeTranscriptionError.timeout("no completion within commit timeout")
+      if let done = try transcriptIfPastDeadline(deadline) {
+        return done
       }
       do {
         guard let item = try await receiveChannel?.next(timeout: 0.2) else {
-          // Stream finished before completion: same close-out as clean EOF.
-          if let final = self.accumulator.finalText {
-            return final
-          }
-          let partial = self.accumulator.partialText
-          if !partial.isEmpty {
-            return partial
-          }
-          state = .failed
-          lastError = "transport closed before completion"
-          throw RealtimeTranscriptionError.transport("transport closed before completion")
+          return try closeOutOrFail(message: "transport closed before completion")
         }
-        switch item {
-        case .text(let text):
-          guard let text else {
-            // Clean EOF before completion: deterministic close-out. When a
-            // final or partial transcript is already available it is returned
-            // (no failure); otherwise the drop fails the session closed.
-            if let final = self.accumulator.finalText {
-              return final
-            }
-            let partial = self.accumulator.partialText
-            if !partial.isEmpty {
-              return partial
-            }
-            state = .failed
-            lastError = "transport closed before completion"
-            throw RealtimeTranscriptionError.transport("transport closed before completion")
-          }
-          _ = handleMessage(text)
-        case .failure(let transportError):
-          throw transportError
+        if let done = try handleWaitItem(item) {
+          return done
         }
       } catch is CancellationError {
         throw RealtimeTranscriptionError.cancelled
@@ -924,37 +657,21 @@ public actor RealtimeTranscriptionSession {
         // Per-poll expiry (not EOF): keep waiting until the commit deadline.
         continue
       } catch let error as RealtimeTranscriptionError {
-        // Transport drop during receive fails the session closed so a later
-        // `lastErrorMessage` reflects the drop. When a final or partial
-        // transcript is already buffered it is returned instead of throwing
-        // (same close-out as clean EOF below).
-        if case .transport(let message) = error {
-          if let final = self.accumulator.finalText {
-            return final
-          }
-          let partial = self.accumulator.partialText
-          if !partial.isEmpty {
-            return partial
-          }
-          state = .failed
-          lastError = message
-        }
-        throw error
+        return try resolveWaitError(error)
       } catch {
-        // Unknown receive errors are transport drops, not per-poll
-        // expiries: return buffered text when available, otherwise fail
-        // closed so `lastErrorMessage` reflects the drop.
-        if let final = self.accumulator.finalText {
-          return final
-        }
-        let partial = self.accumulator.partialText
-        if !partial.isEmpty {
-          return partial
-        }
-        state = .failed
-        lastError = error.localizedDescription
-        throw RealtimeTranscriptionError.transport(error.localizedDescription)
+        return try closeOutOrFail(message: error.localizedDescription)
       }
+    }
+  }
+
+  /// Throw when the wait loop reached a terminal session state.
+  private func throwIfWaitTerminal() throws {
+    try Task.checkCancellation()
+    if state == .cancelled {
+      throw RealtimeTranscriptionError.cancelled
+    }
+    if state == .failed {
+      throw RealtimeTranscriptionError.sessionFailed(lastError ?? "session failed")
     }
   }
 
@@ -1118,70 +835,64 @@ public actor RealtimeTranscriptionSession {
   }
 }
 
-// MARK: - URLSession WebSocket transport (production)
+// MARK: - waitForFinal helpers (kept out of the session body for lint)
 
-/// Production WebSocket transport over `URLSessionWebSocketTask`.
-/// Kept separate from the session state machine so tests inject a mock.
-public final class URLSessionWebSocketTransport: RealtimeTransport {
-  private let url: URL
-  private let apiKey: String
-  private var task: URLSessionWebSocketTask?
-  private let session: URLSession
-
-  public init(url: URL, apiKey: String, session: URLSession = .shared) {
-    self.url = url
-    self.apiKey = apiKey
-    self.session = session
+extension RealtimeTranscriptionSession {
+  /// Deterministic close-out at the commit deadline: prefer completed text,
+  /// else expose the accumulated partial so the caller never hangs. Batch
+  /// fallback is NOT triggered here (see RealtimeFallbackPolicy).
+  /// Returns nil when still before the deadline.
+  fileprivate func transcriptIfPastDeadline(_ deadline: Date) throws -> String? {
+    guard Date() >= deadline else { return nil }
+    let partial = accumulator.partialText
+    if !partial.isEmpty {
+      return partial
+    }
+    throw RealtimeTranscriptionError.timeout("no completion within commit timeout")
   }
 
-  /// Connect lazily on first send/receive.
-  private func ensureTask() {
-    guard task == nil else { return }
-    var request = URLRequest(url: url)
-    request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-    task = session.webSocketTask(with: request)
-    task?.resume()
+  /// Buffered transcript when available (completed preferred, else partial).
+  fileprivate func bufferedTranscript() -> String? {
+    if let final = accumulator.finalText {
+      return final
+    }
+    let partial = accumulator.partialText
+    return partial.isEmpty ? nil : partial
   }
 
-  public func send(text: String) async throws {
-    ensureTask()
-    guard let task else {
-      throw RealtimeTranscriptionError.transport("websocket unavailable")
+  /// Deterministic close-out: return buffered text when available, otherwise
+  /// fail the session closed with `message`.
+  fileprivate func closeOutOrFail(message: String) throws -> String {
+    if let buffered = bufferedTranscript() {
+      return buffered
     }
-    do {
-      try await task.send(.string(text))
-    } catch {
-      throw RealtimeTranscriptionError.transport(error.localizedDescription)
-    }
+    state = .failed
+    lastError = message
+    throw RealtimeTranscriptionError.transport(message)
   }
 
-  public func receive() async throws -> String? {
-    ensureTask()
-    guard let task else {
-      throw RealtimeTranscriptionError.transport("websocket unavailable")
-    }
-    do {
-      let message = try await task.receive()
-      switch message {
-      case .string(let text):
-        return text
-      case .data(let data):
-        return String(data: data, encoding: .utf8)
-      @unknown default:
-        return nil
+  /// Handle one receive-channel item during `waitForFinal`.
+  /// Returns a transcript when close-out is satisfied, nil to keep waiting.
+  fileprivate func handleWaitItem(_ item: RealtimeReceiveItem) throws -> String? {
+    switch item {
+    case .text(let text):
+      guard let text else {
+        return try closeOutOrFail(message: "transport closed before completion")
       }
-    } catch {
-      // Cancelled receive surfaces as an error; map to clean EOF when the
-      // task is already cancelled/closed so teardown stays deterministic.
-      if (error as NSError).code == NSURLErrorCancelled {
-        return nil
-      }
-      throw RealtimeTranscriptionError.transport(error.localizedDescription)
+      _ = handleMessage(text)
+      return nil
+    case .failure(let transportError):
+      throw transportError
     }
   }
 
-  public func close() async {
-    task?.cancel(with: .normalClosure, reason: nil)
-    task = nil
+  /// Map a realtime error during the wait into return-or-throw.
+  /// A transport drop fails the session closed so a later `lastErrorMessage`
+  /// reflects the drop; when buffered text exists it is returned instead.
+  fileprivate func resolveWaitError(_ error: RealtimeTranscriptionError) throws -> String {
+    if case .transport(let message) = error {
+      return try closeOutOrFail(message: message)
+    }
+    throw error
   }
 }
