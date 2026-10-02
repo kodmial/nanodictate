@@ -2,9 +2,9 @@
 
 ## Status
 
-Migration Step 2 complete, Step 3 in progress (see the issue
-"P1: Refactor NanoDictate into a shared Rust engine while preserving
-native macOS capabilities"):
+The shared Rust engine, C ABI, Swift bridge, build integration, and cross-platform Rust CI are now merged into `main` as the foundation from PR #67. Production call-site activation and the real-macOS hardware parity/performance gate remain mandatory follow-up work tracked in #123 before the overall migration in #50 can be considered complete.
+
+Migration Step 2 is complete and Step 3 is implemented at the parity-test/foundation level:
 
 - Step 1 (baseline): the macOS behavioral baseline is documented by the
   existing Swift unit/integration suites under `Tests/NanoDictateCoreTests`
