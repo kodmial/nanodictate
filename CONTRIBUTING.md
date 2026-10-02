@@ -14,8 +14,11 @@ Thanks for contributing to NanoDictate. Keep changes focused, verifiable, and ea
 For every production-code change, run:
 
 ```sh
-swift build
-swift run NanoDictateCoreTests
+scripts/build-rust-core.sh --release   # prints the absolute archive path (default rust/target/release/libnanodictate_core.a when CARGO_TARGET_DIR is unset)
+ARCHIVE="<absolute path printed above>"  # e.g. "$(pwd)/rust/target/release/libnanodictate_core.a" by default
+swift build -Xlinker "$ARCHIVE"                 # debug
+swift build -c release -Xlinker "$ARCHIVE"     # release
+swift run -Xlinker "$ARCHIVE" NanoDictateCoreTests   # not `swift test` — executable target
 ```
 
 `NanoDictateCoreTests` is an executable test runner, so do not use `swift test`. It exits non-zero when a test fails.
@@ -58,7 +61,7 @@ docs: clarify local verification
 
 - Branch from `main` and target `main`.
 - Keep the PR scoped to one coherent change.
-- Explain what changed, why it changed, and how it was verified.
+- Explain what changed, why it changed, and how it was verified (for example, `swift build -Xlinker "$ARCHIVE"` / `swift run -Xlinker "$ARCHIVE" NanoDictateCoreTests`, where `$ARCHIVE` is the absolute path printed by `scripts/build-rust-core.sh`; default `rust/target/release/libnanodictate_core.a` when `CARGO_TARGET_DIR` is unset).
 - Add or update focused tests for changed behavior.
 - Never commit secrets, credentials, or local configuration such as `~/.config/nanodictate/`.
 - Do not change `Sources/NanoDictateCore/Version.swift` or `.release-please-manifest.json` in ordinary feature or fix PRs; release automation owns version changes.
