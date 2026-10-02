@@ -25,6 +25,26 @@ public enum RustEngine {
     try assertEngineABIVersion()
   }
 
+  /// Creates one dictation session on the shared engine for the active
+  /// macOS dictation/session lifecycle. The ABI is checked first so a
+  /// link mismatch fails loudly here instead of silently leaving Rust
+  /// unused on the shipping path. The caller drives the returned session
+  /// with the native macOS events (engineStarted, firstBuffer,
+  /// engineFailed, cancelled, stopRequested, transcriptionDone) and
+  /// consumes its capture-readiness decision for the ready-cue gate.
+  /// - Parameter sessionFactory: handle construction (production default
+  ///   builds a live `RustSession`; tests may inject a throwing factory to
+  ///   prove the shipping path fails loudly instead of falling back).
+  /// - Returns: the live session and its engine generation.
+  public static func makeSession(
+    sessionFactory: () throws -> RustSession = { try RustSession() }
+  ) throws -> (session: RustSession, generation: UInt64) {
+    try checkAvailable()
+    let session = try sessionFactory()
+    let generation = try session.start()
+    return (session, generation)
+  }
+
   /// Word-level diff between inserted (`old`) and final (`new`) text.
   /// Engine equivalent of `WordDiff.change` (see `RustWordDiff.change`).
   public static func wordDiff(old: String, new: String) throws -> RustWordDiff {
