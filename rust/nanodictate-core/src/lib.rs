@@ -8,7 +8,9 @@
 //! The crate must never depend on Apple-only (or Windows-only) APIs. All
 //! platform integration (microphone acquisition, permissions, event taps,
 //! text injection, packaging) stays in the native layer and talks to this
-//! engine through the stable C ABI in [`abi`].
+//! engine through the stable C ABI in [`abi`]. The engine is linked into the
+//! macOS build while production call-site activation remains an explicit,
+//! parity-gated migration step.
 
 pub mod abi;
 pub mod audio_metrics;
