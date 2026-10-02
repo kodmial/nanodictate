@@ -1,0 +1,343 @@
+//! Model-aware STT capability profiles and request-planning policy.
+//!
+//! Ports `STTAdapterID`, `STTUploadFormat`, `STTAudioProfile`,
+//! `STTTransportKind`, `STTResponseFormat`, `STTLanguageHintMode`,
+//! `STTCapabilities`, `STTModelProfile`, and `STTModelRegistry` from the
+//! Swift layer. Request construction and audio preparation are driven by
+//! the resolved concrete provider+model profile, never by branching on
+//! provider names at call sites. Transport itself (networking) stays
+//! native; the engine produces the policy that the native transport
+//! executes.
+
+/// Known STT adapter ids. Unknown ids resolve to `openai_compatible`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdapterId {
+    Openai,
+    Groq,
+    Cloudflare,
+    OpenaiCompatible,
+}
+
+impl AdapterId {
+    pub fn from_id(id: &str) -> Self {
+        match id {
+            "openai" => Self::Openai,
+            "groq" => Self::Groq,
+            "cloudflare" => Self::Cloudflare,
+            _ => Self::OpenaiCompatible,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Openai => "openai",
+            Self::Groq => "groq",
+            Self::Cloudflare => "cloudflare",
+            Self::OpenaiCompatible => "openai-compatible",
+        }
+    }
+
+    pub fn default_base_url(&self) -> &'static str {
+        match self {
+            Self::Openai => "https://api.openai.com/v1/audio/transcriptions",
+            Self::Groq => "https://api.groq.com/openai/v1/audio/transcriptions",
+            Self::Cloudflare | Self::OpenaiCompatible => "",
+        }
+    }
+
+    pub fn default_model(&self) -> &'static str {
+        match self {
+            Self::Openai => "whisper-1",
+            Self::Groq => "whisper-large-v3",
+            Self::Cloudflare | Self::OpenaiCompatible => "",
+        }
+    }
+}
+
+/// Accepted upload audio container. Only WAV is implemented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadFormat {
+    Wav,
+}
+
+/// Model-specific audio requirements for request preparation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioProfile {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub upload_format: UploadFormat,
+}
+
+impl AudioProfile {
+    pub const BATCH_MONO_16K: Self = Self {
+        sample_rate: 16000,
+        channels: 1,
+        upload_format: UploadFormat::Wav,
+    };
+}
+
+/// Session/transport semantics of a model profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportKind {
+    BatchMultipart,
+    BatchRawAudio,
+    StreamingSession,
+}
+
+/// Response shape a model profile is asked to return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseFormat {
+    Json,
+    VerboseJson,
+}
+
+/// How a model profile accepts the language hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LanguageHintMode {
+    None,
+    Single,
+    Multi,
+}
+
+/// Full capability set of one concrete STT model profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Capabilities {
+    pub transport: TransportKind,
+    pub response_formats: Vec<ResponseFormat>,
+    pub supports_verbose_json: bool,
+    pub supports_word_timestamps: bool,
+    pub supports_segment_timestamps: bool,
+    pub supports_prompt: bool,
+    pub supports_temperature: bool,
+    pub supports_vad_filter: bool,
+    pub supports_no_speech_threshold: bool,
+    pub supports_compression_ratio_threshold: bool,
+    pub supports_logprob_threshold: bool,
+    pub language_hint: LanguageHintMode,
+    pub supports_keyword_biasing: bool,
+    pub supports_server_vad: bool,
+    pub supports_server_chunking: bool,
+    pub supports_noise_reduction: bool,
+}
+
+impl Capabilities {
+    /// Conservative fallback for custom OpenAI-compatible endpoints.
+    pub fn openai_compatible_fallback() -> Self {
+        Self {
+            transport: TransportKind::BatchMultipart,
+            response_formats: vec![ResponseFormat::Json],
+            supports_verbose_json: false,
+            supports_word_timestamps: false,
+            supports_segment_timestamps: false,
+            supports_prompt: true,
+            supports_temperature: true,
+            supports_vad_filter: false,
+            supports_no_speech_threshold: false,
+            supports_compression_ratio_threshold: false,
+            supports_logprob_threshold: false,
+            language_hint: LanguageHintMode::Single,
+            supports_keyword_biasing: false,
+            supports_server_vad: false,
+            supports_server_chunking: false,
+            supports_noise_reduction: false,
+        }
+    }
+}
+
+/// One concrete provider+model profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelProfile {
+    pub adapter_id: String,
+    pub model: String,
+    pub capabilities: Capabilities,
+    pub audio: AudioProfile,
+    /// JSON path to transcript text; `None` means flat `text`.
+    pub transcript_path: Option<Vec<String>>,
+}
+
+fn normalize_model(model: &str) -> String {
+    model.trim().to_lowercase()
+}
+
+fn openai_profile(model: &str) -> ModelProfile {
+    let base = |capabilities: Capabilities| ModelProfile {
+        adapter_id: AdapterId::Openai.as_str().to_string(),
+        model: model.to_string(),
+        capabilities,
+        audio: AudioProfile::BATCH_MONO_16K,
+        transcript_path: None,
+    };
+    if model == "whisper-1" || model.starts_with("whisper-") {
+        return base(Capabilities {
+            transport: TransportKind::BatchMultipart,
+            response_formats: vec![ResponseFormat::Json, ResponseFormat::VerboseJson],
+            supports_verbose_json: true,
+            supports_word_timestamps: true,
+            supports_prompt: true,
+            supports_temperature: true,
+            ..Capabilities::openai_compatible_fallback()
+        });
+    }
+    if model == "gpt-4o-transcribe"
+        || model == "gpt-4o-mini-transcribe"
+        || model.starts_with("gpt-4o-")
+    {
+        return base(Capabilities {
+            transport: TransportKind::BatchMultipart,
+            response_formats: vec![ResponseFormat::Json],
+            supports_verbose_json: false,
+            supports_word_timestamps: false,
+            supports_prompt: true,
+            supports_temperature: false,
+            ..Capabilities::openai_compatible_fallback()
+        });
+    }
+    base(Capabilities {
+        supports_temperature: true,
+        ..Capabilities::openai_compatible_fallback()
+    })
+}
+
+fn groq_profile(model: &str) -> ModelProfile {
+    let base = |capabilities: Capabilities| ModelProfile {
+        adapter_id: AdapterId::Groq.as_str().to_string(),
+        model: model.to_string(),
+        capabilities,
+        audio: AudioProfile::BATCH_MONO_16K,
+        transcript_path: None,
+    };
+    if model == "whisper-large-v3"
+        || model == "whisper-large-v3-turbo"
+        || model == "distil-whisper-large-v3-en"
+        || model.starts_with("whisper-")
+        || model.starts_with("distil-whisper-")
+    {
+        return base(Capabilities {
+            transport: TransportKind::BatchMultipart,
+            response_formats: vec![ResponseFormat::Json, ResponseFormat::VerboseJson],
+            supports_verbose_json: true,
+            supports_word_timestamps: false,
+            supports_prompt: true,
+            supports_temperature: true,
+            supports_vad_filter: true,
+            supports_server_vad: true,
+            ..Capabilities::openai_compatible_fallback()
+        });
+    }
+    base(Capabilities {
+        supports_temperature: true,
+        ..Capabilities::openai_compatible_fallback()
+    })
+}
+
+/// Resolves the profile for a concrete (adapter id, model) pair.
+/// Matching is case-insensitive with surrounding whitespace trimmed.
+pub fn resolve(adapter_id: &str, model: &str) -> ModelProfile {
+    let normalized = normalize_model(model);
+    match AdapterId::from_id(adapter_id) {
+        AdapterId::Openai => openai_profile(&normalized),
+        AdapterId::Groq => groq_profile(&normalized),
+        AdapterId::Cloudflare => ModelProfile {
+            adapter_id: adapter_id.to_string(),
+            model: normalized,
+            capabilities: Capabilities {
+                transport: TransportKind::BatchRawAudio,
+                response_formats: vec![ResponseFormat::Json],
+                supports_verbose_json: false,
+                supports_word_timestamps: false,
+                supports_prompt: false,
+                supports_temperature: false,
+                language_hint: LanguageHintMode::None,
+                ..Capabilities::openai_compatible_fallback()
+            },
+            audio: AudioProfile::BATCH_MONO_16K,
+            transcript_path: Some(vec!["result".to_string(), "text".to_string()]),
+        },
+        AdapterId::OpenaiCompatible => ModelProfile {
+            adapter_id: adapter_id.to_string(),
+            model: normalized,
+            capabilities: Capabilities::openai_compatible_fallback(),
+            audio: AudioProfile::BATCH_MONO_16K,
+            transcript_path: None,
+        },
+    }
+}
+
+/// Audio requirements for a concrete (adapter id, model) pair.
+pub fn audio_profile(adapter_id: &str, model: &str) -> AudioProfile {
+    resolve(adapter_id, model).audio
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn whisper_profile_has_full_word_timestamps() {
+        let p = resolve("openai", "whisper-1");
+        assert!(p.capabilities.supports_verbose_json);
+        assert!(p.capabilities.supports_word_timestamps);
+        assert!(p.capabilities.supports_temperature);
+        assert_eq!(p.transcript_path, None);
+    }
+
+    #[test]
+    fn modern_openai_models_are_narrow() {
+        let p = resolve("openai", "gpt-4o-transcribe");
+        assert!(!p.capabilities.supports_verbose_json);
+        assert!(!p.capabilities.supports_word_timestamps);
+        assert!(!p.capabilities.supports_temperature);
+        assert!(p.capabilities.supports_prompt);
+    }
+
+    #[test]
+    fn unknown_openai_model_is_conservative() {
+        let p = resolve("openai", "some-future-model");
+        assert!(!p.capabilities.supports_verbose_json);
+        assert!(p.capabilities.supports_temperature);
+    }
+
+    #[test]
+    fn groq_profile_has_vad_filter_and_server_vad() {
+        let p = resolve("groq", "whisper-large-v3-turbo");
+        assert!(p.capabilities.supports_vad_filter);
+        assert!(p.capabilities.supports_server_vad);
+        assert!(!p.capabilities.supports_word_timestamps);
+    }
+
+    #[test]
+    fn cloudflare_uses_raw_audio_and_nested_path() {
+        let p = resolve("cloudflare", "anything");
+        assert_eq!(p.capabilities.transport, TransportKind::BatchRawAudio);
+        assert_eq!(p.capabilities.language_hint, LanguageHintMode::None);
+        assert_eq!(
+            p.transcript_path,
+            Some(vec!["result".to_string(), "text".to_string()])
+        );
+    }
+
+    #[test]
+    fn unknown_adapter_falls_back_to_openai_compatible() {
+        let p = resolve("my-custom-provider", "my-model");
+        assert_eq!(p.capabilities, Capabilities::openai_compatible_fallback());
+        // Model matching is case-insensitive with whitespace trimmed;
+        // adapter ids match exactly, like the Swift registry.
+        let q = resolve("openai", "  WHISPER-1 ");
+        assert!(q.capabilities.supports_word_timestamps);
+        let r = resolve("  OpenAI ", "whisper-1");
+        assert_eq!(r.capabilities, Capabilities::openai_compatible_fallback());
+    }
+
+    #[test]
+    fn every_builtin_profile_requires_mono_16k_wav() {
+        for (adapter, model) in [
+            ("openai", "whisper-1"),
+            ("openai", "gpt-4o-mini-transcribe"),
+            ("groq", "whisper-large-v3"),
+            ("cloudflare", "x"),
+            ("custom", "y"),
+        ] {
+            assert_eq!(audio_profile(adapter, model), AudioProfile::BATCH_MONO_16K);
+        }
+    }
+}
