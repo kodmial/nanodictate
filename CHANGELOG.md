@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.21] - 2026-10-02
+
+
+
+### Bug Fixes
+
+* STT contextual biasing for tech vocab ([00ebe23](https://github.com/kodmial/nanodictate/commit/00ebe23bf29155d7b62326e4e20bfb07bf572849))
+
 ## [0.1.20] - 2026-10-02
 
 
@@ -452,7 +460,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.20...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.21...HEAD
+[0.1.21]: https://github.com/kodmial/nanodictate/compare/v0.1.20...v0.1.21
 [0.1.20]: https://github.com/kodmial/nanodictate/compare/v0.1.19...v0.1.20
 [0.1.19]: https://github.com/kodmial/nanodictate/compare/v0.1.18...v0.1.19
 [0.1.18]: https://github.com/kodmial/nanodictate/compare/v0.1.17...v0.1.18
