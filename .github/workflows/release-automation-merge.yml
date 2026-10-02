@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   call:
-    uses: kodmial/continuum/.github/workflows/continuum-tech-swift-release-automation-merge.yml@main
+    uses: ./.github/workflows/nanodictate-release-automation-merge-engine.yml
     secrets: inherit
     with:
       continuum_ref: main
