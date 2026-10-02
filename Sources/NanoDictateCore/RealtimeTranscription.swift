@@ -656,8 +656,12 @@ private actor RealtimeReceiveChannel {
         // item was consumed by this call and must be requeued, not discarded.
         // If delivery happened after cancel, `deliver` already buffered it in
         // `pending`, so there is nothing extra to do here.
+        // Requeue at the front: the recovered item arrived before anything
+        // buffered in `pending` while draining the race (e.g. a `.completed`
+        // followed by EOF), so appending would invert receive order and let
+        // EOF be processed before the completion.
         if let item = late ?? nil {
-          pending.append(item)
+          pending.insert(item, at: 0)
         }
         throw RealtimeWaitTimeout.timedOut
       }

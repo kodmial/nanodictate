@@ -74,6 +74,40 @@ final class DelayedRealtimeTransport: RealtimeTransport {
     }
 }
 
+/// Transport with per-message receive delays. Lets tests script a slow
+/// completion (longer than the 0.2s per-poll wait, so at least one poll
+/// expiry happens) immediately followed by an instant EOF, which is the
+/// exact ordering the timeout-recovery requeue must preserve.
+final class SequenceRealtimeTransport: RealtimeTransport {
+    var sent: [String] = []
+    var steps: [(message: String?, delayNanoseconds: UInt64)]
+    var closedCount = 0
+
+    init(steps: [(String?, UInt64)]) {
+        self.steps = steps.map { (message: $0.0, delayNanoseconds: $0.1) }
+    }
+
+    func send(text: String) async throws {
+        sent.append(text)
+    }
+
+    func receive() async throws -> String? {
+        guard !steps.isEmpty else {
+            try await Task.sleep(nanoseconds: 5_000_000)
+            return nil
+        }
+        let step = steps.removeFirst()
+        if step.delayNanoseconds > 0 {
+            try await Task.sleep(nanoseconds: step.delayNanoseconds)
+        }
+        return step.message
+    }
+
+    func close() async {
+        closedCount += 1
+    }
+}
+
 final class RealtimeTranscriptionTests: XCTestCase {
     private func runAsync(_ name: String, _ body: @escaping () async throws -> Void) {
         let expectation = expectation(description: name)
@@ -581,6 +615,62 @@ final class RealtimeTranscriptionTests: XCTestCase {
             try await session.commit()
             let final = try await session.waitForFinal()
             XCTAssertEqual(final, "late win")
+            await session.close()
+        }
+    }
+
+    @objc func testWaitForFinalCompletionImmediatelyFollowedByEOFReturnsFinal() {
+        runAsync("realtime completion followed by EOF returns final") {
+            // Regression coverage for the timeout-recovery ordering race:
+            // a `.completed` that arrives around a per-poll expiry must be
+            // processed before a buffered EOF that follows it. EOF must never
+            // jump ahead of an earlier completion.
+            let transport = MockRealtimeTransport(incoming: [
+                self.json(["type": "session.updated"]),
+                self.json([
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "item_id": "item_1", "content_index": 0,
+                    "transcript": "hello world",
+                ]),
+                nil,
+            ])
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5))
+            try await session.connect()
+            try await session.appendAudio([1, 2, 3], sourceSampleRate: 24000)
+            try await session.commit()
+            let final = try await session.waitForFinal()
+            XCTAssertEqual(final, "hello world")
+            await session.close()
+        }
+    }
+
+    @objc func testWaitForFinalSlowCompletionFollowedByEOFReturnsFinal() {
+        runAsync("realtime slow completion followed by EOF returns final") {
+            // Same ordering guarantee under per-poll timeouts: the completion
+            // arrives after at least one 0.2s poll expiry and EOF follows
+            // immediately, so a timeout-recovery requeue must preserve
+            // receive order (completion before EOF).
+            let transport = SequenceRealtimeTransport(steps: [
+                (self.json(["type": "session.updated"]), 0),
+                (self.json([
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "item_id": "item_1", "content_index": 0,
+                    "transcript": "slow win",
+                ]), 300_000_000),
+                (nil, 0),
+            ])
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 8))
+            try await session.connect()
+            try await session.appendAudio([1, 2, 3], sourceSampleRate: 24000)
+            try await session.commit()
+            let final = try await session.waitForFinal()
+            XCTAssertEqual(final, "slow win")
             await session.close()
         }
     }
