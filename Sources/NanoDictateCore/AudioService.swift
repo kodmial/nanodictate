@@ -1,6 +1,7 @@
 import AVFoundation
 import AudioEngineGuard
 import Foundation
+import NanoDictateRustBridge
 
 // MARK: - Протоколы движка (инъекция в тестах)
 
@@ -169,10 +170,54 @@ public final class AudioService {
   /// True once the current session appended its first valid microphone buffer
   /// (and the session is still live). False after `start` until that point,
   /// and after `stop()`/`cancel()`/teardown/wedge. Read under lock.
+  /// The shared Rust engine co-decides: readiness requires both the native
+  /// first-buffer observation AND the Rust session's capture-ready flag, so
+  /// the shipping path can never report ready with Rust dormant or
+  /// disagreeing (fail-closed, never a silent Swift-only fallback).
   public var isCaptureReady: Bool {
     lock.lock()
     defer { lock.unlock() }
-    return captureReadyLive
+    guard captureReadyLive else { return false }
+    // The bridge handle is not thread-safe: read it only while holding
+    // `lock`, like every event drive above.
+    guard let rust = rustSession, rustSessionGeneration != nil else { return false }
+    return rust.isCaptureReady
+  }
+
+  /// Diagnostic: true while the current session is driven by the shared
+  /// Rust engine (a live `RustSession` exists for the active generation).
+  /// Timing/generation only, never audio content.
+  public var isRustSessionActive: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return rustSession != nil && rustSessionGeneration != nil
+  }
+
+  /// Diagnostic: Rust engine generation of the active session (nil when no
+  /// session is live). Timing only, never audio content.
+  public var activeRustGeneration: UInt64? {
+    lock.lock()
+    defer { lock.unlock() }
+    return rustSessionGeneration
+  }
+
+  /// Diagnostic: Rust engine state of the active session
+  /// (0 idle / 1 recording / 2 transcribing, see ND_STATE_*; nil when no
+  /// session is live). Timing/state only, never audio content.
+  public var rustSessionStateForDiagnostics: UInt32? {
+    lock.lock()
+    defer { lock.unlock() }
+    // Read under `lock`: the bridge handle is not thread-safe.
+    return rustSession?.state
+  }
+
+  /// How many Rust sessions the service created (one per dictation start
+  /// attempt). Monotonic diagnostic proving the shipping path instantiates
+  /// the engine per session lifecycle; never audio content.
+  public var rustSessionStartCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return rustSessionSequence
   }
 
   // var, not let: replaceEngineAfterWedge() swaps a "wedged" engine for a fresh
@@ -255,6 +300,31 @@ public final class AudioService {
   /// Live readiness flag behind `isCaptureReady` (cleared on stop/cancel/
   /// teardown/wedge/new-session reset).
   private var captureReadyLive = false
+  // MARK: - Shared Rust session engine (production cutover)
+
+  /// Factory for the per-session Rust engine handle. Production default
+  /// creates a live `RustSession`; tests may inject a throwing factory to
+  /// prove the shipping path fails loudly instead of silently falling back
+  /// to a Swift-only session.
+  private let rustSessionFactory: () throws -> RustSession
+  /// Live Rust session for the current dictation lifecycle (nil when no
+  /// session is active). Created once per start attempt via
+  /// `RustEngine.makeSession()`; driven with the native macOS events
+  /// (engineStarted, firstBuffer, engineFailed, cancelled, stopRequested,
+  /// transcriptionDone). Guarded by `lock`; the handle itself is only
+  /// touched while holding `lock` (the bridge handle is not thread-safe).
+  private var rustSession: RustSession?
+  /// Engine generation returned by `RustSession.start()` for the live
+  /// session (nil when no session is active). Tags every driven event so a
+  /// stale callback can never mutate the current session.
+  private var rustSessionGeneration: UInt64?
+  /// Monotonic count of Rust sessions created (one per start attempt).
+  /// Diagnostic proving per-lifecycle instantiation; never audio content.
+  private var rustSessionSequence = 0
+  /// Result of the startup ABI check (`RustEngine.checkAvailable()` at
+  /// composition time). False means the engine cannot be trusted: session
+  /// creation fails loudly and readiness stays fail-closed.
+  private var rustEngineAvailable = false
   /// Pre-warmed converter cache (no microphone capture): built by `prewarm()`
   /// or refreshed after teardown, reused by the next `start` when the hardware
   /// input format signature still matches. Cleared on wedge replacement.
@@ -467,9 +537,26 @@ public final class AudioService {
     segmenterConfig: AudioSegmenterConfig = .defaults,
     autoStopConfig: AutoStopConfig = .defaults,
     gainConfig: InputGainConfig = .fromEnvironment(),
-    vadConfig: AdaptiveVADConfig = .defaults
+    vadConfig: AdaptiveVADConfig = .defaults,
+    rustSessionFactory: (() throws -> RustSession)? = nil
   ) {
     self.logLevel = logLevel
+    self.rustSessionFactory = rustSessionFactory ?? { try RustSession() }
+    // Composition-boundary ABI check: an ABI/link mismatch must not
+    // silently leave Rust unused. A mismatch logs loudly here and every
+    // session creation fails loudly below (readiness stays fail-closed).
+    do {
+      try RustEngine.checkAvailable()
+      rustEngineAvailable = true
+      Logger.log(
+        "rust session engine available — shipping sessions drive RustSession", level: "info")
+    } catch {
+      rustEngineAvailable = false
+      Logger.log(
+        "rust session engine unavailable: \(error.localizedDescription)"
+          + " — dictation start will fail loudly",
+        level: "error")
+    }
     // Engine factory: the initial instance (if not injected) and the wedge
     // replacement are created BY it — tests swap it and control the "fresh"
     // post-swap engine.
@@ -801,6 +888,7 @@ public final class AudioService {
     // falls through to the generation gate after the converter setup, which
     // tears down only its own (stale) engine.
     lock.lock()
+    var rustSetupError: Error?
     if isCurrentGeneration(startGeneration) {
       didLogFirstBuffer = false
       limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
@@ -844,8 +932,33 @@ public final class AudioService {
       startupGeneration = startGeneration
       captureReadyFired = false
       captureReadyLive = false
+      // One Rust session per dictation lifecycle, created at session reset
+      // under the same lock as the generation check: a stale start never
+      // creates (or replaces) the live session. A creation/ABI failure is
+      // loud — the start fails below instead of silently running Swift-only.
+      rustSession = nil
+      rustSessionGeneration = nil
+      do {
+        try beginRustSessionLocked()
+      } catch {
+        rustSetupError = error
+        rustSession = nil
+        rustSessionGeneration = nil
+      }
     }
     lock.unlock()
+    // Rust session bootstrap failed (ABI/link mismatch or handle failure):
+    // no silent fallback — the start fails loudly before touching hardware.
+    if let rustSetupError {
+      guard isCurrentGeneration(startGeneration) else {
+        return .failure(AudioServiceError.engineSuperseded)
+      }
+      setRecording(false)
+      Logger.log(
+        "record engine: rust session bootstrap failed: \(rustSetupError.localizedDescription)",
+        level: "error")
+      return .failure(rustSetupError)
+    }
 
     // Safe start from scratch: if the previous session left the engine with a
     // tap installed (failure branch), remove it BEFORE installTap — a repeat
@@ -944,6 +1057,7 @@ public final class AudioService {
         teardownEngineOnly(using: engine)
         return .failure(setupFailure)
       }
+      failRustSessionForStartGeneration(startGeneration)
       setRecording(false)
       teardownOnEngineQueue(using: engine)
       Logger.log(
@@ -952,10 +1066,12 @@ public final class AudioService {
     }
     guard let input = capturedInput, let hwFormat = capturedHWFormat else {
       // Unreachable (makeInputNode never returns nil) — compiler reassurance.
+      failRustSessionForStartGeneration(startGeneration)
       Logger.log("record engine: input node unavailable", level: "error")
       return .failure(AudioServiceError.unsupportedFormat)
     }
     guard let converter = capturedConverter else {
+      failRustSessionForStartGeneration(startGeneration)
       Logger.log(
         "record engine: AVAudioConverter init failed (hw=\(Int(hwFormat.sampleRate)) Hz -> "
           + "target=\(Int(targetFormat.sampleRate)) Hz)",
@@ -1114,6 +1230,9 @@ public final class AudioService {
         lock.lock()
         startupEngineStartedNanos = Self.monotonicNanos()
         lock.unlock()
+        // Native engine-started event into the Rust session (current
+        // generation only; a stale start never touches the live session).
+        startedRustSessionForStartGeneration(startGeneration)
       }
     }
     // Post-start startup invalidation: a device change that landed after the
@@ -1130,6 +1249,7 @@ public final class AudioService {
         configEpoch != consumedArmEpoch || startupArmedEpoch != consumedArmEpoch
       lock.unlock()
       if staleAfterCommit {
+        failRustSessionForStartGeneration(startGeneration)
         setRecording(false)
         teardownOnEngineQueue(using: engine)
         lock.lock()
@@ -1162,6 +1282,7 @@ public final class AudioService {
         teardownEngineOnly(using: engine)
         return .failure(failure)
       }
+      failRustSessionForStartGeneration(startGeneration)
       setRecording(false)
       teardownOnEngineQueue(using: engine)
       Logger.log("record engine: start failed: \(failure.localizedDescription)", level: "error")
@@ -1246,6 +1367,10 @@ public final class AudioService {
     // Capture readiness ends with the session: the next start resets it, and
     // no late buffer may re-fire it (process drops buffers once !isRecording).
     captureReadyLive = false
+    // Native stop event into the Rust session (Recording -> Transcribing).
+    // The handle stays live for the agent's `notifyTranscriptionDone`
+    // (Transcribing -> Idle); only that call ends the Rust lifecycle.
+    driveRustLocked(.stopRequested)
     // "Tail" range + COW snapshot under one lock (VAD state and recording
     // buffer stay consistent); Array materialization AFTER unlock so the
     // lock holds only O(1) bookkeeping.
@@ -1292,6 +1417,16 @@ public final class AudioService {
   public func cancel() {
     lock.lock()
     guard isRecordingLocked else {
+      // Not recording: either idle or engine bring-up before the recording
+      // flag was set. A live Rust session in Recording (bring-up cancelled
+      // before `setRecording(true)`) still gets its terminal event so no
+      // session is abandoned mid-lifecycle; a session already past Recording
+      // (awaiting transcriptionDone) is left untouched for its owner.
+      if let rust = rustSession, rust.state == RustState.recording {
+        endRustSessionLocked(after: .cancelled)
+        captureReadyLive = false
+        captureReadyFired = true
+      }
       lock.unlock()
       return
     }
@@ -1302,6 +1437,9 @@ public final class AudioService {
     // becomes ready, and the ready cue must never fire for it.
     captureReadyLive = false
     captureReadyFired = true
+    // Native cancel event ends the Rust lifecycle (Recording -> Idle): no
+    // transcription follows a cancel, so no handle outlives this call.
+    endRustSessionLocked(after: .cancelled)
     collectedSamples.removeAll(keepingCapacity: true)
     // Cancel discards EVERYTHING, including the open utterance: no
     // onSpeechSegment callback (Esc = no delivery).
@@ -1390,6 +1528,11 @@ public final class AudioService {
     captureReadyFired = true
     captureReadyLive = false
     startupGeneration = -1
+    // The wedged session never completes: end its Rust lifecycle loudly
+    // (engine failure) so no handle outlives the swap. A hung start that
+    // unblocks later sees the generation mismatch and never touches the
+    // fresh session.
+    endRustSessionLocked(after: .engineFailed)
     lock.unlock()
     // Device-change subscription belonged to the OLD engine: its
     // configuration-change must not stop recording on the fresh pair.
@@ -1668,6 +1811,101 @@ public final class AudioService {
   /// SessionLedger).
   private func isCurrentGeneration(_ generation: Int) -> Bool {
     session.isCurrentGeneration(generation)
+  }
+
+  // MARK: - Shared Rust session driving
+
+  /// Rust session state code for Recording (see ND_STATE_* in
+  /// nanodictate_core.h). Diagnostic comparison only; transitions stay
+  /// inside the engine.
+  private enum RustState {
+    static let recording: UInt32 = 1
+  }
+
+  /// Creates the per-session Rust engine handle for a new dictation start.
+  /// Called on the engine queue under `lock` at session reset. A creation
+  /// failure is loud (logged + thrown) — the start fails instead of
+  /// silently proceeding with a Swift-only session.
+  private func beginRustSessionLocked() throws {
+    guard rustEngineAvailable else {
+      throw RustEngineError(
+        code: -1,
+        message: "shared Rust engine unavailable (ABI check failed at startup)")
+    }
+    let made = try RustEngine.makeSession(sessionFactory: rustSessionFactory)
+    rustSession = made.session
+    rustSessionGeneration = made.generation
+    rustSessionSequence += 1
+    Logger.log(
+      "rust session engine active"
+        + " (session #\(rustSessionSequence), generation=\(made.generation))",
+      level: "info")
+  }
+
+  /// Drives one native macOS event into the live Rust session. Best-effort
+  /// by design: a bridge misuse logs loudly but never crashes capture, and
+  /// the readiness gate below stays fail-closed (no cue without Rust
+  /// approval). Must be called while holding `lock`.
+  private func driveRustLocked(_ event: RustSession.SessionEvent) {
+    guard let rust = rustSession, let generation = rustSessionGeneration else { return }
+    do {
+      try rust.onEvent(event, generation: generation)
+    } catch {
+      Logger.log(
+        "rust session engine event failed (\(event), generation=\(generation)): "
+          + "\(error.localizedDescription)",
+        level: "error")
+    }
+  }
+
+  /// Ends the live Rust session after driving a terminal event. Must be
+  /// called while holding `lock`.
+  private func endRustSessionLocked(after event: RustSession.SessionEvent) {
+    driveRustLocked(event)
+    rustSession = nil
+    rustSessionGeneration = nil
+  }
+
+  /// Drives `.engineFailed` into the live Rust session for a failed start of
+  /// the current generation, then ends the session. Stale starts (superseded
+  /// by a wedge swap) never touch the live session: their late failure must
+  /// not corrupt the new dictation lifecycle.
+  private func failRustSessionForStartGeneration(_ startGeneration: Int) {
+    lock.lock()
+    defer { lock.unlock() }
+    guard session.isCurrentGeneration(startGeneration) else { return }
+    endRustSessionLocked(after: .engineFailed)
+  }
+
+  /// Drives `.engineStarted` into the live Rust session after a successful
+  /// `engine.start()` for the current generation. Stale starts never touch
+  /// the live session.
+  private func startedRustSessionForStartGeneration(_ startGeneration: Int) {
+    lock.lock()
+    defer { lock.unlock() }
+    guard session.isCurrentGeneration(startGeneration) else { return }
+    driveRustLocked(.engineStarted)
+  }
+
+  /// Transcription finished (success or terminal failure) for the session
+  /// ended by `stop()` / forced stop. Called by the agent from its terminal
+  /// transcription points on the main queue. Driving it moves the Rust
+  /// session Recording->Transcribing->Idle to completion; unknown or
+  /// already-ended sessions are ignored by the engine's state guards.
+  /// - Parameter rustGeneration: the `activeRustGeneration` observed for the
+  ///   transcribed session. A stale completion (its session already replaced
+  ///   by a newer dictation) never touches the live session: generations
+  ///   must match, otherwise this is a no-op.
+  /// Diagnostics only (no audio content); never throws.
+  public func notifyTranscriptionDone(rustGeneration: UInt64?) {
+    lock.lock()
+    defer { lock.unlock() }
+    guard let rustGeneration, rustGeneration == rustSessionGeneration else { return }
+    driveRustLocked(.transcriptionDone)
+    // The dictation lifecycle ended: drop the handle so a stale
+    // transcriptionDone can never touch the next session.
+    rustSession = nil
+    rustSessionGeneration = nil
   }
 
   private var isAutoStopScheduled: Bool {
@@ -2164,45 +2402,68 @@ public final class AudioService {
     // paths never fire (error path only, no false ready cue).
     var pendingCaptureInfo: CaptureReadyInfo?
     var pendingBreakdown: StartupBreakdown?
+    // Rust diagnostics snapshotted with the cue decision (generation/state
+    // only, never audio content) and logged outside the lock below.
+    var rustReadyGeneration: UInt64?
+    var rustReadyState: UInt32?
     if appendCount > 0, !captureReadyFired, startupGeneration >= 0,
       isCurrentGeneration(startupGeneration)
     {
-      let firstNanos = Self.monotonicNanos()
-      if startupEngineStartedNanos == 0 {
-        // Rare race: the tap delivered before the engineQueue stamped
-        // engine.start() completion. Stamp now so readiness still fires on
-        // the true first buffer (engine→first delay reads 0).
-        startupEngineStartedNanos = firstNanos
-      }
-      if startupFirstRawNanos == 0 {
-        startupFirstRawNanos = firstNanos
-      }
-      if startupEngineStartedNanos > 0 {
-        captureReadyFired = true
-        captureReadyLive = true
-        pendingCaptureInfo = CaptureReadyInfo(
-          triggerToRequestMs: startupTriggerNanos.map {
-            Self.ms(fromNanos: $0, to: startupRequestNanos)
-          },
-          requestToEngineStartedMs: Self.ms(
-            fromNanos: startupRequestNanos, to: startupEngineStartedNanos),
-          engineStartedToFirstBufferMs: Self.ms(
-            fromNanos: startupEngineStartedNanos, to: firstNanos),
-          requestToFirstBufferMs: Self.ms(fromNanos: startupRequestNanos, to: firstNanos)
-        )
-        pendingBreakdown = StartupBreakdown(
-          firstAltNanos: startupFirstAltNanos,
-          secondAltNanos: startupSecondAltNanos,
-          requestNanos: startupRequestNanos,
-          queueEntryNanos: startupQueueEntryNanos,
-          inputReadyNanos: startupInputReadyNanos,
-          tapInstalledNanos: startupTapInstalledNanos,
-          prepareDoneNanos: startupPrepareDoneNanos,
-          engineStartedNanos: startupEngineStartedNanos,
-          firstRawCallbackNanos: startupFirstRawNanos,
-          firstAcceptedNanos: firstNanos
-        )
-        completedBreakdown = pendingBreakdown
+      // Native first-buffer event into the Rust session. The ready-cue
+      // gate below consumes the Rust decision (fail-closed: without Rust
+      // approval no cue fires — the capture watchdog surfaces the stall as
+      // an error instead of silently cueing Swift-only).
+      driveRustLocked(.firstBuffer)
+      let rustCueApproved: Bool = {
+        guard let rust = rustSession, rustSessionGeneration != nil else { return false }
+        guard rust.isCaptureReady else { return false }
+        return rust.shouldEmitReadyCue
+      }()
+      // Without Rust approval no cue fires (fail-closed); the buffer stays
+      // retained above and captureReadyFired stays false so a later buffer
+      // can still complete the gate. Live-VAD/limit bookkeeping below runs
+      // unchanged for every buffer.
+      if rustCueApproved {
+        let firstNanos = Self.monotonicNanos()
+        if startupEngineStartedNanos == 0 {
+          // Rare race: the tap delivered before the engineQueue stamped
+          // engine.start() completion. Stamp now so readiness still fires on
+          // the true first buffer (engine→first delay reads 0).
+          startupEngineStartedNanos = firstNanos
+        }
+        if startupFirstRawNanos == 0 {
+          startupFirstRawNanos = firstNanos
+        }
+        if startupEngineStartedNanos > 0 {
+          captureReadyFired = true
+          captureReadyLive = true
+          pendingCaptureInfo = CaptureReadyInfo(
+            triggerToRequestMs: startupTriggerNanos.map {
+              Self.ms(fromNanos: $0, to: startupRequestNanos)
+            },
+            requestToEngineStartedMs: Self.ms(
+              fromNanos: startupRequestNanos, to: startupEngineStartedNanos),
+            engineStartedToFirstBufferMs: Self.ms(
+              fromNanos: startupEngineStartedNanos, to: firstNanos),
+            requestToFirstBufferMs: Self.ms(fromNanos: startupRequestNanos, to: firstNanos)
+          )
+          pendingBreakdown = StartupBreakdown(
+            firstAltNanos: startupFirstAltNanos,
+            secondAltNanos: startupSecondAltNanos,
+            requestNanos: startupRequestNanos,
+            queueEntryNanos: startupQueueEntryNanos,
+            inputReadyNanos: startupInputReadyNanos,
+            tapInstalledNanos: startupTapInstalledNanos,
+            prepareDoneNanos: startupPrepareDoneNanos,
+            engineStartedNanos: startupEngineStartedNanos,
+            firstRawCallbackNanos: startupFirstRawNanos,
+            firstAcceptedNanos: firstNanos
+          )
+          completedBreakdown = pendingBreakdown
+          // Snapshot for the concise engine-active diagnostic below.
+          rustReadyGeneration = rustSessionGeneration
+          rustReadyState = rustSession?.state
+        }
       }
     }
 
@@ -2302,6 +2563,15 @@ public final class AudioService {
     // timeline + the truthful ready signal. Exactly once per session, on main
     // like the other session callbacks. No raw audio logged.
     if let info = pendingCaptureInfo {
+      // Concise engine-active proof: the cue fired on the Rust session
+      // decision (generation/state only, never dictation content).
+      if let gen = rustReadyGeneration, let state = rustReadyState {
+        Logger.log(
+          "record ready: rust session engine active (generation=\(gen), state=\(state))",
+          level: "info")
+      } else {
+        Logger.log("record ready: rust session engine missing at cue time", level: "error")
+      }
       if let trigToReq = info.triggerToRequestMs {
         Logger.log(
           String(
@@ -2429,6 +2699,10 @@ public final class AudioService {
     setRecording(false)
     // Session ended: capture readiness lapses with it (as in stop()).
     captureReadyLive = false
+    // Native stop event into the Rust session (Recording -> Transcribing);
+    // the handle stays live for the agent's `notifyTranscriptionDone`, as in
+    // stop().
+    driveRustLocked(.stopRequested)
     let rms = rmsHistory
     rmsHistory = []
     // Same range+snapshot tail handoff as stop(): copy after unlock.
