@@ -380,7 +380,8 @@ final class AudioTransportTests: XCTestCase {
             FLACEncoder.writeUTF8(&writer, value: value)
             writer.flush()
             var reader = FLACBitReader(bytes: writer.bytes, bitPos: 0)
-            XCTAssertEqual(try FLACDecoder.readUTF8(&reader), value, "UTF-8 round trip \(value)")
+            let decodedValue = try FLACDecoder.readUTF8(&reader)
+            XCTAssertEqual(decodedValue, value, "UTF-8 round trip \(value)")
         }
         // More than 2048 x 4096 samples: frame 2048+ headers must decode.
         // Constant signal keeps the long encode fast.
