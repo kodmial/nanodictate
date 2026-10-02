@@ -425,10 +425,13 @@ public enum BenchmarkFixtures {
       BenchmarkFixture(
         id: "technical-codeswitch-long",
         category: .technical,
-        durationBucket: .short,
-        description: "Mixed Russian/English API dictation with identifiers, 8 seconds.",
-        transcript: "открой терминал запусти nanodictate transcribe с моделью gpt transcribe",
-        samples: BenchmarkSynth.samples(seed: 46, durationSeconds: 8, kind: .technical)
+        durationBucket: .long,
+        description: "Mixed Russian/English API dictation with identifiers, 55 seconds.",
+        transcript: String(
+          repeating: "открой терминал запусти nanodictate transcribe с моделью gpt transcribe ",
+          count: 20
+        ).trimmingCharacters(in: .whitespaces),
+        samples: BenchmarkSynth.samples(seed: 46, durationSeconds: 55, kind: .technical)
       ),
       BenchmarkFixture(
         id: "normal-long",

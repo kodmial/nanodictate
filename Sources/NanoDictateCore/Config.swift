@@ -977,6 +977,8 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
 
   /// Разбор массива строк: `providers = ["groq", "gigaam"]`.
   /// Допускает пробелы между элементами и после запятых.
+  /// Запятые внутри кавычек сохраняются как часть термина
+  /// (`vocabulary = ["foo, bar"]` — один термин, а не два).
   private static func parseStringArray(_ raw: String, line: Int, rawLine: String) throws -> [String]
   {  // swiftlint:disable:this opening_brace
     let trimmed = raw.trimmingCharacters(in: .whitespaces)
@@ -984,13 +986,31 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
       throw AppConfigError.invalidLine(line, rawLine)
     }
     let inner = trimmed.dropFirst().dropLast()
-    let result =
-      inner
-      .components(separatedBy: ",")
-      .map { $0.trimmingCharacters(in: .whitespaces) }
-      .filter { !$0.isEmpty }
+    // Split only on commas outside quoted strings so commas inside
+    // a quoted term are preserved verbatim (see serializeVocabularyHint).
+    var segments: [String] = []
+    var current = ""
+    var inQuotes = false
+    for char in inner {
+      if char == "\"" {
+        inQuotes.toggle()
+        current.append(char)
+      } else if char == "," && !inQuotes {
+        let candidate = current.trimmingCharacters(in: .whitespaces)
+        if !candidate.isEmpty {
+          segments.append(candidate)
+        }
+        current = ""
+      } else {
+        current.append(char)
+      }
+    }
+    let tail = current.trimmingCharacters(in: .whitespaces)
+    if !tail.isEmpty {
+      segments.append(tail)
+    }
     var values: [String] = []
-    for item in result {
+    for item in segments {
       try values.append(parseString(item, line: line, rawLine: rawLine))
     }
     return values

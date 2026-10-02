@@ -166,7 +166,7 @@ public enum ProviderRequestBuilder {
     let chainPrompt = batchParams?.prompt ?? prompt
     let applied = STTContextualBiasing.apply(
       bias: bias,
-      chainPrompt: caps.supportsPrompt ? chainPrompt : chainPrompt,
+      chainPrompt: chainPrompt,
       primaryLanguage: language,
       capabilities: caps,
       adapterID: adapterID,

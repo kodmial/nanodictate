@@ -148,6 +148,21 @@ final class STTContextualBiasTests: XCTestCase {
         XCTAssertNotNil(applied.diagnostic)
     }
 
+    @objc func testNoneHintPrimaryOnlyLogsDiagnostic() {
+        let caps = STTModelRegistry.resolve(adapterID: "cloudflare", model: "").capabilities
+        let applied = STTContextualBiasing.apply(
+            bias: STTContextualBias(vocabulary: [], extraLanguages: []),
+            chainPrompt: nil,
+            primaryLanguage: "ru",
+            capabilities: caps,
+            adapterID: "cloudflare",
+            model: "")
+        XCTAssertEqual(applied.effectiveLanguage, "")
+        XCTAssertTrue(applied.effectiveLanguages.isEmpty)
+        XCTAssertTrue(applied.droppedExtraLanguages.isEmpty)
+        XCTAssertNotNil(applied.diagnostic)
+    }
+
     // MARK: - Capability gating: vocabulary
 
     @objc func testCloudflareDropsVocabularyDeterministically() {
@@ -159,7 +174,9 @@ final class STTContextualBiasTests: XCTestCase {
             capabilities: caps,
             adapterID: "cloudflare",
             model: "")
-        XCTAssertNil(applied.effectivePrompt)
+        // Chain context is preserved; the caller omits `prompt` on no-prompt
+        // profiles (STTAdapter gates on supportsPrompt).
+        XCTAssertEqual(applied.effectivePrompt, "chain")
         XCTAssertTrue(applied.vocabularyDropped)
         XCTAssertNotNil(applied.diagnostic)
         XCTAssertTrue(applied.diagnostic?.contains("vocabulary") ?? false)
@@ -309,6 +326,16 @@ final class STTContextualBiasTests: XCTestCase {
         XCTAssertEqual(config.extraLanguages, [])
     }
 
+    @objc func testParseVocabularyPreservesCommasInsideQuotes() throws {
+        let content = """
+        vocabulary = ["foo, bar", "baz"]
+        extra_languages = ["en", "ru"]
+        """
+        let config = try AppConfig.parse(content)
+        XCTAssertEqual(config.vocabulary, ["foo, bar", "baz"])
+        XCTAssertEqual(config.extraLanguages, ["en", "ru"])
+    }
+
     // MARK: - Benchmark fixtures cover mixed RU/EN technical dictation
 
     @objc func testBuiltinFixturesIncludeCodeSwitchTechnical() {
@@ -319,6 +346,10 @@ final class STTContextualBiasTests: XCTestCase {
         XCTAssertNotNil(fixtures.first { $0.id == "technical-codeswitch-long" })
         let short = fixtures.first { $0.id == "technical-codeswitch-short" }!
         XCTAssertTrue(short.transcript.contains("whisper"))
+        XCTAssertEqual(short.durationBucket, .short)
+        let long = fixtures.first { $0.id == "technical-codeswitch-long" }!
+        XCTAssertEqual(long.durationBucket, .long)
+        XCTAssertGreaterThanOrEqual(long.durationSeconds, 50)
     }
 
     @objc func testBenchmarkUploadIncludesBiasOverhead() {

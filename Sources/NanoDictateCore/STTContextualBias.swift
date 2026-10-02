@@ -200,9 +200,7 @@ public enum STTContextualBiasing {
     var droppedExtras: [String] = []
     switch capabilities.languageHint {
     case .none:
-      if !primary.isEmpty || !extras.isEmpty {
-        droppedExtras = extras
-      }
+      droppedExtras = extras
     case .single:
       effectiveLanguage = primary
       droppedExtras = extras
@@ -266,7 +264,9 @@ public enum STTContextualBiasing {
             : hint
         }
       } else if !capabilities.supportsKeywordBiasing {
-        effectivePrompt = nil
+        // Chain context is never cleared here: the caller gates `prompt`
+        // on `supportsPrompt`, so preserving `chainPrompt` keeps the
+        // "never reordered or replaced" contract without sending anything.
         vocabularyDropped = true
       }
     }
@@ -280,7 +280,11 @@ public enum STTContextualBiasing {
         "vocabulary (\(vocabulary.count) terms) ignored: \(target) supports neither prompt nor keyword biasing"
       )
     }
-    if !droppedExtras.isEmpty {
+    // On `.none` profiles the primary hint is also dropped, so the diagnostic
+    // must run when either `primary` or `extras` is non-empty — not only when
+    // `droppedExtras` is non-empty (primary-only drops left no warning).
+    let droppedPrimaryOnNone = capabilities.languageHint == .none && !primary.isEmpty
+    if !droppedExtras.isEmpty || droppedPrimaryOnNone {
       switch capabilities.languageHint {
       case .none:
         notes.append(
