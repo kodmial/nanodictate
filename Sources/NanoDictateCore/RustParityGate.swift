@@ -54,19 +54,24 @@ public enum RustParityGate {
     public var cpuRatio: Double
     /// Relative peak-memory change vs baseline (1.0 = unchanged).
     public var memoryRatio: Double
+    /// Relative audio-copy/allocation change vs baseline (1.0 = unchanged).
+    /// Covers the audio-copy/allocation impact required by #123.
+    public var copyAllocationRatio: Double
 
     public init(
       startupLatencyMs: Double,
       maxBlockCallMs: Double,
       meanBlockCallMs: Double,
       cpuRatio: Double,
-      memoryRatio: Double
+      memoryRatio: Double,
+      copyAllocationRatio: Double
     ) {
       self.startupLatencyMs = startupLatencyMs
       self.maxBlockCallMs = maxBlockCallMs
       self.meanBlockCallMs = meanBlockCallMs
       self.cpuRatio = cpuRatio
       self.memoryRatio = memoryRatio
+      self.copyAllocationRatio = copyAllocationRatio
     }
   }
 
@@ -79,13 +84,15 @@ public enum RustParityGate {
     public var maxMeanBlockCallMs: Double
     public var maxCPURatio: Double
     public var maxMemoryRatio: Double
+    public var maxCopyAllocationRatio: Double
 
     public static let `default` = Budgets(
       maxStartupLatencyMs: 500,
       maxBlockCallMs: 25,
       maxMeanBlockCallMs: 5,
       maxCPURatio: 1.2,
-      maxMemoryRatio: 1.2
+      maxMemoryRatio: 1.2,
+      maxCopyAllocationRatio: 1.2
     )
 
     public init(
@@ -93,13 +100,15 @@ public enum RustParityGate {
       maxBlockCallMs: Double,
       maxMeanBlockCallMs: Double,
       maxCPURatio: Double,
-      maxMemoryRatio: Double
+      maxMemoryRatio: Double,
+      maxCopyAllocationRatio: Double
     ) {
       self.maxStartupLatencyMs = maxStartupLatencyMs
       self.maxBlockCallMs = maxBlockCallMs
       self.maxMeanBlockCallMs = maxMeanBlockCallMs
       self.maxCPURatio = maxCPURatio
       self.maxMemoryRatio = maxMemoryRatio
+      self.maxCopyAllocationRatio = maxCopyAllocationRatio
     }
   }
 
@@ -133,29 +142,58 @@ public enum RustParityGate {
     }
 
     if let measurements {
-      if !(measurements.startupLatencyMs <= budgets.maxStartupLatencyMs) {
+      if !(measurements.startupLatencyMs >= 0 && measurements.startupLatencyMs.isFinite) {
+        reasons.append(
+          "invalid performance measurement: startupLatencyMs=\(measurements.startupLatencyMs)ms must be non-negative and finite"
+        )
+      } else if !(measurements.startupLatencyMs <= budgets.maxStartupLatencyMs) {
         reasons.append(
           "startup latency regression: \(measurements.startupLatencyMs)ms exceeds budget \(budgets.maxStartupLatencyMs)ms"
         )
       }
-      if !(measurements.maxBlockCallMs <= budgets.maxBlockCallMs) {
+      if !(measurements.maxBlockCallMs >= 0 && measurements.maxBlockCallMs.isFinite) {
+        reasons.append(
+          "invalid performance measurement: maxBlockCallMs=\(measurements.maxBlockCallMs)ms must be non-negative and finite"
+        )
+      } else if !(measurements.maxBlockCallMs <= budgets.maxBlockCallMs) {
         reasons.append(
           "realtime block regression: max \(measurements.maxBlockCallMs)ms exceeds budget \(budgets.maxBlockCallMs)ms"
         )
       }
-      if !(measurements.meanBlockCallMs <= budgets.maxMeanBlockCallMs) {
+      if !(measurements.meanBlockCallMs >= 0 && measurements.meanBlockCallMs.isFinite) {
+        reasons.append(
+          "invalid performance measurement: meanBlockCallMs=\(measurements.meanBlockCallMs)ms must be non-negative and finite"
+        )
+      } else if !(measurements.meanBlockCallMs <= budgets.maxMeanBlockCallMs) {
         reasons.append(
           "realtime block regression: mean \(measurements.meanBlockCallMs)ms exceeds budget \(budgets.maxMeanBlockCallMs)ms"
         )
       }
-      if !(measurements.cpuRatio <= budgets.maxCPURatio) {
+      if !(measurements.cpuRatio > 0 && measurements.cpuRatio.isFinite) {
+        reasons.append(
+          "invalid performance measurement: cpuRatio=\(measurements.cpuRatio) must be positive and finite"
+        )
+      } else if !(measurements.cpuRatio <= budgets.maxCPURatio) {
         reasons.append(
           "CPU regression: ratio \(measurements.cpuRatio) exceeds budget \(budgets.maxCPURatio)"
         )
       }
-      if !(measurements.memoryRatio <= budgets.maxMemoryRatio) {
+      if !(measurements.memoryRatio > 0 && measurements.memoryRatio.isFinite) {
+        reasons.append(
+          "invalid performance measurement: memoryRatio=\(measurements.memoryRatio) must be positive and finite"
+        )
+      } else if !(measurements.memoryRatio <= budgets.maxMemoryRatio) {
         reasons.append(
           "memory regression: ratio \(measurements.memoryRatio) exceeds budget \(budgets.maxMemoryRatio)"
+        )
+      }
+      if !(measurements.copyAllocationRatio > 0 && measurements.copyAllocationRatio.isFinite) {
+        reasons.append(
+          "invalid performance measurement: copyAllocationRatio=\(measurements.copyAllocationRatio) must be positive and finite"
+        )
+      } else if !(measurements.copyAllocationRatio <= budgets.maxCopyAllocationRatio) {
+        reasons.append(
+          "audio-copy/allocation regression: ratio \(measurements.copyAllocationRatio) exceeds budget \(budgets.maxCopyAllocationRatio)"
         )
       }
     } else {

@@ -15,7 +15,8 @@ final class RustParityGateTests: XCTestCase {
       maxBlockCallMs: 2,
       meanBlockCallMs: 0.2,
       cpuRatio: 1.0,
-      memoryRatio: 1.0
+      memoryRatio: 1.0,
+      copyAllocationRatio: 1.0
     )
   }
 
@@ -53,6 +54,35 @@ final class RustParityGateTests: XCTestCase {
       supersededSwiftRemoved: false
     )
     XCTAssertFalse(verdict.passed, "mean block regression must fail the gate")
+  }
+
+  @objc func testGateFailsOnInvalidMeasurements() {
+    var bad = passingMeasurements()
+    bad.startupLatencyMs = -1
+    bad.cpuRatio = 0
+    let verdict = RustParityGate.evaluate(
+      passedItems: fullChecklist(),
+      measurements: bad,
+      supersededSwiftRemoved: false
+    )
+    XCTAssertFalse(verdict.passed, "invalid measurements must fail the gate")
+    XCTAssertTrue(
+      verdict.reasons.contains { $0.contains("invalid performance measurement") },
+      "reasons must flag invalid measurements: \(verdict.reasons)")
+  }
+
+  @objc func testGateFailsOnCopyAllocationRegression() {
+    var bad = passingMeasurements()
+    bad.copyAllocationRatio = RustParityGate.Budgets.default.maxCopyAllocationRatio + 0.1
+    let verdict = RustParityGate.evaluate(
+      passedItems: fullChecklist(),
+      measurements: bad,
+      supersededSwiftRemoved: false
+    )
+    XCTAssertFalse(verdict.passed, "audio-copy/allocation regression must fail the gate")
+    XCTAssertTrue(
+      verdict.reasons.contains { $0.contains("audio-copy/allocation") },
+      "reasons must name copy/allocation regression: \(verdict.reasons)")
   }
 
   @objc func testGateBlocksSwiftRemovalBeforeParity() {
