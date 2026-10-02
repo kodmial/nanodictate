@@ -83,6 +83,7 @@ let suites: [XCTestCase.Type] = [
     AgentPlistTests.self,
     RustParityTests.self,
     RustParityGateTests.self,
+    RustSessionActivationTests.self,
 ]
 
 var passed = 0
