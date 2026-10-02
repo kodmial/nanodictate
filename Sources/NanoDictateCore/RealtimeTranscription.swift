@@ -569,9 +569,11 @@ public actor RealtimeTranscriptionSession {
     if state == .failed {
       throw RealtimeTranscriptionError.sessionFailed(lastError ?? "session rejected")
     }
-    _ = acknowledged
-    // Optimistic ready: some servers start accepting audio without an
-    // explicit ack on fast paths. Stay usable but record the miss.
+    if !acknowledged {
+      state = .failed
+      lastError = "no session ack"
+      throw RealtimeTranscriptionError.timeout("no session ack")
+    }
     state = .ready
     connectAttempts += 1
   }
@@ -676,7 +678,9 @@ public actor RealtimeTranscriptionSession {
         guard let text = try await withTimeout(seconds: 0.2, operation: {
           try await transport.receive()
         }) else {
-          // Clean EOF before completion: deterministic close-out.
+          // Clean EOF before completion: deterministic close-out. When a
+          // final or partial transcript is already available it is returned
+          // (no failure); otherwise the drop fails the session closed.
           if let final = self.accumulator.finalText {
             return final
           }
@@ -684,6 +688,8 @@ public actor RealtimeTranscriptionSession {
           if !partial.isEmpty {
             return partial
           }
+          state = .failed
+          lastError = "transport closed before completion"
           throw RealtimeTranscriptionError.transport("transport closed before completion")
         }
         _ = handleMessage(text)
@@ -693,6 +699,12 @@ public actor RealtimeTranscriptionSession {
         // Per-receive expiry (not EOF): keep waiting until the commit deadline.
         continue
       } catch let error as RealtimeTranscriptionError {
+        // Transport drop during receive fails the session closed so a later
+        // `lastErrorMessage` reflects the drop.
+        if case .transport(let message) = error {
+          state = .failed
+          lastError = message
+        }
         throw error
       } catch {
         // Per-receive timeout: keep waiting until the commit deadline.
@@ -717,7 +729,27 @@ public actor RealtimeTranscriptionSession {
       if let final = accumulator.finalText {
         return final
       }
-      guard let text = try await transport.receive() else {
+      let text: String?
+      do {
+        text = try await transport.receive()
+      } catch is CancellationError {
+        throw RealtimeTranscriptionError.cancelled
+      } catch let error as RealtimeTranscriptionError {
+        // Transport drop during receive fails the session closed so a later
+        // `lastErrorMessage` reflects the drop.
+        if case .transport(let message) = error {
+          state = .failed
+          lastError = message
+        }
+        throw error
+      } catch {
+        state = .failed
+        lastError = error.localizedDescription
+        throw RealtimeTranscriptionError.transport(error.localizedDescription)
+      }
+      guard let text else {
+        // Clean EOF before completion: return buffered transcript when
+        // available; otherwise fail the session closed.
         if let final = accumulator.finalText {
           return final
         }
@@ -725,6 +757,8 @@ public actor RealtimeTranscriptionSession {
         if !partial.isEmpty {
           return partial
         }
+        state = .failed
+        lastError = "transport closed before completion"
         throw RealtimeTranscriptionError.transport("transport closed before completion")
       }
       _ = handleMessage(text)

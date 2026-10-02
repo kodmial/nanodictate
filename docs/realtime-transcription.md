@@ -68,9 +68,13 @@ is deterministic after stop/session completion.
 - Provider errors (`error` event, `...transcription.failed`) move the session
   to `.failed` with `lastErrorMessage` preserved and surface
   `.sessionFailed`. The failed session never retries the same audio silently.
-- No automatic reconnect. After a transport drop the session stays `.failed`
-  with `lastErrorMessage` preserved; reconnecting or restarting the dictation
-  is the caller's responsibility. Already-sent audio is NOT re-uploaded
+- No automatic reconnect. A transport drop that yields no transcript leaves
+  the session `.failed` with `lastErrorMessage` preserved (this includes a
+  missing session ack at connect time and a dropped transport while waiting
+  for completion); reconnecting or restarting the dictation
+  is the caller's responsibility. When a final or partial transcript is
+  already buffered, `waitForFinal()` / `runToCompletion()` return it instead
+  of throwing. Already-sent audio is NOT re-uploaded
   automatically; the caller decides whether to restart the dictation.
 - **No silent batch fallback.** `ProviderRequestBuilder.plan` for a streaming
   profile returns an invalid spec (`url == nil`) instead of a multipart body.
