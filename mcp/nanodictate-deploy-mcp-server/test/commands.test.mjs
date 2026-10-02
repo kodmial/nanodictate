@@ -15,6 +15,7 @@ import { basename, dirname, join } from "node:path";
 import {
   matchSigningIdentity,
   parseEntitlements,
+  parseRustArchivePath,
   parseTeamId,
   resolveSwiftToolchain,
   signBundle,
@@ -176,6 +177,28 @@ test("resolveSwiftToolchain errors when no swift is available anywhere", () => {
   assert.equal(res.ok, false);
   assert.match(res.error, /not found in PATH/);
   assert.match(res.error, /SWIFT_TOOLCHAIN/);
+});
+
+// ── parseRustArchivePath ────────────────────────────────────────────────────
+
+test("parseRustArchivePath extracts the default archive path", () => {
+  const stdout = "Rust engine built: /repo/rust/target/release/libnanodictate_core.a\nLink with: swift build -Xlinker /repo/rust/target/release/libnanodictate_core.a\n";
+  assert.equal(parseRustArchivePath(stdout), "/repo/rust/target/release/libnanodictate_core.a");
+});
+
+test("parseRustArchivePath extracts a target-triple archive path", () => {
+  const stdout = "Rust engine built: /repo/rust/target/aarch64-apple-darwin/release/libnanodictate_core.a\n";
+  assert.equal(parseRustArchivePath(stdout), "/repo/rust/target/aarch64-apple-darwin/release/libnanodictate_core.a");
+});
+
+test("parseRustArchivePath extracts a custom target-dir archive path", () => {
+  const stdout = "cargo build output\nRust engine built: /custom/target/release/libnanodictate_core.a\nLink with: swift build -Xlinker /custom/target/release/libnanodictate_core.a\n";
+  assert.equal(parseRustArchivePath(stdout), "/custom/target/release/libnanodictate_core.a");
+});
+
+test("parseRustArchivePath returns null when the build line is absent", () => {
+  assert.equal(parseRustArchivePath(""), null);
+  assert.equal(parseRustArchivePath("building...\nno archive line here\n"), null);
 });
 // ── dictation_wipe + dictation_cert_* (mocked deps, no real system calls) ──
 

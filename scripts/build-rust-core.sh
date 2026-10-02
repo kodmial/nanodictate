@@ -70,6 +70,58 @@ if [[ "$CHECK_HEADER" == 1 ]]; then
   "$REPO_ROOT/scripts/check-rust-abi.sh"
 fi
 
-LIB_DIR="$TARGET_DIR/$PROFILE"
-echo "Rust engine built: $LIB_DIR/libnanodictate_core.a"
-echo "Link with: swift build -Xlinker $LIB_DIR/libnanodictate_core.a"
+# Locate the static archive Cargo actually produced. When CARGO_BUILD_TARGET
+# or build.target sets a target triple, Cargo places the archive under
+# $TARGET_DIR/<triple>/$PROFILE even when the triple matches the host, so
+# reconstructing "$TARGET_DIR/$PROFILE/..." would report a stale path. Parse
+# the compiler-artifact filenames from a cached `cargo build
+# --message-format=json` invocation instead (the real build above keeps
+# human-readable output; this second invocation is cached and only discovers
+# the path).
+ARCHIVE_NAME="libnanodictate_core.a"
+ARCHIVE=""
+if [[ "$PROFILE" == "release" ]]; then
+  BUILD_JSON="$(cargo build --target-dir "$TARGET_DIR" --release -p nanodictate-core --message-format=json 2>/dev/null || true)"
+else
+  BUILD_JSON="$(cargo build --target-dir "$TARGET_DIR" -p nanodictate-core --message-format=json 2>/dev/null || true)"
+fi
+if [[ -n "${BUILD_JSON:-}" ]]; then
+  ARCHIVE="$(printf '%s' "$BUILD_JSON" | python3 -c 'import json,sys
+want = "libnanodictate_core.a"
+found = ""
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        msg = json.loads(line)
+    except Exception:
+        continue
+    if msg.get("reason") != "compiler-artifact":
+        continue
+    if "nanodictate-core" not in str(msg.get("package_id", "")):
+        continue
+    for f in msg.get("filenames") or []:
+        if f.endswith("/" + want):
+            found = f
+            break
+    if found:
+        break
+print(found)' 2>/dev/null || true)"
+fi
+if [[ -z "${ARCHIVE:-}" || ! -f "$ARCHIVE" ]]; then
+  ARCHIVE="$TARGET_DIR/$PROFILE/$ARCHIVE_NAME"
+fi
+# Last-resort triple fallback when JSON discovery is unavailable (e.g. no
+# python3): accept $TARGET_DIR/<triple>/$PROFILE/$ARCHIVE_NAME.
+if [[ ! -f "$ARCHIVE" ]]; then
+  for candidate in "$TARGET_DIR"/*/"$PROFILE/$ARCHIVE_NAME"; do
+    if [[ -f "$candidate" ]]; then
+      ARCHIVE="$candidate"
+      break
+    fi
+  done
+fi
+
+echo "Rust engine built: $ARCHIVE"
+echo "Link with: swift build -Xlinker $ARCHIVE"

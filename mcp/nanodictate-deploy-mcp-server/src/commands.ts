@@ -298,6 +298,19 @@ export function rustStaticArchive(): string {
   return join(targetDir, "release", "libnanodictate_core.a");
 }
 
+/**
+ * Extract the static archive path printed by scripts/build-rust-core.sh
+ * (`Rust engine built: <absolute path>`). The script resolves the real Cargo
+ * target directory (CARGO_TARGET_DIR, build.target-dir) and target triple
+ * (CARGO_BUILD_TARGET, build.target) via `cargo build --message-format=json`,
+ * so its output is authoritative when those settings redirect the archive
+ * away from the `rust/target/release` default.
+ */
+export function parseRustArchivePath(stdout: string): string | null {
+  const match = /Rust engine built:\s*(.+\.a)\s*$/m.exec(stdout);
+  return match ? match[1].trim() : null;
+}
+
 export interface SymlinkResult {
   created: boolean;
   /** Absolute path to the freshly built binary. */
@@ -410,7 +423,13 @@ export async function buildProject(
 
   const res = await run(
     toolchain.toolchain.swift,
-    ["build", "-c", configuration, "-Xlinker", rustStaticArchive()],
+    [
+      "build",
+      "-c",
+      configuration,
+      "-Xlinker",
+      parseRustArchivePath(rustBuild.stdout) ?? rustStaticArchive(),
+    ],
     {
       cwd: PROJECT_ROOT,
       timeoutMs: BUILD_TIMEOUT_MS,
