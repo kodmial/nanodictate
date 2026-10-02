@@ -1,0 +1,254 @@
+name: NanoDictate CI engine
+
+on:
+  workflow_call:
+    inputs:
+      continuum_ref:
+        description: Continuum revision supplying fallback scripts
+        type: string
+        default: main
+        required: false
+      native_prepare_command:
+        description: >-
+          Optional consumer command that prepares a native/static dependency
+          before Swift builds (for example a Rust static library build).
+        type: string
+        default: ''
+        required: false
+      static_archive_path:
+        description: >-
+          Optional repository-relative static archive passed to SwiftPM via
+          -Xlinker for build and coverage-test linking.
+        type: string
+        default: ''
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+# Keep only the newest CI for each PR/branch. Automatic main synchronization can
+# create several short-lived heads in quick succession; stale macOS jobs must
+# not consume runner capacity ahead of the current head.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  classify-changes:
+    name: Classify changes
+    runs-on: ubuntu-latest
+    outputs:
+      build_required: ${{ steps.classify.outputs.build_required }}
+    steps:
+      - name: Decide whether macOS build is required
+        id: classify
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            // Pushes that reach this workflow already passed paths-ignore above.
+            if (context.eventName !== 'pull_request') {
+              core.setOutput('build_required', 'true');
+              return;
+            }
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              per_page: 100,
+            });
+
+            const pr = context.payload.pull_request;
+            const repoFullName = `${context.repo.owner}/${context.repo.repo}`;
+            const filenames = files.map(({ filename }) => filename);
+            const sameRepo = pr.head.repo?.full_name === repoFullName;
+            const labelNames = new Set((pr.labels || []).map(label => label.name));
+
+            // Generated release PRs are data-only changes. Do not spend a macOS
+            // runner rebuilding application code that did not change. The fast
+            // path is deliberately strict: same-repository automation branch,
+            // expected lifecycle marker (for release-please), and no file
+            // outside the generator-owned allow-list. Anything unexpected falls
+            // back to the normal full build instead of being trusted.
+            const releaseFiles = new Set([
+              '.release-please-manifest.json',
+              'CHANGELOG.md',
+              'Sources/NanoDictateCore/Version.swift',
+            ]);
+            const manifestFiles = new Set([
+              'nanodictate.rb',
+              'packaging/homebrew/nanodictate.rb',
+              'packaging/homebrew/Casks/nanodictate.rb',
+              'packaging/macports/Portfile',
+              'scripts/install-macports.sh',
+            ]);
+            const onlyAllowed = (allowed) =>
+              filenames.length > 0 && filenames.every(path => allowed.has(path));
+
+            const trustedReleasePr =
+              sameRepo &&
+              pr.head.ref === 'release-please--branches--main' &&
+              labelNames.has('autorelease: pending') &&
+              onlyAllowed(releaseFiles);
+            const trustedManifestPr =
+              sameRepo &&
+              pr.head.ref.startsWith('chore/release-manifests-v') &&
+              onlyAllowed(manifestFiles);
+
+            if (trustedReleasePr || trustedManifestPr) {
+              core.notice(
+                `Trusted generated ${trustedReleasePr ? 'Release' : 'manifest'} PR: skipping macOS build/tests; lightweight policy jobs remain required.`
+              );
+              core.info(`Changed files: ${filenames.join(', ')}`);
+              core.setOutput('build_required', 'false');
+              return;
+            }
+
+            // Keep this intentionally conservative: only documentation-only PRs
+            // skip the expensive macOS runner. Any non-documentation file means
+            // the normal build, lint, and test job still runs.
+            const isDocumentationOnlyPath = (path) =>
+              path.startsWith('docs/') ||
+              path.endsWith('.md') ||
+              path === 'LICENSE';
+
+            const docsOnly = files.length > 0 && files.every(({ filename }) =>
+              isDocumentationOnlyPath(filename)
+            );
+
+            core.info(`Changed files: ${filenames.join(', ')}`);
+            core.info(docsOnly
+              ? 'Documentation-only PR: skipping macOS build and tests.'
+              : 'Code or non-documentation change detected: macOS build and tests are required.');
+            core.setOutput('build_required', docsOnly ? 'false' : 'true');
+
+  # The release policy that decides whether a merge into main needs a Release
+  # PR update lives in scripts/release-policy.sh (used by release-pr.yml). It is
+  # plain bash, so it is tested on Linux against real git diff output.
+  release-policy:
+    name: Release policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          # This job runs scripts/test-release-policy.sh from the checked-out PR on
+          # pull_request events, so the token must not stay in .git/config where
+          # that code could reuse it (CWE-522).
+          persist-credentials: false
+
+      - name: Ensure Continuum scripts available
+        if: hashFiles('scripts/release-policy.sh') == ''
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: kodmial/continuum
+          ref: ${{ inputs.continuum_ref || 'main' }}
+          path: .continuum
+          persist-credentials: false
+
+      - name: Copy missing Continuum scripts
+        if: hashFiles('scripts/release-policy.sh') == ''
+        run: |
+          mkdir -p scripts
+          rsync -a --ignore-existing .continuum/scripts/ scripts/
+
+      - name: Test the release policy
+        run: bash scripts/test-release-policy.sh
+
+  # Version ownership: only the automated Release PR branch may touch
+  # Sources/NanoDictateCore/Version.swift or .release-please-manifest.json.
+  # Ordinary PRs never reserve the next version, so concurrent merges cannot
+  # race or pick duplicate versions — version selection is serialized in the
+  # Release PR at release time (issue #10). Runs on pull_request only: pushes
+  # to main are merges that already passed this gate as PRs.
+  version-ownership:
+    name: Version ownership
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          # The checked-out PR code is only diffed here, so the token must not
+          # stay in .git/config where that code could reuse it (CWE-522).
+          persist-credentials: false
+
+      - name: Ensure Continuum scripts available
+        if: hashFiles('scripts/release-policy.sh') == ''
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: kodmial/continuum
+          ref: ${{ inputs.continuum_ref || 'main' }}
+          path: .continuum
+          persist-credentials: false
+
+      - name: Copy missing Continuum scripts
+        if: hashFiles('scripts/release-policy.sh') == ''
+        run: |
+          mkdir -p scripts
+          rsync -a --ignore-existing .continuum/scripts/ scripts/
+
+      - name: Require consumer identity variables
+        env:
+          VERSION_FILE: ${{ vars.CONTINUUM_VERSION_FILE }}
+          CORE_TEST_TARGET: ${{ vars.CONTINUUM_CORE_TEST_TARGET }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [[ -n "${VERSION_FILE:-}" ]] || missing+=('CONTINUUM_VERSION_FILE')
+          [[ -n "${CORE_TEST_TARGET:-}" ]] || missing+=('CONTINUUM_CORE_TEST_TARGET')
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::Missing repository variables: ${missing[*]}" >&2
+            exit 1
+          fi
+
+      - name: Reject hand-written version bumps
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Version-file ownership moves with the version source itself: the
+          # automated Release PR owns this file, ordinary PRs never bump it.
+          VERSION_FILE: ${{ vars.CONTINUUM_VERSION_FILE }}
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/release-policy.sh
+          source scripts/release-policy.sh
+          CHANGED=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")
+          echo "Changed files:"
+          printf '%s\n' "$CHANGED" | sed 's/^/  /'
+          # A fork can name its branch like the Release PR branch, so the
+          # branch name alone must not confer trust — only a same-repo head
+          # counts as the Release PR.
+          if [[ "$SAME_REPO" != "true" ]]; then HEAD_REF="fork:${HEAD_REF}"; fi
+          if policy_check_version_ownership "$HEAD_REF" "$CHANGED"; then
+            echo "Version ownership ok — no hand-written version bump."
+          elif policy_is_version_seeding \
+            "$(git show "$BASE_SHA:$VERSION_FILE" 2>/dev/null || true)" \
+            "$(git show "$HEAD_SHA:$VERSION_FILE" 2>/dev/null || true)" \
+            "$(git show "$BASE_SHA:.release-please-manifest.json" 2>/dev/null || true)" \
+            "$(git show "$HEAD_SHA:.release-please-manifest.json" 2>/dev/null || true)"; then
+            echo "Version ownership ok — one-time release-please bootstrap (manifest seeded at the current version, version-file version unchanged)."
+          else
+            echo "::error::PR '$HEAD_REF' touches Version.swift or .release-please-manifest.json. The next version is owned by the automated Release PR (release-pr.yml): remove the version bump from this PR and merge normally — the changes will ride along with the next Release PR."
+            exit 1
+          fi
+
+  build-and-test:
+    name: Build & Test (macOS)
+    needs: classify-changes
+    if: needs.classify-changes.outputs.build_required == 'true'
+    uses: kodmial/continuum/.github/workflows/continuum-validation.yml@main
+    secrets: inherit
+    with:
+      continuum_ref: main
+      runner: macos-15
+      auto_detect: 'false'
+      validation_command: bash scripts/ci-validation.sh
+      publish_status: 'false'
+      dispatch_repair: 'false'
