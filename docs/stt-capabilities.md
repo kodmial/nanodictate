@@ -33,7 +33,7 @@ segment overlap stitching) and only for profiles that support them.
 | `groq` | unknown (fallback) | batch multipart | no | no | yes | yes | no | single | flat `text` |
 | `cloudflare` | any (model baked into URL) | batch raw WAV (`audio/wav`) | no | no | no | no | no | none | `result.text` |
 | `airubiz` / `gigaam` / `selfhosted` / custom | any | batch multipart (conservative fallback below) | no | no | yes | yes | no | single | flat `text` |
-| `openai` | `gpt-live-transcribe`, `gpt-live-*` (realtime streaming) | streaming WebSocket session | n/a (deltas + completion events) | n/a | yes (`prompt` in session.update) | no | multi (`languages`) | realtime events |
+| `openai` | `gpt-live-transcribe`, `gpt-live-*` (realtime streaming) | streaming WebSocket session | n/a (deltas + completion events) | n/a | yes (`prompt` in session.update) | no | no | multi (`languages`) | realtime events |
 
 Audio requirements: batch profiles use 16 kHz mono WAV
 (`STTAudioProfile.batchMono16k`); the realtime `gpt-live-transcribe` family

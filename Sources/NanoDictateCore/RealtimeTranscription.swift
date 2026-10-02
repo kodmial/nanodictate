@@ -27,8 +27,10 @@ import Foundation
 // - cancel() from any state -> cancelled: transport closed, pending work
 //   dropped, no further callbacks. Never wedges: every wait has a timeout and
 //   honors Task cancellation.
-// - reconnect is explicit and bounded (policy.maxReconnectAttempts); already
-//   sent audio is NOT re-uploaded silently. A failed session never falls back
+// - No automatic reconnect: after a transport drop the session stays
+//   `.failed` and never re-uploads already-sent audio silently.
+//   Reconnecting or restarting the dictation is the caller's
+//   responsibility. A failed session never falls back
 //   to repeated batch uploads unless RealtimeFallbackPolicy explicitly allows
 //   it (default: fail-closed).
 
@@ -482,6 +484,14 @@ extension ProviderRequestBuilder {
 
 // MARK: - Stateful session (one per dictation)
 
+/// Signals that a bounded `withTimeout` wait expired without a result.
+/// Distinct from a `nil` operation result (clean transport EOF) so callers
+/// keep waiting until their own deadline instead of treating a short
+/// per-receive expiry as closure.
+private enum RealtimeWaitTimeout: Error {
+  case timedOut
+}
+
 /// One stateful realtime transcription session per dictation.
 ///
 /// Usage:
@@ -556,13 +566,13 @@ public actor RealtimeTranscriptionSession {
     }
     // Wait for session acknowledgement (created or updated).
     let acknowledged = await waitForAck(timeout: policy.connectTimeout)
-    if acknowledged {
-      state = .ready
-    } else {
-      // Optimistic ready: some servers start accepting audio without an
-      // explicit ack on fast paths. Stay usable but record the miss.
-      state = .ready
+    if state == .failed {
+      throw RealtimeTranscriptionError.sessionFailed(lastError ?? "session rejected")
     }
+    _ = acknowledged
+    // Optimistic ready: some servers start accepting audio without an
+    // explicit ack on fast paths. Stay usable but record the miss.
+    state = .ready
     connectAttempts += 1
   }
 
@@ -620,7 +630,7 @@ public actor RealtimeTranscriptionSession {
       _ = accumulator.apply(event)
     case .completed:
       _ = accumulator.apply(event)
-      if state == .committing || state == .streaming || state == .ready {
+      if state == .committing {
         state = .closed
       }
     case let .failed(_, message):
@@ -679,6 +689,9 @@ public actor RealtimeTranscriptionSession {
         _ = handleMessage(text)
       } catch is CancellationError {
         throw RealtimeTranscriptionError.cancelled
+      } catch is RealtimeWaitTimeout {
+        // Per-receive expiry (not EOF): keep waiting until the commit deadline.
+        continue
       } catch let error as RealtimeTranscriptionError {
         throw error
       } catch {
@@ -746,6 +759,8 @@ public actor RealtimeTranscriptionSession {
 
   /// Wait up to `timeout` for a session ack message. Returns true when
   /// `session.created`/`session.updated` arrived; false on timeout/EOF.
+  /// A per-receive expiry keeps waiting until the deadline; only a `nil`
+  /// transport result (clean EOF) returns `false` early.
   private func waitForAck(timeout: TimeInterval) async -> Bool {
     let deadline = Date().addingTimeInterval(timeout)
     let transport = self.transport
@@ -779,6 +794,9 @@ public actor RealtimeTranscriptionSession {
         case .unknown:
           continue
         }
+      } catch is RealtimeWaitTimeout {
+        // Per-receive expiry: keep waiting until the ack deadline.
+        continue
       } catch {
         continue
       }
@@ -786,6 +804,12 @@ public actor RealtimeTranscriptionSession {
     return false
   }
 
+  /// Race `operation` against a timeout.
+  /// - Returns: the operation result, where `nil` always means the operation
+  ///   itself returned `nil` (clean transport EOF).
+  /// - Throws: `RealtimeWaitTimeout.timedOut` when the timeout expires first;
+  ///   callers handle it with `continue` to keep waiting until their own
+  ///   deadline. Operation and cancellation errors propagate unchanged.
   private func withTimeout<T>(
     seconds: TimeInterval, operation: @escaping () async throws -> T?
   ) async throws -> T? {
@@ -798,19 +822,21 @@ public actor RealtimeTranscriptionSession {
       }
       group.addTask {
         try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-        return nil
+        throw RealtimeWaitTimeout.timedOut
       }
-      guard let first = try await group.next() else {
+      do {
+        if let result = try await group.next() {
+          group.cancelAll()
+          _ = try? await group.next()
+          return result
+        } else {
+          group.cancelAll()
+          return nil
+        }
+      } catch is RealtimeWaitTimeout {
         group.cancelAll()
-        return nil
+        throw RealtimeWaitTimeout.timedOut
       }
-      group.cancelAll()
-      // Distinguish real nil (EOF) from sleep expiry: if the winner was the
-      // sleeper it returns nil too; the caller treats both as "no message
-      // yet" except in waitForFinal EOF handling. For ack waits both mean
-      // "keep waiting", which is correct.
-      _ = try? await group.next()
-      return first
     }
   }
 }

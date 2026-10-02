@@ -68,10 +68,10 @@ is deterministic after stop/session completion.
 - Provider errors (`error` event, `...transcription.failed`) move the session
   to `.failed` with `lastErrorMessage` preserved and surface
   `.sessionFailed`. The failed session never retries the same audio silently.
-- Reconnect is explicit and bounded by
-  `RealtimeSessionPolicy.maxReconnectAttempts` with exponential backoff
-  (`reconnectBaseDelay * 2^n`). Already-sent audio is NOT re-uploaded on
-  reconnect; the caller decides whether to restart the dictation.
+- No automatic reconnect. After a transport drop the session stays `.failed`
+  with `lastErrorMessage` preserved; reconnecting or restarting the dictation
+  is the caller's responsibility. Already-sent audio is NOT re-uploaded
+  automatically; the caller decides whether to restart the dictation.
 - **No silent batch fallback.** `ProviderRequestBuilder.plan` for a streaming
   profile returns an invalid spec (`url == nil`) instead of a multipart body.
   `RealtimeFallbackPolicy` defaults to `.failClosed`: a failed realtime
