@@ -34,6 +34,10 @@ Resources/nanodictate-agent.plist
 *.bak
 *~
 
+# Rust build outputs (the shared engine builds from rust/ via scripts/build-rust-core.sh)
+rust/target/
+.opencode-tmp/
+
 # Generated packaging outputs (filled by scripts/release-prep.rb — keep the .tpl sources only).
 # These files are tracked and the release workflow force-commits them (release.yml does
 # `git add -f` in the manifests job): the ignore rules only keep a local regeneration out
