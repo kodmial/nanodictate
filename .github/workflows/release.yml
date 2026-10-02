@@ -14,8 +14,8 @@ on:
       - 'Resources/**'
       - 'config.example.toml'
       - 'rust/**'
-      - '.github/workflows/continuum-tech-swift-packaging-smoke.yml'
-      - '.github/workflows/continuum-tech-swift-release.yml'
+      - '.github/workflows/packaging-smoke.yml'
+      - '.github/workflows/release.yml'
   workflow_dispatch:
     inputs:
       version:
@@ -48,7 +48,7 @@ concurrency:
 
 jobs:
   call:
-    uses: kodmial/continuum/.github/workflows/continuum-tech-swift-release.yml@main
+    uses: ./.github/workflows/nanodictate-release-engine.yml
     secrets: inherit
     with:
       continuum_ref: main
