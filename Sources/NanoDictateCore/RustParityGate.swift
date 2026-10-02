@@ -110,6 +110,28 @@ public enum RustParityGate {
       self.maxMemoryRatio = maxMemoryRatio
       self.maxCopyAllocationRatio = maxCopyAllocationRatio
     }
+
+    /// Human-readable reasons for budgets that cannot enforce a regression
+    /// check. Every budget must be positive and finite: `.infinity` (or NaN,
+    /// zero, or negative values) would let any finite measurement pass and
+    /// silently disable that dimension of the gate.
+    func invalidReasons() -> [String] {
+      var invalid: [String] = []
+      let values: [(name: String, value: Double)] = [
+        ("maxStartupLatencyMs", maxStartupLatencyMs),
+        ("maxBlockCallMs", maxBlockCallMs),
+        ("maxMeanBlockCallMs", maxMeanBlockCallMs),
+        ("maxCPURatio", maxCPURatio),
+        ("maxMemoryRatio", maxMemoryRatio),
+        ("maxCopyAllocationRatio", maxCopyAllocationRatio),
+      ]
+      for (name, value) in values {
+        if !(value > 0 && value.isFinite) {
+          invalid.append("invalid budget: \(name)=\(value) must be positive and finite")
+        }
+      }
+      return invalid
+    }
   }
 
   public struct Verdict: Equatable {
@@ -142,6 +164,7 @@ public enum RustParityGate {
     }
 
     if let measurements {
+      reasons.append(contentsOf: budgets.invalidReasons())
       if !(measurements.startupLatencyMs >= 0 && measurements.startupLatencyMs.isFinite) {
         reasons.append(
           "invalid performance measurement: startupLatencyMs=\(measurements.startupLatencyMs)ms must be non-negative and finite"
@@ -167,6 +190,14 @@ public enum RustParityGate {
       } else if !(measurements.meanBlockCallMs <= budgets.maxMeanBlockCallMs) {
         reasons.append(
           "realtime block regression: mean \(measurements.meanBlockCallMs)ms exceeds budget \(budgets.maxMeanBlockCallMs)ms"
+        )
+      }
+      if measurements.maxBlockCallMs >= 0 && measurements.maxBlockCallMs.isFinite
+        && measurements.meanBlockCallMs >= 0 && measurements.meanBlockCallMs.isFinite
+        && measurements.meanBlockCallMs > measurements.maxBlockCallMs
+      {
+        reasons.append(
+          "inconsistent block-call measurements: mean \(measurements.meanBlockCallMs)ms exceeds max \(measurements.maxBlockCallMs)ms"
         )
       }
       if !(measurements.cpuRatio > 0 && measurements.cpuRatio.isFinite) {

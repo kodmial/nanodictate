@@ -97,6 +97,36 @@ final class RustParityGateTests: XCTestCase {
       "removal rule must be explicit: \(verdict.reasons)")
   }
 
+  @objc func testGateFailsWhenMeanExceedsMax() {
+    var inconsistent = passingMeasurements()
+    inconsistent.maxBlockCallMs = 1
+    inconsistent.meanBlockCallMs = 4
+    let verdict = RustParityGate.evaluate(
+      passedItems: fullChecklist(),
+      measurements: inconsistent,
+      supersededSwiftRemoved: false
+    )
+    XCTAssertFalse(verdict.passed, "mean exceeding max must fail the gate")
+    XCTAssertTrue(
+      verdict.reasons.contains { $0.contains("mean") && $0.contains("max") },
+      "reasons must flag inconsistent block-call measurements: \(verdict.reasons)")
+  }
+
+  @objc func testGateFailsOnInvalidBudgets() {
+    var infiniteBudget = RustParityGate.Budgets.default
+    infiniteBudget.maxBlockCallMs = .infinity
+    let verdict = RustParityGate.evaluate(
+      passedItems: fullChecklist(),
+      measurements: passingMeasurements(),
+      supersededSwiftRemoved: false,
+      budgets: infiniteBudget
+    )
+    XCTAssertFalse(verdict.passed, "non-finite budget must fail the gate")
+    XCTAssertTrue(
+      verdict.reasons.contains { $0.contains("invalid budget") },
+      "reasons must flag invalid budgets: \(verdict.reasons)")
+  }
+
   @objc func testGatePassesWhenEvidenceAndBudgetsHold() {
     let verdict = RustParityGate.evaluate(
       passedItems: fullChecklist(),
