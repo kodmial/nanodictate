@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.20] - 2026-10-02
+
+
+
+### Bug Fixes
+
+* RustSession drives shipping dictation path ([93e01a6](https://github.com/kodmial/nanodictate/commit/93e01a6dd61109600255d9dcffa2377bda6a6b16))
+
 ## [0.1.19] - 2026-10-02
 
 
@@ -437,7 +445,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.19...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.20...HEAD
+[0.1.20]: https://github.com/kodmial/nanodictate/compare/v0.1.19...v0.1.20
 [0.1.19]: https://github.com/kodmial/nanodictate/compare/v0.1.18...v0.1.19
 [0.1.18]: https://github.com/kodmial/nanodictate/compare/v0.1.17...v0.1.18
 [0.1.17]: https://github.com/kodmial/nanodictate/compare/v0.1.16...v0.1.17
