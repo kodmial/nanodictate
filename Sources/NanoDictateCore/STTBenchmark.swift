@@ -70,12 +70,22 @@ public struct BenchmarkSTTConfig: Equatable {
   public var adapterID: String
   public var model: String
   public var language: String
+  /// Contextual bias under comparison (technical vocabulary / code-switch
+  /// hints). Empty = no biasing; byte accounting includes the bias fields.
+  public var bias: STTContextualBias
 
-  public init(name: String, adapterID: String, model: String, language: String = "") {
+  public init(
+    name: String,
+    adapterID: String,
+    model: String,
+    language: String = "",
+    bias: STTContextualBias = .none
+  ) {
     self.name = name
     self.adapterID = adapterID
     self.model = model
     self.language = language
+    self.bias = bias
   }
 }
 
@@ -405,6 +415,25 @@ public enum BenchmarkFixtures {
         samples: BenchmarkSynth.samples(seed: 44, durationSeconds: 5, kind: .technical)
       ),
       BenchmarkFixture(
+        id: "technical-codeswitch-short",
+        category: .technical,
+        durationBucket: .short,
+        description: "Mixed Russian/English technical dictation, 6 seconds.",
+        transcript: "создай пул реквест для whisper large v3 turbo эндпоинта с verbose json",
+        samples: BenchmarkSynth.samples(seed: 45, durationSeconds: 6, kind: .technical)
+      ),
+      BenchmarkFixture(
+        id: "technical-codeswitch-long",
+        category: .technical,
+        durationBucket: .long,
+        description: "Mixed Russian/English API dictation with identifiers, 55 seconds.",
+        transcript: String(
+          repeating: "открой терминал запусти nanodictate transcribe с моделью gpt transcribe ",
+          count: 20
+        ).trimmingCharacters(in: .whitespaces),
+        samples: BenchmarkSynth.samples(seed: 46, durationSeconds: 55, kind: .technical)
+      ),
+      BenchmarkFixture(
         id: "normal-long",
         category: .normal,
         durationBucket: .long,
@@ -551,7 +580,8 @@ public enum BenchmarkRunner {
       model: config.model,
       apiKey: "",
       language: config.language,
-      wav: wav
+      wav: wav,
+      bias: config.bias
     )
     return spec.bodyData.count
   }
