@@ -397,7 +397,7 @@ final class AudioTransportTests: XCTestCase {
     @objc func testTranscriberFlacFallsBackToWavBytesOnWavOnlyProfile() {
         let samples = BenchmarkSynth.samples(seed: 9, durationSeconds: 1, kind: .normal)
         let wav = WAVEncoder.encode(samples: samples, sampleRate: 16000)
-        let transport = MockTransport(status: 200, body: Data(#"{"text":"ok"}"#.utf8))
+        let transport = MockTransport(status: 200, body: Data(#"{"result":{"text":"ok"}}"#.utf8))
         let transcriber = Transcriber(
             baseURL: "https://api.cloudflare.com/client/v4/accounts/a/ai/run/@cf/openai/whisper-large-v3-turbo",
             model: "", apiKey: "k", logLevel: "info",
