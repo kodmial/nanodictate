@@ -308,6 +308,112 @@ final class AudioTransportTests: XCTestCase {
         XCTAssertTrue(multipartText(spec)?.contains("audio/flac") ?? false)
     }
 
+    @objc func testSpecExposesEffectiveFilePartMetadata() {
+        let flac = ProviderRequestBuilder.plan(
+            adapterID: "openai", baseURL: "", model: "whisper-1", apiKey: "k",
+            language: "", wav: fakeAudio, filename: "audio.wav", audioFormat: .flac)
+        XCTAssertEqual(flac.filePartFilename, "audio.flac")
+        XCTAssertEqual(flac.filePartContentType, "audio/flac")
+        let fallback = ProviderRequestBuilder.plan(
+            adapterID: "my-custom", baseURL: "https://stt.example/v1", model: "m",
+            apiKey: "k", language: "", wav: fakeAudio, filename: "audio.wav", audioFormat: .flac)
+        XCTAssertEqual(fallback.filePartFilename, "audio.wav")
+        XCTAssertEqual(fallback.filePartContentType, "audio/wav")
+        let cloudflare = ProviderRequestBuilder.plan(
+            adapterID: "cloudflare",
+            baseURL: "https://api.cloudflare.com/client/v4/accounts/a/ai/run/@cf/openai/whisper-large-v3-turbo",
+            model: "", apiKey: "k", language: "", wav: fakeAudio, audioFormat: .flac)
+        XCTAssertEqual(cloudflare.filePartContentType, "audio/wav")
+    }
+
+    @objc func testPrepareUploadFlacEncodesWavBytes() throws {
+        let samples = BenchmarkSynth.samples(seed: 9, durationSeconds: 1, kind: .normal)
+        let wav = WAVEncoder.encode(samples: samples, sampleRate: 16000)
+        let prepared = Transcriber.prepareUpload(
+            wav: wav, filename: "audio.wav", audioFormat: .flac,
+            adapterID: "openai", model: "whisper-1")
+        XCTAssertEqual(prepared.effectiveFormat, .flac)
+        XCTAssertEqual(prepared.filename, "audio.flac")
+        XCTAssertEqual([UInt8](prepared.data.prefix(4)), [0x66, 0x4C, 0x61, 0x43])
+        let decoded = try FLACDecoder.decode(prepared.data)
+        XCTAssertEqual(decoded.samples, samples, "FLAC transport is lossless")
+    }
+
+    @objc func testPrepareUploadFallsBackOnWavOnlyProfile() {
+        let samples = BenchmarkSynth.samples(seed: 9, durationSeconds: 1, kind: .normal)
+        let wav = WAVEncoder.encode(samples: samples, sampleRate: 16000)
+        let prepared = Transcriber.prepareUpload(
+            wav: wav, filename: "audio.wav", audioFormat: .flac,
+            adapterID: "cloudflare", model: "")
+        XCTAssertEqual(prepared.effectiveFormat, .wav)
+        XCTAssertEqual(prepared.data, wav, "fallback keeps WAV bytes")
+        XCTAssertEqual(prepared.filename, "audio.wav")
+    }
+
+    @objc func testPrepareUploadFallsBackOnInvalidWav() {
+        let prepared = Transcriber.prepareUpload(
+            wav: fakeAudio, filename: "audio.wav", audioFormat: .flac,
+            adapterID: "openai", model: "whisper-1")
+        XCTAssertEqual(prepared.effectiveFormat, .wav)
+        XCTAssertEqual(prepared.data, fakeAudio)
+        XCTAssertEqual(prepared.filename, "audio.wav")
+    }
+
+    private func runAsync(_ testName: String, _ body: @escaping () async throws -> Void) {
+        let expectation = expectation(description: testName)
+        Task {
+            do {
+                try await body()
+            } catch {
+                XCTFail("Unexpected error: \(error)")
+            }
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 10)
+    }
+
+    @objc func testTranscriberSendsFlacBytesWithFlacMetadata() {
+        let samples = BenchmarkSynth.samples(seed: 9, durationSeconds: 1, kind: .normal)
+        let wav = WAVEncoder.encode(samples: samples, sampleRate: 16000)
+        let transport = MockTransport(status: 200, body: Data(#"{"text":"ok"}"#.utf8))
+        let transcriber = Transcriber(
+            baseURL: "https://api.openai.com/v1/audio/transcriptions",
+            model: "whisper-1", apiKey: "k", logLevel: "info",
+            transport: transport, networkChecker: { true }, adapterID: "openai")
+        runAsync("transcribeFlacEncodesBytes") {
+            _ = try await transcriber.transcribe(wav: wav, audioFormat: .flac)
+        }
+        guard let request = transport.lastRequest, let body = request.httpBody else {
+            XCTFail("transcriber must send a request")
+            return
+        }
+        XCTAssertNotNil(body.range(of: Data("audio.flac".utf8)), "FLAC filename in body")
+        XCTAssertNotNil(body.range(of: Data("audio/flac".utf8)), "FLAC content type in body")
+        XCTAssertNotNil(
+            body.range(of: Data([0x66, 0x4C, 0x61, 0x43])),
+            "FLAC magic bytes in multipart body (bytes match metadata)")
+    }
+
+    @objc func testTranscriberFlacFallsBackToWavBytesOnWavOnlyProfile() {
+        let samples = BenchmarkSynth.samples(seed: 9, durationSeconds: 1, kind: .normal)
+        let wav = WAVEncoder.encode(samples: samples, sampleRate: 16000)
+        let transport = MockTransport(status: 200, body: Data(#"{"text":"ok"}"#.utf8))
+        let transcriber = Transcriber(
+            baseURL: "https://api.cloudflare.com/client/v4/accounts/a/ai/run/@cf/openai/whisper-large-v3-turbo",
+            model: "", apiKey: "k", logLevel: "info",
+            transport: transport, networkChecker: { true }, adapterID: "cloudflare")
+        runAsync("transcribeFlacFallbackWav") {
+            _ = try await transcriber.transcribe(wav: wav, audioFormat: .flac)
+        }
+        guard let request = transport.lastRequest else {
+            XCTFail("transcriber must send a request")
+            return
+        }
+        // Raw-audio body must be the original WAV bytes, not FLAC relabelled.
+        XCTAssertEqual(request.httpBody, wav)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "audio/wav")
+    }
+
     // MARK: - Config parsing
 
     @objc func testConfigUploadFormatTopLevel() throws {

@@ -1204,15 +1204,19 @@ func cmdTranscribeLegacy(_ file: String, json: Bool) -> Int32 {
     proxyPassword: config.proxyPassword,
     adapterID: activeAdapterID
   )
-  // Data is always WAV (non-WAV is converted above); the server is strict
-  // about the extension, so the multipart file field always sends
-  // "audio.wav", not the original name.
+  // Data is always WAV (non-WAV is converted above). The upload container
+  // follows `upload_format` through the model profile capabilities; the
+  // Transcriber FLAC-encodes the WAV bytes per provider request when FLAC is
+  // selected, so bytes always match metadata.
   let filename = "audio.wav"
   let rawURL = inputURL.deletingLastPathComponent().appendingPathComponent("transcription_raw.json")
+  let uploadFormat = config.effectiveUploadFormat(
+    adapterID: activeAdapterID ?? "", model: config.model)
 
   Task {
     do {
-      let result = try await transcriber.transcribe(wav: data, filename: filename)
+      let result = try await transcriber.transcribe(
+        wav: data, filename: filename, audioFormat: uploadFormat)
       print(result.text)
       if json {
         do {
@@ -1616,9 +1620,12 @@ func cmdBenchmarkLive(
         }
         let wavOutcome = try await transcriber.transcribe(wav: wav, audioFormat: .wav)
         var flacOutcomeText: String?
-        if flacSupported, let flac {
+        if flacSupported, flac != nil {
+          // Pass WAV bytes with the FLAC container: Transcriber FLAC-encodes
+          // the recovered PCM per provider request, so bytes always match
+          // metadata (never pre-encoded FLAC relabelled as WAV or vice versa).
           let flacOutcome = try await transcriber.transcribe(
-            wav: flac, filename: "audio.flac", audioFormat: .flac)
+            wav: wav, filename: "audio.wav", audioFormat: .flac)
           flacOutcomeText = flacOutcome.text
         }
         transportRows.append(

@@ -178,6 +178,16 @@ private struct SendContext {
   let transcriptPath: [String]?
   let wav: Data
   let filename: String
+  /// Effective multipart file-part filename from the plan (after capability
+  /// gating and extension coercion). Debug dump uses this, not `filename`.
+  let filePartFilename: String
+  /// Effective multipart file-part MIME type from the plan (e.g.
+  /// `audio/wav` / `audio/flac`). Never the enclosing multipart content
+  /// type and never the requested format before gating.
+  let filePartContentType: String
+  /// Byte count of the actual uploaded audio payload (after FLAC encoding
+  /// when selected). May differ from `wav.count` (original WAV bytes).
+  let filePartByteCount: Int
   let prompt: String?
   let skipPreflight: Bool
 }
@@ -362,6 +372,12 @@ public final class Transcriber {
   /// On retryable failures (network, HTTP 429/5xx) retries with exponential
   /// backoff and jitter, up to `maxAttempts` total. Timeouts, cancellation
   /// and invalid responses are terminal.
+  /// - Parameter wav: WAV (RIFF PCM16) bytes. The upload container is chosen
+  ///   by `audioFormat` through the model profile capabilities, and the bytes
+  ///   are encoded to match: `.flac` FLAC-encodes the decoded PCM (lossless),
+  ///   falling back to WAV when the profile does not accept FLAC or encoding
+  ///   fails. Never pass pre-encoded FLAC bytes here; the selected format is
+  ///   always applied to these WAV bytes before each provider request.
   /// - Parameter prompt: optional context for Whisper-compatible APIs
   ///   (`prompt` form-data field): text of already-recognized segments in
   ///   stepwise dictation. Default nil — old single-request path unchanged.
@@ -369,6 +385,9 @@ public final class Transcriber {
   ///   granularities where the model profile supports them (chunked/live
   ///   segment overlap stitching). Default false: normal push-to-talk sends
   ///   one complete utterance per request without timestamps.
+  /// - Parameter audioFormat: requested upload container. Gated by the model
+  ///   profile (`supportedUploadFormats`): unsupported requests fall back to
+  ///   the profile preferred format. Default `.wav`: byte-identical behavior.
   public func transcribe(
     wav: Data, filename: String = "audio.wav", prompt: String? = nil,
     needsWordTimestamps: Bool = false,
@@ -426,17 +445,25 @@ public final class Transcriber {
       throw TranscribeError.network(Self.noInternetMessage)
     }
 
+    // Encode the selected container before planning: the request metadata
+    // must never describe bytes it does not carry (no WAV bytes labelled
+    // as FLAC). Stored WAV is retained for recording/debug; each provider
+    // request encodes from the recovered PCM for its own selected format,
+    // so retries and failovers re-encode per target instead of relabelling.
+    let prepared = Self.prepareUpload(
+      wav: wav, filename: filename, audioFormat: audioFormat,
+      adapterID: adapterID, model: model)
     let spec = ProviderRequestBuilder.plan(
       adapterID: adapterID,
       baseURL: baseURL,
       model: model,
       apiKey: apiKey,
       language: language,
-      wav: wav,
-      filename: filename,
+      wav: prepared.data,
+      filename: prepared.filename,
       prompt: prompt,
       needsWordTimestamps: needsWordTimestamps,
-      audioFormat: audioFormat
+      audioFormat: prepared.effectiveFormat
     )
     guard let url = spec.url else {
       Logger.log("STT error: invalid base URL", level: "error")
@@ -465,10 +492,79 @@ public final class Transcriber {
       transcriptPath: spec.transcriptPath,
       wav: wav,
       filename: filename,
+      filePartFilename: spec.filePartFilename,
+      filePartContentType: spec.filePartContentType,
+      filePartByteCount: prepared.data.count,
       prompt: prompt,
       skipPreflight: true
     )
     return try await sendWithRetry(context: context)
+  }
+
+  /// Encode WAV bytes to the capability-gated upload container.
+  ///
+  /// - `wav` is always WAV (RIFF PCM16) bytes; the returned `data` carries
+  ///   the `effectiveFormat` container (FLAC bytes when FLAC is requested,
+  ///   supported and encodable, else the original WAV bytes).
+  /// - The capability gate mirrors `ProviderRequestBuilder.plan`: a format
+  ///   outside `supportedUploadFormats` falls back to the profile preferred
+  ///   format, so the plan gate stays a no-op and metadata always matches
+  ///   bytes.
+  /// - FLAC is lossless: WAV is decoded to PCM (`WAVDecoder`) and re-encoded
+  ///   (`FLACEncoder`); any decode/encode failure falls back to WAV so the
+  ///   request path stays total and never mislabels bytes.
+  /// - Already-FLAC input (legacy callers passing encoder output directly) is
+  ///   passed through when FLAC is the effective format, so existing
+  ///   benchmark usage keeps working while new callers pass WAV.
+  static func prepareUpload(
+    wav: Data, filename: String, audioFormat: STTUploadFormat,
+    adapterID: String, model: String
+  ) -> (data: Data, filename: String, effectiveFormat: STTUploadFormat) {
+    let profile = ProviderRequestBuilder.profile(adapterID: adapterID, model: model)
+    let gated: STTUploadFormat =
+      profile.audio.supportedUploadFormats.contains(audioFormat)
+      ? audioFormat : profile.audio.uploadFormat
+    guard gated == .flac else {
+      return (
+        data: wav,
+        filename: AudioTransportEncoder.coercedFilename(filename, for: gated),
+        effectiveFormat: gated
+      )
+    }
+    guard FLACEncoder.canEncode(profile: profile.audio) else {
+      return (
+        data: wav,
+        filename: AudioTransportEncoder.coercedFilename(filename, for: .wav),
+        effectiveFormat: .wav
+      )
+    }
+    if isFLACMagic(wav) {
+      return (
+        data: wav,
+        filename: AudioTransportEncoder.coercedFilename(filename, for: .flac),
+        effectiveFormat: .flac
+      )
+    }
+    guard let pcm = WAVDecoder.decodePCM16(wav), pcm.channels == 1,
+      let flac = FLACEncoder.encode(
+        samples: pcm.samples, sampleRate: pcm.sampleRate, channels: pcm.channels)
+    else {
+      return (
+        data: wav,
+        filename: AudioTransportEncoder.coercedFilename(filename, for: .wav),
+        effectiveFormat: .wav
+      )
+    }
+    return (
+      data: flac,
+      filename: AudioTransportEncoder.coercedFilename(filename, for: .flac),
+      effectiveFormat: .flac
+    )
+  }
+
+  private static func isFLACMagic(_ data: Data) -> Bool {
+    data.count >= 4 && data[0] == 0x66 && data[1] == 0x4C && data[2] == 0x61
+      && data[3] == 0x43
   }
 
   // MARK: - Send
@@ -598,9 +694,9 @@ extension Transcriber {
 
     let filePart = DebugDump.FilePart(
       fieldName: "file",
-      filename: context.filename,
-      contentType: "audio/wav",
-      byteCount: context.wav.count
+      filename: context.filePartFilename,
+      contentType: context.filePartContentType,
+      byteCount: context.filePartByteCount
     )
 
     let entry = DebugDump.summarize(

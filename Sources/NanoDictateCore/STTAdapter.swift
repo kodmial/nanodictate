@@ -56,6 +56,15 @@ public struct STTRequestSpec {
   public var body: STTRequestBody
   /// JSON path to transcript text; nil = flat "text" (OpenAI-compatible).
   public var transcriptPath: [String]?
+  /// Effective multipart file-part filename from the capability-gated plan
+  /// (e.g. `audio.wav` / `audio.flac` after extension coercion). Diagnostic
+  /// consumers (debug dump) must use this, not the requested filename, so
+  /// fallback selection is reflected accurately.
+  public var filePartFilename: String
+  /// Effective multipart file-part MIME type from the capability-gated plan
+  /// (e.g. `audio/wav` / `audio/flac`). Never the enclosing
+  /// `multipart/form-data` content type.
+  public var filePartContentType: String
 
   public enum STTRequestBody: Equatable {
     /// OpenAI-compatible multipart/form-data: file first, then fields.
@@ -65,12 +74,16 @@ public struct STTRequestSpec {
   }
 
   public init(
-    url: URL?, headers: [(String, String)], body: STTRequestBody, transcriptPath: [String]? = nil
+    url: URL?, headers: [(String, String)], body: STTRequestBody, transcriptPath: [String]? = nil,
+    filePartFilename: String = STTUploadFormat.wav.defaultFilename,
+    filePartContentType: String = STTUploadFormat.wav.contentType
   ) {
     self.url = url
     self.headers = headers
     self.body = body
     self.transcriptPath = transcriptPath
+    self.filePartFilename = filePartFilename
+    self.filePartContentType = filePartContentType
   }
 
   /// Content-Type for URLRequest ("multipart/form-data; boundary=…", …).
@@ -500,7 +513,9 @@ extension ProviderRequestBuilder {
     return STTRequestSpec(
       url: URL(string: baseURL),
       headers: [("Authorization", "Bearer \(apiKey)")],
-      body: .multipart(data: multipart, contentType: "multipart/form-data; boundary=\(boundary)")
+      body: .multipart(data: multipart, contentType: "multipart/form-data; boundary=\(boundary)"),
+      filePartFilename: filename,
+      filePartContentType: audioFormat.contentType
     )
   }
 
@@ -524,7 +539,9 @@ extension ProviderRequestBuilder {
         ("Content-Type", audioFormat.contentType),
       ],
       body: .rawAudio(data: wav, contentType: audioFormat.contentType),
-      transcriptPath: ["result", "text"]
+      transcriptPath: ["result", "text"],
+      filePartFilename: audioFormat.defaultFilename,
+      filePartContentType: audioFormat.contentType
     )
   }
 }
