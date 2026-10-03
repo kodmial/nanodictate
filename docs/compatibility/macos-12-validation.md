@@ -22,7 +22,8 @@ incompatibility. The repeatable gate is therefore split:
    Verifies the declared floor is intact and the deployment-target build
    passes: `Package.swift` platform, `Info.NanoDictateApp.plist`
    `LSMinimumSystemVersion`, Homebrew formula/cask `:monterey` floor,
-   `MACOSX_DEPLOYMENT_TARGET=12.0 swift build`, `--version`/`--help`
+   the canonical `scripts/build-rust-core.sh --release` archive preparation,
+   `MACOSX_DEPLOYMENT_TARGET=12.0` Swift build linked to that archive, `--version`/`--help`
    sanity, and linked `minos 12.x`. This catches accidental floor bumps
    and availability errors on every PR. It makes **no runtime claim**.
 2. **Runtime gate (isolated macOS 12 machine or VM, out-of-band).**
@@ -84,7 +85,7 @@ Automated by `scripts/macos12-compat-check.sh --full` on macOS 12:
 | # | Flow | Automated probe | Why macOS 12 matters |
 |---|------|-----------------|----------------------|
 | 1 | Declared floor | `Package.swift` `.v12`, plist `12.0`, brew `:monterey` | Floor drift silently drops 12 |
-| 2 | Deployment-target build | `MACOSX_DEPLOYMENT_TARGET=12.0 swift build` | Availability errors surface here |
+| 2 | Deployment-target build | Canonical Rust archive + `MACOSX_DEPLOYMENT_TARGET=12.0` Swift build with `-Xlinker <archive>` | Availability and Rust-link drift surface here |
 | 3 | CLI sanity | `--version`, `--help`, `minos 12.x` linkage | Wrong SDK/minos ships wrong floor |
 | 4 | Install/startup | `config init` in isolated HOME | First-launch paths differ by OS |
 | 5 | LaunchAgent lifecycle | `start` → live `launchctl print gui/$UID` + PID → `stop` → gone → restart | `launchctl`/`gui` domain behavior varies |
