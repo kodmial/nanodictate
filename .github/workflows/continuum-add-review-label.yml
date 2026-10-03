@@ -22,3 +22,4 @@ jobs:
     # CodeRabbit for a repository that never asked for it.
     with:
       continuum_ref: main
+      review_provider: 'coderabbit'
