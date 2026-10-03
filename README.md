@@ -245,12 +245,7 @@ NanoDictate is also available through the project MacPorts tree.
 Initial installation:
 
 ```bash
-tmp="$(mktemp)" &&
-curl -fsSL https://raw.githubusercontent.com/kodmial/nanodictate/main/scripts/install-macports.sh -o "$tmp" &&
-bash "$tmp"
-rc=$?
-rm -f "$tmp"
-exit "$rc"
+bash <(curl -fsSL https://raw.githubusercontent.com/kodmial/nanodictate/main/scripts/install-macports.sh)
 ```
 
 Update:
