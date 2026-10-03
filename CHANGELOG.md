@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.23] - 2026-10-03
+
+
+
+### Bug Fixes
+
+* Conditional chunked final pass added ([d8f99d5](https://github.com/kodmial/nanodictate/commit/d8f99d57e5b9800b9a33b71d2d130639e607707b))
+
 ## [0.1.22] - 2026-10-03
 
 
@@ -461,7 +469,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.22...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.23...HEAD
+[0.1.23]: https://github.com/kodmial/nanodictate/compare/v0.1.22...v0.1.23
 [0.1.22]: https://github.com/kodmial/nanodictate/compare/v0.1.21...v0.1.22
 [0.1.21]: https://github.com/kodmial/nanodictate/compare/v0.1.20...v0.1.21
 [0.1.20]: https://github.com/kodmial/nanodictate/compare/v0.1.19...v0.1.20

@@ -134,3 +134,40 @@ the repo unless you recorded them and have redistribution rights.
 
 Keys come from your existing config/env (`NANODICTATE_API_KEY` or the
 provider section) and are never written to the report or the repo.
+
+## Chunked final-pass comparison (always vs default)
+
+The local run also prints a `Chunked final-pass` section for the long
+fixture (`normal-long`): real `AudioSegmenter` segments, scripted confident
+hypotheses (correct transcript slice + synthetic uniform word timings per
+segment, correct full transcript for the final pass), exact multipart upload
+bytes via `ProviderRequestBuilder.plan`. The stitched hypothesis runs the
+production `dedupeOverlap` + finalization path (`ChunkedPipeline.recognizeWAV`),
+so seam duplicates inside glued overlaps are excluded from scoring.
+
+| policy | meaning |
+| --- | --- |
+| `always` | Historical behavior: final full-recording pass for every multi-segment recording. |
+| `on-uncertainty` (default) | Skip the full re-upload when all segments look acceptable; fall back on empty segments or seams without timestamps. |
+| `never` | Never re-upload after successful segments (failed segments still recover via the full pass). |
+
+With confident segments the default saves the whole final upload plus one
+request of tail latency (`ChunkedBenchmark.simulatedFinalLatencyMs`) at the
+same scripted WER/CER as `always`. That WER equality is deterministic
+accounting, not recognition-quality evidence: both hypotheses derive from the
+reference transcript and synthetic audio does not speak it. Quality trade-off
+evidence comes from the opt-in live benchmark on transcript-bearing speech:
+for each multi-segment speech fixture it transcribes every segment with
+actual STT (word timestamps requested, prompt chained like production) plus
+the full recording, then runs `ChunkedBenchmark.compare` on those real
+segment/final results. The live `Chunked final-pass: <id> (live)` section
+reports WER/CER for `always` vs default `on-uncertainty`, a boundary check
+(`ChunkedBenchmark.boundaryDiagnostics`: omission/duplication at seams), and
+whether the default hypothesis matches `always`
+(`ChunkedBenchmark.defaultMatchesAlways`). No segment-boundary regression is
+additionally covered by the `ChunkedPipeline` dedupe unit tests exercising
+the same production stitching path. With an empty segment or a seam without
+timestamps the default falls back to the final pass, matching `always` on
+quality. Decision: default `on-uncertainty`; keep `always` as the
+quality-first option; use `never` with true streaming providers, where the
+stream's own final hypothesis already carries full context.
