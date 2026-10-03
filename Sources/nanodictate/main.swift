@@ -317,6 +317,7 @@ func cmdConfig(_ args: [String]) -> Int32 {
     print("double_alt_max_interval: \(config.doubleAltMaxInterval)")
     print("log_level: \(config.logLevel)")
     print("language: \(config.language)")
+    print("chunked_final_pass: \(config.chunkedFinalPass.configValue)")
     print("api_key: \(secretDisplay(config.apiKey))")
     print("proxy_key: \(secretDisplay(config.proxyKey))")
     return 0
@@ -1458,11 +1459,52 @@ func cmdBenchmarkLocal(jsonPath: String?, markdownPath: String?) -> Int32 {
       fixtures: fixtures,
       config: transportConfig,
       provider: transportProvider)
-    let code = writeBenchmarkOutputs(report: report, jsonPath: jsonPath, markdownPath: nil)
-    print(BenchmarkTransportComparison.markdown(transport))
+    let transportMarkdown = BenchmarkTransportComparison.markdown(transport)
+    // Chunked final-pass accounting (always vs default on-uncertainty): the
+    // long fixture is segmented for real and upload bytes use the exact
+    // multipart bodies. Scripted segment hypotheses are confident slices of
+    // the reference with synthetic uniform word timings, so the stitched
+    // text runs the production dedupeOverlap + finalize path; the default
+    // skips the final full-recording upload here. WER equality in this
+    // deterministic table is tautological (both hypotheses derive from the
+    // reference transcript) and is NOT recognition-quality evidence:
+    // synthetic tones do not speak the transcript. Real quality trade-off
+    // and no-boundary-regression evidence come from transcript-bearing
+    // speech with actual segment/final STT results (opt-in live benchmark
+    // with --live-wav-dir, plus ChunkedPipeline dedupe unit tests).
+    // Printed after the main report; file outputs append the section.
+    let chunkedConfig = configs[0]
+    var chunkedMarkdown = ""
+    if let longFixture = fixtures.first(where: { $0.durationBucket == .long }) {
+      let chunkedRows = chunkedComparisonRows(fixture: longFixture, config: chunkedConfig)
+      chunkedMarkdown = ChunkedBenchmark.markdown(fixtureID: longFixture.id, rows: chunkedRows)
+    }
+    print(report.markdown())
+    print("")
+    if !chunkedMarkdown.isEmpty {
+      print(chunkedMarkdown)
+      print("")
+    }
+    print(transportMarkdown)
+    var fullMarkdown = report.markdown() + "\n"
+    if !chunkedMarkdown.isEmpty {
+      fullMarkdown += chunkedMarkdown + "\n"
+    }
+    fullMarkdown += transportMarkdown
+    if let jsonPath {
+      // JSON keeps the machine-readable STT report; chunked and transport
+      // rows are human-evidence in markdown (scripted, deterministic).
+      do {
+        try report.jsonData().write(to: URL(fileURLWithPath: jsonPath), options: .atomic)
+        eprint("benchmark: JSON written to \(jsonPath)")
+      } catch {
+        eprint("benchmark: failed to write JSON: \(error)")
+        return 1
+      }
+    }
     if let markdownPath {
       do {
-        try (report.markdown() + "\n" + BenchmarkTransportComparison.markdown(transport)).write(
+        try fullMarkdown.write(
           to: URL(fileURLWithPath: markdownPath), atomically: true, encoding: .utf8)
         eprint("benchmark: Markdown written to \(markdownPath)")
       } catch {
@@ -1470,11 +1512,69 @@ func cmdBenchmarkLocal(jsonPath: String?, markdownPath: String?) -> Int32 {
         return 1
       }
     }
-    return code
+    return 0
   } catch {
     eprint("benchmark: local run failed: \(error)")
     return 1
   }
+}
+
+/// Scripted chunked hypotheses for local policy/byte accounting: split the
+/// fixture transcript across the real AudioSegmenter segments and attach
+/// synthetic uniform word timings per segment so the stitched hypothesis runs
+/// the production dedupeOverlap + finalize path (the same code
+/// ChunkedPipeline.recognizeWAV uses). Deterministic, no network.
+///
+/// The resulting WER equality is tautological — both the stitched and final
+/// hypotheses derive from the reference transcript — and must not be read as
+/// recognition-quality proof (synthetic audio is tones, not speech). Quality
+/// trade-off evidence requires transcript-bearing speech plus actual segment
+/// and final STT results (opt-in live benchmark via transcript-bearing WAVs);
+/// no segment-boundary regression is covered by ChunkedPipeline dedupe tests
+/// exercising the same production path.
+func chunkedComparisonRows(
+  fixture: BenchmarkFixture,
+  config: BenchmarkSTTConfig
+) -> [ChunkedPolicyComparison] {
+  let segments = AudioSegmenter.segments(
+    samples: fixture.samples, sampleRate: fixture.sampleRate)
+  let words = BenchmarkText.words(fixture.transcript)
+  var segmentTexts: [String] = []
+  if segments.isEmpty {
+    segmentTexts = []
+  } else {
+    let perSegment = max(1, words.count / max(1, segments.count))
+    for index in 0..<segments.count {
+      let start = index * perSegment
+      let end = index == segments.count - 1 ? words.count : min(words.count, start + perSegment)
+      if start < end {
+        segmentTexts.append(words[start..<end].joined(separator: " "))
+      } else {
+        segmentTexts.append("")
+      }
+    }
+  }
+  let hasTimestamps = Array(repeating: true, count: max(1, segmentTexts.count))
+  // Explicit timed words with uniform timings over each segment duration so
+  // the comparison scores the text the pipeline would insert (seam duplicates
+  // inside glued overlaps removed, same finalization as recognizeWAV).
+  var segmentWords: [[TimedWord]] = []
+  for (index, text) in segmentTexts.enumerated() {
+    let duration =
+      index < segments.count
+      ? Double(segments[index].samples.count) / Double(max(1, fixture.sampleRate)) : 0
+    let overlap = index < segments.count ? segments[index].overlapSeconds : 0
+    segmentWords.append(
+      ChunkedBenchmark.syntheticWords(
+        for: text, segmentDuration: duration, overlapSeconds: overlap))
+  }
+  return ChunkedBenchmark.compare(
+    fixture: fixture,
+    config: config,
+    segmentTexts: segmentTexts,
+    segmentHasTimestamps: hasTimestamps,
+    segmentWords: segmentWords,
+    finalText: fixture.transcript)
 }
 
 /// Opt-in live run: fixture audio through the active configured provider.
@@ -1485,6 +1585,90 @@ func cmdBenchmarkLocal(jsonPath: String?, markdownPath: String?) -> Int32 {
 /// NANODICTATE_BENCHMARK_LIVE_WAV_DIR. Fixtures without readable speech
 /// audio are skipped (never scored) so reported WER/CER only reflect
 /// recognition quality on audio that speaks each transcript.
+func liveChunkedSection(
+  fixture: BenchmarkFixture,
+  fullHypothesis: String,
+  transcriber: Transcriber,
+  benchmarkConfig: BenchmarkSTTConfig
+) async -> String? {
+  let segments = AudioSegmenter.segments(
+    samples: fixture.samples, sampleRate: fixture.sampleRate)
+  guard segments.count > 1 else { return nil }
+  var segmentTexts: [String] = []
+  var segmentHasTimestamps: [Bool] = []
+  var segmentWords: [[TimedWord]] = []
+  var promptParts: [String] = []
+  for (index, segment) in segments.enumerated() {
+    let segmentWAV = WAVEncoder.encode(
+      samples: segment.samples, sampleRate: fixture.sampleRate)
+    let prompt: String? =
+      promptParts.isEmpty ? nil : ChunkedPipeline.truncatedPrompt(promptParts)
+    do {
+      let segmentResult = try await transcriber.transcribe(
+        wav: segmentWAV, filename: "segment-\(index + 1).wav", prompt: prompt,
+        needsWordTimestamps: true)
+      segmentTexts.append(segmentResult.text)
+      segmentHasTimestamps.append(!segmentResult.words.isEmpty)
+      segmentWords.append(segmentResult.words)
+      promptParts.append(TextRefinement.finalize(segmentResult.text))
+    } catch {
+      eprint(
+        "benchmark: live chunked segment \(index + 1) for \(fixture.id) failed: \(error); skipping chunked comparison for this fixture."
+      )
+      return nil
+    }
+  }
+  let rows = ChunkedBenchmark.compare(
+    fixture: fixture,
+    config: benchmarkConfig,
+    segmentTexts: segmentTexts,
+    segmentHasTimestamps: segmentHasTimestamps,
+    segmentWords: segmentWords,
+    finalText: fullHypothesis)
+  let alwaysRow = rows.first { $0.policy == ChunkedFinalPassPolicy.always.configValue }
+  let defaultRow = rows.first {
+    $0.policy == ChunkedFinalPassPolicy.default.configValue
+  }
+  let stitchedHypothesis = defaultRow?.hypothesis ?? fullHypothesis
+  let boundary = ChunkedBenchmark.boundaryDiagnostics(
+    stitched: stitchedHypothesis, final: fullHypothesis)
+  let matchNote =
+    ChunkedBenchmark.defaultMatchesAlways(rows: rows)
+    ? "no segment-boundary regression (default matches always)"
+    : "REGRESSION: default hypothesis differs from always; inspect boundary"
+  var section = ChunkedBenchmark.markdown(fixtureID: "\(fixture.id) (live)", rows: rows)
+  if let alwaysRow, let defaultRow {
+    let alwaysWER = BenchmarkFormat.ratio(alwaysRow.wer)
+    let defaultWER = BenchmarkFormat.ratio(defaultRow.wer)
+    let alwaysCER = BenchmarkFormat.ratio(alwaysRow.cer)
+    let defaultCER = BenchmarkFormat.ratio(defaultRow.cer)
+    section += "- live WER always \(alwaysWER) vs default \(defaultWER)\n"
+    section += "- live CER always \(alwaysCER) vs default \(defaultCER)\n"
+  }
+  section += "- boundary: \(boundary)\n- \(matchNote)\n"
+  return section
+}
+
+func liveChunkedSections(
+  fixtures: [BenchmarkFixture],
+  results: [BenchmarkCaseResult],
+  transcriber: Transcriber,
+  benchmarkConfig: BenchmarkSTTConfig
+) async -> [String] {
+  var sections: [String] = []
+  for fixture in fixtures {
+    guard let fullHypothesis = results.first(where: { $0.fixtureID == fixture.id })?.hypothesis
+    else { continue }
+    if let section = await liveChunkedSection(
+      fixture: fixture, fullHypothesis: fullHypothesis, transcriber: transcriber,
+      benchmarkConfig: benchmarkConfig)
+    {
+      sections.append(section)
+    }
+  }
+  return sections
+}
+
 func cmdBenchmarkLive(
   jsonPath: String?, markdownPath: String?, liveWavDir: String? = nil
 ) -> Int32 {
@@ -1665,23 +1849,48 @@ func cmdBenchmarkLive(
             flacHypothesis: flacOutcomeText
           ))
       }
-      print(BenchmarkTransportComparison.markdown(transportRows))
       let report = BenchmarkReport(
         results: results, summaries: BenchmarkRunner.summarize(results: results))
-      let code = writeBenchmarkOutputs(
-        report: report, jsonPath: jsonPath, markdownPath: nil)
+      let transportMarkdown = BenchmarkTransportComparison.markdown(transportRows)
+      // Live chunked quality evidence on transcript-bearing speech: re-run
+      // segmentation for real, transcribe each segment with actual STT
+      // (timestamps requested, prompt chained like production), then compare
+      // `always` vs default `on-uncertainty` with those real segment/final
+      // results. WER/CER per policy plus a boundary omission/duplication
+      // check replace the scripted local table as quality evidence.
+      let chunkedSections = await liveChunkedSections(
+        fixtures: fixtures, results: results, transcriber: transcriber,
+        benchmarkConfig: benchmarkConfig)
+      if chunkedSections.isEmpty {
+        eprint(
+          "benchmark: no multi-segment live fixtures for chunked comparison (single-segment audio needs no final pass)."
+        )
+      }
+      var fullMarkdown = report.markdown() + "\n" + transportMarkdown
+      for section in chunkedSections {
+        fullMarkdown += "\n" + section
+      }
+      print(fullMarkdown)
+      if let jsonPath {
+        do {
+          try report.jsonData().write(to: URL(fileURLWithPath: jsonPath), options: .atomic)
+          eprint("benchmark: JSON written to \(jsonPath)")
+        } catch {
+          eprint("benchmark: failed to write JSON: \(error)")
+          exit(1)
+        }
+      }
       if let markdownPath {
         do {
-          try (report.markdown() + "\n" + BenchmarkTransportComparison.markdown(transportRows))
-            .write(
-              to: URL(fileURLWithPath: markdownPath), atomically: true, encoding: .utf8)
+          try fullMarkdown.write(
+            to: URL(fileURLWithPath: markdownPath), atomically: true, encoding: .utf8)
           eprint("benchmark: Markdown written to \(markdownPath)")
         } catch {
           eprint("benchmark: failed to write Markdown: \(error)")
           exit(1)
         }
       }
-      exit(code)
+      exit(0)
     } catch {
       eprint("benchmark: live run failed: \(error)")
       exit(1)

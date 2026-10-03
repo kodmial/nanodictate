@@ -942,3 +942,244 @@ public struct BenchmarkTransportComparison: Codable, Equatable {
     return lines.joined(separator: "\n") + "\n"
   }
 }
+
+// MARK: - Chunked final-pass comparison (always vs default)
+//
+// Deterministic byte/latency/quality comparison for the chunked final-pass
+// policy. Segments are derived from the real AudioSegmenter so upload bytes
+// use the exact multipart body the adapter would send; hypotheses are
+// scripted (no network). The confident scenario (correct segment texts with
+// word timestamps) shows the default `on-uncertainty` saving the full
+// final upload at identical WER; the uncertain scenario (one empty segment
+// or missing timestamps) shows it falling back to the final pass.
+
+/// One policy row of a chunked final-pass comparison.
+public struct ChunkedPolicyComparison: Codable, Equatable {
+  public var policy: String
+  public var requests: Int
+  public var segmentUploadBytes: Int
+  public var finalUploadBytes: Int
+  public var totalUploadBytes: Int
+  public var finalLatencyMs: Double
+  public var wer: Double
+  public var cer: Double
+  public var hypothesis: String
+  public var finalRan: Bool
+  public var reason: String
+
+  public init(
+    policy: String,
+    requests: Int,
+    segmentUploadBytes: Int,
+    finalUploadBytes: Int,
+    totalUploadBytes: Int,
+    finalLatencyMs: Double,
+    wer: Double,
+    cer: Double,
+    hypothesis: String,
+    finalRan: Bool,
+    reason: String
+  ) {
+    self.policy = policy
+    self.requests = requests
+    self.segmentUploadBytes = segmentUploadBytes
+    self.finalUploadBytes = finalUploadBytes
+    self.totalUploadBytes = totalUploadBytes
+    self.finalLatencyMs = finalLatencyMs
+    self.wer = wer
+    self.cer = cer
+    self.hypothesis = hypothesis
+    self.finalRan = finalRan
+    self.reason = reason
+  }
+}
+
+public enum ChunkedBenchmark {
+  /// Simulated per-request latency for the final pass, milliseconds.
+  /// Scripted runs report no real network time; the comparison uses a fixed
+  /// representative figure so the latency delta is visible and stable.
+  public static let simulatedFinalLatencyMs: Double = 800
+
+  /// Compare `always` (historical) against the default (`on-uncertainty`)
+  /// for one fixture with scripted segment/final hypotheses.
+  /// - `segmentTexts`: one hypothesis per AudioSegmenter segment, in order.
+  /// - `segmentHasTimestamps`: per-segment timestamp presence, in order.
+  /// - `segmentWords`: optional per-segment timed words, in order. When nil,
+  ///   words are synthesized with uniform timings for segments that report
+  ///   timestamps, so production overlap deduplication can run. Pass explicit
+  ///   words when the seam timing matters.
+  /// - `finalText`: hypothesis of the full-recording pass.
+  public static func compare(
+    fixture: BenchmarkFixture,
+    config: BenchmarkSTTConfig,
+    segmentTexts: [String],
+    segmentHasTimestamps: [Bool],
+    segmentWords: [[TimedWord]]? = nil,
+    finalText: String,
+    segmenterConfig: AudioSegmenterConfig = .defaults,
+    simulatedFinalLatencyMs: Double = Self.simulatedFinalLatencyMs
+  ) -> [ChunkedPolicyComparison] {
+    let segments = AudioSegmenter.segments(
+      samples: fixture.samples, sampleRate: fixture.sampleRate, config: segmenterConfig)
+    let segmentCount = segments.count
+    var segmentUpload = 0
+    for segment in segments {
+      let wav = WAVEncoder.encode(samples: segment.samples, sampleRate: fixture.sampleRate)
+      segmentUpload += BenchmarkRunner.uploadBytes(config: config, wav: wav)
+    }
+    let fullWAV = WAVEncoder.encode(samples: fixture.samples, sampleRate: fixture.sampleRate)
+    let finalUpload = BenchmarkRunner.uploadBytes(config: config, wav: fullWAV)
+
+    // Stitched text mirrors ChunkedPipeline.recognizeWAV per segment:
+    // overlap dedupe by timestamps, then finalization, then space join.
+    // Scoring the raw joined text would keep seam duplicates that production
+    // removes (for example "hello world" + "world again" must score as
+    // "hello world again", not with the repeated seam word).
+    var stitched = ""
+    for (index, text) in segmentTexts.enumerated() {
+      let overlap = index < segments.count ? segments[index].overlapSeconds : 0
+      let hasStamps =
+        index < segmentHasTimestamps.count ? segmentHasTimestamps[index] : false
+      let words: [TimedWord]
+      if let provided = segmentWords, index < provided.count {
+        words = provided[index]
+      } else if hasStamps {
+        let duration =
+          index < segments.count
+          ? Double(segments[index].samples.count) / Double(max(1, fixture.sampleRate)) : 0
+        words = Self.syntheticWords(
+          for: text, segmentDuration: duration, overlapSeconds: overlap)
+      } else {
+        words = []
+      }
+      let deduped = ChunkedPipeline.dedupeOverlap(
+        text: text, words: words, overlapSeconds: overlap)
+      let finalized = TextRefinement.finalize(deduped)
+      guard !finalized.isEmpty else { continue }
+      if index > 0, !stitched.isEmpty, !stitched.hasSuffix(" ") {
+        stitched += " "
+      }
+      stitched += finalized
+    }
+    let finalizedFinal = TextRefinement.finalize(finalText)
+    let reports: [ChunkedSegmentReport] = (0..<segmentCount).map { index in
+      let text = index < segmentTexts.count ? segmentTexts[index] : ""
+      let overlap = index < segments.count ? segments[index].overlapSeconds : 0
+      let hasStamps = index < segmentHasTimestamps.count ? segmentHasTimestamps[index] : false
+      return ChunkedSegmentReport(
+        index: index,
+        isEmpty: text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+        hasTimestamps: hasStamps,
+        overlapSeconds: overlap)
+    }
+    let policies: [ChunkedFinalPassPolicy] = [.always, .default, .never]
+    return policies.map { policy in
+      let decision = ChunkedFinalDecision.shouldRunFinalPass(
+        segmentCount: segmentCount, reports: reports, policy: policy)
+      let hypothesis = decision.run ? finalizedFinal : stitched
+      let requests = segmentCount + (decision.run ? 1 : 0)
+      return ChunkedPolicyComparison(
+        policy: policy.configValue,
+        requests: requests,
+        segmentUploadBytes: segmentUpload,
+        finalUploadBytes: decision.run ? finalUpload : 0,
+        totalUploadBytes: segmentUpload + (decision.run ? finalUpload : 0),
+        finalLatencyMs: decision.run ? simulatedFinalLatencyMs : 0,
+        wer: BenchmarkText.wer(reference: fixture.transcript, hypothesis: hypothesis),
+        cer: BenchmarkText.cer(reference: fixture.transcript, hypothesis: hypothesis),
+        hypothesis: hypothesis,
+        finalRan: decision.run,
+        reason: decision.reason.rawValue)
+    }
+  }
+
+  /// Synthetic timed words for scripted segment text: uniform slicing of the
+  /// segment body across whitespace-separated tokens, offset past the glued
+  /// overlap. Lets the benchmark exercise production `dedupeOverlap` without
+  /// a real STT response: only an explicit seam duplicate placed inside
+  /// `overlapSeconds` is treated as a duplicate. Disjoint slices (no seam
+  /// repeat) score without false drops because every synthesized word starts
+  /// after the overlap.
+  public static func syntheticWords(
+    for text: String, segmentDuration: Double, overlapSeconds: Double = 0
+  ) -> [TimedWord] {
+    let tokens = text.split { $0.isWhitespace }.map(String.init).filter { !$0.isEmpty }
+    guard !tokens.isEmpty else { return [] }
+    let overlap = max(0, overlapSeconds)
+    let duration = max(0.01, segmentDuration)
+    let bodyDuration = max(0.01, duration - min(overlap, duration - 0.001))
+    let perWord = bodyDuration / Double(tokens.count)
+    return tokens.enumerated().map { index, token in
+      TimedWord(
+        word: token,
+        start: overlap + Double(index) * perWord,
+        end: overlap + Double(index + 1) * perWord)
+    }
+  }
+
+  /// Human-readable markdown for one fixture comparison.
+  public static func markdown(fixtureID: String, rows: [ChunkedPolicyComparison]) -> String {
+    var lines: [String] = []
+    lines.append("## Chunked final-pass: \(fixtureID) (always vs default)")
+    lines.append("")
+    lines.append(
+      "| policy | requests | total upload | final latency | WER | CER | final | reason |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+    for row in rows {
+      lines.append(
+        "| \(row.policy) | \(row.requests) | \(row.totalUploadBytes)B"
+          + " | \(BenchmarkFormat.ms(row.finalLatencyMs)) | \(BenchmarkFormat.ratio(row.wer))"
+          + " | \(BenchmarkFormat.ratio(row.cer)) | \(row.finalRan ? "yes" : "no")"
+          + " | \(row.reason) |")
+    }
+    return lines.joined(separator: "\n") + "\n"
+  }
+
+  /// Whether the default policy hypothesis matches the `always` hypothesis
+  /// (normalized word comparison). Used as live quality evidence that
+  /// skipping the final pass introduces no segment-boundary regression for
+  /// the measured fixture with actual STT results.
+  public static func defaultMatchesAlways(rows: [ChunkedPolicyComparison]) -> Bool {
+    guard
+      let always = rows.first(where: { $0.policy == ChunkedFinalPassPolicy.always.configValue }),
+      let def = rows.first(where: {
+        $0.policy == ChunkedFinalPassPolicy.default.configValue
+      })
+    else { return false }
+    return BenchmarkText.words(always.hypothesis) == BenchmarkText.words(def.hypothesis)
+  }
+
+  /// Boundary diagnostics for live quality evidence: compare the stitched
+  /// segment hypothesis (production dedupe path) against the full-recording
+  /// hypothesis from actual STT results on transcript-bearing speech.
+  /// Flags omissions or duplication at segment boundaries in one human line.
+  public static func boundaryDiagnostics(stitched: String, final: String) -> String {
+    let stitchedWords = BenchmarkText.words(stitched)
+    let finalWords = BenchmarkText.words(final)
+    if stitchedWords == finalWords {
+      return
+        "match: stitched equals final (\(stitchedWords.count) words, no boundary omission/duplication)"
+    }
+    var notes: [String] = []
+    notes.append("stitched \(stitchedWords.count) words vs final \(finalWords.count) words")
+    var adjacentDuplicates: [String] = []
+    for index in stitchedWords.indices.dropFirst() {
+      if stitchedWords[index] == stitchedWords[index - 1],
+        !adjacentDuplicates.contains(stitchedWords[index])
+      {
+        adjacentDuplicates.append(stitchedWords[index])
+      }
+    }
+    if !adjacentDuplicates.isEmpty {
+      notes.append("possible seam duplication: \(adjacentDuplicates.joined(separator: ", "))")
+    }
+    if stitchedWords.count < finalWords.count {
+      notes.append("possible omission at boundary (\(finalWords.count - stitchedWords.count) fewer words)")
+    } else if stitchedWords.count > finalWords.count {
+      notes.append("possible duplication at boundary (\(stitchedWords.count - finalWords.count) extra words)")
+    } else {
+      notes.append("same word count, wording differs (substitution at boundary)")
+    }
+    return "diff: " + notes.joined(separator: "; ")
+  }
+}

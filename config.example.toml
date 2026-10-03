@@ -12,6 +12,16 @@ timeout_seconds = 120
 log_level = "info"
 active_provider = "airubiz"
 
+# Chunked final-pass policy: when the complete recording is re-uploaded
+# after segment transcription. "always" = historical behavior (final pass
+# for every multi-segment recording); "on-uncertainty" (default) = skip the
+# full re-upload when all segments look acceptable, keep it as fallback for
+# empty segments or unverifiable seams; "never" = never re-upload after
+# successful segments (a failed segment still recovers via the full pass).
+# True streaming providers should prefer "never": the stream's own final
+# hypothesis already carries full context.
+# chunked_final_pass = "on-uncertainty"
+
 [providers.openai]
 name = "OpenAI"
 base_url = ""

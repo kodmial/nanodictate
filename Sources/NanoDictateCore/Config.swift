@@ -73,6 +73,12 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
   /// финальный проход по всему WAV. OFF по умолчанию — ровно текущее поведение.
   public var chunked: Bool
 
+  /// Final full-recording pass policy for chunked mode
+  /// (key `chunked_final_pass`: "always" | "on-uncertainty" | "never").
+  /// Default `on-uncertainty`: skip the full re-upload when all segments
+  /// look acceptable, keep it as fallback for uncertain segments.
+  public var chunkedFinalPass: ChunkedFinalPassPolicy
+
   // MARK: Провайдеры STT
 
   /// Имя активной секции `[providers.X]` (пусто — не задан: legacy-конфиг).
@@ -252,6 +258,7 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
     undoMaxInterval: 2.0,
     undoSoundEnabled: true,
     chunked: false,
+    chunkedFinalPass: .default,
     activeProvider: "",
     providers: [],
     providersOrder: [],
@@ -610,6 +617,7 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
     var undoMaxInterval: Double = base.undoMaxInterval
     var undoSoundEnabled: Bool = base.undoSoundEnabled
     var chunked: Bool = base.chunked
+    var chunkedFinalPass: ChunkedFinalPassPolicy = base.chunkedFinalPass
 
     var activeProvider = base.activeProvider
     var providers: [Provider] = base.providers
@@ -845,6 +853,12 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
           throw AppConfigError.invalidValue(key, valuePart, index + 1)
         }
         uploadFormat = preference
+      case "chunked_final_pass":
+        let rawPolicy = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+        guard let parsed = ChunkedFinalPassPolicy(configString: rawPolicy) else {
+          throw AppConfigError.invalidValue(key, valuePart, index + 1)
+        }
+        chunkedFinalPass = parsed
       case "vocabulary":
         vocabulary = try parseStringArray(valuePart, line: index + 1, rawLine: rawLine)
       case "extra_languages":
@@ -877,6 +891,7 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
       undoMaxInterval: undoMaxInterval,
       undoSoundEnabled: undoSoundEnabled,
       chunked: chunked,
+      chunkedFinalPass: chunkedFinalPass,
       activeProvider: activeProvider,
       providers: providers,
       routing: Routing(segmentProvider: segmentProvider, finalProvider: finalProvider),
