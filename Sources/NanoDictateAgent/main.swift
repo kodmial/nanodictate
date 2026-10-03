@@ -299,6 +299,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// new loop (processSamples).
   private var cancelRecognition = false
 
+  /// Retained realtime transcription task for the active "processing" phase.
+  /// The watchdog and `handleCancel` cancel it so an abandoned WebSocket does
+  /// not outlive the overlay session. Main-thread only; cleared on completion.
+  private var activeRealtimeTask: Task<Void, Never>?
+
   /// While ReviewGate.confirmAsync waits for the terminal decision, a
   /// physical Return MUST pass through the event tap — the terminal's
   /// readLine needs it (ReviewGate reads stdin on a background queue). Set
@@ -1246,17 +1251,41 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     let watchdogDuration =
       OverlayController.processingMaxDuration
       + (autoFailover && !failoverCandidates.isEmpty ? Transcriber.networkRequestTimeout : 0)
-    DispatchQueue.main.asyncAfter(deadline: .now() + watchdogDuration) {
+    // Realtime sessions need their own budget (connect + appends + final
+    // wait), not the batch watchdog: connectTimeout (10 s) + commitTimeout
+    // (20 s) already exceed processingMaxDuration (25 s), so a valid realtime
+    // completion could arrive after failTranscription ends the session and be
+    // dropped. Independent of the auto-failover margin (realtime is
+    // fail-closed and never runs the failover chain).
+    let realtimePolicy = RealtimeSessionPolicy()
+    let realtimeWatchdogDuration =
+      realtimePolicy.connectTimeout + realtimePolicy.commitTimeout + realtimePolicy.closeTimeout + 5
+    let isRealtimeRequest: Bool = {
+      if let provider = self.effectiveOrdinaryProvider() {
+        return self.isRealtimeOrdinaryProvider(provider)
+      }
+      return false
+    }()
+    let effectiveWatchdogDuration = isRealtimeRequest ? realtimeWatchdogDuration : watchdogDuration
+    DispatchQueue.main.asyncAfter(deadline: .now() + effectiveWatchdogDuration) {
       [weak self] in  // swiftlint:disable:this closure_parameter_position
       guard
         let self,
         self.processingSession == session,
         self.state == .transcribing
       else { return }
+      // Cancel the retained realtime task so the WebSocket does not remain
+      // open after the watchdog ends the session.
+      self.activeRealtimeTask?.cancel()
+      self.activeRealtimeTask = nil
       self.failTranscription(Transcriber.sttTimeoutMessage, isNetworkFailure: true)
     }
 
-    Task { [weak self] in
+    // Drop any previous realtime task before starting a new loop so an
+    // abandoned session cannot linger when dictations overlap.
+    activeRealtimeTask?.cancel()
+    activeRealtimeTask = nil
+    let realtimeTask = Task { [weak self] in
       guard let self else { return }
 
       // Same guard as the watchdog above: the "processing" session fixed at
@@ -1265,9 +1294,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       // "STT timeout" watchdog set state to .idle) — terminal calls become
       // no-ops; a repeated failTranscription/completeInsertion is impossible.
       // Realtime profiles (`.streamingSession`, today `gpt-live-transcribe`)
-      // stream raw PCM via RealtimeTranscriptionSession — never as a WAV
-      // batch upload through Transcriber (which rejects realtime profiles
-      // with an invalid spec). Fail-closed: no implicit batch fallback.
+      // go through Transcriber's realtime routing (connect -> append ->
+      // commit -> final with network preflight) — never as a WAV batch upload
+      // (which rejects realtime profiles with an invalid spec). Fail-closed:
+      // no implicit batch fallback and no failover chain.
       // Keep manual retry consistent with the current recording on both paths.
       let wav = WAVEncoder.encode(samples: samples)
       // Last WAV kept in memory (RetryProvider): manual retry with another
@@ -1275,10 +1305,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       self.retryProvider.store(wav: wav)
       if let realtimeProvider = self.effectiveOrdinaryProvider(),
         self.isRealtimeOrdinaryProvider(realtimeProvider)
-      {
+      {  // swiftlint:disable:this opening_brace
         do {
-          let result = try await self.transcribeRealtime(
-            samples: samples, provider: realtimeProvider)
+          // Transcriber routes `.streamingSession` profiles to its realtime
+          // path (no batch fallback, no failover chain).
+          let result = try await self.makeTranscriber(realtimeProvider).transcribe(wav: wav)
           let text = TextRefinement.finalize(result.text)
           DispatchQueue.main.async {
             guard
@@ -1287,6 +1318,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
                 sessionActive: self.processingSession == session && self.state == .transcribing
               )
             else { return }
+            self.activeRealtimeTask = nil
             self.completeInsertion(text)
           }
         } catch {
@@ -1297,6 +1329,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
               self.processingSession == session,
               self.state == .transcribing
             else { return }
+            self.activeRealtimeTask = nil
             self.failTranscription(message, isNetworkFailure: networkText != nil)
           }
         }
@@ -1334,6 +1367,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
           self.failTranscription(message, isNetworkFailure: networkText != nil)
         }
       }
+    }
+    if isRealtimeRequest {
+      activeRealtimeTask = realtimeTask
     }
   }
 
@@ -2207,31 +2243,6 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     return ProviderRequestBuilder.isRealtime(adapterID: provider.id, model: resolvedModel)
   }
 
-  /// Ordinary dictation for realtime profiles: raw PCM streams through
-  /// `RealtimeTranscriptionSession` (connect -> append -> commit -> final).
-  /// Fail-closed: a realtime failure surfaces and never falls back to batch.
-  private func transcribeRealtime(
-    samples: [Int16], provider: AppConfig.Provider
-  ) async throws -> TranscriptionResult {
-    let resolvedModel = ProviderRequestBuilder.resolveModel(provider.model, for: provider.id)
-    let apiKey = RetryProvider.resolveAPIKey(for: provider, activeProviderID: activeProviderID)
-    guard let url = RealtimeEndpoint.transcriptionURL() else {
-      throw TranscribeError.network("Invalid base URL")
-    }
-    let transport = URLSessionWebSocketTransport(url: url, apiKey: apiKey)
-    let config = RealtimeSessionConfig(
-      model: resolvedModel,
-      language: resolvedConfig.language,
-      prompt: nil,
-      keywords: [],
-      sourceSampleRate: 16000)
-    return try await RealtimeDictationRunner.transcribe(
-      samples: samples,
-      sourceSampleRate: 16000,
-      config: config,
-      transport: transport)
-  }
-
   /// Effective upload container for a provider: config `upload_format`
   /// (section override or top-level inheritance) through the model profile
   /// capabilities. WAV bytes are FLAC-encoded per request inside
@@ -2254,8 +2265,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// error NOT related to the provider (microphone etc.) does not start a
   /// failover. Returns (result, id of the failover provider; nil — primary).
   /// Batch-only: realtime (`.streamingSession`) profiles never reach here —
-  /// `processSingleRequest` routes them through `transcribeRealtime` before
-  /// any WAV encoding.
+  /// `processSingleRequest` routes them through `makeTranscriber(...).transcribe`
+  /// (Transcriber's realtime path) before any failover chain.
   private func transcribeAutomatically(wav: Data) async throws -> (TranscriptionResult, String?) {
     // The final role from [routing] (whole recording non-chunked): set and
     // different from the active — the direct role provider WITHOUT a
@@ -2556,6 +2567,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       Logger.log("record cancelled")
     case .transcribing:
       cancelRecognition = true
+      // Cancel a retained realtime session so Esc closes the WebSocket
+      // immediately instead of leaving it open until its own timeout.
+      activeRealtimeTask?.cancel()
+      activeRealtimeTask = nil
       // Esc during transcription stops the queued work immediately, not only
       // at the next segment: the isCancelled guard in finishLiveRun drops the
       // final pass, so a cancelled run never sends audio to STT.

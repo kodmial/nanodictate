@@ -675,11 +675,23 @@ extension Transcriber {
   /// Decodes the WAV to Int16 samples (mono-mixed when needed), then runs
   /// connect → append → commit → waitForFinal → close. Fail-closed: any
   /// realtime failure throws and never degrades into batch uploads.
+  /// Realtime bypasses custom routing: the session always dials the fixed
+  /// `wss://api.openai.com/v1/realtime` endpoint with the provider `apiKey`
+  /// as Bearer credential. Configured `baseURL`, `httpProxy`, `proxyKey`,
+  /// and cookie-relay settings do not apply; a conflicting configuration
+  /// logs a warning so credentials and audio are not silently sent outside
+  /// the intended gateway.
   private func transcribeViaRealtime(wav: Data, prompt: String?) async throws -> TranscriptionResult {
     if await !networkChecker() {
       Logger.log("STT not sent: no internet (preflight)", level: "error")
       throw TranscribeError.network(Self.noInternetMessage)
     }
+    Self.warnIfRealtimeBypassesRouting(
+      baseURL: baseURL,
+      adapterID: adapterID,
+      httpProxy: httpProxy,
+      proxyKey: proxyKey,
+      hasCookieRelay: cookieRelayProvider != nil)
     guard let info = WAVDecoder.decodePCM16(wav) else {
       throw TranscribeError.invalidResponse("Invalid WAV for realtime transcription")
     }
@@ -766,6 +778,40 @@ extension Transcriber {
     case .cancelled:
       return "Request cancelled"
     }
+  }
+
+  /// Whether realtime bypasses configured routing (pure, unit-tested).
+  /// True when a custom `baseURL` (differs from the adapter default),
+  /// `httpProxy`, `proxyKey`, or cookie-relay layer is configured: the fixed
+  /// `wss://api.openai.com/v1/realtime` transport ignores all of them.
+  static func realtimeBypassesRouting(
+    baseURL: String, adapterID: String?, httpProxy: String, proxyKey: String,
+    hasCookieRelay: Bool
+  ) -> Bool {
+    if !httpProxy.isEmpty || !proxyKey.isEmpty || hasCookieRelay {
+      return true
+    }
+    guard !baseURL.isEmpty else { return false }
+    let adapterDefault = STTAdapterID.from(adapterID ?? "").defaultBaseURL
+    return baseURL != adapterDefault
+  }
+
+  /// Warn when realtime bypasses custom routing so credentials and audio are
+  /// not silently sent directly to the fixed endpoint.
+  private static func warnIfRealtimeBypassesRouting(
+    baseURL: String, adapterID: String?, httpProxy: String, proxyKey: String,
+    hasCookieRelay: Bool
+  ) {
+    guard
+      realtimeBypassesRouting(
+        baseURL: baseURL, adapterID: adapterID, httpProxy: httpProxy, proxyKey: proxyKey,
+        hasCookieRelay: hasCookieRelay)
+    else { return }
+    Logger.log(
+      "realtime transcription bypasses custom routing "
+        + "(baseURL/httpProxy/proxyKey/cookie-relay); audio and API key go directly to "
+        + "wss://api.openai.com/v1/realtime",
+      level: "warn")
   }
 }
 

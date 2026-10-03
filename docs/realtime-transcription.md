@@ -23,6 +23,11 @@ Batch behavior is unchanged. Realtime is selected by the model profile
 - Provider id `openai`, model `gpt-live-transcribe` (or `gpt-live-*` snapshot).
 - WebSocket endpoint `wss://api.openai.com/v1/realtime?intent=transcription`
   with `Authorization: Bearer <key>`.
+- Realtime bypasses custom routing: configured `base_url`, `http_proxy`
+  (`httpProxy`), `proxy_key` (`proxyKey`), and `cookie-relay` transport do
+  not apply to the WebSocket session. Audio and the API key always go
+  directly to the fixed endpoint above; a conflicting configuration logs a
+  warning (`Transcriber.transcribeViaRealtime`) instead of failing silently.
 - Session configuration (`session.update`, type `transcription`):
   `audio.input.format = {"type": "audio/pcm", "rate": 24000}`,
   `audio.input.transcription = {model, prompt?, keywords?, languages?, delay?}`,
