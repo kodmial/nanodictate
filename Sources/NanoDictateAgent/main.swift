@@ -1260,9 +1260,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     // Independent of the auto-failover margin (realtime is fail-closed and
     // never runs the failover chain).
     let realtimePolicy = RealtimeSessionPolicy()
-    let realtimeWatchdogDuration =
-      realtimePolicy.connectTimeout + 2 * realtimePolicy.appendTimeout + realtimePolicy.commitTimeout
-      + realtimePolicy.closeTimeout + 5
+    let realtimeWatchdogDuration = realtimePolicy.watchdogDuration()
     let isRealtimeRequest: Bool = {
       if let provider = self.effectiveOrdinaryProvider() {
         return self.isRealtimeOrdinaryProvider(provider)

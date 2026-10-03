@@ -155,6 +155,13 @@ public struct RealtimeSessionPolicy: Equatable {
   public func reconnectDelay(forAttempt attempt: Int) -> TimeInterval {
     reconnectBaseDelay * pow(2.0, Double(max(0, attempt)))
   }
+
+  /// Worst-case session duration the Agent watchdog must cover: connect, one
+  /// `appendTimeout` for the append phase, a second `appendTimeout` for the
+  /// commit send, the final-wait budget, close, plus `margin`.
+  public func watchdogDuration(margin: TimeInterval = 5) -> TimeInterval {
+    connectTimeout + (2 * appendTimeout) + commitTimeout + closeTimeout + margin
+  }
 }
 
 /// Explicit fallback policy when a realtime session fails.

@@ -550,6 +550,17 @@ final class RealtimeTranscriptionTests: XCTestCase {
         XCTAssertEqual(policy.reconnectDelay(forAttempt: 2), 2.0, accuracy: 1e-9)
     }
 
+    @objc func testWatchdogDurationCoversBothSendBudgets() {
+        // The append phase and the commit send each get a full appendTimeout;
+        // the watchdog must cover connect + 2 x append + final wait + close.
+        let policy = RealtimeSessionPolicy()
+        XCTAssertEqual(policy.watchdogDuration(), 70, accuracy: 1e-9)
+        let custom = RealtimeSessionPolicy(
+            connectTimeout: 9, commitTimeout: 19, appendTimeout: 14,
+            closeTimeout: 5)
+        XCTAssertEqual(custom.watchdogDuration(), 9 + 28 + 19 + 5 + 5, accuracy: 1e-9)
+    }
+
     @objc func testConnectTimeoutFailsClosedInsteadOfReady() {
         runAsync("realtime connect timeout fails closed") {
             let transport = MockRealtimeTransport(incoming: [])
