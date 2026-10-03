@@ -943,6 +943,14 @@ jobs:
             fi
             # Release already exists (re-run): attach only the assets that
             # are missing; every already-published byte stays untouched.
+            # The existing body must still match the canonical section —
+            # a diverged body means the release was published from different
+            # notes, so refuse to attach assets until it is corrected.
+            gh release view "$TAG" --json body --jq '.body' > /tmp/existing-body.md
+            if ! release_notes_gate_publish "$RELEASE_VERSION" "$SWIFT_VERSION" 1 /tmp/existing-body.md < CHANGELOG.md; then
+              echo "::error::Existing release body differs from the canonical CHANGELOG.md section; refusing to upload assets."
+              exit 1
+            fi
             if gh release view "$TAG" --json assets --jq '.assets[].name' > /tmp/existing-assets.txt 2>/dev/null; then
               MISSING=()
               for f in dist/$CLI_NAME-*.tar.gz dist/$CLI_NAME-*.zip dist/SHA256SUMS.txt; do

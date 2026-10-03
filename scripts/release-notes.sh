@@ -53,8 +53,6 @@
 # full PR bodies, review threads, Co-authored-by lines and automation chatter
 # are never dumped into release notes.
 
-set -uo pipefail
-
 # Canonical Keep a Changelog section order. Only sections that contain entries
 # are rendered.
 RELEASE_NOTES_SECTIONS="Added Changed Deprecated Removed Fixed Security"
@@ -397,5 +395,6 @@ release_notes_cli() {
 }
 
 if [[ "${BASH_SOURCE[0]:-}" == "$0" ]]; then
+  set -uo pipefail
   release_notes_cli "$@"
 fi
