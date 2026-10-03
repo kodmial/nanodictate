@@ -96,7 +96,8 @@ type (aligned with `changelog-sections` in `release-please-config.json`):
 | `security`        | Security   |
 | `deprecate`       | Deprecated |
 | `remove`          | Removed    |
-| `docs`, `style`, `test`, `build`, `ci`, `chore` | hidden (never rendered) |
+| `docs`, `style`, `test`, `ci`, `chore` | hidden (never rendered) |
+| `build` | hidden unless it carries an explicit non-`None` user-facing note, in which case Changed |
 
 Only sections with entries are rendered, in canonical Keep a Changelog order.
 Internal release plumbing, manifest synchronization, pure formatting and

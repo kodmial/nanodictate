@@ -191,13 +191,17 @@ release_notes_render() {
     local parsed type
     parsed=$(release_notes_parse_subject "$subject")
     type=${parsed%%|*}
-    local section
-    if ! section=$(release_notes_section_for_type "$type"); then
-      continue
-    fi
     local text
     if ! text=$(release_notes_entry_text "$subject" "$note"); then
       continue
+    fi
+    local section
+    if ! section=$(release_notes_section_for_type "$type"); then
+      # `build` is hidden by default, but a user-visible packaging or
+      # installation change carries an explicit non-`None` note and renders
+      # under Changed. Other hidden types stay excluded even with a note.
+      [[ "$type" == "build" && -n "${note//[[:space:]]/}" ]] || continue
+      section=Changed
     fi
     # One-line bullets: embedded newlines/carriage returns would break the
     # section shape, so collapse them to spaces.
@@ -295,12 +299,20 @@ release_notes_normalize() {
 #
 # stdin:  an extracted `## [<version>]` section (header included).
 # Exit 0 when the section carries no releasable content (only the header,
-# blank lines and/or bare `###` group headers), 1 otherwise. This is the
+# blank lines, bare `###` group headers, HTML comments and/or placeholder
+# text without a list entry), 1 otherwise. A releasable entry is a bullet
+# (`-`, `*` or ordered-list marker) under a changelog category. This is the
 # guard against the v0.1.7 empty-section failure mode recurring.
 release_notes_section_is_empty() {
-  local body
+  local body stripped bullet
   body=$(grep -vE '^## \[' | grep -vE '^[[:space:]]*$' | grep -vE '^###[[:space:]]+[A-Za-z]+[[:space:]]*$' || true)
-  [[ -z "${body//[[:space:]]/}" ]]
+  # HTML comments must not count as release notes.
+  stripped=$(printf '%s\n' "$body" | sed -E 's/<!--.*-->//g' | grep -vE '^[[:space:]]*$' || true)
+  [[ -z "${stripped//[[:space:]]/}" ]] && return 0
+  # Placeholders such as a bare TODO without a bullet do not count: require
+  # an actual list entry.
+  bullet=$(printf '%s\n' "$stripped" | grep -E '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+[^[:space:]]' || true)
+  [[ -z "$bullet" ]]
 }
 
 # release_notes_gate_publish
@@ -310,13 +322,18 @@ release_notes_section_is_empty() {
 #   release_notes_gate_publish <version> <swift-version> <releasable-count> [body-file]
 #
 # Fails (exit 1) when:
+#   - <releasable-count> is omitted (pass 0 explicitly for a no-change release);
 #   - the `## [<version>]` section is missing;
 #   - the section is empty while <releasable-count> > 0;
 #   - <version> disagrees with <swift-version> (Sources/NanoDictateCore/Version.swift);
 #   - [body-file] is given and its content is neither byte-for-byte nor
 #     normalization-equivalent to the canonical section.
 release_notes_gate_publish() {
-  local version=${1:-} swift_version=${2:-} releasable=${3:-0} body_file=${4:-}
+  local version=${1:-} swift_version=${2:-} releasable=${3:-} body_file=${4:-}
+  if [[ -z "$releasable" ]]; then
+    echo "release_notes_gate_publish: <releasable-count> is required" >&2
+    return 1
+  fi
   if [[ -z "$version" || -z "$swift_version" ]]; then
     echo "release_notes_gate_publish: <version> and <swift-version> are required" >&2
     return 1
@@ -369,7 +386,7 @@ release_notes_cli() {
     normalize) release_notes_normalize ;;
     first-version) release_notes_first_version ;;
     gate)
-      local version="" swift_version="" releasable="0" body_file=""
+      local version="" swift_version="" releasable="" body_file=""
       while [[ $# -gt 0 ]]; do
         case "$1" in
           --version)
@@ -389,7 +406,7 @@ release_notes_cli() {
       done
       release_notes_gate_publish "$version" "$swift_version" "$releasable" "$body_file" ;;
     *)
-      echo "usage: release-notes.sh {render|extract <version>|normalize|first-version|gate --version V --swift-version S [--releasable N] [--body-file F]}" >&2
+      echo "usage: release-notes.sh {render|extract <version>|normalize|first-version|gate --version V --swift-version S --releasable N [--body-file F]}" >&2
       return 1 ;;
   esac
 }

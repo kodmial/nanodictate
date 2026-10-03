@@ -157,10 +157,12 @@ assert_eq '3: sections follow Keep a Changelog order' \
 # Manifest syncs, version bumps, CI-only and docs-only commits must not appear
 # as user-facing changes.
 
-PLUMBING=$'p1|chore(release): update v0.1.15 manifests||| \np2|fix(packaging): restore v0.1.14 post-release state||81| \np3|docs: clarify local verification||| \np4|ci: enforce 80 percent core coverage||| \nr1|fix(audio): reuse buffers, cut locks|Audio hot path|71|'
+PLUMBING=$'p1|chore(release): update v0.1.15 manifests||| \np2|fix(packaging): restore v0.1.14 post-release state|None|81| \np3|docs: clarify local verification||| \np4|ci: enforce 80 percent core coverage||| \nr1|fix(audio): reuse buffers, cut locks|Audio hot path|71|'
 BODY_PLUMB=$(printf '%s\n' "$PLUMBING" | release_notes_render)
 assert_contains '4: user-facing change survives' "$BODY_PLUMB" 'Audio hot path'
 assert_not_contains '4: manifest sync is excluded' "$BODY_PLUMB" 'manifests'
+assert_not_contains '4: note-free packaging plumbing is excluded' \
+  "$BODY_PLUMB" 'restore v0.1.14 post-release state'
 assert_not_contains '4: docs change is excluded' "$BODY_PLUMB" 'clarify local'
 assert_not_contains '4: ci change is excluded' "$BODY_PLUMB" '80 percent'
 # A docs/ci-only set renders no user-facing notes at all.
@@ -177,6 +179,17 @@ assert_not_contains '4: None entry stays out of mixed notes' \
   "$BODY_NONE_MIXED" 'quiet xyz'
 assert_contains '4: real entry still renders alongside None' \
   "$BODY_NONE_MIXED" 'Audio hot path'
+# A `build` entry with an explicit user-facing note (for example a visible
+# packaging/installation change) renders under Changed; without an explicit
+# note it stays hidden.
+BUILD_NOTED=$(printf 'b1|build(macos): add notarization|Notarized macOS installer|99|')
+BODY_BUILD_NOTED=$(printf '%s\n' "$BUILD_NOTED" | release_notes_render)
+assert_contains '4: explicitly noted build renders' "$BODY_BUILD_NOTED" 'Notarized macOS installer'
+assert_contains '4: explicitly noted build renders under Changed' "$BODY_BUILD_NOTED" '### Changed'
+BUILD_BARE=$(printf 'b1|build(macos): bump helper|||')
+assert_eq '4: build without a note renders nothing' '' "$(printf '%s\n' "$BUILD_BARE" | release_notes_render)"
+BUILD_NONE=$(printf 'b1|build(macos): bump helper|None|99|')
+assert_eq '4: build with None renders nothing' '' "$(printf '%s\n' "$BUILD_NONE" | release_notes_render)"
 
 # --- 5. skip-release PR excluded ----------------------------------------------
 SKIP=$'s1|feat(stt): experimental flag|Experimental flag|91|skip-release\nr1|fix(audio): reuse buffers|Audio hot path|71|'
@@ -311,6 +324,27 @@ else
 fi
 assert_ok '12: repaired section passes the gate' \
   release_notes_gate_publish 0.1.7 0.1.7 1 <<< "$REPAIRED"
+# HTML comments and bare placeholders without a bullet are not release notes.
+COMMENT_ONLY=$'# Changelog\n\n## [Unreleased]\n\n## [0.1.7] - 2026-09-27\n\n### Fixed\n\n<!-- TODO -->\n\n## [0.1.6] - 2026-09-27\n\n### Changed\n\n- Something\n'
+if printf '%s' "$COMMENT_ONLY" | release_notes_extract_section 0.1.7 | release_notes_section_is_empty; then
+  pass '12: comment-only section is detected as empty'
+else
+  fail '12: comment-only section is detected as empty'
+fi
+assert_not_ok '12: comment-only section fails the gate with releasable changes' \
+  release_notes_gate_publish 0.1.7 0.1.7 1 <<< "$COMMENT_ONLY"
+TODO_ONLY=$'# Changelog\n\n## [Unreleased]\n\n## [0.1.7] - 2026-09-27\n\n### Fixed\n\nTODO\n\n## [0.1.6] - 2026-09-27\n\n### Changed\n\n- Something\n'
+if printf '%s' "$TODO_ONLY" | release_notes_extract_section 0.1.7 | release_notes_section_is_empty; then
+  pass '12: placeholder-only section is detected as empty'
+else
+  fail '12: placeholder-only section is detected as empty'
+fi
+assert_not_ok '12: placeholder-only section fails the gate with releasable changes' \
+  release_notes_gate_publish 0.1.7 0.1.7 1 <<< "$TODO_ONLY"
+# An omitted releasable count fails closed; an explicit zero still allows an
+# intentional no-change release.
+assert_not_ok '12: omitted releasable count fails the gate' \
+  release_notes_gate_publish 0.1.7 0.1.7 <<< "$REPAIRED"
 
 # --- Repository self-checks ----------------------------------------------------
 # The repository's own CHANGELOG must satisfy the same invariants: the first
@@ -367,6 +401,13 @@ run_gate_cli_watchdog --version
 run_gate_cli_watchdog --swift-version
 run_gate_cli_watchdog --releasable
 run_gate_cli_watchdog --body-file
+# An omitted --releasable flag fails closed; an explicit zero remains valid.
+GATE_CLI_FULL=$'# Changelog\n\n## [Unreleased]\n\n## [0.9.1] - 2026-09-27\n\n### Fixed\n\n- Audio hot path\n'
+GATE_CLI_EMPTY=$'# Changelog\n\n## [Unreleased]\n\n## [0.9.1] - 2026-09-27\n\n## [0.9.0] - 2026-09-26\n\n### Fixed\n\n- Old entry\n'
+assert_not_ok '13: gate CLI without --releasable fails' \
+  bash "${REPO_ROOT}/scripts/release-notes.sh" gate --version 0.9.1 --swift-version 0.9.1 <<< "$GATE_CLI_FULL"
+assert_ok '13: gate CLI with explicit --releasable 0 passes for an empty section' \
+  bash "${REPO_ROOT}/scripts/release-notes.sh" gate --version 0.9.1 --swift-version 0.9.1 --releasable 0 <<< "$GATE_CLI_EMPTY"
 
 # --- summary -----------------------------------------------------------------
 
