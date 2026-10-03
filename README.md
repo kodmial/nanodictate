@@ -163,6 +163,7 @@ The full configuration reference is [`config.example.toml`](config.example.toml)
 | `insert_method` | Text insertion method |
 | `review_before_insert` | Review transcription before insertion |
 | `chunked` | Enable chunked transcription |
+| `chunked_final_pass` | Chunked final-pass policy: `always` / `on-uncertainty` (default) / `never` |
 | `auto_failover` | Enable provider failover |
 | `providers` | Provider list used by failover |
 
@@ -197,6 +198,16 @@ Optional routing can select different providers for chunk segments and the final
 segment_provider = "cloudflare"
 final_provider = "groq"
 ```
+
+Chunked final-pass policy (`chunked_final_pass`): `always` re-uploads the
+complete recording for every multi-segment dictation (historical,
+quality-first); `on-uncertainty` (default) skips that re-upload when all
+segments look acceptable and keeps it as fallback for empty segments or
+seams without word timestamps; `never` never re-uploads after successful
+segments. A failed segment still recovers via the full pass. With true
+streaming providers this replay is normally unnecessary — prefer `never`
+there. See `docs/stt-benchmark.md` for the always-vs-default evidence
+(bytes, tail latency, WER/CER).
 
 See [`config.example.toml`](config.example.toml) for the canonical defaults and complete examples.
 

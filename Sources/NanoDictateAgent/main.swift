@@ -61,6 +61,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// final pass over the whole WAV. OFF — current behavior (single request).
   private let chunked: Bool
 
+  /// Final full-recording pass policy for chunked/live dictation
+  /// (`chunked_final_pass` in config, default `on-uncertainty`).
+  private let chunkedFinalPass: ChunkedFinalPassPolicy
+
   // MARK: Live dictation (chunked = true)
 
   /// Serial executor of the live loop: utterances recognized STRICTLY in chain
@@ -103,6 +107,14 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     /// At least one segment failed — final pass is mandatory
     /// (it recovers the missed phrase from the whole WAV).
     var anySegmentFailed = false
+    /// At least one segment recognized to empty text: uncertain result that
+    /// justifies a reconciling final pass under `on-uncertainty`.
+    var anySegmentEmpty = false
+    /// At least one segment with glued overlap returned no word timestamps:
+    /// the seam cannot be verified without the full-pass word diff.
+    /// Live batches carry no glued overlap today (always false), kept so the
+    /// live decision uses the same uncertainty vocabulary as offline chunking.
+    var anySegmentMissingTimestamps = false
     /// Text of the last segment failure: on a FULL failure of all segments
     /// (segmentCount == 0) the final pass shows an explicit STT error message
     /// instead of the confusing "Empty result" (review #112).
@@ -360,6 +372,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     undoMaxInterval = config.undoMaxInterval
     undoSoundEnabled = config.undoSoundEnabled
     chunked = config.chunked
+    chunkedFinalPass = config.chunkedFinalPass
     sounds = SysSounds(enabled: config.soundsEnabled)
     overlay = OverlayController(logLevel: config.logLevel)
     audio = AudioService(
@@ -1287,7 +1300,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
 
   /// Step dictation (chunked = true): VAD segmentation of the recording → each
   /// segment as a request (prompt = already-recognized text) → incremental
-  /// insert → final pass over the whole WAV in one request → word diff →
+  /// insert → conditional final pass over the whole WAV (policy
+  /// `chunked_final_pass`: always / on-uncertainty / never) → word diff →
   /// replacement of the changed range in a single action.
   // swiftlint:disable:next cyclomatic_complexity function_body_length
   private func processChunked(_ samples: [Int16]) {
@@ -1303,11 +1317,12 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       String(format: "chunked transcribe submit (\(samples.count) samples, %.2f s)", duration),
       level: "info")
 
-    // "Processing" phase watchdog: several segments + final pass — each
-    // request up to networkRequestTimeout; the guard counts by request number
-    // (N segments, count > 1 ⇒ one more final). Same session-token mechanism
-    // as processSingleRequest. Segmentation runs once per recording: the plan
-    // below is reused by the pipeline run (no rerun for watchdog limits).
+    // "Processing" phase watchdog: several segments + possible final pass —
+    // each request up to networkRequestTimeout; the guard counts conservatively
+    // (N segments, count > 1 ⇒ one more final even when the policy may skip
+    // it). Same session-token mechanism as processSingleRequest.
+    // Segmentation runs once per recording: the plan below is reused by the
+    // pipeline run (no rerun for watchdog limits).
     let chunkedPlan = AudioSegmenter.plan(samples: samples)
     let requestCount = AudioSegmenter.watchdogRequestCount(for: chunkedPlan)
     let chunkedMaxDuration = Double(requestCount) * Transcriber.networkRequestTimeout + 5
@@ -1326,7 +1341,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     Task { [weak self] in
       guard let self else { return }
       do {
-        let outcome = try await ChunkedPipeline().run(
+        let outcome = try await ChunkedPipeline(finalPassPolicy: self.chunkedFinalPass).run(
           samples: samples,
           plannedSegments: chunkedPlan,
           stt: { wav, filename, prompt in
@@ -1511,7 +1526,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     state = .idle
     Logger.log(
       "chunked transcription inserted: segments=\(outcome.segmentCount) finalized=\(outcome.finalized) "
-        + "finalChanged=\(outcome.finalChanged) (\(text.count) chars)",
+        + "finalChanged=\(outcome.finalChanged) policy=\(outcome.policy.configValue)"
+        + " reason=\(outcome.reason.rawValue) (\(text.count) chars)",
       level: "info"
     )
     // Marker for `nanodictate last` — the chunked session's final text:
@@ -1680,6 +1696,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             let transcriber = self.roleTranscriber(self.segmentRoleProviderID) ?? self.transcriber
             let segmentResult = try await transcriber.transcribe(
               wav: wav, filename: filename, prompt: prompt, needsWordTimestamps: true)
+            // Live batches carry no glued overlap: missing timestamps cannot
+            // leave an unverifiable seam (mirrors ChunkedSegmentReport rule).
             return ChunkedPipeline.SttResult(text: segmentResult.text, words: segmentResult.words)
           },
           filename: "live-segment-\(index + 1).wav"
@@ -1687,6 +1705,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
 
         // Accumulation — on liveExecutor AFTER successful STT: only recognized
         // text enters the next segment's prompt and the final diff base.
+        if result.promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+          runState.anySegmentEmpty = true
+        }
         runState.insertedText += result.insertText
         runState.promptParts.append(result.promptText)
         runState.segmentCount += 1
@@ -1831,12 +1852,15 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   }
 
   /// Final pass of a live loop (always on liveExecutor, AFTER the tail and
-  /// all segments — the serial queue guarantees the order). "One segment
-  /// without pauses" — the only segment is the tail (covers the recording to
-  /// its end) and no segment failed: a double STT request is not needed
-  /// (nothing to "polish"). Otherwise — the static helper
-  /// ChunkedPipeline.finalize (the same path as in offline chunking):
-  /// word-diff → replace one range.
+  /// all segments — the serial queue guarantees the order). Governed by
+  /// `chunked_final_pass`: `always` keeps the historical final replay,
+  /// `on-uncertainty` (default) skips it when segments look acceptable,
+  /// `never` skips it for successful segments. A failed segment always
+  /// recovers via the full pass (error recovery, not reconciliation), and a
+  /// single segment covered by the stop tail never needs a double request.
+  /// True streaming providers should prefer `never`: the stream's own final
+  /// hypothesis already carries full context, so this client-side replay is
+  /// normally unnecessary there.
   // swiftlint:disable:next cyclomatic_complexity function_body_length
   private func finishLiveRun(samples: [Int16], session: Int, runState: LiveRunState) async {
     // A cancelled run (Esc / device change / new recording started) must not
@@ -1845,8 +1869,12 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     // isCancelled guard blocks segment inserts the same way.
     guard !runState.isCancelled else { return }
     // Empty recording — no extra STT request (reachable only in a contrived
-    // process, but symmetric to offline chunking).
-    if runState.segmentCount == 0 {
+    // process, but symmetric to offline chunking). An all-failed run with
+    // recorded audio falls through to the full-pass recovery below instead
+    // of failing immediately: a transient segment failure can still recover
+    // through a successful full-recording request under any policy.
+    let needsFullRecovery = runState.segmentCount == 0 && runState.anySegmentFailed && !samples.isEmpty
+    if runState.segmentCount == 0, !needsFullRecovery {
       // Full failure of all segments (STT unavailable: disconnected network /
       // provider): the user actually spoke, but no segment was recognized.
       // This is an STT error, NOT an "empty dictation" — an explicit
@@ -1864,7 +1892,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         return
       }
       let outcome = ChunkedPipeline.Outcome(
-        segmentCount: 0, insertedText: "", finalized: false, finalChanged: false
+        segmentCount: 0, insertedText: "", finalized: false, finalChanged: false,
+        policy: self.chunkedFinalPass, reason: .emptyRecording, uncertainSegments: []
       )
       DispatchQueue.main.async {
         guard self.processingSession == session, self.state == .transcribing else { return }
@@ -1874,11 +1903,12 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     }
 
     // Single segment + the tail covers the recording to its end + no
-    // failures — skip the final pass.
+    // failures — skip the final pass under any policy.
     // swiftformat:disable:next andOperator
     if runState.segmentCount == 1 && runState.tailDelivered && !runState.anySegmentFailed {
       let outcome = ChunkedPipeline.Outcome(
-        segmentCount: 1, insertedText: runState.insertedText, finalized: false, finalChanged: false
+        segmentCount: 1, insertedText: runState.insertedText, finalized: false, finalChanged: false,
+        policy: self.chunkedFinalPass, reason: .singleSegment, uncertainSegments: []
       )
       DispatchQueue.main.async {
         guard self.processingSession == session, self.state == .transcribing else { return }
@@ -1886,6 +1916,48 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       }
       return
     }
+
+    // Policy gate for the live final replay. A failed segment always
+    // recovers via the full pass; otherwise the policy decides.
+    let liveUncertain: Bool = runState.anySegmentEmpty || runState.anySegmentMissingTimestamps
+    let liveReason: ChunkedFinalReason? = {
+      if runState.anySegmentEmpty { return .uncertainEmptySegment }
+      if runState.anySegmentMissingTimestamps { return .uncertainMissingTimestamps }
+      return nil
+    }()
+    switch self.chunkedFinalPass {
+    case .never:
+      if !runState.anySegmentFailed {
+        let outcome = ChunkedPipeline.Outcome(
+          segmentCount: runState.segmentCount, insertedText: runState.insertedText,
+          finalized: false, finalChanged: false,
+          policy: self.chunkedFinalPass, reason: .policyNever, uncertainSegments: []
+        )
+        DispatchQueue.main.async {
+          guard self.processingSession == session, self.state == .transcribing else { return }
+          self.completeChunkedInsertion(outcome: outcome)
+        }
+        return
+      }
+    case .onUncertainty:
+      if !runState.anySegmentFailed, !liveUncertain {
+        let outcome = ChunkedPipeline.Outcome(
+          segmentCount: runState.segmentCount, insertedText: runState.insertedText,
+          finalized: false, finalChanged: false,
+          policy: self.chunkedFinalPass, reason: .confidentSkip, uncertainSegments: []
+        )
+        DispatchQueue.main.async {
+          guard self.processingSession == session, self.state == .transcribing else { return }
+          self.completeChunkedInsertion(outcome: outcome)
+        }
+        return
+      }
+    case .always:
+      break
+    }
+    let liveFinalReason: ChunkedFinalReason =
+      runState.anySegmentFailed
+      ? (liveReason ?? .segmentFailed) : (liveReason ?? .policyAlways)
 
     do {
       let result = try await ChunkedPipeline.finalize(
@@ -1923,15 +1995,24 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         segmentCount: runState.segmentCount,
         insertedText: result.changed ? result.finalText : runState.insertedText,
         finalized: true,
-        finalChanged: result.changed
+        finalChanged: result.changed,
+        policy: self.chunkedFinalPass,
+        reason: liveFinalReason,
+        uncertainSegments: []
       )
       DispatchQueue.main.async {
         guard self.processingSession == session, self.state == .transcribing else { return }
         self.completeChunkedInsertion(outcome: outcome)
       }
     } catch {
+      // Recovery failure for an all-failed run: report the stored segment
+      // error so the user sees why dictation failed, not just the final
+      // request's error. Otherwise report the final request's error.
+      let storedMessage: String? =
+        (runState.segmentCount == 0 && runState.anySegmentFailed)
+        ? runState.lastErrorText : nil
       let networkText = OverlayErrorText.text(for: error)
-      let message = networkText ?? Self.message(for: error)
+      let message = storedMessage ?? networkText ?? Self.message(for: error)
       DispatchQueue.main.async {
         guard self.processingSession == session, self.state == .transcribing else { return }
         self.failTranscription(message, isNetworkFailure: networkText != nil)
