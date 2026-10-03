@@ -572,8 +572,13 @@ public enum BenchmarkResources {
 /// same code works for scripted (deterministic) and live providers.
 public enum BenchmarkRunner {
   /// Upload byte count for a config: exact request body the adapter would
-  /// send for this WAV (multipart overhead included).
-  public static func uploadBytes(config: BenchmarkSTTConfig, wav: Data) -> Int {
+  /// send for this audio payload (multipart overhead included, bias fields
+  /// included).
+  /// Default format is WAV (byte-identical to historic behavior); pass
+  /// `.flac` to account the FLAC transport for the same config.
+  public static func uploadBytes(
+    config: BenchmarkSTTConfig, wav: Data, audioFormat: STTUploadFormat = .wav
+  ) -> Int {
     let spec = ProviderRequestBuilder.plan(
       adapterID: config.adapterID,
       baseURL: "https://benchmark.invalid/v1/audio/transcriptions",
@@ -581,6 +586,7 @@ public enum BenchmarkRunner {
       apiKey: "",
       language: config.language,
       wav: wav,
+      audioFormat: audioFormat,
       bias: config.bias
     )
     return spec.bodyData.count

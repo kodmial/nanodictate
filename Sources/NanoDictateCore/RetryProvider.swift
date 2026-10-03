@@ -74,7 +74,16 @@ public final class RetryProvider {
       proxyPassword: provider.proxyPassword,
       adapterID: provider.id
     )
-    return try await transcriber.transcribe(wav: wav)
+    // Section `upload_format` selects the container per target provider; the
+    // Transcriber FLAC-encodes the stored WAV bytes per request (PCM
+    // recovered via WAV decode), so failover never relabels WAV as FLAC.
+    // No top-level config here: empty section inherits `auto` (WAV default).
+    let preference = STTUploadPreference.parse(
+      provider.uploadFormat.isEmpty ? nil : provider.uploadFormat) ?? .auto
+    let profile = ProviderRequestBuilder.profile(adapterID: provider.id, model: provider.model)
+    let audioFormat = AudioTransportSelection.resolve(
+      preference: preference, profile: profile.audio)
+    return try await transcriber.transcribe(wav: wav, audioFormat: audioFormat)
   }
 
   /// Shared cookie-relay cache (key — provider baseURL).

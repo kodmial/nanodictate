@@ -963,6 +963,8 @@ public enum BatchRequestBuilder {
   ///     таймстампам). Default false: обычный батч шлёт plain transcription.
   ///   - bias: contextual biasing (vocabulary + extra languages), gated per
   ///     model profile; empty = byte-identical behavior.
+  ///   - audioFormat: requested upload container, capability-gated per model
+  ///     profile; default `.wav` keeps byte-identical behavior.
   // swiftlint:disable:next function_parameter_count
   public static func makeRequest(
     provider: AppConfig.Provider,
@@ -975,18 +977,23 @@ public enum BatchRequestBuilder {
     needsWordTimestamps: Bool = false,
     proxyKey: String = "",
     proxyKeyHeader: String = "X-Proxy-Key",
+    audioFormat: STTUploadFormat = .wav,
     bias: STTContextualBias = .none
   ) -> BatchPreparedRequest? {
+    let prepared = Transcriber.prepareUpload(
+      wav: wav, filename: "segment-\(chunkIndex + 1).wav", audioFormat: audioFormat,
+      adapterID: provider.id, model: provider.model)
     let spec = ProviderRequestBuilder.plan(
       adapterID: provider.id,
       baseURL: provider.baseURL,
       model: provider.model,
       apiKey: apiKey.isEmpty ? "" : apiKey,
       language: language,
-      wav: wav,
-      filename: "segment-\(chunkIndex + 1).wav",
+      wav: prepared.data,
+      filename: prepared.filename,
       needsWordTimestamps: needsWordTimestamps,
       batchParams: batchParams,
+      audioFormat: prepared.effectiveFormat,
       bias: bias
     )
     guard let url = spec.url else { return nil }

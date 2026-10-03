@@ -10,33 +10,112 @@ import Foundation
 // MARK: - Upload audio format
 
 /// Accepted upload audio format for a model profile.
-/// Only WAV is implemented (FLAC/Opus encoding is explicitly out of scope).
-public enum STTUploadFormat: String, Equatable {
+///
+/// - `wav`: 16-bit PCM WAV. Zero/low encoding overhead, universally
+///   accepted; the default transport everywhere.
+/// - `flac`: lossless FLAC (16 kHz mono PCM16 source). Compact batch
+///   transport where the provider declares support. Encoded locally with the
+///   pure-Swift `FLACEncoder` (fixed predictors + Rice coding), so it works
+///   on every supported macOS version with no extra dependency.
+/// - `opus`: explicitly experimental bandwidth mode. No local encoder is
+///   shipped yet, so capability-gated selection never auto-selects it; an
+///   explicit request falls back to WAV until benchmark evidence justifies
+///   stronger support.
+///
+/// Provider support (verified 2026-09 against current official docs):
+/// OpenAI transcription API (`flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav,
+/// webm`) and Groq Speech-to-Text (same list) both accept FLAC and
+/// Ogg-encapsulated Opus. Cloudflare Workers AI raw-audio upload is only
+/// verified for WAV in this repository, so its profile stays WAV-only, as
+/// does the conservative custom-endpoint fallback (never assume an
+/// undeclared codec).
+public enum STTUploadFormat: String, Equatable, CaseIterable {
   case wav
+  case flac
+  case opus
+
+  /// File extension used for the multipart `filename` (no dot).
+  public var fileExtension: String {
+    switch self {
+    case .wav: return "wav"
+    case .flac: return "flac"
+    case .opus: return "ogg"
+    }
+  }
+
+  /// MIME type used for the multipart file part and raw-audio bodies.
+  public var contentType: String {
+    switch self {
+    case .wav: return "audio/wav"
+    case .flac: return "audio/flac"
+    case .opus: return "audio/ogg"
+    }
+  }
+
+  /// Default multipart filename for batch uploads.
+  public var defaultFilename: String {
+    "audio.\(fileExtension)"
+  }
+
+  /// True for bit-exact transports (no recognition-quality risk).
+  public var isLossless: Bool {
+    switch self {
+    case .wav, .flac: return true
+    case .opus: return false
+    }
+  }
+
+  /// Experimental formats are never auto-selected; they require an explicit
+  /// opt-in and stay opt-in until benchmark evidence is documented.
+  public var isExperimental: Bool {
+    self == .opus
+  }
 }
 
 // MARK: - Audio profile
 
 /// Model-specific audio requirements for request preparation.
-/// All built-in profiles currently require 16 kHz mono WAV (equivalent to
-/// the historic single batch profile); the struct exists so callers request
-/// the requirement from the model instead of hard-coding it.
+/// All built-in profiles require 16 kHz mono PCM16; the upload container
+/// varies per profile (`uploadFormat` is the preferred/default container,
+/// `supportedUploadFormats` lists every container the provider accepts).
+/// Selection (`AudioTransportSelection`) never picks a format outside
+/// `supportedUploadFormats`, and never upmixes source audio (e.g. no 48 kHz
+/// stereo is sent to 16 kHz mono Whisper-style models merely to preserve a
+/// source format).
 public struct STTAudioProfile: Equatable {
   /// Required sample rate in Hz (preferred == required for current models).
   public var sampleRate: Int
   /// Required channel count (1 = mono).
   public var channels: Int
-  /// Accepted upload container for this model.
+  /// Preferred upload container for this model (the default selection).
   public var uploadFormat: STTUploadFormat
+  /// Every upload container the provider accepts for this model.
+  public var supportedUploadFormats: [STTUploadFormat]
 
-  public init(sampleRate: Int = 16000, channels: Int = 1, uploadFormat: STTUploadFormat = .wav) {
+  public init(
+    sampleRate: Int = 16000,
+    channels: Int = 1,
+    uploadFormat: STTUploadFormat = .wav,
+    supportedUploadFormats: [STTUploadFormat]? = nil
+  ) {
     self.sampleRate = sampleRate
     self.channels = channels
     self.uploadFormat = uploadFormat
+    // Default: only the preferred format is accepted (conservative: never
+    // assume an undeclared codec).
+    self.supportedUploadFormats = supportedUploadFormats ?? [uploadFormat]
   }
 
   /// Shared batch profile used by every built-in model today.
   public static let batchMono16k = STTAudioProfile(sampleRate: 16000, channels: 1, uploadFormat: .wav)
+
+  /// Batch profile for providers verified to accept lossless FLAC
+  /// (OpenAI and Groq transcription APIs, 2026-09). Preferred/default
+  /// transport stays WAV (zero encoding overhead); FLAC is opt-in via
+  /// `upload_format = "flac"` and is only ever selected where declared here.
+  public static let batchMono16kFLACCapable = STTAudioProfile(
+    sampleRate: 16000, channels: 1, uploadFormat: .wav,
+    supportedUploadFormats: [.wav, .flac])
 }
 
 // MARK: - Transport
@@ -307,7 +386,7 @@ public enum STTModelRegistry {
           supportsTemperature: true,
           languageHint: .single
         ),
-        audio: .batchMono16k,
+        audio: .batchMono16kFLACCapable,
         transcriptPath: nil
       )
     }
@@ -328,7 +407,7 @@ public enum STTModelRegistry {
           supportsTemperature: false,
           languageHint: .multi
         ),
-        audio: .batchMono16k,
+        audio: .batchMono16kFLACCapable,
         transcriptPath: nil
       )
     }
@@ -346,7 +425,7 @@ public enum STTModelRegistry {
           supportsTemperature: false,
           languageHint: .single
         ),
-        audio: .batchMono16k,
+        audio: .batchMono16kFLACCapable,
         transcriptPath: nil
       )
     }
@@ -390,7 +469,7 @@ public enum STTModelRegistry {
           languageHint: .single,
           supportsServerVAD: true
         ),
-        audio: .batchMono16k,
+        audio: .batchMono16kFLACCapable,
         transcriptPath: nil
       )
     }
