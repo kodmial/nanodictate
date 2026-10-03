@@ -51,8 +51,10 @@ idle --connect()--> connecting --ack--> ready --appendAudio()--> streaming
   `session.updated` within `RealtimeSessionPolicy.connectTimeout`.
 - `appendAudio(_:sourceSampleRate:)`: resamples to 24 kHz (linear), splits
   into `maxSamplesPerAppend` chunks, sends ordered
-  `input_audio_buffer.append` messages. No WAV files are written.
-- `commit()`: sends `input_audio_buffer.commit` (end of turn).
+  `input_audio_buffer.append` messages. No WAV files are written. The whole
+  send phase is bounded by `appendTimeout` (all chunks share the budget).
+- `commit()`: sends `input_audio_buffer.commit` (end of turn), bounded by
+  `appendTimeout` as well.
 - `waitForFinal()` / `runToCompletion()`: consumes delta/completed events
   until the deterministic final transcript.
 - `close()` / `cancel()`: deterministic teardown, transport closed exactly
@@ -67,7 +69,11 @@ is deterministic after stop/session completion.
 
 ## Error / reconnect / timeout policy
 
-- Every wait is bounded (`connectTimeout`, `commitTimeout`, `closeTimeout`).
+- Every wait is bounded (`connectTimeout`, `appendTimeout`, `commitTimeout`,
+  `closeTimeout`). Audio/commit sends share `appendTimeout`, so a stalled
+  upload cannot outlive the caller's watchdog (connect + append + final wait
+  + close + margin). Task cancellation closes the transport up front instead
+  of waiting for a stalled send to return.
   Timeouts throw `RealtimeTranscriptionError.timeout`; Task cancellation
   throws `.cancelled`. Neither wedges `AudioService` nor the UI.
 - Provider errors (`error` event, `...transcription.failed`) move the session

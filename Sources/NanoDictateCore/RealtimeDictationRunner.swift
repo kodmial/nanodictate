@@ -27,13 +27,19 @@ public enum RealtimeDictationRunner {
   ) async throws -> TranscriptionResult {
     let session = RealtimeTranscriptionSession(
       transport: transport, config: config, policy: policy, fallback: .failClosed)
+    // Same cancellation contract as Transcriber.transcribeViaRealtime: close
+    // the transport up front so a stalled send cannot outlive cancellation.
     do {
-      try await session.connect()
-      try await session.appendAudio(samples, sourceSampleRate: sourceSampleRate)
-      try await session.commit()
-      let text = try await session.waitForFinal()
-      await session.close()
-      return TranscriptionResult(text: text, rawData: Data(text.utf8))
+      return try await withTaskCancellationHandler {
+        try await session.connect()
+        try await session.appendAudio(samples, sourceSampleRate: sourceSampleRate)
+        try await session.commit()
+        let text = try await session.waitForFinal()
+        await session.close()
+        return TranscriptionResult(text: text, rawData: Data(text.utf8))
+      } onCancel: {
+        Task { await session.cancel() }
+      }
     } catch {
       await session.close()
       throw error

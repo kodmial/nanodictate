@@ -714,13 +714,21 @@ extension Transcriber {
       prompt: prompt,
       sourceSampleRate: info.sampleRate)
     let session = RealtimeTranscriptionSession(transport: transport, config: config)
+    // Esc/watchdog cancellation must close the WebSocket immediately instead
+    // of waiting for a stalled send to return: the handler cancels the
+    // session (which closes the transport and unblocks suspended sends)
+    // before the awaited operation observes cancellation.
     do {
-      try await session.connect()
-      try await session.appendAudio(mono, sourceSampleRate: info.sampleRate)
-      try await session.commit()
-      let text = try await session.waitForFinal()
-      await session.close()
-      return TranscriptionResult(text: text, rawData: Data(text.utf8))
+      return try await withTaskCancellationHandler {
+        try await session.connect()
+        try await session.appendAudio(mono, sourceSampleRate: info.sampleRate)
+        try await session.commit()
+        let text = try await session.waitForFinal()
+        await session.close()
+        return TranscriptionResult(text: text, rawData: Data(text.utf8))
+      } onCancel: {
+        Task { await session.cancel() }
+      }
     } catch is CancellationError {
       await session.cancel()
       throw TranscribeError.network("Request cancelled")

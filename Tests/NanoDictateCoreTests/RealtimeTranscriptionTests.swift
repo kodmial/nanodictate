@@ -173,6 +173,90 @@ final class NonCooperativeStalledSendRealtimeTransport: RealtimeTransport {
     }
 }
 
+/// Transport whose audio/commit sends stall while the session handshake is
+/// instant. Proves the append/commit send phase is bounded by
+/// `appendTimeout` instead of keeping the session pending past the watchdog.
+final class AppendStalledRealtimeTransport: RealtimeTransport {
+    var sent: [String] = []
+    var incoming: [String?]
+    var closedCount = 0
+    var appendDelayNanoseconds: UInt64
+
+    init(incoming: [String?] = [], appendDelayNanoseconds: UInt64 = 2_000_000_000) {
+        self.incoming = incoming
+        self.appendDelayNanoseconds = appendDelayNanoseconds
+    }
+
+    func send(text: String) async throws {
+        sent.append(text)
+        if text.contains("session.update") {
+            return
+        }
+        try await Task.sleep(nanoseconds: appendDelayNanoseconds)
+    }
+
+    func receive() async throws -> String? {
+        if incoming.isEmpty {
+            try await Task.sleep(nanoseconds: 5_000_000)
+            throw RealtimeTranscriptionError.transport("no scripted message")
+        }
+        return incoming.removeFirst()
+    }
+
+    func close() async {
+        closedCount += 1
+    }
+}
+
+/// Transport whose audio/commit sends ignore task cancellation and stay
+/// suspended until `close()` unblocks them, modelling a production WebSocket
+/// send suspended in lazy setup. Proves cancellation closes the transport up
+/// front instead of waiting for the stalled send to return.
+final class NonCooperativeAppendRealtimeTransport: RealtimeTransport {
+    var sentCount = 0
+    var incoming: [String?]
+    var closedCount = 0
+    private let lock = NSLock()
+    private var closed = false
+
+    init(incoming: [String?] = []) {
+        self.incoming = incoming
+    }
+
+    private var isClosed: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return closed
+    }
+
+    func send(text: String) async throws {
+        sentCount += 1
+        if text.contains("session.update") {
+            return
+        }
+        while !isClosed {
+            // Intentionally ignore cancellation: the suspended send unblocks
+            // only when the transport closes.
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    func receive() async throws -> String? {
+        if incoming.isEmpty {
+            try await Task.sleep(nanoseconds: 5_000_000)
+            throw RealtimeTranscriptionError.transport("no scripted message")
+        }
+        return incoming.removeFirst()
+    }
+
+    func close() async {
+        lock.lock()
+        closed = true
+        closedCount += 1
+        lock.unlock()
+    }
+}
+
 final class RealtimeTranscriptionTests: XCTestCase {
     private func runAsync(_ name: String, _ body: @escaping () async throws -> Void) {
         let expectation = expectation(description: name)
@@ -867,5 +951,100 @@ final class RealtimeTranscriptionTests: XCTestCase {
             expectation.fulfill()
         }
         wait(for: [expectation], timeout: 15)
+    }
+
+    @objc func testAppendStalledSendTimesOutWithinBudget() {
+        runAsync("realtime append stalled send times out within budget") {
+            // The audio-send phase must be bounded by appendTimeout: a 2s
+            // stalled append with a 0.3s budget must fail fast instead of
+            // keeping the session pending past the caller's watchdog.
+            let transport = AppendStalledRealtimeTransport(
+                incoming: [self.json(["type": "session.updated"])],
+                appendDelayNanoseconds: 2_000_000_000)
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5, appendTimeout: 0.3))
+            try await session.connect()
+            let start = Date()
+            do {
+                try await session.appendAudio([1, 2, 3], sourceSampleRate: 24000)
+                XCTFail("stalled append must throw")
+            } catch let error as RealtimeTranscriptionError {
+                XCTAssertEqual(error, .timeout("audio append timed out"))
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+            let elapsed = Date().timeIntervalSince(start)
+            XCTAssertTrue(elapsed < 1.5, "stalled append blocked session for \(elapsed)s")
+            let state = await session.currentState
+            XCTAssertEqual(state, .failed)
+            XCTAssertEqual(transport.closedCount, 1)
+        }
+    }
+
+    @objc func testCommitStalledSendTimesOutWithinBudget() {
+        runAsync("realtime commit stalled send times out within budget") {
+            // Same bound for the commit send: a 2s stalled commit with a
+            // 0.3s budget must fail fast with the transport closed.
+            let transport = AppendStalledRealtimeTransport(
+                incoming: [self.json(["type": "session.updated"])],
+                appendDelayNanoseconds: 2_000_000_000)
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5, appendTimeout: 0.3))
+            try await session.connect()
+            let start = Date()
+            do {
+                try await session.commit()
+                XCTFail("stalled commit must throw")
+            } catch let error as RealtimeTranscriptionError {
+                XCTAssertEqual(error, .timeout("commit timed out"))
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+            let elapsed = Date().timeIntervalSince(start)
+            XCTAssertTrue(elapsed < 1.5, "stalled commit blocked session for \(elapsed)s")
+            let state = await session.currentState
+            XCTAssertEqual(state, .failed)
+            XCTAssertEqual(transport.closedCount, 1)
+        }
+    }
+
+    @objc func testAppendCancellationClosesTransportWithoutWaitingForStalledSend() {
+        runAsync("realtime append cancel closes transport") {
+            // The stalled append ignores task cancellation (like a production
+            // WebSocket send suspended in lazy setup) and unblocks only when
+            // the transport closes. Cancelling the awaiting task must close
+            // the transport up front instead of waiting out appendTimeout.
+            let transport = NonCooperativeAppendRealtimeTransport(
+                incoming: [self.json(["type": "session.updated"])])
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5, appendTimeout: 30))
+            try await session.connect()
+            let start = Date()
+            let pending = Task {
+                try await session.appendAudio([1, 2, 3], sourceSampleRate: 24000)
+            }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            pending.cancel()
+            do {
+                try await pending.value
+                XCTFail("cancelled append must throw")
+            } catch is CancellationError {
+                // Acceptable: outer cancellation observed before the session
+                // mapped it to .cancelled.
+            } catch let error as RealtimeTranscriptionError {
+                XCTAssertEqual(error, .cancelled)
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+            let elapsed = Date().timeIntervalSince(start)
+            XCTAssertTrue(elapsed < 5, "cancelled append blocked session for \(elapsed)s")
+            XCTAssertEqual(transport.closedCount, 1)
+        }
     }
 }

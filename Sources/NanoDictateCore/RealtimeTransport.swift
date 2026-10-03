@@ -268,10 +268,21 @@ public final class URLSessionWebSocketTransport: RealtimeTransport {
     guard let task = ensureTask() else {
       throw RealtimeTranscriptionError.transport("websocket unavailable")
     }
-    do {
-      try await task.send(.string(text))
-    } catch {
-      throw RealtimeTranscriptionError.transport(error.localizedDescription)
+    // Cancelling the surrounding task must not leave the WebSocket open
+    // behind a suspended send: abort the underlying task up front so a
+    // stalled send unblocks instead of outliving Esc/watchdog cancellation.
+    // Cancellation errors propagate unchanged so session-level handlers keep
+    // their cancelled-vs-transport mapping.
+    try await withTaskCancellationHandler {
+      do {
+        try await task.send(.string(text))
+      } catch is CancellationError {
+        throw CancellationError()
+      } catch {
+        throw RealtimeTranscriptionError.transport(error.localizedDescription)
+      }
+    } onCancel: {
+      task.cancel()
     }
   }
 

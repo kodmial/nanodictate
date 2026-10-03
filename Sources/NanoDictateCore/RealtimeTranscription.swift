@@ -118,6 +118,10 @@ public struct RealtimeSessionPolicy: Equatable {
   public var connectTimeout: TimeInterval
   /// Seconds to wait for the final completion after `commit`.
   public var commitTimeout: TimeInterval
+  /// Total budget for the audio-send phase (`appendAudio` chunks plus the
+  /// `commit` send). Bounds otherwise unbounded WebSocket sends so a stalled
+  /// upload cannot outlive the caller's watchdog.
+  public var appendTimeout: TimeInterval
   /// Seconds to wait for transport close to settle.
   public var closeTimeout: TimeInterval
   /// Reconnect attempts after a transport drop (0 = no auto reconnect).
@@ -130,6 +134,7 @@ public struct RealtimeSessionPolicy: Equatable {
   public init(
     connectTimeout: TimeInterval = 10,
     commitTimeout: TimeInterval = 20,
+    appendTimeout: TimeInterval = 15,
     closeTimeout: TimeInterval = 5,
     maxReconnectAttempts: Int = 2,
     reconnectBaseDelay: TimeInterval = 0.5,
@@ -137,6 +142,7 @@ public struct RealtimeSessionPolicy: Equatable {
   ) {
     self.connectTimeout = connectTimeout
     self.commitTimeout = commitTimeout
+    self.appendTimeout = appendTimeout
     self.closeTimeout = closeTimeout
     self.maxReconnectAttempts = maxReconnectAttempts
     self.reconnectBaseDelay = reconnectBaseDelay
@@ -581,7 +587,11 @@ public actor RealtimeTranscriptionSession {
 
   /// Stream microphone audio continuously. Samples are resampled from
   /// `sourceSampleRate` to the model-required 24 kHz and sent as ordered
-  /// base64 PCM16 appends (no WAV chunks are written).
+  /// base64 PCM16 appends (no WAV chunks are written). The whole send phase
+  /// is bounded by `policy.appendTimeout`: each chunk send receives only the
+  /// unspent remainder, so a stalled upload fails fast instead of outliving
+  /// the caller's watchdog. Timeout/cancellation closes the transport before
+  /// returning (a suspended WebSocket send unblocks only on close).
   public func appendAudio(_ samples: [Int16], sourceSampleRate: Int) async throws {
     try Task.checkCancellation()
     guard state == .ready || state == .streaming else {
@@ -593,13 +603,31 @@ public actor RealtimeTranscriptionSession {
     let realtime = RealtimePCMConverter.resample(samples, fromRate: sourceSampleRate, toRate: 24000)
     let chunks = RealtimePCMConverter.chunk(realtime, maxSamples: policy.maxSamplesPerAppend)
     state = .streaming
+    let deadline = Date().addingTimeInterval(policy.appendTimeout)
     for chunk in chunks {
       try Task.checkCancellation()
+      let remaining = deadline.timeIntervalSinceNow
+      guard remaining > 0 else {
+        state = .failed
+        lastError = "audio append timed out"
+        await closeTransportOnce()
+        throw RealtimeTranscriptionError.timeout("audio append timed out")
+      }
       let payload = RealtimeClientEvents.appendAudio(
         base64PCM: RealtimePCMConverter.base64PCM(from: chunk))
       do {
-        try await transport.send(text: payload)
+        try await sendWithTimeout(text: payload, timeout: remaining)
+      } catch is RealtimeWaitTimeout {
+        state = .failed
+        lastError = "audio append timed out"
+        await closeTransportOnce()
+        throw RealtimeTranscriptionError.timeout("audio append timed out")
       } catch {
+        if error is CancellationError {
+          state = .cancelled
+          await closeTransportOnce()
+          throw RealtimeTranscriptionError.cancelled
+        }
         state = .failed
         lastError = error.localizedDescription
         throw RealtimeTranscriptionError.transport(error.localizedDescription)
@@ -608,6 +636,8 @@ public actor RealtimeTranscriptionSession {
   }
 
   /// End the audio turn: the provider emits the final completion event.
+  /// The `commit` send is bounded by `policy.appendTimeout` and closes the
+  /// transport on timeout/cancellation, like the append phase above.
   public func commit() async throws {
     try Task.checkCancellation()
     guard state == .ready || state == .streaming else {
@@ -615,8 +645,18 @@ public actor RealtimeTranscriptionSession {
     }
     state = .committing
     do {
-      try await transport.send(text: RealtimeClientEvents.commit())
+      try await sendWithTimeout(text: RealtimeClientEvents.commit(), timeout: policy.appendTimeout)
+    } catch is RealtimeWaitTimeout {
+      state = .failed
+      lastError = "commit timed out"
+      await closeTransportOnce()
+      throw RealtimeTranscriptionError.timeout("commit timed out")
     } catch {
+      if error is CancellationError {
+        state = .cancelled
+        await closeTransportOnce()
+        throw RealtimeTranscriptionError.cancelled
+      }
       state = .failed
       lastError = error.localizedDescription
       throw RealtimeTranscriptionError.transport(error.localizedDescription)

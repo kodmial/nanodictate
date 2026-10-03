@@ -1251,15 +1251,17 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     let watchdogDuration =
       OverlayController.processingMaxDuration
       + (autoFailover && !failoverCandidates.isEmpty ? Transcriber.networkRequestTimeout : 0)
-    // Realtime sessions need their own budget (connect + appends + final
-    // wait), not the batch watchdog: connectTimeout (10 s) + commitTimeout
+    // Realtime sessions need their own budget (connect + audio sends +
+    // final wait), not the batch watchdog: connectTimeout (10 s) +
+    // appendTimeout (15 s, all appends plus the commit send) + commitTimeout
     // (20 s) already exceed processingMaxDuration (25 s), so a valid realtime
     // completion could arrive after failTranscription ends the session and be
     // dropped. Independent of the auto-failover margin (realtime is
     // fail-closed and never runs the failover chain).
     let realtimePolicy = RealtimeSessionPolicy()
     let realtimeWatchdogDuration =
-      realtimePolicy.connectTimeout + realtimePolicy.commitTimeout + realtimePolicy.closeTimeout + 5
+      realtimePolicy.connectTimeout + realtimePolicy.appendTimeout + realtimePolicy.commitTimeout
+      + realtimePolicy.closeTimeout + 5
     let isRealtimeRequest: Bool = {
       if let provider = self.effectiveOrdinaryProvider() {
         return self.isRealtimeOrdinaryProvider(provider)
