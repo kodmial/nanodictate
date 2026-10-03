@@ -309,6 +309,9 @@ public struct RealtimeTranscriptAccumulator: Equatable {
   public var hasCompleted: Bool {
     completed.values.contains { !$0.isEmpty }
   }
+
+  /// Whether any item completed, including an empty (silent) transcript.
+  public var hasAnyCompletion: Bool { !completed.isEmpty }
 }
 
 // MARK: - PCM conversion and resampling
@@ -653,8 +656,8 @@ public actor RealtimeTranscriptionSession {
     await ensureReceiveChannel()
     while true {
       try throwIfWaitTerminal()
-      if let final = accumulator.finalText {
-        return final
+      if accumulator.hasAnyCompletion {
+        return accumulator.finalText ?? ""
       }
       if let done = try transcriptIfPastDeadline(deadline) {
         return done
@@ -704,8 +707,8 @@ public actor RealtimeTranscriptionSession {
       if state == .failed {
         throw RealtimeTranscriptionError.sessionFailed(lastError ?? "session failed")
       }
-      if let final = accumulator.finalText {
-        return final
+      if accumulator.hasAnyCompletion {
+        return accumulator.finalText ?? ""
       }
       let item = await receiveChannel?.dequeue()
       guard let item else {
@@ -713,9 +716,9 @@ public actor RealtimeTranscriptionSession {
         // available; otherwise fail the session closed. Tear down the pump
         // and transport so an unclosed session cannot leave runPump
         // appending outcomes indefinitely.
-        if let final = accumulator.finalText {
+        if accumulator.hasAnyCompletion {
           await closeTransportOnce()
-          return final
+          return accumulator.finalText ?? ""
         }
         let partial = accumulator.partialText
         if !partial.isEmpty {
@@ -734,9 +737,9 @@ public actor RealtimeTranscriptionSession {
           // available; otherwise fail the session closed. Tear down the
           // pump and transport (see above); runPump itself keeps running
           // on EOF so waitForAck can read until its deadline.
-          if let final = accumulator.finalText {
+          if accumulator.hasAnyCompletion {
             await closeTransportOnce()
-            return final
+            return accumulator.finalText ?? ""
           }
           let partial = accumulator.partialText
           if !partial.isEmpty {
@@ -753,9 +756,9 @@ public actor RealtimeTranscriptionSession {
       case .failure(let transportError):
         if case .transport(let message) = transportError {
           // Terminal transport failure: same teardown as EOF above.
-          if let final = accumulator.finalText {
+          if accumulator.hasAnyCompletion {
             await closeTransportOnce()
-            return final
+            return accumulator.finalText ?? ""
           }
           let partial = accumulator.partialText
           if !partial.isEmpty {
@@ -923,6 +926,9 @@ extension RealtimeTranscriptionSession {
   /// Returns nil when still before the deadline.
   fileprivate func transcriptIfPastDeadline(_ deadline: Date) throws -> String? {
     guard Date() >= deadline else { return nil }
+    if accumulator.hasAnyCompletion {
+      return accumulator.finalText ?? ""
+    }
     let partial = accumulator.partialText
     if !partial.isEmpty {
       return partial
@@ -932,8 +938,8 @@ extension RealtimeTranscriptionSession {
 
   /// Buffered transcript when available (completed preferred, else partial).
   fileprivate func bufferedTranscript() -> String? {
-    if let final = accumulator.finalText {
-      return final
+    if accumulator.hasAnyCompletion {
+      return accumulator.finalText ?? ""
     }
     let partial = accumulator.partialText
     return partial.isEmpty ? nil : partial

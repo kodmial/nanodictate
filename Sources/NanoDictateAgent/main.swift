@@ -1268,6 +1268,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       // stream raw PCM via RealtimeTranscriptionSession — never as a WAV
       // batch upload through Transcriber (which rejects realtime profiles
       // with an invalid spec). Fail-closed: no implicit batch fallback.
+      // Keep manual retry consistent with the current recording on both paths.
+      let wav = WAVEncoder.encode(samples: samples)
+      // Last WAV kept in memory (RetryProvider): manual retry with another
+      // provider (`nanodictate retry`) and auto-failover reuse it.
+      self.retryProvider.store(wav: wav)
       if let realtimeProvider = self.effectiveOrdinaryProvider(),
         self.isRealtimeOrdinaryProvider(realtimeProvider)
       {
@@ -1297,10 +1302,6 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         }
         return
       }
-      let wav = WAVEncoder.encode(samples: samples)
-      // Last WAV kept in memory (RetryProvider): manual retry with another
-      // provider (`nanodictate retry`) and auto-failover reuse it.
-      self.retryProvider.store(wav: wav)
 
       do {
         let (result, providerID) = try await self.transcribeAutomatically(wav: wav)

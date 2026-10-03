@@ -240,6 +240,8 @@ public final class URLSessionWebSocketTransport: RealtimeTransport {
   private let url: URL
   private let apiKey: String
   private var task: URLSessionWebSocketTask?
+  private var closed = false
+  private let lock = NSLock()
   private let session: URLSession
 
   public init(url: URL, apiKey: String, session: URLSession = .shared) {
@@ -249,17 +251,21 @@ public final class URLSessionWebSocketTransport: RealtimeTransport {
   }
 
   /// Connect lazily on first send/receive.
-  private func ensureTask() {
-    guard task == nil else { return }
+  private func ensureTask() -> URLSessionWebSocketTask? {
+    lock.lock()
+    defer { lock.unlock() }
+    if closed { return nil }
+    if let task { return task }
     var request = URLRequest(url: url)
     request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-    task = session.webSocketTask(with: request)
-    task?.resume()
+    let created = session.webSocketTask(with: request)
+    task = created
+    created.resume()
+    return created
   }
 
   public func send(text: String) async throws {
-    ensureTask()
-    guard let task else {
+    guard let task = ensureTask() else {
       throw RealtimeTranscriptionError.transport("websocket unavailable")
     }
     do {
@@ -270,8 +276,7 @@ public final class URLSessionWebSocketTransport: RealtimeTransport {
   }
 
   public func receive() async throws -> String? {
-    ensureTask()
-    guard let task else {
+    guard let task = ensureTask() else {
       throw RealtimeTranscriptionError.transport("websocket unavailable")
     }
     do {
@@ -295,7 +300,11 @@ public final class URLSessionWebSocketTransport: RealtimeTransport {
   }
 
   public func close() async {
-    task?.cancel(with: .normalClosure, reason: nil)
+    lock.lock()
+    closed = true
+    let current = task
     task = nil
+    lock.unlock()
+    current?.cancel(with: .normalClosure, reason: nil)
   }
 }
