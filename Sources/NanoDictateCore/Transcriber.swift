@@ -672,8 +672,9 @@ extension Transcriber {
   // MARK: - Realtime path
 
   /// Transcribe WAV audio through one stateful realtime session.
-  /// Decodes the WAV to Int16 samples (mono-mixed when needed), then runs
-  /// connect → append → commit → waitForFinal → close. Fail-closed: any
+  /// Decodes the WAV to Int16 samples (mono-mixed when needed), then
+  /// delegates the session lifecycle (connect → append → commit →
+  /// waitForFinal → close) to `RealtimeDictationRunner`. Fail-closed: any
   /// realtime failure throws and never degrades into batch uploads.
   /// Realtime bypasses custom routing: the session always dials the fixed
   /// `wss://api.openai.com/v1/realtime` endpoint with the provider `apiKey`
@@ -715,33 +716,24 @@ extension Transcriber {
       keywords: STTContextualBiasing.normalizeVocabulary(contextualBias.vocabulary),
       extraLanguages: STTContextualBiasing.normalizeExtraLanguages(contextualBias.extraLanguages),
       sourceSampleRate: info.sampleRate)
-    let session = RealtimeTranscriptionSession(transport: transport, config: config)
-    // Esc/watchdog cancellation must close the WebSocket immediately instead
-    // of waiting for a stalled send to return: the handler cancels the
-    // session (which closes the transport and unblocks suspended sends)
-    // before the awaited operation observes cancellation.
+    // Single session path: WAV decoding, mono mixing, and error mapping stay
+    // here; the connect/append/commit/final/close lifecycle (including
+    // cancellation that preserves `.cancelled`) lives in the runner so the
+    // two flows cannot diverge.
     do {
-      return try await withTaskCancellationHandler {
-        try await session.connect()
-        try await session.appendAudio(mono, sourceSampleRate: info.sampleRate)
-        try await session.commit()
-        let text = try await session.waitForFinal()
-        await session.close()
-        return TranscriptionResult(text: text, rawData: Data(text.utf8))
-      } onCancel: {
-        Task { await session.cancel() }
-      }
+      return try await RealtimeDictationRunner.transcribe(
+        samples: mono,
+        sourceSampleRate: info.sampleRate,
+        config: config,
+        transport: transport)
     } catch is CancellationError {
-      await session.cancel()
       throw TranscribeError.network("Request cancelled")
     } catch let error as RealtimeTranscriptionError {
-      await session.close()
       if case .cancelled = error {
         throw TranscribeError.network("Request cancelled")
       }
       throw TranscribeError.network(Self.describeRealtime(error))
     } catch {
-      await session.close()
       if error is TranscribeError {
         throw error
       }

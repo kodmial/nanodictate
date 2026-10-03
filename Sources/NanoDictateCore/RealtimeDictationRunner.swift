@@ -4,10 +4,12 @@ import Foundation
 
 /// One-shot ordinary dictation over a stateful realtime session.
 ///
-/// Batch callers keep using `Transcriber.transcribe` (which rejects
-/// `.streamingSession` profiles with an invalid `STTRequestSpec`); ordinary
-/// push-to-talk with a realtime profile (today: `gpt-live-transcribe`) runs
-/// here: raw PCM samples stream through `RealtimeTranscriptionSession`
+/// Production entry point is `Transcriber.transcribe(wav:)` (which rejects
+/// `.streamingSession` profiles with an invalid `STTRequestSpec` on the batch
+/// path and routes realtime profiles to `transcribeViaRealtime` below):
+/// ordinary push-to-talk with a realtime profile (today:
+/// `gpt-live-transcribe`) runs here through this runner — raw PCM samples
+/// stream through `RealtimeTranscriptionSession`
 /// (connect -> append -> commit -> final), never as a WAV batch upload.
 /// Fail-closed: a realtime failure surfaces and never falls back to batch.
 public enum RealtimeDictationRunner {
@@ -27,8 +29,10 @@ public enum RealtimeDictationRunner {
   ) async throws -> TranscriptionResult {
     let session = RealtimeTranscriptionSession(
       transport: transport, config: config, policy: policy, fallback: .failClosed)
-    // Same cancellation contract as Transcriber.transcribeViaRealtime: close
-    // the transport up front so a stalled send cannot outlive cancellation.
+    // Esc/watchdog cancellation must close the WebSocket immediately instead
+    // of waiting for a stalled send to return: the handler cancels the
+    // session (which closes the transport and unblocks suspended sends)
+    // before the awaited operation observes cancellation.
     do {
       return try await withTaskCancellationHandler {
         try await session.connect()
@@ -40,8 +44,24 @@ public enum RealtimeDictationRunner {
       } onCancel: {
         Task { await session.cancel() }
       }
+    } catch is CancellationError {
+      await session.cancel()
+      throw CancellationError()
+    } catch let error as RealtimeTranscriptionError {
+      if case .cancelled = error {
+        await session.cancel()
+      } else {
+        await session.close()
+      }
+      throw error
     } catch {
-      await session.close()
+      // Concurrent cancellation racing a failure must not flip `.cancelled`
+      // back to `.closed`: cancelling preserves the terminal state.
+      if Task.isCancelled {
+        await session.cancel()
+      } else {
+        await session.close()
+      }
       throw error
     }
   }

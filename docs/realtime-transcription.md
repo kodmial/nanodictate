@@ -97,8 +97,9 @@ is deterministic after stop/session completion.
 ## Implementation map
 
 - `Sources/NanoDictateCore/RealtimeTranscription.swift`: event parser,
-  accumulator, PCM converter/resampler, client event builders, endpoint,
-  `RealtimeTranscriptionSession` actor.
+  accumulator, session/fallback policies, `RealtimeTranscriptionSession` actor.
+- `Sources/NanoDictateCore/RealtimeTranscriptionSupport.swift`: PCM
+  converter/resampler, client event builders, endpoint.
 - `Sources/NanoDictateCore/RealtimeTransport.swift`: `RealtimeTransport`
   protocol, `RealtimeReceiveChannel` receive channel, `URLSessionWebSocketTransport`.
 - `Sources/NanoDictateCore/STTCapabilities.swift`: `STTUploadFormat.pcm16`,
@@ -106,6 +107,10 @@ is deterministic after stop/session completion.
   (now implemented), `gpt-live-transcribe` registry entry.
 - `Sources/NanoDictateCore/STTAdapter.swift`: batch `plan` refuses streaming
   profiles (nil URL) so the batch path cannot duplicate realtime audio.
+- `Sources/NanoDictateCore/Transcriber.swift`: `transcribeViaRealtime`
+  (production realtime path, routing-bypass warning).
+- `Sources/NanoDictateAgent/main.swift`: realtime routing, realtime watchdog,
+  task retention, failover/retry exclusion.
 - `Tests/NanoDictateCoreTests/RealtimeTranscriptionTests.swift`: event parsing,
   accumulator, payload builders, resampling, and session state with a mocked
   transport.
