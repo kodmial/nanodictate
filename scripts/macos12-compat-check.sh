@@ -45,6 +45,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/swift-rust-build-contract.sh
+source "$REPO_ROOT/scripts/swift-rust-build-contract.sh"
 MODE="full"
 ALLOW_NON12_RUNTIME=0
 RESULT_DIR="${REPO_ROOT}/.opencode-tmp/macos12-compat-results"
@@ -168,10 +170,18 @@ phase "deployment-target-build"
 if [ "$SKIP_BUILD" = "1" ]; then
   log "skip-build requested, deployment-target build not executed"
 else
-  set_check "MACOSX_DEPLOYMENT_TARGET=12.0 swift build succeeds"
-  (cd "$REPO_ROOT" && MACOSX_DEPLOYMENT_TARGET=12.0 swift build) \
-    || fail "swift build failed with MACOSX_DEPLOYMENT_TARGET=12.0 (availability error?)"
-  log "deployment-target build ok"
+  set_check "canonical production Rust archive is prepared"
+  ARCHIVE="$(prepare_rust_archive)" \
+    || fail "failed to prepare the production Rust archive"
+  [ -f "$ARCHIVE" ] || fail "missing Rust archive after preparation: $ARCHIVE"
+  log "Rust archive: $ARCHIVE"
+
+  set_check "MACOSX_DEPLOYMENT_TARGET=12.0 Swift build links the canonical Rust archive"
+  (
+    export MACOSX_DEPLOYMENT_TARGET=12.0
+    swift_build_with_rust "$ARCHIVE"
+  ) || fail "Swift/Rust build failed with MACOSX_DEPLOYMENT_TARGET=12.0 (availability or link error?)"
+  log "deployment-target Swift/Rust build ok"
 fi
 
 # --- 4. Freshly built CLI sanity (no hardware, no TCC) -----------------------
