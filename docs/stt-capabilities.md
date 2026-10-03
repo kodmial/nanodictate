@@ -169,8 +169,10 @@ extra_languages = ["en", "ru"]
   (`gpt-transcribe`); single-hint models keep `language` only, `none`
   profiles send nothing.
 - Dedicated `keywords[]` multipart serialization exists but no built-in
-  profile emits it today (`supportsKeywordBiasing == false` everywhere) —
-  it is reserved for future models with a native keywords field.
+  batch profile emits it (`supportsKeywordBiasing == false` for batch) —
+  it is reserved for batch models with a native keywords field. The
+  realtime `gpt-live-transcribe` family (`supportsKeywordBiasing == true`)
+  sends the normalized vocabulary as `keywords` in `session.update`.
 - Limits and escaping are covered by request-builder tests; debug logs
   record only `vocabulary_terms=N` counts, never the terms themselves.
 

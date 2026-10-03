@@ -57,6 +57,56 @@ final class RoutingRoleTests: XCTestCase {
         )
     }
 
+    /// Realtime providers never run the chunked/live pipeline: one stateful
+    /// session per dictation via processSingleRequest, not one session per
+    /// segment plus a final replay.
+    @objc func testChunkedRealtimeRoutesThroughSingleRequest() {
+        guard let source = Self.agentMainSource() else {
+            XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
+            return
+        }
+        XCTAssertTrue(
+            source.contains("func chunkedUsesRealtime()"),
+            "agent обязан определять realtime-роли для chunked/live"
+        )
+        let samplesBody = Self.functionBody(named: "processSamples", in: source)
+        XCTAssertTrue(
+            samplesBody.contains("chunkedUsesRealtime()"),
+            "processSamples обязан проверять realtime перед chunked"
+        )
+        XCTAssertTrue(
+            samplesBody.contains("processSingleRequest(samples)"),
+            "realtime-запись при chunked обязана идти через processSingleRequest"
+        )
+        let chunkedBody = Self.functionBody(named: "processChunked", in: source)
+        XCTAssertTrue(
+            chunkedBody.contains("chunkedUsesRealtime()"),
+            "processChunked обязан защищаться от realtime-ролей"
+        )
+        let liveBody = Self.functionBody(named: "handleLiveSegment", in: source)
+        XCTAssertTrue(
+            liveBody.contains("chunkedUsesRealtime()"),
+            "live-сегменты не должны открывать per-segment realtime-сессии"
+        )
+    }
+
+    /// Live subscription is skipped for realtime providers: no per-segment
+    /// sessions, no live tail buffering for the single-session path.
+    @objc func testLiveSubscriptionSkippedForRealtime() {
+        guard let source = Self.agentMainSource() else {
+            XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
+            return
+        }
+        XCTAssertTrue(
+            source.contains("if chunked, !chunkedUsesRealtime()"),
+            "подписка live-сегментов обязана пропускаться для realtime"
+        )
+        XCTAssertTrue(
+            source.contains("subscribeLiveNanoDictate()"),
+            "subscribeLiveNanoDictate обязана существовать для batch"
+        )
+    }
+
     // MARK: - Helpers (зеркало LiveSegmentFailureTests)
 
     private static func agentMainSource() -> String? {

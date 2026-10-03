@@ -107,4 +107,41 @@ final class TranscriberRealtimeTests: XCTestCase {
             XCTAssertEqual(http.requestCount, 1)
         }
     }
+
+    @objc func testRealtimeForwardsVocabularyAsSessionKeywords() {
+        runAsync("realtime forwards vocabulary") {
+            let wav = WAVEncoder.encode(samples: [0, 1000, 2000, 3000])
+            let realtime = MockRealtimeTransport(incoming: [
+                self.json(["type": "session.updated"]),
+                self.json([
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "item_id": "item_1", "content_index": 0,
+                    "transcript": "hello realtime",
+                ]),
+            ])
+            let http = MockTransport(status: 200, body: Data(#"{"text":"batch"}"#.utf8))
+            let transcriber = Transcriber(
+                baseURL: "https://api.openai.com/v1/audio/transcriptions",
+                model: "gpt-live-transcribe",
+                apiKey: "test-key",
+                transport: http,
+                networkChecker: { true },
+                adapterID: "openai",
+                contextualBias: STTContextualBias(
+                    vocabulary: ["Kubernetes", "Whisper"], extraLanguages: []),
+                retrySleep: { _ in },
+                realtimeTransportFactory: { realtime })
+            let result = try await transcriber.transcribe(wav: wav)
+            XCTAssertEqual(result.text, "hello realtime")
+            XCTAssertEqual(http.requestCount, 0)
+            guard let update = realtime.sent.first else {
+                XCTFail("session.update must be sent")
+                return
+            }
+            XCTAssertTrue(update.contains("session.update"))
+            XCTAssertTrue(update.contains("Kubernetes"))
+            XCTAssertTrue(update.contains("Whisper"))
+            XCTAssertTrue(update.contains("keywords"))
+        }
+    }
 }

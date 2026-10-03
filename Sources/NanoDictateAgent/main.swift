@@ -1142,10 +1142,12 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       Logger.log("record ready: rust session engine missing at cue time", level: "error")
     }
     state = .recording
-    if chunked {
+    if chunked, !chunkedUsesRealtime() {
       // Live dictation: each utterance (pause ≥ pauseDuration) is
       // recognized and inserted on the fly; by the time of Alt+Alt the
-      // text is already partly in the input field.
+      // text is already partly in the input field. Realtime providers skip
+      // live segments: the recording runs as one session via
+      // processSingleRequest instead.
       subscribeLiveNanoDictate()
     }
     if isDebug {
@@ -1196,7 +1198,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// Called both on user stop and after the forced duration limit
   /// (see `onRecordingLimitReached`).
   private func processSamples(_ samples: [Int16]) {
-    if chunked {
+    // Realtime providers never run the chunked/live pipeline: one stateful
+    // WebSocket session per dictation (processSingleRequest) instead of one
+    // session per segment plus a final replay.
+    if chunked, !chunkedUsesRealtime() {
       processChunked(samples)
       return
     }
@@ -1381,6 +1386,13 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// replacement of the changed range in a single action.
   // swiftlint:disable:next cyclomatic_complexity function_body_length
   private func processChunked(_ samples: [Int16]) {
+    // Defense in depth: a realtime role must never open per-segment
+    // sessions (see processSamples routing). Direct callers fall back to
+    // the single-session path with the realtime watchdog budget.
+    if chunkedUsesRealtime() {
+      processSingleRequest(samples)
+      return
+    }
     state = .transcribing
     // New loop — previous recognition's cancel token does not apply
     // (same reset as in processSingleRequest).
@@ -1624,7 +1636,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   private func handleRecordingLimitReached(samples: [Int16]) {
     guard state == .recording else { return }
     Logger.log("record limit reached (\(samples.count) samples)", level: "info")
-    if chunked {
+    if chunked, !chunkedUsesRealtime() {
       // Live dictation: the tail was already handed by onSpeechSegment BEFORE
       // this call (performForcedStop: tail → onRecordingLimitReached) and
       // stands first in liveExecutor; here — only the guard and the final
@@ -1643,7 +1655,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   private func handleAutoStop(samples: [Int16]) {
     guard state == .recording else { return }
     Logger.log("auto-stop by silence (\(samples.count) samples)", level: "info")
-    if chunked {
+    if chunked, !chunkedUsesRealtime() {
       // Live dictation: the tail stands first in liveExecutor (tail was
       // delivered by onSpeechSegment before onAutoStop), here — the final
       // pass over the snapshot. No audio.stop(): AudioService already tears
@@ -1731,6 +1743,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   private func handleLiveSegment(
     runState: LiveRunState
   ) async {
+    // Defense in depth: realtime recordings never subscribe to live
+    // segments, so this drain must not open per-segment sessions.
+    if chunkedUsesRealtime() {
+      return
+    }
     // Drain loop: each iteration takes exactly one batch FIFO. Nil means the
     // buffer is empty (earlier iterations already transcribed the merged
     // batch that bounds the request count when STT falls behind).
@@ -1849,6 +1866,14 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// over the whole WAV → the common terminal path completeChunkedInsertion.
   private func liveFinalize() {
     guard state == .recording else { return }
+    // Realtime providers never run the live pipeline (see processSamples):
+    // stop and run one session with the realtime watchdog budget.
+    if chunkedUsesRealtime() {
+      liveRunState?.isCancelled = true
+      liveRunState = nil
+      sendRecording()
+      return
+    }
     guard let runState = liveRunState else {
       // Logically unreachable (the subscription is set on successful start
       // together with state = .recording) — safety path into offline chunking.
@@ -1899,6 +1924,14 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// callback) and stands first in liveExecutor; here — only the guard and
   /// the final pass over the passed samples (no audio.stop()).
   private func liveFinalizeFromSamples(_ samples: [Int16]) {
+    // Realtime providers never run the live pipeline (see processSamples):
+    // one session with the realtime watchdog budget instead.
+    if chunkedUsesRealtime() {
+      liveRunState?.isCancelled = true
+      liveRunState = nil
+      processSingleRequest(samples)
+      return
+    }
     guard let runState = liveRunState else {
       processChunked(samples)
       return
@@ -2242,6 +2275,25 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   private func isRealtimeOrdinaryProvider(_ provider: AppConfig.Provider) -> Bool {
     let resolvedModel = ProviderRequestBuilder.resolveModel(provider.model, for: provider.id)
     return ProviderRequestBuilder.isRealtime(adapterID: provider.id, model: resolvedModel)
+  }
+
+  /// Whether a routing id resolves to a realtime provider.
+  private func isRealtimeProviderID(_ providerID: String?) -> Bool {
+    guard let providerID, let provider = providersByID[providerID] else { return false }
+    return isRealtimeOrdinaryProvider(provider)
+  }
+
+  /// Whether the chunked/live pipeline would use a realtime provider for
+  /// segments or the final pass. Chunked/live opens one session per segment
+  /// (plus a final replay) under the batch watchdog budget, contradicting
+  /// the one-session-per-dictation realtime contract — such recordings run
+  /// through `processSingleRequest` instead. Chunked paths use role
+  /// providers directly without auto-failover, so checking the resolved
+  /// segment/final roles covers every realtime entry point there.
+  private func chunkedUsesRealtime() -> Bool {
+    let segmentID = segmentRoleProviderID ?? activeProviderID
+    let finalID = finalRoleProviderID ?? activeProviderID
+    return isRealtimeProviderID(segmentID) || isRealtimeProviderID(finalID)
   }
 
   /// Effective upload container for a provider: config `upload_format`
