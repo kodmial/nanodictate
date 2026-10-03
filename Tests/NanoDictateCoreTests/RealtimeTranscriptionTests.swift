@@ -135,6 +135,44 @@ final class StalledSendRealtimeTransport: RealtimeTransport {
     }
 }
 
+/// Transport whose `send` ignores task cancellation and stays suspended until
+/// `close()` unblocks it, modelling a production WebSocket send suspended in
+/// lazy setup. Proves the connect timeout closes the transport before draining
+/// the send task instead of blocking group exit behind the pending send.
+final class NonCooperativeStalledSendRealtimeTransport: RealtimeTransport {
+    var sentCount = 0
+    var closedCount = 0
+    private let lock = NSLock()
+    private var closed = false
+
+    private var isClosed: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return closed
+    }
+
+    func send(text: String) async throws {
+        sentCount += 1
+        while !isClosed {
+            // Intentionally ignore cancellation: a suspended WebSocket send
+            // unblocks only when the transport closes.
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    func receive() async throws -> String? {
+        try await Task.sleep(nanoseconds: 5_000_000)
+        throw RealtimeTranscriptionError.transport("no scripted message")
+    }
+
+    func close() async {
+        lock.lock()
+        closed = true
+        closedCount += 1
+        lock.unlock()
+    }
+}
+
 final class RealtimeTranscriptionTests: XCTestCase {
     private func runAsync(_ name: String, _ body: @escaping () async throws -> Void) {
         let expectation = expectation(description: name)
@@ -471,6 +509,36 @@ final class RealtimeTranscriptionTests: XCTestCase {
             }
             let elapsed = Date().timeIntervalSince(start)
             XCTAssertTrue(elapsed < 1.5, "stalled send blocked connect for \(elapsed)s")
+            let state = await session.currentState
+            XCTAssertEqual(state, .failed)
+            let lastError = await session.lastErrorMessage
+            XCTAssertEqual(lastError, "no session ack")
+            XCTAssertEqual(transport.closedCount, 1)
+        }
+    }
+
+    @objc func testConnectNonCooperativeStalledSendTimesOutWithinBudget() {
+        runAsync("realtime non-cooperative stalled send times out within budget") {
+            // The stalled send ignores task cancellation (like a production
+            // WebSocket send suspended in lazy setup) and unblocks only when
+            // the transport closes. The timeout must close before draining the
+            // send task so connect() still fails fast within budget.
+            let transport = NonCooperativeStalledSendRealtimeTransport()
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 0.3, commitTimeout: 1))
+            let start = Date()
+            do {
+                try await session.connect()
+                XCTFail("stalled send must throw")
+            } catch let error as RealtimeTranscriptionError {
+                XCTAssertEqual(error, .timeout("no session ack"))
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+            let elapsed = Date().timeIntervalSince(start)
+            XCTAssertTrue(elapsed < 1.5, "non-cooperative send blocked connect for \(elapsed)s")
             let state = await session.currentState
             XCTAssertEqual(state, .failed)
             let lastError = await session.lastErrorMessage

@@ -809,9 +809,12 @@ public actor RealtimeTranscriptionSession {
 
   /// Bounded initial send: lazy WebSocket setup inside `transport.send`
   /// must not keep `connect()` pending past `timeout`. Expiring the wait
-  /// cancels only the send waiter (via the task group); the caller closes
-  /// the transport and marks the session failed. Transport errors propagate
-  /// unchanged so `connect()` preserves its existing error mapping.
+  /// closes the transport *before* waiting for the send task to finish: send
+  /// cancellation is cooperative, and a production send can stay suspended
+  /// until the WebSocket closes, so draining the task group first would block
+  /// the very close that unblocks it. The caller marks the session failed.
+  /// Transport errors propagate unchanged so `connect()` preserves its
+  /// existing error mapping.
   private func sendWithTimeout(text: String, timeout: TimeInterval) async throws {
     let transport = self.transport
     let nanoseconds = UInt64(max(0, timeout) * 1_000_000_000)
@@ -828,10 +831,18 @@ public actor RealtimeTranscriptionSession {
         group.cancelAll()
         _ = try? await group.next()
       } catch is RealtimeWaitTimeout {
+        // Unblock a non-cooperative send first: closing the transport lets a
+        // suspended WebSocket send finish instead of blocking group exit.
+        await closeTransportOnce()
         group.cancelAll()
         _ = try? await group.next()
         throw RealtimeWaitTimeout.timedOut
       } catch {
+        if error is CancellationError {
+          // Same ordering for outer cancellation: close before draining so a
+          // suspended send cannot block task-group exit.
+          await closeTransportOnce()
+        }
         group.cancelAll()
         _ = try? await group.next()
         throw error
