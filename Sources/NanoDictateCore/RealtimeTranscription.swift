@@ -528,6 +528,9 @@ public actor RealtimeTranscriptionSession {
 
   /// Open the session: send `session.update` and wait for
   /// `session.created`/`session.updated` within `policy.connectTimeout`.
+  /// The timeout is a total budget: the initial send (including lazy
+  /// WebSocket setup) is bounded by `connectTimeout`, and the acknowledgement
+  /// wait receives only the unspent remainder.
   public func connect() async throws {
     guard state == .idle else {
       throw RealtimeTranscriptionError.alreadyConnected
@@ -540,15 +543,27 @@ public actor RealtimeTranscriptionSession {
       prompt: config.prompt,
       keywords: config.keywords,
       delay: config.delay)
+    let connectStart = Date()
     do {
-      try await transport.send(text: update)
+      try await sendWithTimeout(text: update, timeout: policy.connectTimeout)
+    } catch is RealtimeWaitTimeout {
+      state = .failed
+      lastError = "no session ack"
+      await closeTransportOnce()
+      throw RealtimeTranscriptionError.timeout("no session ack")
     } catch {
       state = .failed
       lastError = error.localizedDescription
       throw RealtimeTranscriptionError.transport(error.localizedDescription)
     }
+    let remaining = policy.connectTimeout - Date().timeIntervalSince(connectStart)
+    if remaining <= 0 {
+      state = .failed
+      lastError = "no session ack"
+      throw RealtimeTranscriptionError.timeout("no session ack")
+    }
     // Wait for session acknowledgement (created or updated).
-    let acknowledged = await waitForAck(timeout: policy.connectTimeout)
+    let acknowledged = await waitForAck(timeout: remaining)
     if state == .failed {
       throw RealtimeTranscriptionError.sessionFailed(lastError ?? "session rejected")
     }
@@ -790,6 +805,38 @@ public actor RealtimeTranscriptionSession {
     guard !closedTransport else { return }
     closedTransport = true
     await transport.close()
+  }
+
+  /// Bounded initial send: lazy WebSocket setup inside `transport.send`
+  /// must not keep `connect()` pending past `timeout`. Expiring the wait
+  /// cancels only the send waiter (via the task group); the caller closes
+  /// the transport and marks the session failed. Transport errors propagate
+  /// unchanged so `connect()` preserves its existing error mapping.
+  private func sendWithTimeout(text: String, timeout: TimeInterval) async throws {
+    let transport = self.transport
+    let nanoseconds = UInt64(max(0, timeout) * 1_000_000_000)
+    try await withThrowingTaskGroup(of: Void.self) { group in
+      group.addTask {
+        try await transport.send(text: text)
+      }
+      group.addTask {
+        try await Task.sleep(nanoseconds: nanoseconds)
+        throw RealtimeWaitTimeout.timedOut
+      }
+      do {
+        _ = try await group.next()
+        group.cancelAll()
+        _ = try? await group.next()
+      } catch is RealtimeWaitTimeout {
+        group.cancelAll()
+        _ = try? await group.next()
+        throw RealtimeWaitTimeout.timedOut
+      } catch {
+        group.cancelAll()
+        _ = try? await group.next()
+        throw error
+      }
+    }
   }
 
   /// Wait up to `timeout` for a session ack message. Returns true when

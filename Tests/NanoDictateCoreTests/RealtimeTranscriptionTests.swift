@@ -108,6 +108,33 @@ final class SequenceRealtimeTransport: RealtimeTransport {
     }
 }
 
+/// Transport whose `send` stalls longer than the session's connect timeout.
+/// Proves the initial `session.update` send (including lazy WebSocket setup)
+/// is bounded by `connectTimeout` instead of keeping `connect()` pending.
+final class StalledSendRealtimeTransport: RealtimeTransport {
+    var sentCount = 0
+    var closedCount = 0
+    var sendDelayNanoseconds: UInt64
+
+    init(sendDelayNanoseconds: UInt64 = 2_000_000_000) {
+        self.sendDelayNanoseconds = sendDelayNanoseconds
+    }
+
+    func send(text: String) async throws {
+        sentCount += 1
+        try await Task.sleep(nanoseconds: sendDelayNanoseconds)
+    }
+
+    func receive() async throws -> String? {
+        try await Task.sleep(nanoseconds: 5_000_000)
+        throw RealtimeTranscriptionError.transport("no scripted message")
+    }
+
+    func close() async {
+        closedCount += 1
+    }
+}
+
 final class RealtimeTranscriptionTests: XCTestCase {
     private func runAsync(_ name: String, _ body: @escaping () async throws -> Void) {
         let expectation = expectation(description: name)
@@ -420,6 +447,35 @@ final class RealtimeTranscriptionTests: XCTestCase {
             XCTAssertEqual(state, .failed)
             let lastError = await session.lastErrorMessage
             XCTAssertEqual(lastError, "no session ack")
+        }
+    }
+
+    @objc func testConnectStalledSendTimesOutWithinBudget() {
+        runAsync("realtime stalled send times out within budget") {
+            // The initial send includes lazy WebSocket setup and must be
+            // bounded by connectTimeout; a 2s stalled send with a 0.3s
+            // budget must fail fast instead of keeping connect() pending.
+            let transport = StalledSendRealtimeTransport(sendDelayNanoseconds: 2_000_000_000)
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 0.3, commitTimeout: 1))
+            let start = Date()
+            do {
+                try await session.connect()
+                XCTFail("stalled send must throw")
+            } catch let error as RealtimeTranscriptionError {
+                XCTAssertEqual(error, .timeout("no session ack"))
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+            let elapsed = Date().timeIntervalSince(start)
+            XCTAssertTrue(elapsed < 1.5, "stalled send blocked connect for \(elapsed)s")
+            let state = await session.currentState
+            XCTAssertEqual(state, .failed)
+            let lastError = await session.lastErrorMessage
+            XCTAssertEqual(lastError, "no session ack")
+            XCTAssertEqual(transport.closedCount, 1)
         }
     }
 
