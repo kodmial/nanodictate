@@ -103,7 +103,9 @@ Only sections with entries are rendered, in canonical Keep a Changelog order.
 Internal release plumbing, manifest synchronization, pure formatting and
 generated-version commits never appear as user-facing changes unless they
 materially affect users (for example, a fix for a stale distribution
-channel). A PR that must merge without touching the release flow uses the
+channel). An entry with the `release` scope and no explicit non-`None`
+`Release note:` is treated as such internal plumbing and excluded; with an
+explicit note it renders under its type's section. A PR that must merge without touching the release flow uses the
 `skip-release` label instead — such entries are always excluded from notes.
 
 Entry encoding: the renderer consumes `sha|subject|note|pr|labels` lines, so

@@ -190,6 +190,17 @@ BUILD_BARE=$(printf 'b1|build(macos): bump helper|||')
 assert_eq '4: build without a note renders nothing' '' "$(printf '%s\n' "$BUILD_BARE" | release_notes_render)"
 BUILD_NONE=$(printf 'b1|build(macos): bump helper|None|99|')
 assert_eq '4: build with None renders nothing' '' "$(printf '%s\n' "$BUILD_NONE" | release_notes_render)"
+# A `release`-scope entry without an explicit note is internal plumbing and
+# stays hidden even for otherwise visible types; with an explicit note it
+# renders under its type section.
+RELEASE_BARE=$(printf 'abc|fix(release): sync manifests||42|')
+assert_eq '4: unnoted release-scope fix renders nothing' '' "$(printf '%s\n' "$RELEASE_BARE" | release_notes_render)"
+RELEASE_NONE=$(printf 'abc|fix(release): sync manifests|None|42|')
+assert_eq '4: release-scope fix with None renders nothing' '' "$(printf '%s\n' "$RELEASE_NONE" | release_notes_render)"
+RELEASE_NOTED=$(printf 'abc|fix(release): repair stale channel|Stale channel now refreshes|42|')
+BODY_RELEASE_NOTED=$(printf '%s\n' "$RELEASE_NOTED" | release_notes_render)
+assert_contains '4: explicitly noted release-scope fix renders' "$BODY_RELEASE_NOTED" 'Stale channel now refreshes'
+assert_contains '4: explicitly noted release-scope fix renders under Fixed' "$BODY_RELEASE_NOTED" '### Fixed'
 
 # --- 5. skip-release PR excluded ----------------------------------------------
 SKIP=$'s1|feat(stt): experimental flag|Experimental flag|91|skip-release\nr1|fix(audio): reuse buffers|Audio hot path|71|'

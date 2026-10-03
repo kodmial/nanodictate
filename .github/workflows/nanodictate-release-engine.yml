@@ -898,8 +898,12 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_VERSION: ${{ steps.assets.outputs.version }}
           TAG: v${{ steps.assets.outputs.version }}
+          SHA: ${{ github.sha }}
         # On the merge/manual paths TAG (v<version>) does not exist yet:
-        # `gh release create` creates the tag itself from the default branch.
+        # `gh release create` creates the tag itself from the latest default
+        # branch commit unless --target pins it, so pass the triggering commit
+        # SHA to bind the new tag to the commit that supplied the notes and
+        # tested assets.
         # A re-run whose release already exists never overwrites an existing
         # asset: uploaded bytes are the canonical sha256 baked into the
         # committed manifests, and a silently-replaced asset (--clobber) is
@@ -925,6 +929,7 @@ jobs:
             dist/$CLI_NAME-*.tar.gz \
             dist/$CLI_NAME-*.zip \
             dist/SHA256SUMS.txt \
+            --target "$SHA" \
             --title "v$RELEASE_VERSION" \
             --notes-file /tmp/canonical-body.md; then
             : # release created

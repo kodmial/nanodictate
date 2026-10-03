@@ -188,9 +188,25 @@ release_notes_render() {
     if release_notes_has_skip_release "$labels"; then
       continue
     fi
-    local parsed type
+    local parsed type scope scope_lower
     parsed=$(release_notes_parse_subject "$subject")
     type=${parsed%%|*}
+    scope=${parsed#*|}
+    scope=${scope%%|*}
+    scope=$(printf '%s' "$scope" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+    scope_lower=$(printf '%s' "$scope" | tr '[:upper:]' '[:lower:]')
+    # `release` scope is internal plumbing (manifest syncs, version bumps):
+    # without an explicit non-`None` user-facing note it never renders, even
+    # for otherwise visible types such as `fix`. An explicit note renders
+    # normally so a visible release-process change stays describable.
+    if [[ "$scope_lower" == "release" ]]; then
+      local scope_note_trimmed scope_note_lowered
+      scope_note_trimmed=$(printf '%s' "$note" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+      scope_note_lowered=$(printf '%s' "$scope_note_trimmed" | tr '[:upper:]' '[:lower:]')
+      if [[ -z "$scope_note_trimmed" || "$scope_note_lowered" == "none" ]]; then
+        continue
+      fi
+    fi
     local text
     if ! text=$(release_notes_entry_text "$subject" "$note"); then
       continue
