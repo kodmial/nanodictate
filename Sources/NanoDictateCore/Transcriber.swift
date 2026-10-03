@@ -713,6 +713,7 @@ extension Transcriber {
       language: language,
       prompt: prompt,
       keywords: STTContextualBiasing.normalizeVocabulary(contextualBias.vocabulary),
+      extraLanguages: STTContextualBiasing.normalizeExtraLanguages(contextualBias.extraLanguages),
       sourceSampleRate: info.sampleRate)
     let session = RealtimeTranscriptionSession(transport: transport, config: config)
     // Esc/watchdog cancellation must close the WebSocket immediately instead

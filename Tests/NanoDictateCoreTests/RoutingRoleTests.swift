@@ -107,6 +107,33 @@ final class RoutingRoleTests: XCTestCase {
         )
     }
 
+    /// Auto-failover and manual retry stay batch-only: realtime candidates
+    /// never join the parallel failover chain (wrong watchdog budget, no
+    /// session task retention) and an explicit realtime retry target fails
+    /// closed instead of opening an unmanaged socket.
+    @objc func testFailoverAndRetryExcludeRealtime() {
+        guard let source = Self.agentMainSource() else {
+            XCTFail("Could not read Sources/NanoDictateAgent/main.swift")
+            return
+        }
+        XCTAssertTrue(
+            source.contains("failoverCandidates = allFailover.filter { !Self.isRealtimeProvider($0) }"),
+            "init must exclude realtime providers from failoverCandidates"
+        )
+        let autoBody = Self.functionBody(named: "transcribeAutomatically", in: source)
+        XCTAssertFalse(autoBody.isEmpty, "transcribeAutomatically must exist")
+        XCTAssertTrue(
+            autoBody.contains("failoverCandidates.filter { !Self.isRealtimeProvider($0) }"),
+            "parallel failover must skip realtime candidates (defense in depth)"
+        )
+        let retryBody = Self.functionBody(named: "handleRetryRequest", in: source)
+        XCTAssertFalse(retryBody.isEmpty, "handleRetryRequest must exist")
+        XCTAssertTrue(
+            retryBody.contains("if Self.isRealtimeProvider(provider)"),
+            "manual retry must fail closed for realtime providers"
+        )
+    }
+
     // MARK: - Helpers (зеркало LiveSegmentFailureTests)
 
     private static func agentMainSource() -> String? {

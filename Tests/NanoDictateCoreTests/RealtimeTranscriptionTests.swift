@@ -381,6 +381,42 @@ final class RealtimeTranscriptionTests: XCTestCase {
         XCTAssertTrue(input["turn_detection"] is NSNull)
     }
 
+    @objc func testSessionUpdateMergesExtraLanguagesWithPrimary() {
+        let text = RealtimeClientEvents.sessionUpdate(
+            model: "gpt-live-transcribe", language: "en",
+            extraLanguages: ["ru", "EN", "xx-invalid!!", "de", "fr", "it"])
+        guard let data = text.data(using: .utf8),
+            let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let session = event["session"] as? [String: Any],
+            let audio = session["audio"] as? [String: Any],
+            let input = audio["input"] as? [String: Any],
+            let transcription = input["transcription"] as? [String: Any]
+        else {
+            XCTFail("session.update payload malformed: \(text)")
+            return
+        }
+        // Primary first, extras normalized (EN dedupes, invalid dropped),
+        // capped at the shared total-languages budget.
+        XCTAssertEqual(transcription["languages"] as? [String], ["en", "ru", "de", "fr"])
+
+        let extrasOnly = RealtimeClientEvents.sessionUpdate(
+            model: "gpt-live-transcribe", extraLanguages: ["ru"])
+        guard let extrasData = extrasOnly.data(using: .utf8),
+            let extrasEvent = try? JSONSerialization.jsonObject(with: extrasData) as? [String: Any],
+            let extrasSession = extrasEvent["session"] as? [String: Any],
+            let extrasAudio = extrasSession["audio"] as? [String: Any],
+            let extrasInput = extrasAudio["input"] as? [String: Any],
+            let extrasTranscription = extrasInput["transcription"] as? [String: Any]
+        else {
+            XCTFail("session.update payload malformed: \(extrasOnly)")
+            return
+        }
+        XCTAssertEqual(extrasTranscription["languages"] as? [String], ["ru"])
+
+        let noHints = RealtimeClientEvents.sessionUpdate(model: "gpt-live-transcribe")
+        XCTAssertFalse(noHints.contains("languages"), "no language hints means no languages field")
+    }
+
     @objc func testAppendEventCarriesBase64PCM() {
         let b64 = RealtimePCMConverter.base64PCM(from: [1, -2, 300])
         let text = RealtimeClientEvents.appendAudio(base64PCM: b64)

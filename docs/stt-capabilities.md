@@ -166,7 +166,9 @@ extra_languages = ["en", "ru"]
   (`supportsPrompt == false`) drops it with a warning.
 - Extra languages: normalized codes (lowercased, capped at 4) are sent as
   `languages[]` only where the profile declares multi-hint mode
-  (`gpt-transcribe`); single-hint models keep `language` only, `none`
+  (`gpt-transcribe`); the realtime `gpt-live-transcribe` family merges them
+  with the primary hint into `session.update` `languages[]` (capped at 5
+  total); single-hint models keep `language` only, `none`
   profiles send nothing.
 - Dedicated `keywords[]` multipart serialization exists but no built-in
   batch profile emits it (`supportsKeywordBiasing == false` for batch) —

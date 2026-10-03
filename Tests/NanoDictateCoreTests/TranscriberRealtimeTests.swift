@@ -144,4 +144,49 @@ final class TranscriberRealtimeTests: XCTestCase {
             XCTAssertTrue(update.contains("keywords"))
         }
     }
+
+    @objc func testRealtimeForwardsExtraLanguagesAsSessionLanguages() {
+        runAsync("realtime forwards extra languages") {
+            let wav = WAVEncoder.encode(samples: [0, 1000, 2000, 3000])
+            let realtime = MockRealtimeTransport(incoming: [
+                self.json(["type": "session.updated"]),
+                self.json([
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "item_id": "item_1", "content_index": 0,
+                    "transcript": "hello realtime",
+                ]),
+            ])
+            let http = MockTransport(status: 200, body: Data(#"{"text":"batch"}"#.utf8))
+            let transcriber = Transcriber(
+                baseURL: "https://api.openai.com/v1/audio/transcriptions",
+                model: "gpt-live-transcribe",
+                apiKey: "test-key",
+                language: "en",
+                transport: http,
+                networkChecker: { true },
+                adapterID: "openai",
+                contextualBias: STTContextualBias(
+                    vocabulary: [], extraLanguages: ["ru", "EN"]),
+                retrySleep: { _ in },
+                realtimeTransportFactory: { realtime })
+            let result = try await transcriber.transcribe(wav: wav)
+            XCTAssertEqual(result.text, "hello realtime")
+            guard let update = realtime.sent.first else {
+                XCTFail("session.update must be sent")
+                return
+            }
+            guard let data = update.data(using: .utf8),
+                let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let session = event["session"] as? [String: Any],
+                let audio = session["audio"] as? [String: Any],
+                let input = audio["input"] as? [String: Any],
+                let transcription = input["transcription"] as? [String: Any]
+            else {
+                XCTFail("session.update payload malformed: \(update)")
+                return
+            }
+            // Primary hint first, extras merged (EN duplicate collapses).
+            XCTAssertEqual(transcription["languages"] as? [String], ["en", "ru"])
+        }
+    }
 }

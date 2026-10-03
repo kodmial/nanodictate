@@ -86,6 +86,10 @@ public struct RealtimeSessionConfig: Equatable {
   public var prompt: String?
   /// Literal keyword hints (product names, codes).
   public var keywords: [String]
+  /// Extra expected language hints besides `language` (code-switching).
+  /// Normalized codes; merged with `language` into `languages[]` by
+  /// `session.update` (capped at the shared total-languages budget).
+  public var extraLanguages: [String]
   /// Latency/accuracy hint; nil = server default.
   public var delay: RealtimeTranscriptionDelay?
   /// Source sample rate of appended Int16 samples (resampled to 24 kHz).
@@ -96,6 +100,7 @@ public struct RealtimeSessionConfig: Equatable {
     language: String = "",
     prompt: String? = nil,
     keywords: [String] = [],
+    extraLanguages: [String] = [],
     delay: RealtimeTranscriptionDelay? = nil,
     sourceSampleRate: Int = 16000
   ) {
@@ -103,6 +108,7 @@ public struct RealtimeSessionConfig: Equatable {
     self.language = language
     self.prompt = prompt
     self.keywords = keywords
+    self.extraLanguages = extraLanguages
     self.delay = delay
     self.sourceSampleRate = sourceSampleRate
   }
@@ -419,6 +425,7 @@ public actor RealtimeTranscriptionSession {
       language: config.language,
       prompt: config.prompt,
       keywords: config.keywords,
+      extraLanguages: config.extraLanguages,
       delay: config.delay)
     let connectStart = Date()
     do {

@@ -73,6 +73,7 @@ public enum RealtimeClientEvents {
     language: String = "",
     prompt: String? = nil,
     keywords: [String] = [],
+    extraLanguages: [String] = [],
     delay: RealtimeTranscriptionDelay? = nil
   ) -> String {
     var transcription: [String: Any] = ["model": model]
@@ -83,8 +84,9 @@ public enum RealtimeClientEvents {
     if !cleanKeywords.isEmpty {
       transcription["keywords"] = cleanKeywords
     }
-    if !language.isEmpty {
-      transcription["languages"] = [language]
+    let languages = mergedLanguages(primary: language, extras: extraLanguages)
+    if !languages.isEmpty {
+      transcription["languages"] = languages
     }
     if let delay {
       transcription["delay"] = delay.rawValue
@@ -104,6 +106,27 @@ public enum RealtimeClientEvents {
     let data =
       (try? JSONSerialization.data(withJSONObject: event, options: [.sortedKeys])) ?? Data()
     return String(data: data, encoding: .utf8) ?? "{\"type\":\"session.update\"}"
+  }
+
+  /// Merge the primary language hint with extra hints for `languages[]`:
+  /// primary first, then normalized extras minus duplicates, capped at the
+  /// shared total-languages budget. An unparseable primary is sent as
+  /// configured (trimmed) so previously valid payloads never become empty.
+  static func mergedLanguages(primary: String, extras: [String]) -> [String] {
+    var merged: [String] = []
+    var seen = Set<String>()
+    let trimmed = primary.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !trimmed.isEmpty {
+      let code = STTContextualBiasing.normalizeLanguageCode(trimmed) ?? trimmed
+      merged.append(code)
+      seen.insert(code)
+    }
+    for code in STTContextualBiasing.normalizeExtraLanguages(extras) where !seen.contains(code) {
+      merged.append(code)
+      seen.insert(code)
+      if merged.count >= STTContextualBiasLimits.maxTotalLanguages { break }
+    }
+    return merged
   }
 
   /// `input_audio_buffer.append` with base64 PCM16.

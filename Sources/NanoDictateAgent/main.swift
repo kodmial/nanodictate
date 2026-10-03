@@ -31,7 +31,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   private let autoFailover: Bool
   private let reviewBeforeInsert: Bool
 
-  /// Failover order (active excluded): candidates for auto-retry.
+  /// Failover order (active excluded, realtime excluded): batch candidates
+  /// for auto-retry. Realtime profiles never join the failover chain
+  /// (fail-closed with their own watchdog and task retention).
   private let failoverCandidates: [AppConfig.Provider]
   /// All providers by id: for manual retry via IPC.
   private let providersByID: [String: AppConfig.Provider]
@@ -444,7 +446,19 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       config.activeProvider.isEmpty
       ? config.providers.first?.id
       : config.activeProvider
-    failoverCandidates = config.failoverProviders(excluding: activeProviderID)
+    // Auto-failover stays batch-only: a realtime (`.streamingSession`)
+    // candidate would run a stateful WebSocket session under the batch
+    // watchdog budget with no realtime task retention, so the watchdog could
+    // end processing while the socket stays open. Realtime is fail-closed
+    // and never joins the failover chain.
+    let allFailover = config.failoverProviders(excluding: activeProviderID)
+    let realtimeFailover = allFailover.filter { Self.isRealtimeProvider($0) }
+    if !realtimeFailover.isEmpty {
+      Logger.log(
+        "failover skips realtime providers: \(realtimeFailover.map(\.id).joined(separator: ", "))",
+        level: "warn")
+    }
+    failoverCandidates = allFailover.filter { !Self.isRealtimeProvider($0) }
     var byID: [String: AppConfig.Provider] = [:]
     for provider in config.providers {
       byID[provider.id] = provider
@@ -2270,11 +2284,18 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     return active
   }
 
+  /// Whether a provider streams via a stateful realtime session (today:
+  /// `gpt-live-transcribe` family). Static so init-time failover filtering
+  /// (before self exists) shares the check with the instance paths.
+  private static func isRealtimeProvider(_ provider: AppConfig.Provider) -> Bool {
+    let resolvedModel = ProviderRequestBuilder.resolveModel(provider.model, for: provider.id)
+    return ProviderRequestBuilder.isRealtime(adapterID: provider.id, model: resolvedModel)
+  }
+
   /// Whether an ordinary-dictation provider streams via a stateful realtime
   /// session (today: `gpt-live-transcribe` family).
   private func isRealtimeOrdinaryProvider(_ provider: AppConfig.Provider) -> Bool {
-    let resolvedModel = ProviderRequestBuilder.resolveModel(provider.model, for: provider.id)
-    return ProviderRequestBuilder.isRealtime(adapterID: provider.id, model: resolvedModel)
+    Self.isRealtimeProvider(provider)
   }
 
   /// Whether a routing id resolves to a realtime provider.
@@ -2319,7 +2340,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// failover. Returns (result, id of the failover provider; nil — primary).
   /// Batch-only: realtime (`.streamingSession`) profiles never reach here —
   /// `processSingleRequest` routes them through `makeTranscriber(...).transcribe`
-  /// (Transcriber's realtime path) before any failover chain.
+  /// (Transcriber's realtime path) before any failover chain, and realtime
+  /// candidates are excluded from the failover chain (init-time filtering
+  /// plus the guard below).
   private func transcribeAutomatically(wav: Data) async throws -> (TranscriptionResult, String?) {
     // The final role from [routing] (whole recording non-chunked): set and
     // different from the active — the direct role provider WITHOUT a
@@ -2355,8 +2378,16 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       // chain like the sequential loop (microphone etc.).
       // lastFailedProviderID is set BEFORE the group and reset on a success
       // in retranscribe.
+      // Defense in depth alongside init-time filtering: realtime candidates
+      // never join the parallel chain — they need the realtime watchdog and
+      // task retention, not the batch budget. No batch candidates left —
+      // rethrow the primary error instead of failing over nowhere.
+      let batchCandidates = failoverCandidates.filter { !Self.isRealtimeProvider($0) }
+      guard !batchCandidates.isEmpty else {
+        throw error
+      }
       return try await RetryProvider.parallelFailover(
-        candidates: failoverCandidates
+        candidates: batchCandidates
       ) { provider in
         guard let retryResult = try await self.retryProvider.retranscribe(with: provider) else {
           throw TranscribeError.invalidResponse("failover retry lost the stored WAV")
@@ -2369,13 +2400,31 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// Handles a manual retry from the CLI (`nanodictate retry <provider>`).
   /// Recognizes the last WAV from memory (if any) with the chosen provider
   /// and inserts the result by the standard path (review/insertion method
-  /// are respected).
+  /// are respected). Batch-only like auto-failover: the retry path has no
+  /// realtime watchdog or session task retention, so an explicit realtime
+  /// target fails closed instead of opening an unmanaged socket.
   private func handleRetryRequest(provider: AppConfig.Provider) {
     guard retryProvider.hasLastRecording else {
       Logger.log("retry request ignored: no recording in this session", level: "info")
       return
     }
     let display = provider.name.isEmpty ? provider.id : provider.name
+    if Self.isRealtimeProvider(provider) {
+      Logger.log(
+        "retry with provider '\(display)' ignored: realtime providers need a live dictation session",
+        level: "error")
+      DispatchQueue.main.async { [weak self] in
+        guard let self, self.state == .idle else { return }
+        self.overlay.show()
+        self.overlay.resetPhase()
+        self.overlay.setStatus(
+          L10n.tr("overlay.retryError").replacingOccurrences(
+            of: "{message}",
+            with: "realtime provider '\(display)' cannot retry a stored recording"))
+        self.hideAfter(2.0, reason: "retry failed")
+      }
+      return
+    }
     Logger.log("retry with provider '\(display)' started", level: "info")
     Task { [weak self] in
       guard let self else { return }
