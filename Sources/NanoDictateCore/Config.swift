@@ -130,6 +130,20 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
   /// (ключ `review_before_insert`; дефолт false — прод-поведение).
   public var reviewBeforeInsert: Bool
 
+  // MARK: Audio transport (WAV/FLAC)
+
+  /// Audio upload container (`upload_format` key, top level or in the active
+  /// provider section). Values: `auto` (default) — profile preferred format
+  /// (`WAV` everywhere today: zero encoding overhead); `wav` — always WAV;
+  /// `flac` — lossless compact transport where the profile declares FLAC
+  /// support (openai/groq), WAV fallback elsewhere; `opus` /
+  /// `opus-experimental` — experimental bandwidth mode: with no local
+  /// encoder it resolves to WAV until benchmark evidence is documented.
+  /// Selection always goes through the profile capabilities
+  /// (`AudioTransportSelection`): an unsupported codec is never selected.
+  /// The default does not change without benchmark evidence (see #24).
+  public var uploadFormat: STTUploadPreference = .auto
+
   // MARK: Failover-порядок
 
   /// Имена провайдеров в порядке failover: явный список `providers` из конфига,
@@ -182,6 +196,40 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
     return activeProvider
   }
 
+  // MARK: Audio transport (effective selection)
+
+  /// Effective `upload_format` for a provider: the `[providers.X]` section
+  /// value wins over the top level; empty inherits it. A section value
+  /// unknown to the parser (hand-edited past validation) falls back to the
+  /// top level.
+  public func effectiveUploadPreference(providerID: String? = nil) -> STTUploadPreference {
+    let id: String
+    if let providerID, !providerID.isEmpty {
+      id = providerID
+    } else {
+      id = activeProvider.isEmpty ? (providers.first?.id ?? "") : activeProvider
+    }
+    if !id.isEmpty,
+      let provider = providers.first(where: { $0.id == id }),
+      !provider.uploadFormat.isEmpty,
+      let preference = STTUploadPreference.parse(provider.uploadFormat)
+    {
+      return preference
+    }
+    return uploadFormat
+  }
+
+  /// Effective upload container for a concrete (adapterID, model) pair: the
+  /// config preference routed through the model profile capabilities. An
+  /// unsupported codec is never selected (profile WAV fallback).
+  public func effectiveUploadFormat(
+    adapterID: String, model: String, providerID: String? = nil
+  ) -> STTUploadFormat {
+    let profile = ProviderRequestBuilder.profile(adapterID: adapterID, model: model)
+    return AudioTransportSelection.resolve(
+      preference: effectiveUploadPreference(providerID: providerID), profile: profile.audio)
+  }
+
   // MARK: Defaults
 
   public static let defaults = AppConfig(
@@ -216,7 +264,8 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
     providersOrder: [],
     autoFailover: false,
     insertMethod: .cgevent,
-    reviewBeforeInsert: false
+    reviewBeforeInsert: false,
+    uploadFormat: .auto
   )
 
   // MARK: Public API
@@ -451,6 +500,10 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
     /// Имя заголовка для proxy_key (ключ `proxy_key_header` в секции или
     /// корневой). Пусто — берётся корневой, затем дефолт `X-Proxy-Key`.
     public var proxyKeyHeader: String = ""
+    /// Audio upload container for this section (`upload_format` inside
+    /// `[providers.X]`). Empty — inherits the top-level `upload_format`
+    /// (previous behavior: `auto` → WAV).
+    public var uploadFormat: String = ""
 
     public static func withDefaults(id: String) -> Provider {
       Provider(
@@ -574,6 +627,7 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
     var autoFailover: Bool = base.autoFailover
     var insertMethod: InsertMethod = base.insertMethod
     var reviewBeforeInsert: Bool = base.reviewBeforeInsert
+    var uploadFormat: STTUploadPreference = base.uploadFormat
     var vocabulary: [String] = base.vocabulary
     var extraLanguages: [String] = base.extraLanguages
 
@@ -703,6 +757,12 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
         case "proxy_password":
           providers[providerIndex].proxyPassword = try parseString(
             valuePart, line: index + 1, rawLine: rawLine)
+        case "upload_format":
+          let raw = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+          guard STTUploadPreference.parse(raw) != nil else {
+            throw AppConfigError.invalidValue(key, valuePart, index + 1)
+          }
+          providers[providerIndex].uploadFormat = raw
         default:
           // Неизвестный ключ внутри секции — игнорируем
           break
@@ -787,6 +847,12 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
         reviewBeforeInsert = try parseBool(valuePart, line: index + 1, rawLine: rawLine)
       case "chunked":
         chunked = try parseBool(valuePart, line: index + 1, rawLine: rawLine)
+      case "upload_format":
+        let raw = try parseString(valuePart, line: index + 1, rawLine: rawLine)
+        guard let preference = STTUploadPreference.parse(raw) else {
+          throw AppConfigError.invalidValue(key, valuePart, index + 1)
+        }
+        uploadFormat = preference
       case "chunked_final_pass":
         let rawPolicy = try parseString(valuePart, line: index + 1, rawLine: rawLine)
         guard let parsed = ChunkedFinalPassPolicy(configString: rawPolicy) else {
@@ -832,7 +898,8 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
       providersOrder: providersOrder,
       autoFailover: autoFailover,
       insertMethod: insertMethod,
-      reviewBeforeInsert: reviewBeforeInsert
+      reviewBeforeInsert: reviewBeforeInsert,
+      uploadFormat: uploadFormat
     )
 
     if resolveProvider {
@@ -914,6 +981,9 @@ public struct AppConfig: Equatable {  // swiftlint:disable:this type_body_length
     if !provider.proxyKeyHeader.isEmpty {
       config.proxyKeyHeader = provider.proxyKeyHeader
     }
+    // Section upload_format is resolved per provider in
+    // effectiveUploadPreference(providerID:); the top-level value stays
+    // intact so other providers (routing/failover) inherit it correctly.
   }
 
   /// Каноническое значение транспорта: legacy-алиасы старого конфига

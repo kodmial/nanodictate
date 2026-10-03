@@ -519,10 +519,15 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     autoFailover = config.autoFailover
     reviewBeforeInsert = config.reviewBeforeInsert
     // Failover/retry recognizes BY PROVIDER SECTION through the same builder
-    // (see above): retries behave like the main path.
-    retryProvider = RetryProvider { wav, provider in
+    // (see above): retries behave like the main path. Each target provider
+    // encodes from the stored WAV bytes for its own selected container
+    // (Transcriber recovers PCM per request), so failover never relabels
+    // WAV as FLAC.
+    retryProvider = RetryProvider { [config] wav, provider in
       let transcriber = makeTranscriber(provider)
-      return try await transcriber.transcribe(wav: wav)
+      let audioFormat = config.effectiveUploadFormat(
+        adapterID: provider.id, model: provider.model, providerID: provider.id)
+      return try await transcriber.transcribe(wav: wav, audioFormat: audioFormat)
     }
     super.init()
 
@@ -1390,16 +1395,20 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             // single-request path send plain transcription.
             let selected: Transcriber
             let needsTimestamps: Bool
+            let selectedProviderID: String?
             if filename == "final.wav" {
               selected = self.roleTranscriber(self.finalRoleProviderID) ?? self.transcriber
               needsTimestamps = false
+              selectedProviderID = self.finalRoleProviderID ?? self.activeProviderID
             } else {
               selected = self.roleTranscriber(self.segmentRoleProviderID) ?? self.transcriber
               needsTimestamps = true
+              selectedProviderID = self.segmentRoleProviderID ?? self.activeProviderID
             }
             let result = try await selected.transcribe(
               wav: wav, filename: filename, prompt: prompt,
-              needsWordTimestamps: needsTimestamps)
+              needsWordTimestamps: needsTimestamps,
+              audioFormat: self.effectiveAudioFormat(providerID: selectedProviderID))
             return ChunkedPipeline.SttResult(text: result.text, words: result.words)
           },
           insert: { operation in
@@ -1727,8 +1736,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             // timestamps for overlap stitching (dedupeOverlap); other paths
             // send plain transcription.
             let transcriber = self.roleTranscriber(self.segmentRoleProviderID) ?? self.transcriber
+            let roleID = self.segmentRoleProviderID ?? self.activeProviderID
             let segmentResult = try await transcriber.transcribe(
-              wav: wav, filename: filename, prompt: prompt, needsWordTimestamps: true)
+              wav: wav, filename: filename, prompt: prompt, needsWordTimestamps: true,
+              audioFormat: self.effectiveAudioFormat(providerID: roleID))
             // Live batches carry no glued overlap: missing timestamps cannot
             // leave an unverifiable seam (mirrors ChunkedSegmentReport rule).
             return ChunkedPipeline.SttResult(text: segmentResult.text, words: segmentResult.words)
@@ -2002,8 +2013,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
           // transcriber (exactly the current behavior: no failover — the
           // role is chosen explicitly).
           let transcriber = self.roleTranscriber(self.finalRoleProviderID) ?? self.transcriber
+          let roleID = self.finalRoleProviderID ?? self.activeProviderID
           let finalResult = try await transcriber.transcribe(
-            wav: wav, filename: filename, prompt: prompt)
+            wav: wav, filename: filename, prompt: prompt,
+            audioFormat: self.effectiveAudioFormat(providerID: roleID))
           return ChunkedPipeline.SttResult(text: finalResult.text, words: finalResult.words)
         },
         insert: { operation in
@@ -2218,6 +2231,22 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       transport: transport)
   }
 
+  /// Effective upload container for a provider: config `upload_format`
+  /// (section override or top-level inheritance) through the model profile
+  /// capabilities. WAV bytes are FLAC-encoded per request inside
+  /// `Transcriber`, so callers pass WAV plus the selected format and bytes
+  /// always match metadata.
+  private func effectiveAudioFormat(providerID: String?) -> STTUploadFormat {
+    let id = providerID ?? activeProviderID
+    if let id, let provider = providersByID[id] {
+      return resolvedConfig.effectiveUploadFormat(
+        adapterID: provider.id, model: provider.model, providerID: id)
+    }
+    return resolvedConfig.effectiveUploadFormat(
+      adapterID: activeProviderID ?? "", model: resolvedConfig.model,
+      providerID: id)
+  }
+
   /// Recognition with automatic failover (auto_failover = true): the primary
   /// provider is self.transcriber (the active one from the config); on a
   /// TranscribeError the candidates from the failover order are tried. An
@@ -2232,11 +2261,13 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     // failover chain. Role unset/equal to active — exactly the current
     // behavior below.
     if let transcriber = roleTranscriber(finalRoleProviderID) {
-      let result = try await transcriber.transcribe(wav: wav)
+      let result = try await transcriber.transcribe(
+        wav: wav, audioFormat: effectiveAudioFormat(providerID: finalRoleProviderID))
       return (result, nil)
     }
     do {
-      let result = try await transcriber.transcribe(wav: wav)
+      let result = try await transcriber.transcribe(
+        wav: wav, audioFormat: effectiveAudioFormat(providerID: activeProviderID))
       return (result, nil)
     } catch {
       guard

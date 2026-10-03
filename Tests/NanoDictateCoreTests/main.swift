@@ -61,6 +61,7 @@ let suites: [XCTestCase.Type] = [
     STTAdapterTests.self,
     STTCapabilitiesTests.self,
     RealtimeTranscriptionTests.self,
+    AudioTransportTests.self,
     CookieRelayProviderTests.self,
     DebugDumpTests.self,
     EnterSendLatchTests.self,
