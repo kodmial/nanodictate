@@ -11,6 +11,11 @@ on:
   pull_request_review:
     types: [submitted]
 
+  # CodeRabbit finding replies are lifecycle transitions too. Wake the
+  # serialized queue immediately instead of relying on cron or unrelated events.
+  pull_request_review_comment:
+    types: [created, edited]
+
   # Manual/safety-net reconciliation.
   workflow_dispatch:
 
