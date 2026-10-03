@@ -12,6 +12,7 @@ on:
       - 'scripts/test-release-policy.sh'
       - 'docs/release-notes.md'
       - '.github/workflows/release-notes.yml'
+      - '.github/workflows/nanodictate-release-engine.yml'
   push:
     branches: [main]
     paths:
@@ -24,6 +25,7 @@ on:
       - 'scripts/test-release-policy.sh'
       - 'docs/release-notes.md'
       - '.github/workflows/release-notes.yml'
+      - '.github/workflows/nanodictate-release-engine.yml'
 
 permissions:
   contents: read
@@ -52,4 +54,12 @@ jobs:
           # The current version section is the canonical release body: it must
           # exist and must not be header-only (the v0.1.7 failure mode).
           release_notes_gate_publish "$SWIFT_VERSION" "$SWIFT_VERSION" 1 < CHANGELOG.md
+          # Body-equivalence enforcement: the exact bytes published as the
+          # GitHub Release body must equal the canonical section (byte or
+          # normalized equality). Exercise the body-file path here so a
+          # regression in the equivalence check fails CI before publication.
+          BODY_FILE=$(mktemp)
+          release_notes_extract_section "$SWIFT_VERSION" < CHANGELOG.md > "$BODY_FILE"
+          release_notes_gate_publish "$SWIFT_VERSION" "$SWIFT_VERSION" 1 "$BODY_FILE" < CHANGELOG.md
+          rm -f "$BODY_FILE"
           echo "Canonical section ## [$SWIFT_VERSION] passes the publication gate."
