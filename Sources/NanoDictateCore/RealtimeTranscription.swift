@@ -581,6 +581,7 @@ public actor RealtimeTranscriptionSession {
       }
       do {
         guard let item = try await receiveChannel?.next(timeout: 0.2) else {
+          try throwIfWaitTerminal()
           return try closeOutOrFail(message: "transport closed before completion")
         }
         if let done = try handleWaitItem(item) {
@@ -629,6 +630,9 @@ public actor RealtimeTranscriptionSession {
       }
       let item = await receiveChannel?.dequeue()
       guard let item else {
+        if state == .cancelled {
+          throw RealtimeTranscriptionError.cancelled
+        }
         // Stream finished before completion: return buffered transcript when
         // available; otherwise fail the session closed. Tear down the pump
         // and transport so an unclosed session cannot leave runPump
@@ -650,6 +654,9 @@ public actor RealtimeTranscriptionSession {
       switch item {
       case .text(let text):
         guard let text else {
+          if state == .cancelled {
+            throw RealtimeTranscriptionError.cancelled
+          }
           // Clean EOF before completion: return buffered transcript when
           // available; otherwise fail the session closed. Tear down the
           // pump and transport (see above); runPump itself keeps running
@@ -879,6 +886,7 @@ extension RealtimeTranscriptionSession {
     switch item {
     case .text(let text):
       guard let text else {
+        try throwIfWaitTerminal()
         return try closeOutOrFail(message: "transport closed before completion")
       }
       _ = handleMessage(text)

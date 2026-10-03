@@ -257,6 +257,37 @@ final class NonCooperativeAppendRealtimeTransport: RealtimeTransport {
     }
 }
 
+/// Transport that delivers one scripted ack and then parks `receive()` until
+/// the pump is stopped, so a pending wait is still suspended when `cancel()`
+/// resumes it with nil. Proves the cancelled state wins over close-out.
+final class ParkingRealtimeTransport: RealtimeTransport {
+    var sent: [String] = []
+    var closedCount = 0
+    private let ack: String?
+    private var deliveredAck = false
+
+    init(ack: String?) {
+        self.ack = ack
+    }
+
+    func send(text: String) async throws {
+        sent.append(text)
+    }
+
+    func receive() async throws -> String? {
+        if !deliveredAck {
+            deliveredAck = true
+            return ack
+        }
+        try await Task.sleep(nanoseconds: 10_000_000_000)
+        return nil
+    }
+
+    func close() async {
+        closedCount += 1
+    }
+}
+
 final class RealtimeTranscriptionTests: XCTestCase {
     private func runAsync(_ name: String, _ body: @escaping () async throws -> Void) {
         let expectation = expectation(description: name)
@@ -1092,6 +1123,74 @@ final class RealtimeTranscriptionTests: XCTestCase {
             let elapsed = Date().timeIntervalSince(start)
             XCTAssertTrue(elapsed < 5, "cancelled append blocked session for \(elapsed)s")
             XCTAssertEqual(transport.closedCount, 1)
+        }
+    }
+
+    @objc func testWaitForFinalCancelledWhileParkedThrowsCancelled() {
+        runAsync("realtime waitForFinal cancelled while parked throws cancelled") {
+            let transport = ParkingRealtimeTransport(
+                ack: self.json(["type": "session.updated"]))
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5))
+            try await session.connect()
+            try await session.appendAudio([1, 2, 3], sourceSampleRate: 24000)
+            try await session.commit()
+            _ = await session.handleMessage(
+                self.json([
+                    "type": "conversation.item.input_audio_transcription.delta",
+                    "item_id": "item_1", "content_index": 0, "delta": "Hello,",
+                ]))
+            let waiter = Task {
+                try await session.waitForFinal()
+            }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            await session.cancel()
+            do {
+                _ = try await waiter.value
+                XCTFail("cancelled wait must throw, not return buffered partial")
+            } catch let error as RealtimeTranscriptionError {
+                XCTAssertEqual(error, .cancelled)
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+            let state = await session.currentState
+            XCTAssertEqual(state, .cancelled)
+        }
+    }
+
+    @objc func testRunToCompletionCancelledWhileParkedThrowsCancelled() {
+        runAsync("realtime runToCompletion cancelled while parked throws cancelled") {
+            let transport = ParkingRealtimeTransport(
+                ack: self.json(["type": "session.updated"]))
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5))
+            try await session.connect()
+            try await session.appendAudio([1, 2, 3], sourceSampleRate: 24000)
+            try await session.commit()
+            _ = await session.handleMessage(
+                self.json([
+                    "type": "conversation.item.input_audio_transcription.delta",
+                    "item_id": "item_1", "content_index": 0, "delta": "Hello,",
+                ]))
+            let waiter = Task {
+                try await session.runToCompletion()
+            }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            await session.cancel()
+            do {
+                _ = try await waiter.value
+                XCTFail("cancelled wait must throw, not return buffered partial")
+            } catch let error as RealtimeTranscriptionError {
+                XCTAssertEqual(error, .cancelled)
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+            let state = await session.currentState
+            XCTAssertEqual(state, .cancelled)
         }
     }
 }
