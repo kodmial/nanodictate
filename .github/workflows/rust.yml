@@ -17,6 +17,7 @@ on:
       - 'Sources/NanoDictateCore/RustEngine.swift'
       - 'Tests/NanoDictateCoreTests/RustParityTests.swift'
       - 'scripts/build-rust-core.sh'
+      - 'scripts/swift-rust-build-contract.sh'
       - 'scripts/check-rust-abi.sh'
       - 'docs/architecture-rust-engine.md'
       - 'Package.swift'
@@ -29,6 +30,7 @@ on:
       - 'Sources/NanoDictateCore/RustEngine.swift'
       - 'Tests/NanoDictateCoreTests/RustParityTests.swift'
       - 'scripts/build-rust-core.sh'
+      - 'scripts/swift-rust-build-contract.sh'
       - 'scripts/check-rust-abi.sh'
       - 'docs/architecture-rust-engine.md'
       - 'Package.swift'
@@ -113,14 +115,8 @@ jobs:
         with:
           swift-version: "6.1"
 
-      - name: Build Rust engine
-        working-directory: rust
-        run: cargo build --release -p nanodictate-core
-
       - name: Build (Swift + Rust)
-        run: >
-          swift build
-          -Xlinker ${{ github.workspace }}/rust/target/release/libnanodictate_core.a
+        run: bash scripts/swift-rust-build-contract.sh
 
       # The custom test runner (Tests/NanoDictateCoreTests/main.swift) exits
       # non-zero on the first failure; RustParityTests runs the shared input
