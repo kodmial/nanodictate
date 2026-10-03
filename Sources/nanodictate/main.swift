@@ -1210,15 +1210,19 @@ func cmdTranscribeLegacy(_ file: String, json: Bool) -> Int32 {
     contextualBias: STTContextualBias(
       vocabulary: config.vocabulary, extraLanguages: config.extraLanguages)
   )
-  // Data is always WAV (non-WAV is converted above); the server is strict
-  // about the extension, so the multipart file field always sends
-  // "audio.wav", not the original name.
+  // Data is always WAV (non-WAV is converted above). The upload container
+  // follows `upload_format` through the model profile capabilities; the
+  // Transcriber FLAC-encodes the WAV bytes per provider request when FLAC is
+  // selected, so bytes always match metadata.
   let filename = "audio.wav"
   let rawURL = inputURL.deletingLastPathComponent().appendingPathComponent("transcription_raw.json")
+  let uploadFormat = config.effectiveUploadFormat(
+    adapterID: activeAdapterID ?? "", model: config.model)
 
   Task {
     do {
-      let result = try await transcriber.transcribe(wav: data, filename: filename)
+      let result = try await transcriber.transcribe(
+        wav: data, filename: filename, audioFormat: uploadFormat)
       print(result.text)
       if json {
         do {
@@ -1436,6 +1440,26 @@ func cmdBenchmarkLocal(jsonPath: String?, markdownPath: String?) -> Int32 {
     let report = try BenchmarkRunner.run(
       fixtures: fixtures, configs: configs,
       provider: BenchmarkRunner.scriptedProvider(hypotheses: hypotheses))
+    // WAV vs FLAC transport comparison on the same fixtures (size, local
+    // encode time, upload body accounting, lossless check): short and
+    // near-60-second speech are both covered by the built-in corpus.
+    // Recognition is measured per format through the same scripted provider
+    // (both containers carry the identical transcript-bearing fixture audio,
+    // so lossless FLAC must score identically to WAV) rather than inferred
+    // from encoding or the local round trip. Printed to stdout and appended
+    // to the markdown file; the JSON file keeps the historic
+    // BenchmarkReport shape (machine-readable transport rows are available
+    // via BenchmarkRunner.compareTransportFormats for programmatic use).
+    let transportConfig = BenchmarkSTTConfig(
+      name: "transport", adapterID: "openai", model: "whisper-1")
+    let transportProvider: BenchmarkRunner.TransportProviderRun = { fixture, _, _, _ in
+      BenchmarkHypothesis(text: fixture.transcript, requestSeconds: 0)
+    }
+    let transport = BenchmarkRunner.compareTransportFormats(
+      fixtures: fixtures,
+      config: transportConfig,
+      provider: transportProvider)
+    let transportMarkdown = BenchmarkTransportComparison.markdown(transport)
     // Chunked final-pass accounting (always vs default on-uncertainty): the
     // long fixture is segmented for real and upload bytes use the exact
     // multipart bodies. Scripted segment hypotheses are confident slices of
@@ -1450,37 +1474,45 @@ func cmdBenchmarkLocal(jsonPath: String?, markdownPath: String?) -> Int32 {
     // with --live-wav-dir, plus ChunkedPipeline dedupe unit tests).
     // Printed after the main report; file outputs append the section.
     let chunkedConfig = configs[0]
+    var chunkedMarkdown = ""
     if let longFixture = fixtures.first(where: { $0.durationBucket == .long }) {
       let chunkedRows = chunkedComparisonRows(fixture: longFixture, config: chunkedConfig)
-      let chunkedMarkdown = ChunkedBenchmark.markdown(fixtureID: longFixture.id, rows: chunkedRows)
-      print(report.markdown())
-      print("")
-      print(chunkedMarkdown)
-      let fullMarkdown = report.markdown() + "\n" + chunkedMarkdown
-      if let markdownPath {
-        do {
-          try fullMarkdown.write(
-            to: URL(fileURLWithPath: markdownPath), atomically: true, encoding: .utf8)
-          eprint("benchmark: Markdown written to \(markdownPath)")
-        } catch {
-          eprint("benchmark: failed to write Markdown: \(error)")
-          return 1
-        }
-      }
-      if let jsonPath {
-        // JSON keeps the machine-readable STT report; chunked rows are
-        // human-evidence in markdown (scripted, deterministic).
-        do {
-          try report.jsonData().write(to: URL(fileURLWithPath: jsonPath), options: .atomic)
-          eprint("benchmark: JSON written to \(jsonPath)")
-        } catch {
-          eprint("benchmark: failed to write JSON: \(error)")
-          return 1
-        }
-      }
-      return 0
+      chunkedMarkdown = ChunkedBenchmark.markdown(fixtureID: longFixture.id, rows: chunkedRows)
     }
-    return writeBenchmarkOutputs(report: report, jsonPath: jsonPath, markdownPath: markdownPath)
+    print(report.markdown())
+    print("")
+    if !chunkedMarkdown.isEmpty {
+      print(chunkedMarkdown)
+      print("")
+    }
+    print(transportMarkdown)
+    var fullMarkdown = report.markdown() + "\n"
+    if !chunkedMarkdown.isEmpty {
+      fullMarkdown += chunkedMarkdown + "\n"
+    }
+    fullMarkdown += transportMarkdown
+    if let jsonPath {
+      // JSON keeps the machine-readable STT report; chunked and transport
+      // rows are human-evidence in markdown (scripted, deterministic).
+      do {
+        try report.jsonData().write(to: URL(fileURLWithPath: jsonPath), options: .atomic)
+        eprint("benchmark: JSON written to \(jsonPath)")
+      } catch {
+        eprint("benchmark: failed to write JSON: \(error)")
+        return 1
+      }
+    }
+    if let markdownPath {
+      do {
+        try fullMarkdown.write(
+          to: URL(fileURLWithPath: markdownPath), atomically: true, encoding: .utf8)
+        eprint("benchmark: Markdown written to \(markdownPath)")
+      } catch {
+        eprint("benchmark: failed to write Markdown: \(error)")
+        return 1
+      }
+    }
+    return 0
   } catch {
     eprint("benchmark: local run failed: \(error)")
     return 1
@@ -1754,8 +1786,72 @@ func cmdBenchmarkLive(
             hypothesis: outcome.text
           ))
       }
+      // WAV vs FLAC transport recognition on the same transcript-bearing
+      // speech: transcribe each fixture in both containers through the live
+      // provider and report per-format hypotheses plus WER/CER. Size-only or
+      // local round-trip measurements never stand in for recognition quality.
+      let flacSupported = BenchmarkRunner.supportsFLAC(config: benchmarkConfig)
+      var transportRows: [BenchmarkTransportComparison] = []
+      for fixture in fixtures {
+        let wavStart = Date()
+        let wav = WAVEncoder.encode(samples: fixture.samples, sampleRate: fixture.sampleRate)
+        let wavEncodeMs = Date().timeIntervalSince(wavStart) * 1_000.0
+        let flacStart = Date()
+        let flac = FLACEncoder.encode(
+          samples: fixture.samples, sampleRate: fixture.sampleRate, channels: 1)
+        let flacEncodeMs = Date().timeIntervalSince(flacStart) * 1_000.0
+        let lossless =
+          flac.map { (try? FLACDecoder.decode($0))?.samples == fixture.samples } ?? false
+        let uploadWav = BenchmarkRunner.uploadBytes(
+          config: benchmarkConfig, wav: wav, audioFormat: .wav)
+        let uploadFlac: Int
+        if flacSupported, let flac {
+          uploadFlac = BenchmarkRunner.uploadBytes(
+            config: benchmarkConfig, wav: flac, audioFormat: .flac)
+        } else {
+          uploadFlac = 0
+        }
+        let wavOutcome = try await transcriber.transcribe(wav: wav, audioFormat: .wav)
+        var flacOutcomeText: String?
+        if flacSupported, flac != nil {
+          // Pass WAV bytes with the FLAC container: Transcriber FLAC-encodes
+          // the recovered PCM per provider request, so bytes always match
+          // metadata (never pre-encoded FLAC relabelled as WAV or vice versa).
+          let flacOutcome = try await transcriber.transcribe(
+            wav: wav, filename: "audio.wav", audioFormat: .flac)
+          flacOutcomeText = flacOutcome.text
+        }
+        transportRows.append(
+          BenchmarkTransportComparison(
+            fixtureID: fixture.id,
+            category: fixture.category.rawValue,
+            durationBucket: fixture.durationBucket.rawValue,
+            durationSeconds: fixture.durationSeconds,
+            wavBytes: wav.count,
+            flacBytes: flac?.count ?? 0,
+            wavEncodeMs: wavEncodeMs,
+            flacEncodeMs: flacEncodeMs,
+            uploadWavBytes: uploadWav,
+            uploadFlacBytes: uploadFlac,
+            lossless: lossless,
+            flacSupported: flacSupported,
+            wavWER: BenchmarkText.wer(
+              reference: fixture.transcript, hypothesis: wavOutcome.text),
+            wavCER: BenchmarkText.cer(
+              reference: fixture.transcript, hypothesis: wavOutcome.text),
+            flacWER: flacOutcomeText.map {
+              BenchmarkText.wer(reference: fixture.transcript, hypothesis: $0)
+            },
+            flacCER: flacOutcomeText.map {
+              BenchmarkText.cer(reference: fixture.transcript, hypothesis: $0)
+            },
+            wavHypothesis: wavOutcome.text,
+            flacHypothesis: flacOutcomeText
+          ))
+      }
       let report = BenchmarkReport(
         results: results, summaries: BenchmarkRunner.summarize(results: results))
+      let transportMarkdown = BenchmarkTransportComparison.markdown(transportRows)
       // Live chunked quality evidence on transcript-bearing speech: re-run
       // segmentation for real, transcribe each segment with actual STT
       // (timestamps requested, prompt chained like production), then compare
@@ -1770,7 +1866,7 @@ func cmdBenchmarkLive(
           "benchmark: no multi-segment live fixtures for chunked comparison (single-segment audio needs no final pass)."
         )
       }
-      var fullMarkdown = report.markdown()
+      var fullMarkdown = report.markdown() + "\n" + transportMarkdown
       for section in chunkedSections {
         fullMarkdown += "\n" + section
       }

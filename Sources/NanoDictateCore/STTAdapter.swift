@@ -56,6 +56,15 @@ public struct STTRequestSpec {
   public var body: STTRequestBody
   /// JSON path to transcript text; nil = flat "text" (OpenAI-compatible).
   public var transcriptPath: [String]?
+  /// Effective multipart file-part filename from the capability-gated plan
+  /// (e.g. `audio.wav` / `audio.flac` after extension coercion). Diagnostic
+  /// consumers (debug dump) must use this, not the requested filename, so
+  /// fallback selection is reflected accurately.
+  public var filePartFilename: String
+  /// Effective multipart file-part MIME type from the capability-gated plan
+  /// (e.g. `audio/wav` / `audio/flac`). Never the enclosing
+  /// `multipart/form-data` content type.
+  public var filePartContentType: String
 
   public enum STTRequestBody: Equatable {
     /// OpenAI-compatible multipart/form-data: file first, then fields.
@@ -65,12 +74,16 @@ public struct STTRequestSpec {
   }
 
   public init(
-    url: URL?, headers: [(String, String)], body: STTRequestBody, transcriptPath: [String]? = nil
+    url: URL?, headers: [(String, String)], body: STTRequestBody, transcriptPath: [String]? = nil,
+    filePartFilename: String = STTUploadFormat.wav.defaultFilename,
+    filePartContentType: String = STTUploadFormat.wav.contentType
   ) {
     self.url = url
     self.headers = headers
     self.body = body
     self.transcriptPath = transcriptPath
+    self.filePartFilename = filePartFilename
+    self.filePartContentType = filePartContentType
   }
 
   /// Content-Type for URLRequest ("multipart/form-data; boundary=…", …).
@@ -131,6 +144,9 @@ public enum ProviderRequestBuilder {
   ///   - batchParams: stable-transcription batch params (contextual prompt
   ///     chaining + temperature + stable fields). nil = batch path unused
   ///     (stepwise dictation): byte-identical behavior.
+  ///   - audioFormat: upload container for the audio bytes. Gated by the
+  ///     model profile capabilities: unsupported formats fall back to the
+  ///     profile preferred format. Default `.wav`: byte-identical behavior.
   ///   - bias: contextual biasing (reusable vocabulary + extra language hints).
   ///     Gated by the concrete profile: vocabulary folds into `prompt` where
   ///     supported, extra languages into `languages[]` where multi-hint is
@@ -148,6 +164,7 @@ public enum ProviderRequestBuilder {
     prompt: String? = nil,
     needsWordTimestamps: Bool = false,
     batchParams: BatchSTTParams? = nil,
+    audioFormat: STTUploadFormat = .wav,
     bias: STTContextualBias = .none
   ) -> STTRequestSpec {
     // Empty config baseURL/model resolve to adapter defaults; re-resolve of
@@ -191,9 +208,19 @@ public enum ProviderRequestBuilder {
     }
     let stable = BatchStableMultipartFields.stableFields(
       for: adapterID, model: resolvedModel, params: batchParams)
+    // Capability gate: never emit a container the profile does not declare.
+    // An explicitly requested but unsupported format falls back to the
+    // profile preferred format (WAV everywhere today), keeping the request
+    // path total and the default behavior byte-identical.
+    let profileAudio = profile.audio
+    let effectiveFormat: STTUploadFormat =
+      profileAudio.supportedUploadFormats.contains(audioFormat)
+      ? audioFormat : profileAudio.uploadFormat
+    let effectiveFilename = AudioTransportEncoder.coercedFilename(filename, for: effectiveFormat)
     switch caps.transport {
     case .batchRawAudio:
-      return planCloudflare(baseURL: resolvedBaseURL, apiKey: apiKey, wav: wav)
+      return planCloudflare(
+        baseURL: resolvedBaseURL, apiKey: apiKey, wav: wav, audioFormat: effectiveFormat)
     case .batchMultipart:
       return planOpenAICompatible(
         adapterID: adapterID,
@@ -203,11 +230,12 @@ public enum ProviderRequestBuilder {
         language: effectiveLanguage,
         languages: effectiveLanguages,
         wav: wav,
-        filename: filename,
+        filename: effectiveFilename,
         prompt: effectivePrompt,
         needsWordTimestamps: needsWordTimestamps,
         stable: stable,
         capabilities: caps,
+        audioFormat: effectiveFormat,
         keywords: applied.keywordsField ?? []
       )
     case .streamingSession:
@@ -221,11 +249,12 @@ public enum ProviderRequestBuilder {
         language: effectiveLanguage,
         languages: effectiveLanguages,
         wav: wav,
-        filename: filename,
+        filename: effectiveFilename,
         prompt: effectivePrompt,
         needsWordTimestamps: needsWordTimestamps,
         stable: stable,
         capabilities: caps,
+        audioFormat: effectiveFormat,
         keywords: applied.keywordsField ?? []
       )
     }
@@ -379,7 +408,8 @@ extension ProviderRequestBuilder {
     keywords: [String] = [],
     responseFormat: String? = nil,
     timestampGranularities: [String] = [],
-    stable: BatchStableMultipartFields? = nil
+    stable: BatchStableMultipartFields? = nil,
+    audioContentType: String = STTUploadFormat.wav.contentType
   ) -> Data {
     var body = Data()
 
@@ -398,7 +428,7 @@ extension ProviderRequestBuilder {
     // Field: file
     append("--\(boundary)\r\n")
     append("Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n")
-    append("Content-Type: audio/wav\r\n")
+    append("Content-Type: \(audioContentType)\r\n")
     append("\r\n")
     body.append(wav)
     append("\r\n")
@@ -489,6 +519,7 @@ extension ProviderRequestBuilder {
     needsWordTimestamps: Bool = false,
     stable: BatchStableMultipartFields? = nil,
     capabilities: STTCapabilities? = nil,
+    audioFormat: STTUploadFormat = .wav,
     keywords: [String] = []
   ) -> STTRequestSpec {
     let boundary = "Boundary-\(UUID().uuidString)"
@@ -511,33 +542,41 @@ extension ProviderRequestBuilder {
       keywords: effectiveKeywords,
       responseFormat: verbose ? "verbose_json" : nil,
       timestampGranularities: timestamps ? ["word"] : [],
-      stable: stable
+      stable: stable,
+      audioContentType: audioFormat.contentType
     )
     return STTRequestSpec(
       url: URL(string: baseURL),
       headers: [("Authorization", "Bearer \(apiKey)")],
-      body: .multipart(data: multipart, contentType: "multipart/form-data; boundary=\(boundary)")
+      body: .multipart(data: multipart, contentType: "multipart/form-data; boundary=\(boundary)"),
+      filePartFilename: filename,
+      filePartContentType: audioFormat.contentType
     )
   }
 
-  /// Cloudflare Workers AI Whisper: body — raw WAV bytes (multipart
+  /// Cloudflare Workers AI Whisper: body — raw audio bytes (multipart
   /// rejected: 400 code 8001), `Authorization: Bearer <key>`,
-  /// `Content-Type: audio/wav`. Model baked into base_url
+  /// `Content-Type` follows the effective upload format (`audio/wav` today;
+  /// WAV-only profile, so FLAC requests fall back before reaching here).
+  /// Model baked into base_url
   /// (`/@cf/openai/whisper-large-v3-turbo`). Transcript at `result.text`.
   private static func planCloudflare(
     baseURL: String,
     apiKey: String,
-    wav: Data
+    wav: Data,
+    audioFormat: STTUploadFormat = .wav
   ) -> STTRequestSpec {
     STTRequestSpec(
       url: URL(string: baseURL),
       headers: [
         ("Authorization", "Bearer \(apiKey)"),
         // swiftlint:disable:next trailing_comma
-        ("Content-Type", "audio/wav"),
+        ("Content-Type", audioFormat.contentType),
       ],
-      body: .rawAudio(data: wav, contentType: "audio/wav"),
-      transcriptPath: ["result", "text"]
+      body: .rawAudio(data: wav, contentType: audioFormat.contentType),
+      transcriptPath: ["result", "text"],
+      filePartFilename: audioFormat.defaultFilename,
+      filePartContentType: audioFormat.contentType
     )
   }
 }

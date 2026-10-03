@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.24] - 2026-10-03
+
+
+
+### Bug Fixes
+
+* Added FLAC transport; WAV default kept ([745aa81](https://github.com/kodmial/nanodictate/commit/745aa81c95f283e30ccc4dc0ea23e0d51b8c53f4))
+
 ## [0.1.23] - 2026-10-03
 
 
@@ -469,7 +477,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.23...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.24...HEAD
+[0.1.24]: https://github.com/kodmial/nanodictate/compare/v0.1.23...v0.1.24
 [0.1.23]: https://github.com/kodmial/nanodictate/compare/v0.1.22...v0.1.23
 [0.1.22]: https://github.com/kodmial/nanodictate/compare/v0.1.21...v0.1.22
 [0.1.21]: https://github.com/kodmial/nanodictate/compare/v0.1.20...v0.1.21

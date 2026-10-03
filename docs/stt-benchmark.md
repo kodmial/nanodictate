@@ -34,12 +34,43 @@ Per fixture × config:
 - WER and CER against the ground-truth transcript (normalized:
   lowercase, punctuation stripped, whitespace collapsed).
 - Upload bytes: exact request body from `ProviderRequestBuilder.plan`
-  (multipart overhead included), plus raw WAV bytes.
-- Encoding/preprocessing time: `WAVEncoder.encode` wall clock.
+  (multipart overhead included), plus raw WAV bytes. `uploadBytes` accepts
+  an `audioFormat` (default WAV) so FLAC bodies are accounted with their
+  real `audio/flac` part and filename.
+- Encoding/preprocessing time: `WAVEncoder.encode` wall clock (plus
+  `FLACEncoder.encode` wall clock in the transport comparison).
 - Request latency: provider-call wall clock (scripted provider reports 0
   simulated latency; live runs measure the real STT request).
 - End-to-end time to final transcript: case wall clock.
 - Peak RSS kilobytes (best effort via `getrusage`; 0 when unavailable).
+
+## WAV vs FLAC transport comparison
+
+`BenchmarkRunner.compareTransportFormats(fixtures:config:provider:)` encodes every
+fixture as WAV and FLAC and reports per fixture: raw bytes, local encode
+time, multipart upload bytes for a reference config (both `uploadWavBytes`
+and `uploadFlacBytes`, shown as `wav upload` / `flac upload` columns), and lossless
+verification (FLAC decodes back to the exact source samples). When the
+config's model profile does not accept FLAC, the row reports
+`flacSupported == false` with `uploadFlacBytes == 0` and `n/a` in the
+table instead of a WAV-metadata/FLAC-body hybrid request. The local
+benchmark command prints this table on every run (short and near-60-second
+fixtures are both in the built-in corpus):
+
+```sh
+swift run nanodictate benchmark --local
+```
+
+Recognition regression is measured, not assumed: pass a transport provider
+to `compareTransportFormats` (local scripted provider) or use the live
+benchmark path, which transcribes the same transcript-bearing speech in
+both WAV and FLAC through the live provider and compares per-format
+WER/CER. FLAC is lossless, so a deterministic provider must score
+identically on both transports; any deviation is investigated before a
+default change. Without a provider the recognition fields stay empty
+(unmeasured): size and lossless round-trip alone never imply recognition
+quality. No default changes on benchmark evidence in this cycle:
+`auto` still resolves to WAV everywhere.
 
 ## Fixture strategy (no recordings in repo)
 
