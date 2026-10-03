@@ -164,7 +164,7 @@ Results land in `.opencode-tmp/macos12-compat-results/` (never committed).
 
 - `.github/workflows/macos-12-compat.yml` runs the static gate on every PR
   touching `Sources/`, `Package.swift`, `packaging/`, `scripts/`,
-  `Resources/`, or `config.example.toml`, plus nightly and on tags.
+  `Resources/`, or `config.example.toml`, plus weekly and on tags.
 - The runtime handoff job runs on the hosted `macos-15` runner for every
   event (including forks) and uploads `result.txt` (`needs-macos12-host`)
   as an artifact, plus a job summary with the handoff instructions. Actual
