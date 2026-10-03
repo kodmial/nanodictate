@@ -1,8 +1,10 @@
-name: PR Agent (manual, Groq)
+name: PR Agent (OpenCode backend)
 
 on:
   issue_comment:
     types: [created]
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
