@@ -118,9 +118,11 @@ public struct RealtimeSessionPolicy: Equatable {
   public var connectTimeout: TimeInterval
   /// Seconds to wait for the final completion after `commit`.
   public var commitTimeout: TimeInterval
-  /// Total budget for the audio-send phase (`appendAudio` chunks plus the
-  /// `commit` send). Bounds otherwise unbounded WebSocket sends so a stalled
-  /// upload cannot outlive the caller's watchdog.
+  /// Per-phase budget for audio sends. `appendAudio` chunks share one
+  /// `appendTimeout` budget, and the `commit` send gets its own separate
+  /// `appendTimeout` budget. Bounds otherwise unbounded WebSocket sends so a
+  /// stalled upload cannot outlive the caller's watchdog (which must cover
+  /// both phases: connect + 2 x append + final wait + close + margin).
   public var appendTimeout: TimeInterval
   /// Seconds to wait for transport close to settle.
   public var closeTimeout: TimeInterval
@@ -587,8 +589,9 @@ public actor RealtimeTranscriptionSession {
 
   /// Stream microphone audio continuously. Samples are resampled from
   /// `sourceSampleRate` to the model-required 24 kHz and sent as ordered
-  /// base64 PCM16 appends (no WAV chunks are written). The whole send phase
-  /// is bounded by `policy.appendTimeout`: each chunk send receives only the
+  /// base64 PCM16 appends (no WAV chunks are written). The append phase
+  /// is bounded by its own `policy.appendTimeout` budget (separate from the
+  /// commit send budget): each chunk send receives only the
   /// unspent remainder, so a stalled upload fails fast instead of outliving
   /// the caller's watchdog. Timeout/cancellation closes the transport before
   /// returning (a suspended WebSocket send unblocks only on close).
@@ -636,8 +639,9 @@ public actor RealtimeTranscriptionSession {
   }
 
   /// End the audio turn: the provider emits the final completion event.
-  /// The `commit` send is bounded by `policy.appendTimeout` and closes the
-  /// transport on timeout/cancellation, like the append phase above.
+  /// The `commit` send gets its own `policy.appendTimeout` budget (separate
+  /// from the `appendAudio` budget) and closes the transport on
+  /// timeout/cancellation, like the append phase above.
   public func commit() async throws {
     try Task.checkCancellation()
     guard state == .ready || state == .streaming else {
