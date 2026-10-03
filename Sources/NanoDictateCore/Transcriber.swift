@@ -448,105 +448,6 @@ public final class Transcriber {
       needsWordTimestamps: needsWordTimestamps, audioFormat: audioFormat)
   }
 
-  // MARK: - Realtime path
-
-  /// Transcribe WAV audio through one stateful realtime session.
-  /// Decodes the WAV to Int16 samples (mono-mixed when needed), then runs
-  /// connect → append → commit → waitForFinal → close. Fail-closed: any
-  /// realtime failure throws and never degrades into batch uploads.
-  private func transcribeViaRealtime(wav: Data, prompt: String?) async throws -> TranscriptionResult {
-    if await !networkChecker() {
-      Logger.log("STT not sent: no internet (preflight)", level: "error")
-      throw TranscribeError.network(Self.noInternetMessage)
-    }
-    guard let info = WAVDecoder.decodePCM16(wav) else {
-      throw TranscribeError.invalidResponse("Invalid WAV for realtime transcription")
-    }
-    let mono = Self.monoSamples(from: info)
-    guard !mono.isEmpty else {
-      throw TranscribeError.invalidResponse("Invalid WAV for realtime transcription")
-    }
-    let transport: any RealtimeTransport
-    if let factory = realtimeTransportFactory {
-      transport = factory()
-    } else {
-      guard let url = RealtimeEndpoint.transcriptionURL() else {
-        throw TranscribeError.network("Invalid base URL")
-      }
-      transport = URLSessionWebSocketTransport(url: url, apiKey: apiKey)
-    }
-    let config = RealtimeSessionConfig(
-      model: model,
-      language: language,
-      prompt: prompt,
-      sourceSampleRate: info.sampleRate)
-    let session = RealtimeTranscriptionSession(transport: transport, config: config)
-    do {
-      try await session.connect()
-      try await session.appendAudio(mono, sourceSampleRate: info.sampleRate)
-      try await session.commit()
-      let text = try await session.waitForFinal()
-      await session.close()
-      return TranscriptionResult(text: text, rawData: Data(text.utf8))
-    } catch is CancellationError {
-      await session.cancel()
-      throw TranscribeError.network("Request cancelled")
-    } catch let error as RealtimeTranscriptionError {
-      await session.close()
-      if case .cancelled = error {
-        throw TranscribeError.network("Request cancelled")
-      }
-      throw TranscribeError.network(Self.describeRealtime(error))
-    } catch {
-      await session.close()
-      if error is TranscribeError {
-        throw error
-      }
-      throw TranscribeError.network(error.localizedDescription)
-    }
-  }
-
-  /// Mono mix of decoded WAV samples (channel-interleaved when multichannel).
-  static func monoSamples(from info: WAVInfo) -> [Int16] {
-    if info.channels <= 1 {
-      return info.samples
-    }
-    let channels = max(1, info.channels)
-    let frames = info.samples.count / channels
-    var mono: [Int16] = []
-    mono.reserveCapacity(frames)
-    for frame in 0..<frames {
-      var sum = 0
-      for channel in 0..<channels {
-        sum += Int(info.samples[frame * channels + channel])
-      }
-      mono.append(Int16(clamping: sum / channels))
-    }
-    return mono
-  }
-
-  /// Human-readable realtime failure for logs/errors (fail-closed surface).
-  static func describeRealtime(_ error: RealtimeTranscriptionError) -> String {
-    switch error {
-    case .notConnected:
-      return "realtime session not connected"
-    case .alreadyConnected:
-      return "realtime session already connected"
-    case .invalidState(let message):
-      return message.isEmpty ? "realtime session invalid state" : message
-    case .transport(let message):
-      return message.isEmpty ? "realtime transport error" : message
-    case .protocolError(let message):
-      return message.isEmpty ? "realtime protocol error" : message
-    case .sessionFailed(let message):
-      return message.isEmpty ? "realtime session failed" : message
-    case .timeout(let message):
-      return message.isEmpty ? "realtime session timeout" : message
-    case .cancelled:
-      return "Request cancelled"
-    }
-  }
-
   // MARK: - Adapter path
 
   private func transcribeViaAdapter(
@@ -764,6 +665,107 @@ public final class Transcriber {
     let text = try ProviderRequestBuilder.extractText(from: body, path: transcriptPath)
     let words = ProviderRequestBuilder.extractWords(from: body, path: transcriptPath)
     return TranscriptionResult(text: text, rawData: body, words: words)
+  }
+}
+
+extension Transcriber {
+  // MARK: - Realtime path
+
+  /// Transcribe WAV audio through one stateful realtime session.
+  /// Decodes the WAV to Int16 samples (mono-mixed when needed), then runs
+  /// connect → append → commit → waitForFinal → close. Fail-closed: any
+  /// realtime failure throws and never degrades into batch uploads.
+  private func transcribeViaRealtime(wav: Data, prompt: String?) async throws -> TranscriptionResult {
+    if await !networkChecker() {
+      Logger.log("STT not sent: no internet (preflight)", level: "error")
+      throw TranscribeError.network(Self.noInternetMessage)
+    }
+    guard let info = WAVDecoder.decodePCM16(wav) else {
+      throw TranscribeError.invalidResponse("Invalid WAV for realtime transcription")
+    }
+    let mono = Self.monoSamples(from: info)
+    guard !mono.isEmpty else {
+      throw TranscribeError.invalidResponse("Invalid WAV for realtime transcription")
+    }
+    let transport: any RealtimeTransport
+    if let factory = realtimeTransportFactory {
+      transport = factory()
+    } else {
+      guard let url = RealtimeEndpoint.transcriptionURL() else {
+        throw TranscribeError.network("Invalid base URL")
+      }
+      transport = URLSessionWebSocketTransport(url: url, apiKey: apiKey)
+    }
+    let config = RealtimeSessionConfig(
+      model: model,
+      language: language,
+      prompt: prompt,
+      sourceSampleRate: info.sampleRate)
+    let session = RealtimeTranscriptionSession(transport: transport, config: config)
+    do {
+      try await session.connect()
+      try await session.appendAudio(mono, sourceSampleRate: info.sampleRate)
+      try await session.commit()
+      let text = try await session.waitForFinal()
+      await session.close()
+      return TranscriptionResult(text: text, rawData: Data(text.utf8))
+    } catch is CancellationError {
+      await session.cancel()
+      throw TranscribeError.network("Request cancelled")
+    } catch let error as RealtimeTranscriptionError {
+      await session.close()
+      if case .cancelled = error {
+        throw TranscribeError.network("Request cancelled")
+      }
+      throw TranscribeError.network(Self.describeRealtime(error))
+    } catch {
+      await session.close()
+      if error is TranscribeError {
+        throw error
+      }
+      throw TranscribeError.network(error.localizedDescription)
+    }
+  }
+
+  /// Mono mix of decoded WAV samples (channel-interleaved when multichannel).
+  static func monoSamples(from info: WAVInfo) -> [Int16] {
+    if info.channels <= 1 {
+      return info.samples
+    }
+    let channels = max(1, info.channels)
+    let frames = info.samples.count / channels
+    var mono: [Int16] = []
+    mono.reserveCapacity(frames)
+    for frame in 0..<frames {
+      var sum = 0
+      for channel in 0..<channels {
+        sum += Int(info.samples[frame * channels + channel])
+      }
+      mono.append(Int16(clamping: sum / channels))
+    }
+    return mono
+  }
+
+  /// Human-readable realtime failure for logs/errors (fail-closed surface).
+  static func describeRealtime(_ error: RealtimeTranscriptionError) -> String {
+    switch error {
+    case .notConnected:
+      return "realtime session not connected"
+    case .alreadyConnected:
+      return "realtime session already connected"
+    case .invalidState(let message):
+      return message.isEmpty ? "realtime session invalid state" : message
+    case .transport(let message):
+      return message.isEmpty ? "realtime transport error" : message
+    case .protocolError(let message):
+      return message.isEmpty ? "realtime protocol error" : message
+    case .sessionFailed(let message):
+      return message.isEmpty ? "realtime session failed" : message
+    case .timeout(let message):
+      return message.isEmpty ? "realtime session timeout" : message
+    case .cancelled:
+      return "Request cancelled"
+    }
   }
 }
 
