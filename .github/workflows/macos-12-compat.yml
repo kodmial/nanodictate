@@ -65,6 +65,8 @@ jobs:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
+      - name: Test macOS 12 compatibility contract
+        run: bash scripts/test-macos12-compat-check.sh
       - name: Static macOS 12 floor checks
         run: bash scripts/macos12-compat-check.sh --static-only
       - name: Upload static results
