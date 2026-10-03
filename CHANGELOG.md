@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.22] - 2026-10-03
+
+
+
+### Bug Fixes
+
+* Rust parity gate model plus tests ([d9e9b60](https://github.com/kodmial/nanodictate/commit/d9e9b6043b23777f98c60d0b262d21550579efd5))
+
 ## [0.1.21] - 2026-10-02
 
 
@@ -460,7 +468,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.21...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.22...HEAD
+[0.1.22]: https://github.com/kodmial/nanodictate/compare/v0.1.21...v0.1.22
 [0.1.21]: https://github.com/kodmial/nanodictate/compare/v0.1.20...v0.1.21
 [0.1.20]: https://github.com/kodmial/nanodictate/compare/v0.1.19...v0.1.20
 [0.1.19]: https://github.com/kodmial/nanodictate/compare/v0.1.18...v0.1.19
