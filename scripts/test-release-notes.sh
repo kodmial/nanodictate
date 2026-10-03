@@ -333,6 +333,15 @@ else
 fi
 assert_not_ok '12: comment-only section fails the gate with releasable changes' \
   release_notes_gate_publish 0.1.7 0.1.7 1 <<< "$COMMENT_ONLY"
+# A bullet hidden inside a multiline HTML comment is still a comment.
+MULTILINE_COMMENT_ONLY=$'# Changelog\n\n## [Unreleased]\n\n## [0.1.7] - 2026-09-27\n\n### Fixed\n\n<!--\n- TODO\n-->\n\n## [0.1.6] - 2026-09-27\n\n### Changed\n\n- Something\n'
+if printf '%s' "$MULTILINE_COMMENT_ONLY" | release_notes_extract_section 0.1.7 | release_notes_section_is_empty; then
+  pass '12: multiline comment-only section is detected as empty'
+else
+  fail '12: multiline comment-only section is detected as empty'
+fi
+assert_not_ok '12: multiline comment-only section fails the gate with releasable changes' \
+  release_notes_gate_publish 0.1.7 0.1.7 1 <<< "$MULTILINE_COMMENT_ONLY"
 TODO_ONLY=$'# Changelog\n\n## [Unreleased]\n\n## [0.1.7] - 2026-09-27\n\n### Fixed\n\nTODO\n\n## [0.1.6] - 2026-09-27\n\n### Changed\n\n- Something\n'
 if printf '%s' "$TODO_ONLY" | release_notes_extract_section 0.1.7 | release_notes_section_is_empty; then
   pass '12: placeholder-only section is detected as empty'

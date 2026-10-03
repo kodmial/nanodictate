@@ -305,9 +305,34 @@ release_notes_normalize() {
 # guard against the v0.1.7 empty-section failure mode recurring.
 release_notes_section_is_empty() {
   local body stripped bullet
-  body=$(grep -vE '^## \[' | grep -vE '^[[:space:]]*$' | grep -vE '^###[[:space:]]+[A-Za-z]+[[:space:]]*$' || true)
-  # HTML comments must not count as release notes.
-  stripped=$(printf '%s\n' "$body" | sed -E 's/<!--.*-->//g' | grep -vE '^[[:space:]]*$' || true)
+  body=$(grep -vE '^## \[' || true)
+  # HTML comments must not count as release notes. Strip complete
+  # `<!-- ... -->` spans, including multiline comments, before checking
+  # for entries so a bullet hidden inside a comment cannot pass the gate.
+  stripped=$(printf '%s\n' "$body" | awk '
+    {
+      line = $0
+      out = ""
+      while (length(line) > 0) {
+        if (in_comment) {
+          end = index(line, "-->")
+          if (end == 0) { line = ""; break }
+          else { line = substr(line, end + 3); in_comment = 0 }
+        } else {
+          start = index(line, "<!--")
+          if (start == 0) { out = out line; line = ""; break }
+          else {
+            out = out substr(line, 1, start - 1)
+            line = substr(line, start + 4)
+            end = index(line, "-->")
+            if (end == 0) { in_comment = 1; line = ""; break }
+            else { line = substr(line, end + 3) }
+          }
+        }
+      }
+      print out
+    }
+  ' | grep -vE '^[[:space:]]*$' | grep -vE '^###[[:space:]]+[A-Za-z]+[[:space:]]*$' || true)
   [[ -z "${stripped//[[:space:]]/}" ]] && return 0
   # Placeholders such as a bare TODO without a bullet do not count: require
   # an actual list entry.
