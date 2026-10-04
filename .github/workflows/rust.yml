@@ -116,7 +116,11 @@ jobs:
           swift-version: "6.1"
 
       - name: Build (Swift + Rust)
-        run: bash scripts/swift-rust-build-contract.sh
+        run: |
+          source scripts/swift-rust-build-contract.sh
+          archive="$(prepare_rust_archive)"
+          echo "RUST_ARCHIVE=$archive" >> "$GITHUB_ENV"
+          swift_build_with_rust "$archive"
 
       # The custom test runner (Tests/NanoDictateCoreTests/main.swift) exits
       # non-zero on the first failure; RustParityTests runs the shared input
@@ -124,11 +128,11 @@ jobs:
       # options (-Xlinker) must precede the executable name: anything after
       # it is passed to the test binary instead of the linker, which drops
       # the Rust archive and fails with undefined _nd_* symbols. The archive
-      # is linked by absolute path so the macOS build never picks the cdylib
-      # (which would embed an absolute LC_LOAD_DYLIB path and break packaged
-      # binaries on other hosts).
+      # is the path prepared by the build step via RUST_ARCHIVE so the macOS
+      # build never picks the cdylib (which would embed an absolute
+      # LC_LOAD_DYLIB path and break packaged binaries on other hosts).
       - name: Run tests (Swift + Rust)
-        run: >
-          swift run
-          -Xlinker ${{ github.workspace }}/rust/target/release/libnanodictate_core.a
-          NanoDictateCoreTests
+        run: |
+          source scripts/swift-rust-build-contract.sh
+          require_rust_archive "$RUST_ARCHIVE"
+          swift run -Xlinker "$RUST_ARCHIVE" NanoDictateCoreTests
