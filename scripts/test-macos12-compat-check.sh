@@ -203,6 +203,8 @@ assert_grep 'workflow: checkout does not persist credentials' \
   "$WORKFLOW" 'persist-credentials: false'
 assert_grep 'workflow: runtime records an isolated-host handoff instead of claiming a pass' \
   "$WORKFLOW" 'needs-macos12-host'
+assert_grep 'workflow: Rust core changes trigger the compatibility gate' \
+  "$WORKFLOW" "rust/\*\*"
 
 # `secrets:` catches both a secrets block and `secrets: inherit`;
 # `secrets.` additionally catches direct references like `${{ secrets.TOKEN }}`.
