@@ -21,22 +21,22 @@ export DEVELOPER_DIR="$selected"
 echo "::notice::Using preinstalled Swift toolchain from $selected."
 xcrun swift --version
 
-bash scripts/build-rust-core.sh --release
-archive="$GITHUB_WORKSPACE/rust/target/release/libnanodictate_core.a"
-[[ -f "$archive" ]] || { echo "::error::Missing Rust archive: $archive" >&2; exit 1; }
+# shellcheck source=scripts/swift-rust-build-contract.sh
+source scripts/swift-rust-build-contract.sh
+archive="$(prepare_rust_archive)"
+echo "::notice::Using canonical Rust archive: $archive"
 
 brew install swift-format
 swift-format lint --recursive --configuration .swift-format Sources
 brew install swiftlint
 swiftlint lint Sources
 
-swift build -Xlinker "$archive"
+swift_build_with_rust "$archive"
 
-swift build \
+swift_build_with_rust "$archive" \
   -Xswiftc -profile-generate \
   -Xswiftc -profile-coverage-mapping \
-  --product NanoDictateCoreTests \
-  -Xlinker "$archive"
+  --product NanoDictateCoreTests
 
 export LLVM_PROFILE_FILE=".build/nanodictate-%p.profraw"
 .build/debug/NanoDictateCoreTests
