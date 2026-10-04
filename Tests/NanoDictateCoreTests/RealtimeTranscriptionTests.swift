@@ -628,6 +628,22 @@ final class RealtimeTranscriptionTests: XCTestCase {
         XCTAssertEqual(custom.watchdogDuration(), 9 + 28 + 19 + 5 + 5, accuracy: 1e-9)
     }
 
+    @objc func testAppendBudgetScalesWithAudioDuration() {
+        let policy = RealtimeSessionPolicy()
+        // Floor: short audio keeps the fixed appendTimeout budget.
+        XCTAssertEqual(policy.appendBudget(forAudioSeconds: 0), 15, accuracy: 1e-9)
+        XCTAssertEqual(policy.appendBudget(forAudioSeconds: 1), 15.5, accuracy: 1e-9)
+        // 60 s recording needs a larger upload window than the 15 s floor.
+        XCTAssertEqual(policy.appendBudget(forAudioSeconds: 60), 45, accuracy: 1e-9)
+        // Cap: very long audio cannot grow the watchdog without bound.
+        XCTAssertEqual(policy.appendBudget(forAudioSeconds: 600), 60, accuracy: 1e-9)
+        // Watchdog covers the same duration-derived append budget.
+        XCTAssertEqual(
+            policy.watchdogDuration(audioSeconds: 60),
+            10 + 45 + 15 + 20 + 5 + 5, accuracy: 1e-9)
+        XCTAssertEqual(policy.watchdogDuration(), 70, accuracy: 1e-9)
+    }
+
     @objc func testConnectTimeoutFailsClosedInsteadOfReady() {
         runAsync("realtime connect timeout fails closed") {
             let transport = MockRealtimeTransport(incoming: [])

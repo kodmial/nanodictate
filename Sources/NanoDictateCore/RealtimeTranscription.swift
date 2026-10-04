@@ -125,11 +125,16 @@ public struct RealtimeSessionPolicy: Equatable {
   /// Seconds to wait for the final completion after `commit`.
   public var commitTimeout: TimeInterval
   /// Per-phase budget for audio sends. `appendAudio` chunks share one
-  /// `appendTimeout` budget, and the `commit` send gets its own separate
-  /// `appendTimeout` budget. Bounds otherwise unbounded WebSocket sends so a
-  /// stalled upload cannot outlive the caller's watchdog (which must cover
-  /// both phases: connect + 2 x append + final wait + close + margin).
+  /// duration-derived budget (see `appendBudget(forAudioSeconds:)`), and the
+  /// `commit` send gets its own separate `appendTimeout` budget. Bounds
+  /// otherwise unbounded WebSocket sends so a stalled upload cannot outlive
+  /// the caller's watchdog (which must cover both phases: connect + append
+  /// budget + commit send + final wait + close + margin).
   public var appendTimeout: TimeInterval
+  /// Upper bound for the duration-derived append budget. Long recordings
+  /// produce megabytes of base64 PCM (about 64 KB/s at 24 kHz); without a
+  /// cap the watchdog could grow without limit.
+  public var maxAppendBudget: TimeInterval
   /// Seconds to wait for transport close to settle.
   public var closeTimeout: TimeInterval
   /// Reconnect attempts after a transport drop (0 = no auto reconnect).
@@ -146,7 +151,8 @@ public struct RealtimeSessionPolicy: Equatable {
     closeTimeout: TimeInterval = 5,
     maxReconnectAttempts: Int = 2,
     reconnectBaseDelay: TimeInterval = 0.5,
-    maxSamplesPerAppend: Int = 4800
+    maxSamplesPerAppend: Int = 4800,
+    maxAppendBudget: TimeInterval = 60
   ) {
     self.connectTimeout = connectTimeout
     self.commitTimeout = commitTimeout
@@ -155,6 +161,7 @@ public struct RealtimeSessionPolicy: Equatable {
     self.maxReconnectAttempts = maxReconnectAttempts
     self.reconnectBaseDelay = reconnectBaseDelay
     self.maxSamplesPerAppend = maxSamplesPerAppend
+    self.maxAppendBudget = maxAppendBudget
   }
 
   /// Delay before reconnect attempt number `attempt` (0-based).
@@ -162,11 +169,25 @@ public struct RealtimeSessionPolicy: Equatable {
     reconnectBaseDelay * pow(2.0, Double(max(0, attempt)))
   }
 
-  /// Worst-case session duration the Agent watchdog must cover: connect, one
-  /// `appendTimeout` for the append phase, a second `appendTimeout` for the
+  /// Worst-case session duration the Agent watchdog must cover: connect, the
+  /// duration-derived append budget, a second `appendTimeout` for the
   /// commit send, the final-wait budget, close, plus `margin`.
-  public func watchdogDuration(margin: TimeInterval = 5) -> TimeInterval {
-    connectTimeout + (2 * appendTimeout) + commitTimeout + closeTimeout + margin
+  /// `audioSeconds` is the recording duration in seconds (24 kHz sample
+  /// count / 24000, same as 16 kHz count / 16000). Defaults to 0 so the
+  /// floor budget preserves the previous fixed calculation.
+  public func watchdogDuration(audioSeconds: TimeInterval = 0, margin: TimeInterval = 5) -> TimeInterval {
+    connectTimeout + appendBudget(forAudioSeconds: audioSeconds) + appendTimeout + commitTimeout + closeTimeout
+      + margin
+  }
+
+  /// Append-phase budget scaled with the recording duration.
+  /// Base64 PCM at 24 kHz is about 64 KB per audio second, so a fixed budget
+  /// fails long dictations on slow uplinks while short ones still pass. The
+  /// budget is `appendTimeout` (floor) plus half a second per audio second
+  /// (about 2x realtime upload), capped at `maxAppendBudget`.
+  public func appendBudget(forAudioSeconds seconds: TimeInterval) -> TimeInterval {
+    let scaled = appendTimeout + max(0, seconds) * 0.5
+    return min(max(scaled, appendTimeout), maxAppendBudget)
   }
 }
 
@@ -463,8 +484,8 @@ public actor RealtimeTranscriptionSession {
   /// Stream microphone audio continuously. Samples are resampled from
   /// `sourceSampleRate` to the model-required 24 kHz and sent as ordered
   /// base64 PCM16 appends (no WAV chunks are written). The append phase
-  /// is bounded by its own `policy.appendTimeout` budget (separate from the
-  /// commit send budget): each chunk send receives only the
+  /// is bounded by a duration-derived budget (`policy.appendBudget`, floor
+  /// `policy.appendTimeout`, capped): each chunk send receives only the
   /// unspent remainder, so a stalled upload fails fast instead of outliving
   /// the caller's watchdog. Timeout/cancellation closes the transport before
   /// returning (a suspended WebSocket send unblocks only on close).
@@ -479,7 +500,8 @@ public actor RealtimeTranscriptionSession {
     let realtime = RealtimePCMConverter.resample(samples, fromRate: sourceSampleRate, toRate: 24000)
     let chunks = RealtimePCMConverter.chunk(realtime, maxSamples: policy.maxSamplesPerAppend)
     state = .streaming
-    let deadline = Date().addingTimeInterval(policy.appendTimeout)
+    let audioSeconds = Double(realtime.count) / 24000.0
+    let deadline = Date().addingTimeInterval(policy.appendBudget(forAudioSeconds: audioSeconds))
     for chunk in chunks {
       try Task.checkCancellation()
       let remaining = deadline.timeIntervalSinceNow

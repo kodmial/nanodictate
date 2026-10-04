@@ -1272,14 +1272,15 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       + (autoFailover && !failoverCandidates.isEmpty ? Transcriber.networkRequestTimeout : 0)
     // Realtime sessions need their own budget (connect + audio sends +
     // final wait), not the batch watchdog: connectTimeout (10 s) +
-    // appendTimeout per send phase (15 s for all appends, plus another 15 s
-    // for the commit send) + commitTimeout (20 s) already exceed
-    // processingMaxDuration (25 s), so a valid realtime completion could
-    // arrive after failTranscription ends the session and be dropped.
+    // duration-derived append budget (floor appendTimeout 15 s for all
+    // appends, plus another 15 s for the commit send) + commitTimeout
+    // (20 s) already exceed processingMaxDuration (25 s), so a valid
+    // realtime completion could arrive after failTranscription ends the
+    // session and be dropped.
     // Independent of the auto-failover margin (realtime is fail-closed and
     // never runs the failover chain).
     let realtimePolicy = RealtimeSessionPolicy()
-    let realtimeWatchdogDuration = realtimePolicy.watchdogDuration()
+    let realtimeWatchdogDuration = realtimePolicy.watchdogDuration(audioSeconds: duration)
     let isRealtimeRequest: Bool = {
       if let provider = self.effectiveOrdinaryProvider() {
         return self.isRealtimeOrdinaryProvider(provider)
