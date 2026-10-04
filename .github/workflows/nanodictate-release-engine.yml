@@ -32,6 +32,13 @@ on:
         required: false
         type: boolean
         default: false
+      allow_empty_release:
+        description: Explicitly allow publishing a version whose CHANGELOG section is
+          empty (intentional no-change release). Passes --releasable 0 to the
+          publication gate. Default false (fail-closed).
+        required: false
+        type: boolean
+        default: false
       continuum_ref:
         description: Continuum revision supplying fallback scripts
         type: string
@@ -899,6 +906,7 @@ jobs:
           RELEASE_VERSION: ${{ steps.assets.outputs.version }}
           TAG: v${{ steps.assets.outputs.version }}
           SHA: ${{ github.sha }}
+          ALLOW_EMPTY_RELEASE: ${{ inputs.allow_empty_release }}
         # On the merge/manual paths TAG (v<version>) does not exist yet:
         # `gh release create` creates the tag itself from the latest default
         # branch commit unless --target pins it, so pass the triggering commit
@@ -925,21 +933,29 @@ jobs:
           fi
           release_notes_extract_section "$RELEASE_VERSION" < CHANGELOG.md > /tmp/canonical-body.md
           # The gate needs the actual releasable-change count, not a hardcoded
-          # constant: preflight/candidate-gate expose no entry count, so derive
-          # it from the canonical section itself. An empty section takes the
-          # explicit no-change path below (fail-closed); a non-empty section
-          # passes its bullet count so releases with changes stay gated.
+          # constant. Preflight/candidate-gate expose no entry count, so the
+          # count is derived from release evidence available here:
+          #   - a non-empty canonical section passes its rendered bullet
+          #     count (each bullet is one reviewed releasable note);
+          #   - an empty section is fail-closed (RELEASABLE=1, so the gate
+          #     rejects it) unless an explicit no-change release was
+          #     confirmed via `allow_empty_release`, which passes 0.
+          # A new version implies releasable changes (Version.swift is only
+          # bumped by the Release PR on releasable changes), so an empty
+          # section without that opt-in is missing notes, not a no-op.
+          # Every path reaches the gate below — no early exit — so the
+          # gate itself is the single decider for empty sections.
           if release_notes_section_is_empty < /tmp/canonical-body.md; then
-            RELEASABLE=0
+            if [[ "${ALLOW_EMPTY_RELEASE:-false}" == "true" ]]; then
+              RELEASABLE=0
+            else
+              RELEASABLE=1
+            fi
           else
             RELEASABLE=$(grep -cE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+[^[:space:]]' /tmp/canonical-body.md || true)
             if [[ -z "$RELEASABLE" || "$RELEASABLE" -eq 0 ]]; then
               RELEASABLE=1
             fi
-          fi
-          if [[ "$RELEASABLE" == "0" ]]; then
-            echo "::error::Canonical section ## [$RELEASE_VERSION] is empty — refusing to publish a release without notes."
-            exit 1
           fi
           release_notes_gate_publish "$RELEASE_VERSION" "$SWIFT_VERSION" "$RELEASABLE" /tmp/canonical-body.md < CHANGELOG.md
           if gh release create "$TAG" \

@@ -30,6 +30,11 @@ on:
         required: false
         type: boolean
         default: false
+      allow_empty_release:
+        description: 'Explicitly allow publishing a version whose CHANGELOG section is empty (intentional no-change release).'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -56,3 +61,4 @@ jobs:
       static_archive_path: "${{ vars.CONTINUUM_STATIC_ARCHIVE_PATH || 'rust/target/release/libnanodictate_core.a' }}"
       version: "${{ inputs.version || '' }}"
       dry_run: "${{ inputs.dry_run || false }}"
+      allow_empty_release: "${{ inputs.allow_empty_release || false }}"
