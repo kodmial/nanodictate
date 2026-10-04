@@ -24,10 +24,9 @@ Rules:
    it must apply explicit `Release note:` text and honor `Release note: None`
    suppression. No scraping of free-form PR prose at publication time.
 3. The GitHub Release body must be the already-reviewed canonical section
-   extracted from the release commit — never an independently generated text.
-   A link to the full changelog or comparison may be appended after the
-   notes, never instead of them. The `gate --body-file` check enforces this
-   equivalence: `nanodictate-release-engine.yml` extracts the canonical
+   extracted from the release commit — never an independently generated text
+   and with no appended links or extra content. The `gate --body-file` check
+   enforces this equivalence: `nanodictate-release-engine.yml` extracts the canonical
    section from the release commit, gates it with `--body-file`, and
    publishes that exact section via `--notes-file`; `release-notes.yml`
    exercises the same equivalence path in CI.

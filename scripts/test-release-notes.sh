@@ -361,6 +361,16 @@ else
 fi
 assert_not_ok '12: placeholder-only section fails the gate with releasable changes' \
   release_notes_gate_publish 0.1.7 0.1.7 1 <<< "$TODO_ONLY"
+# A link-only section without a changelog category is not releasable content:
+# a bullet outside `### Added/Changed/...` must not pass the gate.
+LINK_ONLY=$'# Changelog\n\n## [Unreleased]\n\n## [0.1.7] - 2026-09-27\n\n- See the full changelog.\n\n## [0.1.6] - 2026-09-27\n\n### Changed\n\n- Something\n'
+if printf '%s' "$LINK_ONLY" | release_notes_extract_section 0.1.7 | release_notes_section_is_empty; then
+  pass '12: link-only section without a category is detected as empty'
+else
+  fail '12: link-only section without a category is detected as empty'
+fi
+assert_not_ok '12: link-only section fails the gate with releasable changes' \
+  release_notes_gate_publish 0.1.7 0.1.7 1 <<< "$LINK_ONLY"
 # An omitted releasable count fails closed; an explicit zero still allows an
 # intentional no-change release.
 assert_not_ok '12: omitted releasable count fails the gate' \

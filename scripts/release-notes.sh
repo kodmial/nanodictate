@@ -320,7 +320,7 @@ release_notes_normalize() {
 # (`-`, `*` or ordered-list marker) under a changelog category. This is the
 # guard against the v0.1.7 empty-section failure mode recurring.
 release_notes_section_is_empty() {
-  local body stripped bullet
+  local body stripped
   body=$(grep -vE '^## \[' || true)
   # HTML comments must not count as release notes. Strip complete
   # `<!-- ... -->` spans, including multiline comments, before checking
@@ -348,12 +348,25 @@ release_notes_section_is_empty() {
       }
       print out
     }
-  ' | grep -vE '^[[:space:]]*$' | grep -vE '^###[[:space:]]+[A-Za-z]+[[:space:]]*$' || true)
+  ' | grep -vE '^[[:space:]]*$' || true)
   [[ -z "${stripped//[[:space:]]/}" ]] && return 0
   # Placeholders such as a bare TODO without a bullet do not count: require
-  # an actual list entry.
-  bullet=$(printf '%s\n' "$stripped" | grep -E '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+[^[:space:]]' || true)
-  [[ -z "$bullet" ]]
+  # an actual list entry under a valid changelog category. A bullet outside
+  # a category (for example a link-only `- See the full changelog` line with
+  # no `### Added/Changed/Deprecated/Removed/Fixed/Security` heading) must
+  # not count as releasable notes. Legacy release-please headings `Features`
+  # (= Added) and `Bug Fixes` (= Fixed) still count so historical sections
+  # are not misclassified as empty.
+  if printf '%s\n' "$stripped" | awk '
+    /^[[:space:]]*###[[:space:]]+(Added|Changed|Deprecated|Removed|Fixed|Security|Features|Bug Fixes)[[:space:]]*$/ { in_category = 1; next }
+    /^[[:space:]]*###/ { in_category = 0; next }
+    in_category && /^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+[^[:space:]]/ { found = 1; exit 0 }
+    END { exit !found }
+  '; then
+    return 1
+  else
+    return 0
+  fi
 }
 
 # release_notes_gate_publish
