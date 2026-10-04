@@ -51,10 +51,11 @@ idle --connect()--> connecting --ack--> ready --appendAudio()--> streaming
   `session.updated` within `RealtimeSessionPolicy.connectTimeout`.
 - `appendAudio(_:sourceSampleRate:)`: resamples to 24 kHz (linear), splits
   into `maxSamplesPerAppend` chunks, sends ordered
-  `input_audio_buffer.append` messages. No WAV files are written. The append
-  phase is bounded by one full `appendTimeout` (all chunks share that budget).
+  `input_audio_buffer.append` messages. No WAV files are written. All chunks
+  share one duration-derived budget (`appendBudget(forAudioSeconds:)`):
+  `appendTimeout` plus 0.5 s per audio second, capped at `maxAppendBudget`.
 - `commit()`: sends `input_audio_buffer.commit` (end of turn), bounded by a
-  separate full `appendTimeout`.
+  separate `appendTimeout` for the commit send.
 - `waitForFinal()` / `runToCompletion()`: consumes delta/completed events
   until the deterministic final transcript.
 - `close()` / `cancel()`: deterministic teardown, transport closed exactly
@@ -70,10 +71,11 @@ is deterministic after stop/session completion.
 ## Error / reconnect / timeout policy
 
 - Every wait is bounded (`connectTimeout`, `appendTimeout`, `commitTimeout`,
-  `closeTimeout`). The append phase and the commit send each get a full
-  `appendTimeout`, so a stalled upload cannot outlive the caller's watchdog
-  (connect + 2 x append + final wait + close + margin). Task cancellation
-  closes the transport up front instead
+  `closeTimeout`). The append phase gets the duration-derived append budget
+  and the commit send gets a separate `appendTimeout`, so a stalled upload
+  cannot outlive the caller's watchdog (`watchdogDuration(audioSeconds:)`:
+  connect + append budget + commit send + final wait + close + margin).
+  Task cancellation closes the transport up front instead
   of waiting for a stalled send to return.
   Timeouts throw `RealtimeTranscriptionError.timeout`; Task cancellation
   throws `.cancelled`. Neither wedges `AudioService` nor the UI.
