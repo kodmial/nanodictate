@@ -16,7 +16,7 @@ on:
   pull_request_review_comment:
     types: [created, edited]
 
-  # Manual/safety-net reconciliation.
+  # Manual/safety-net reconciliation. The reusable controller is non-blocking: quota backoff is durable and never sleeps a runner.
   workflow_dispatch:
 
 permissions:
