@@ -924,7 +924,24 @@ jobs:
             exit 1
           fi
           release_notes_extract_section "$RELEASE_VERSION" < CHANGELOG.md > /tmp/canonical-body.md
-          release_notes_gate_publish "$RELEASE_VERSION" "$SWIFT_VERSION" 1 /tmp/canonical-body.md < CHANGELOG.md
+          # The gate needs the actual releasable-change count, not a hardcoded
+          # constant: preflight/candidate-gate expose no entry count, so derive
+          # it from the canonical section itself. An empty section takes the
+          # explicit no-change path below (fail-closed); a non-empty section
+          # passes its bullet count so releases with changes stay gated.
+          if release_notes_section_is_empty < /tmp/canonical-body.md; then
+            RELEASABLE=0
+          else
+            RELEASABLE=$(grep -cE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+[^[:space:]]' /tmp/canonical-body.md || true)
+            if [[ -z "$RELEASABLE" || "$RELEASABLE" -eq 0 ]]; then
+              RELEASABLE=1
+            fi
+          fi
+          if [[ "$RELEASABLE" == "0" ]]; then
+            echo "::error::Canonical section ## [$RELEASE_VERSION] is empty — refusing to publish a release without notes."
+            exit 1
+          fi
+          release_notes_gate_publish "$RELEASE_VERSION" "$SWIFT_VERSION" "$RELEASABLE" /tmp/canonical-body.md < CHANGELOG.md
           if gh release create "$TAG" \
             dist/$CLI_NAME-*.tar.gz \
             dist/$CLI_NAME-*.zip \
@@ -952,7 +969,7 @@ jobs:
             # a diverged body means the release was published from different
             # notes, so refuse to attach assets until it is corrected.
             gh release view "$TAG" --json body --jq '.body' > /tmp/existing-body.md
-            if ! release_notes_gate_publish "$RELEASE_VERSION" "$SWIFT_VERSION" 1 /tmp/existing-body.md < CHANGELOG.md; then
+            if ! release_notes_gate_publish "$RELEASE_VERSION" "$SWIFT_VERSION" "$RELEASABLE" /tmp/existing-body.md < CHANGELOG.md; then
               echo "::error::Existing release body differs from the canonical CHANGELOG.md section; refusing to upload assets."
               exit 1
             fi
