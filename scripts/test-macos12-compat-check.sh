@@ -286,6 +286,12 @@ assert_grep 'lifecycle: original HOME restored after the probe' \
   "$CHECK_SCRIPT" 'export HOME="\$ORIGINAL_HOME"'
 assert_not_ok 'lifecycle: probe no longer retains the isolated HOME' \
   grep -qF 'export HOME="${HOME:-/}"' "$CHECK_SCRIPT"
+assert_grep 'lifecycle: missing agent binary fails the gate' \
+  "$CHECK_SCRIPT" 'fail "agent binary missing at \$AGENT_BIN"'
+assert_not_ok 'lifecycle: missing agent binary no longer only warns' \
+  grep -q 'agent binary missing.*non-fatal' "$CHECK_SCRIPT"
+assert_grep 'lifecycle: probe uses the agent built in this run' \
+  "$CHECK_SCRIPT" 'export NANODICTATE_AGENT_BIN="\$AGENT_BIN"'
 
 # --- 7. Documentation must not claim more than the gate automates ------------
 

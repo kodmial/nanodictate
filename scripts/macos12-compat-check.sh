@@ -210,7 +210,8 @@ else
     printf '%s\n' "$OTOOL_OUT" | grep -qE 'minos 12\.' \
       || fail "otool minos is not 12.x: $(printf '%s' "$OTOOL_OUT" | head -n 5)"
   fi
-  [ -x "$AGENT_BIN" ] || log "warning: agent binary missing at $AGENT_BIN (non-fatal)"
+  [ -x "$AGENT_BIN" ] || fail "agent binary missing at $AGENT_BIN"
+  export NANODICTATE_AGENT_BIN="$AGENT_BIN"
 fi
 
 if [ "$MODE" = "static-only" ]; then
