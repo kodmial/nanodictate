@@ -20,9 +20,9 @@ on:
   workflow_dispatch:
 
 permissions:
-  # The queue may wake the trusted auto-merge reconciler to re-verify stale
-  # CodeRabbit findings before spending another full-review slot.
-  actions: write
+  # The review queue only reads Actions state; exact-finding verification is
+  # owned by the separate auto-merge reconciler.
+  actions: read
   contents: read
   issues: write
   pull-requests: read
