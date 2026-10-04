@@ -143,6 +143,13 @@ public enum AudioTransportEncoder {
       let wav = WAVEncoder.encode(
         samples: samples, sampleRate: profile.sampleRate, channels: profile.channels)
       return EncodedAudioPayload(data: wav, format: .wav, filename: filename)
+    case .pcm16:
+      // Raw PCM16 for realtime streaming profiles (no container header).
+      // The batch upload path never selects this (realtime dictation streams
+      // via WebSocket through RealtimePCMConverter), but keep the encoder
+      // total for direct calls with a realtime profile.
+      let raw = RealtimePCMConverter.pcmData(from: samples)
+      return EncodedAudioPayload(data: raw, format: .pcm16, filename: filename)
     }
   }
 
@@ -150,7 +157,7 @@ public enum AudioTransportEncoder {
   /// (`segment-1.wav` -> `segment-1.flac`); names without a known audio
   /// extension are left untouched.
   public static func coercedFilename(_ filename: String, for format: STTUploadFormat) -> String {
-    let known = ["wav", "flac", "ogg"]
+    let known = ["wav", "flac", "ogg", "pcm"]
     if let dot = filename.lastIndex(of: ".") {
       let ext = String(filename[filename.index(after: dot)...]).lowercased()
       if known.contains(ext) {

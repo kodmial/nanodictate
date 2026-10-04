@@ -239,23 +239,20 @@ public enum ProviderRequestBuilder {
         keywords: applied.keywordsField ?? []
       )
     case .streamingSession:
-      // Reserved for future WebSocket streaming (non-goal): no profile uses
-      // it yet; fall back to multipart so the request path stays total.
-      return planOpenAICompatible(
-        adapterID: adapterID,
-        baseURL: resolvedBaseURL,
-        model: resolvedModel,
-        apiKey: apiKey,
-        language: effectiveLanguage,
-        languages: effectiveLanguages,
-        wav: wav,
-        filename: effectiveFilename,
-        prompt: effectivePrompt,
-        needsWordTimestamps: needsWordTimestamps,
-        stable: stable,
-        capabilities: caps,
-        audioFormat: effectiveFormat,
-        keywords: applied.keywordsField ?? []
+      // Realtime profiles have no batch representation (24 kHz raw PCM16
+      // streamed over a stateful WebSocket, not a 16 kHz WAV upload).
+      // Return an invalid spec (nil URL) instead of a silent multipart
+      // fallback so batch callers cannot turn one failed realtime session
+      // into repeated duplicate uploads. Realtime callers use
+      // RealtimeTranscriptionSession; explicit batch fallback, when desired,
+      // is owned by RealtimeFallbackPolicy and never implicit here.
+      return STTRequestSpec(
+        url: nil,
+        headers: [],
+        body: .multipart(
+          data: Data(),
+          contentType: "multipart/form-data; boundary=invalid-realtime-profile"),
+        transcriptPath: nil
       )
     }
   }

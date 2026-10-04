@@ -11,9 +11,10 @@ import Foundation
 // diagnostic for the caller to log.
 //
 // Current provider reality (2026-09):
-// - No built-in profile declares `supportsKeywordBiasing` (no current
-//   endpoint documents a dedicated keywords/hotwords field). Vocabulary is
-//   therefore folded into the `prompt` field where `supportsPrompt` is true.
+// - Only the realtime `gpt-live-transcribe` family declares
+//   `supportsKeywordBiasing` (dedicated `keywords` in `session.update`).
+//   Batch vocabulary is therefore folded into the `prompt` field where
+//   `supportsPrompt` is true.
 // - `gpt-transcribe` uses multi language hints (`languages[]`); Whisper-style
 //   models use a single `language` field; Cloudflare uses none.
 // Adding a future model with a dedicated keywords field means flipping
@@ -61,9 +62,9 @@ public struct STTAppliedBias: Equatable {
   public var effectiveLanguages: [String]
   /// Single language field for single-hint profiles.
   public var effectiveLanguage: String
-  /// Dedicated keywords field for future profiles with
-  /// `supportsKeywordBiasing`. Always `nil` today (no built-in profile
-  /// supports it) — reserved so the gating path is covered by tests.
+  /// Dedicated keywords field for profiles with
+  /// `supportsKeywordBiasing` (realtime family today; nil for batch
+  /// profiles) — reserved so the gating path is covered by tests.
   public var keywordsField: [String]?
   /// True when vocabulary was configured but dropped (no prompt or keyword
   /// support on this profile).

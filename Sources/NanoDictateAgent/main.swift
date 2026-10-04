@@ -31,7 +31,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   private let autoFailover: Bool
   private let reviewBeforeInsert: Bool
 
-  /// Failover order (active excluded): candidates for auto-retry.
+  /// Failover order (active excluded, realtime excluded): batch candidates
+  /// for auto-retry. Realtime profiles never join the failover chain
+  /// (fail-closed with their own watchdog and task retention).
   private let failoverCandidates: [AppConfig.Provider]
   /// All providers by id: for manual retry via IPC.
   private let providersByID: [String: AppConfig.Provider]
@@ -299,6 +301,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// new loop (processSamples).
   private var cancelRecognition = false
 
+  /// Retained realtime transcription task for the active "processing" phase.
+  /// The watchdog and `handleCancel` cancel it so an abandoned WebSocket does
+  /// not outlive the overlay session. Main-thread only; cleared on completion.
+  private var activeRealtimeTask: Task<Void, Never>?
+
   /// While ReviewGate.confirmAsync waits for the terminal decision, a
   /// physical Return MUST pass through the event tap — the terminal's
   /// readLine needs it (ReviewGate reads stdin on a background queue). Set
@@ -439,7 +446,19 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       config.activeProvider.isEmpty
       ? config.providers.first?.id
       : config.activeProvider
-    failoverCandidates = config.failoverProviders(excluding: activeProviderID)
+    // Auto-failover stays batch-only: a realtime (`.streamingSession`)
+    // candidate would run a stateful WebSocket session under the batch
+    // watchdog budget with no realtime task retention, so the watchdog could
+    // end processing while the socket stays open. Realtime is fail-closed
+    // and never joins the failover chain.
+    let allFailover = config.failoverProviders(excluding: activeProviderID)
+    let realtimeFailover = allFailover.filter { Self.isRealtimeProvider($0) }
+    if !realtimeFailover.isEmpty {
+      Logger.log(
+        "failover skips realtime providers: \(realtimeFailover.map(\.id).joined(separator: ", "))",
+        level: "warn")
+    }
+    failoverCandidates = allFailover.filter { !Self.isRealtimeProvider($0) }
     var byID: [String: AppConfig.Provider] = [:]
     for provider in config.providers {
       byID[provider.id] = provider
@@ -1137,10 +1156,12 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       Logger.log("record ready: rust session engine missing at cue time", level: "error")
     }
     state = .recording
-    if chunked {
+    if chunked, !chunkedUsesRealtime() {
       // Live dictation: each utterance (pause ≥ pauseDuration) is
       // recognized and inserted on the fly; by the time of Alt+Alt the
-      // text is already partly in the input field.
+      // text is already partly in the input field. Realtime providers skip
+      // live segments: the recording runs as one session via
+      // processSingleRequest instead.
       subscribeLiveNanoDictate()
     }
     if isDebug {
@@ -1191,7 +1212,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// Called both on user stop and after the forced duration limit
   /// (see `onRecordingLimitReached`).
   private func processSamples(_ samples: [Int16]) {
-    if chunked {
+    // Realtime providers never run the chunked/live pipeline: one stateful
+    // WebSocket session per dictation (processSingleRequest) instead of one
+    // session per segment plus a final replay.
+    if chunked, !chunkedUsesRealtime() {
       processChunked(samples)
       return
     }
@@ -1246,17 +1270,43 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     let watchdogDuration =
       OverlayController.processingMaxDuration
       + (autoFailover && !failoverCandidates.isEmpty ? Transcriber.networkRequestTimeout : 0)
-    DispatchQueue.main.asyncAfter(deadline: .now() + watchdogDuration) {
+    // Realtime sessions need their own budget (connect + audio sends +
+    // final wait), not the batch watchdog: connectTimeout (10 s) +
+    // duration-derived append budget (floor appendTimeout 15 s for all
+    // appends, plus another 15 s for the commit send) + commitTimeout
+    // (20 s) already exceed processingMaxDuration (25 s), so a valid
+    // realtime completion could arrive after failTranscription ends the
+    // session and be dropped.
+    // Independent of the auto-failover margin (realtime is fail-closed and
+    // never runs the failover chain).
+    let realtimePolicy = RealtimeSessionPolicy()
+    let realtimeWatchdogDuration = realtimePolicy.watchdogDuration(audioSeconds: duration)
+    let isRealtimeRequest: Bool = {
+      if let provider = self.effectiveOrdinaryProvider() {
+        return self.isRealtimeOrdinaryProvider(provider)
+      }
+      return false
+    }()
+    let effectiveWatchdogDuration = isRealtimeRequest ? realtimeWatchdogDuration : watchdogDuration
+    DispatchQueue.main.asyncAfter(deadline: .now() + effectiveWatchdogDuration) {
       [weak self] in  // swiftlint:disable:this closure_parameter_position
       guard
         let self,
         self.processingSession == session,
         self.state == .transcribing
       else { return }
+      // Cancel the retained realtime task so the WebSocket does not remain
+      // open after the watchdog ends the session.
+      self.activeRealtimeTask?.cancel()
+      self.activeRealtimeTask = nil
       self.failTranscription(Transcriber.sttTimeoutMessage, isNetworkFailure: true)
     }
 
-    Task { [weak self] in
+    // Drop any previous realtime task before starting a new loop so an
+    // abandoned session cannot linger when dictations overlap.
+    activeRealtimeTask?.cancel()
+    activeRealtimeTask = nil
+    let realtimeTask = Task { [weak self] in
       guard let self else { return }
 
       // Same guard as the watchdog above: the "processing" session fixed at
@@ -1264,10 +1314,48 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       // dictation) or the loop already ended with a terminal event (the
       // "STT timeout" watchdog set state to .idle) — terminal calls become
       // no-ops; a repeated failTranscription/completeInsertion is impossible.
+      // Realtime profiles (`.streamingSession`, today `gpt-live-transcribe`)
+      // go through Transcriber's realtime routing (connect -> append ->
+      // commit -> final with network preflight) — never as a WAV batch upload
+      // (which rejects realtime profiles with an invalid spec). Fail-closed:
+      // no implicit batch fallback and no failover chain.
+      // Keep manual retry consistent with the current recording on both paths.
       let wav = WAVEncoder.encode(samples: samples)
       // Last WAV kept in memory (RetryProvider): manual retry with another
       // provider (`nanodictate retry`) and auto-failover reuse it.
       self.retryProvider.store(wav: wav)
+      if let realtimeProvider = self.effectiveOrdinaryProvider(),
+        self.isRealtimeOrdinaryProvider(realtimeProvider)
+      {  // swiftlint:disable:this opening_brace
+        do {
+          // Transcriber routes `.streamingSession` profiles to its realtime
+          // path (no batch fallback, no failover chain).
+          let result = try await self.makeTranscriber(realtimeProvider).transcribe(wav: wav)
+          let text = TextRefinement.finalize(result.text)
+          DispatchQueue.main.async {
+            guard
+              NanoDictateFlow.shouldDeliverResult(
+                isCancelled: self.cancelRecognition,
+                sessionActive: self.processingSession == session && self.state == .transcribing
+              )
+            else { return }
+            self.activeRealtimeTask = nil
+            self.completeInsertion(text)
+          }
+        } catch {
+          let networkText = OverlayErrorText.text(for: error)
+          let message = networkText ?? Self.message(for: error)
+          DispatchQueue.main.async {
+            guard
+              self.processingSession == session,
+              self.state == .transcribing
+            else { return }
+            self.activeRealtimeTask = nil
+            self.failTranscription(message, isNetworkFailure: networkText != nil)
+          }
+        }
+        return
+      }
 
       do {
         let (result, providerID) = try await self.transcribeAutomatically(wav: wav)
@@ -1301,6 +1389,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         }
       }
     }
+    if isRealtimeRequest {
+      activeRealtimeTask = realtimeTask
+    }
   }
 
   /// Step dictation (chunked = true): VAD segmentation of the recording → each
@@ -1310,6 +1401,13 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// replacement of the changed range in a single action.
   // swiftlint:disable:next cyclomatic_complexity function_body_length
   private func processChunked(_ samples: [Int16]) {
+    // Defense in depth: a realtime role must never open per-segment
+    // sessions (see processSamples routing). Direct callers fall back to
+    // the single-session path with the realtime watchdog budget.
+    if chunkedUsesRealtime() {
+      processSingleRequest(samples)
+      return
+    }
     state = .transcribing
     // New loop — previous recognition's cancel token does not apply
     // (same reset as in processSingleRequest).
@@ -1553,7 +1651,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   private func handleRecordingLimitReached(samples: [Int16]) {
     guard state == .recording else { return }
     Logger.log("record limit reached (\(samples.count) samples)", level: "info")
-    if chunked {
+    if chunked, !chunkedUsesRealtime() {
       // Live dictation: the tail was already handed by onSpeechSegment BEFORE
       // this call (performForcedStop: tail → onRecordingLimitReached) and
       // stands first in liveExecutor; here — only the guard and the final
@@ -1572,7 +1670,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   private func handleAutoStop(samples: [Int16]) {
     guard state == .recording else { return }
     Logger.log("auto-stop by silence (\(samples.count) samples)", level: "info")
-    if chunked {
+    if chunked, !chunkedUsesRealtime() {
       // Live dictation: the tail stands first in liveExecutor (tail was
       // delivered by onSpeechSegment before onAutoStop), here — the final
       // pass over the snapshot. No audio.stop(): AudioService already tears
@@ -1660,6 +1758,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   private func handleLiveSegment(
     runState: LiveRunState
   ) async {
+    // Defense in depth: realtime recordings never subscribe to live
+    // segments, so this drain must not open per-segment sessions.
+    if chunkedUsesRealtime() {
+      return
+    }
     // Drain loop: each iteration takes exactly one batch FIFO. Nil means the
     // buffer is empty (earlier iterations already transcribed the merged
     // batch that bounds the request count when STT falls behind).
@@ -1778,6 +1881,14 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// over the whole WAV → the common terminal path completeChunkedInsertion.
   private func liveFinalize() {
     guard state == .recording else { return }
+    // Realtime providers never run the live pipeline (see processSamples):
+    // stop and run one session with the realtime watchdog budget.
+    if chunkedUsesRealtime() {
+      liveRunState?.isCancelled = true
+      liveRunState = nil
+      sendRecording()
+      return
+    }
     guard let runState = liveRunState else {
       // Logically unreachable (the subscription is set on successful start
       // together with state = .recording) — safety path into offline chunking.
@@ -1828,6 +1939,14 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// callback) and stands first in liveExecutor; here — only the guard and
   /// the final pass over the passed samples (no audio.stop()).
   private func liveFinalizeFromSamples(_ samples: [Int16]) {
+    // Realtime providers never run the live pipeline (see processSamples):
+    // one session with the realtime watchdog budget instead.
+    if chunkedUsesRealtime() {
+      liveRunState?.isCancelled = true
+      liveRunState = nil
+      processSingleRequest(samples)
+      return
+    }
     guard let runState = liveRunState else {
       processChunked(samples)
       return
@@ -2149,6 +2268,56 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     return makeTranscriber(provider)
   }
 
+  /// Effective provider for ordinary (single-request) dictation: the final
+  /// routing role when set to another provider, else the active provider.
+  /// Mirrors the provider choice in `transcribeAutomatically` so the realtime
+  /// check and the realtime run agree on the same provider.
+  private func effectiveOrdinaryProvider() -> AppConfig.Provider? {
+    if let finalRoleProviderID,
+      finalRoleProviderID != activeProviderID,
+      let roleProvider = providersByID[finalRoleProviderID]
+    {
+      return roleProvider
+    }
+    guard let activeProviderID, let active = providersByID[activeProviderID] else {
+      return nil
+    }
+    return active
+  }
+
+  /// Whether a provider streams via a stateful realtime session (today:
+  /// `gpt-live-transcribe` family). Static so init-time failover filtering
+  /// (before self exists) shares the check with the instance paths.
+  private static func isRealtimeProvider(_ provider: AppConfig.Provider) -> Bool {
+    let resolvedModel = ProviderRequestBuilder.resolveModel(provider.model, for: provider.id)
+    return ProviderRequestBuilder.isRealtime(adapterID: provider.id, model: resolvedModel)
+  }
+
+  /// Whether an ordinary-dictation provider streams via a stateful realtime
+  /// session (today: `gpt-live-transcribe` family).
+  private func isRealtimeOrdinaryProvider(_ provider: AppConfig.Provider) -> Bool {
+    Self.isRealtimeProvider(provider)
+  }
+
+  /// Whether a routing id resolves to a realtime provider.
+  private func isRealtimeProviderID(_ providerID: String?) -> Bool {
+    guard let providerID, let provider = providersByID[providerID] else { return false }
+    return isRealtimeOrdinaryProvider(provider)
+  }
+
+  /// Whether the chunked/live pipeline would use a realtime provider for
+  /// segments or the final pass. Chunked/live opens one session per segment
+  /// (plus a final replay) under the batch watchdog budget, contradicting
+  /// the one-session-per-dictation realtime contract — such recordings run
+  /// through `processSingleRequest` instead. Chunked paths use role
+  /// providers directly without auto-failover, so checking the resolved
+  /// segment/final roles covers every realtime entry point there.
+  private func chunkedUsesRealtime() -> Bool {
+    let segmentID = segmentRoleProviderID ?? activeProviderID
+    let finalID = finalRoleProviderID ?? activeProviderID
+    return isRealtimeProviderID(segmentID) || isRealtimeProviderID(finalID)
+  }
+
   /// Effective upload container for a provider: config `upload_format`
   /// (section override or top-level inheritance) through the model profile
   /// capabilities. WAV bytes are FLAC-encoded per request inside
@@ -2170,6 +2339,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// TranscribeError the candidates from the failover order are tried. An
   /// error NOT related to the provider (microphone etc.) does not start a
   /// failover. Returns (result, id of the failover provider; nil — primary).
+  /// Batch-only: realtime (`.streamingSession`) profiles never reach here —
+  /// `processSingleRequest` routes them through `makeTranscriber(...).transcribe`
+  /// (Transcriber's realtime path) before any failover chain, and realtime
+  /// candidates are excluded from the failover chain (init-time filtering
+  /// plus the guard below).
   private func transcribeAutomatically(wav: Data) async throws -> (TranscriptionResult, String?) {
     // The final role from [routing] (whole recording non-chunked): set and
     // different from the active — the direct role provider WITHOUT a
@@ -2205,8 +2379,16 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       // chain like the sequential loop (microphone etc.).
       // lastFailedProviderID is set BEFORE the group and reset on a success
       // in retranscribe.
+      // Defense in depth alongside init-time filtering: realtime candidates
+      // never join the parallel chain — they need the realtime watchdog and
+      // task retention, not the batch budget. No batch candidates left —
+      // rethrow the primary error instead of failing over nowhere.
+      let batchCandidates = failoverCandidates.filter { !Self.isRealtimeProvider($0) }
+      guard !batchCandidates.isEmpty else {
+        throw error
+      }
       return try await RetryProvider.parallelFailover(
-        candidates: failoverCandidates
+        candidates: batchCandidates
       ) { provider in
         guard let retryResult = try await self.retryProvider.retranscribe(with: provider) else {
           throw TranscribeError.invalidResponse("failover retry lost the stored WAV")
@@ -2219,13 +2401,31 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// Handles a manual retry from the CLI (`nanodictate retry <provider>`).
   /// Recognizes the last WAV from memory (if any) with the chosen provider
   /// and inserts the result by the standard path (review/insertion method
-  /// are respected).
+  /// are respected). Batch-only like auto-failover: the retry path has no
+  /// realtime watchdog or session task retention, so an explicit realtime
+  /// target fails closed instead of opening an unmanaged socket.
   private func handleRetryRequest(provider: AppConfig.Provider) {
     guard retryProvider.hasLastRecording else {
       Logger.log("retry request ignored: no recording in this session", level: "info")
       return
     }
     let display = provider.name.isEmpty ? provider.id : provider.name
+    if Self.isRealtimeProvider(provider) {
+      Logger.log(
+        "retry with provider '\(display)' ignored: realtime providers need a live dictation session",
+        level: "error")
+      DispatchQueue.main.async { [weak self] in
+        guard let self, self.state == .idle else { return }
+        self.overlay.show()
+        self.overlay.resetPhase()
+        self.overlay.setStatus(
+          L10n.tr("overlay.retryError").replacingOccurrences(
+            of: "{message}",
+            with: "realtime provider '\(display)' cannot retry a stored recording"))
+        self.hideAfter(2.0, reason: "retry failed")
+      }
+      return
+    }
     Logger.log("retry with provider '\(display)' started", level: "info")
     Task { [weak self] in
       guard let self else { return }
@@ -2470,6 +2670,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       Logger.log("record cancelled")
     case .transcribing:
       cancelRecognition = true
+      // Cancel a retained realtime session so Esc closes the WebSocket
+      // immediately instead of leaving it open until its own timeout.
+      activeRealtimeTask?.cancel()
+      activeRealtimeTask = nil
       // Esc during transcription stops the queued work immediately, not only
       // at the next segment: the isCancelled guard in finishLiveRun drops the
       // final pass, so a cancelled run never sends audio to STT.

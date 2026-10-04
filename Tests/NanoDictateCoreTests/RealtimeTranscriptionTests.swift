@@ -1,0 +1,1212 @@
+import Foundation
+@testable import NanoDictateCore
+
+// MARK: - Mock transport
+
+final class MockRealtimeTransport: RealtimeTransport {
+    var sent: [String] = []
+    var incoming: [String?]
+    var closedCount = 0
+    var sendError: Error?
+    /// When non-empty, thrown (in order) from `receive()` before `incoming`
+    /// is consulted. Lets tests script transport and generic failures.
+    var receiveErrors: [Error] = []
+
+    init(incoming: [String?] = []) {
+        self.incoming = incoming
+    }
+
+    func send(text: String) async throws {
+        if let error = sendError {
+            throw error
+        }
+        sent.append(text)
+    }
+
+    func receive() async throws -> String? {
+        if !receiveErrors.isEmpty {
+            throw receiveErrors.removeFirst()
+        }
+        if incoming.isEmpty {
+            // Park briefly so wait loops can observe cancellation/timeout
+            // without hot-spinning; then report no message yet via nil only
+            // when explicitly scripted (nil element), else keep waiting by
+            // throwing a transient error the session treats as "keep waiting".
+            try await Task.sleep(nanoseconds: 5_000_000)
+            throw RealtimeTranscriptionError.transport("no scripted message")
+        }
+        return incoming.removeFirst()
+    }
+
+    func close() async {
+        closedCount += 1
+    }
+}
+
+/// Transport whose `receive()` is slower than the session's per-poll stream
+/// wait (0.2s). Proves a message consumed after a poll timeout is buffered
+/// for the next wait instead of being discarded.
+final class DelayedRealtimeTransport: RealtimeTransport {
+    var sent: [String] = []
+    var messages: [String?]
+    var delayNanoseconds: UInt64
+    var closedCount = 0
+
+    init(messages: [String?], delayNanoseconds: UInt64 = 300_000_000) {
+        self.messages = messages
+        self.delayNanoseconds = delayNanoseconds
+    }
+
+    func send(text: String) async throws {
+        sent.append(text)
+    }
+
+    func receive() async throws -> String? {
+        try await Task.sleep(nanoseconds: delayNanoseconds)
+        if messages.isEmpty {
+            return nil
+        }
+        return messages.removeFirst()
+    }
+
+    func close() async {
+        closedCount += 1
+    }
+}
+
+/// Transport with per-message receive delays. Lets tests script a slow
+/// completion (longer than the 0.2s per-poll wait, so at least one poll
+/// expiry happens) immediately followed by an instant EOF, which is the
+/// exact ordering the timeout-recovery requeue must preserve.
+final class SequenceRealtimeTransport: RealtimeTransport {
+    var sent: [String] = []
+    var steps: [(message: String?, delayNanoseconds: UInt64)]
+    var closedCount = 0
+
+    init(steps: [(String?, UInt64)]) {
+        self.steps = steps.map { (message: $0.0, delayNanoseconds: $0.1) }
+    }
+
+    func send(text: String) async throws {
+        sent.append(text)
+    }
+
+    func receive() async throws -> String? {
+        guard !steps.isEmpty else {
+            try await Task.sleep(nanoseconds: 5_000_000)
+            return nil
+        }
+        let step = steps.removeFirst()
+        if step.delayNanoseconds > 0 {
+            try await Task.sleep(nanoseconds: step.delayNanoseconds)
+        }
+        return step.message
+    }
+
+    func close() async {
+        closedCount += 1
+    }
+}
+
+/// Transport whose `send` stalls longer than the session's connect timeout.
+/// Proves the initial `session.update` send (including lazy WebSocket setup)
+/// is bounded by `connectTimeout` instead of keeping `connect()` pending.
+final class StalledSendRealtimeTransport: RealtimeTransport {
+    var sentCount = 0
+    var closedCount = 0
+    var sendDelayNanoseconds: UInt64
+
+    init(sendDelayNanoseconds: UInt64 = 2_000_000_000) {
+        self.sendDelayNanoseconds = sendDelayNanoseconds
+    }
+
+    func send(text: String) async throws {
+        sentCount += 1
+        try await Task.sleep(nanoseconds: sendDelayNanoseconds)
+    }
+
+    func receive() async throws -> String? {
+        try await Task.sleep(nanoseconds: 5_000_000)
+        throw RealtimeTranscriptionError.transport("no scripted message")
+    }
+
+    func close() async {
+        closedCount += 1
+    }
+}
+
+/// Transport whose `send` ignores task cancellation and stays suspended until
+/// `close()` unblocks it, modelling a production WebSocket send suspended in
+/// lazy setup. Proves the connect timeout closes the transport before draining
+/// the send task instead of blocking group exit behind the pending send.
+final class NonCooperativeStalledSendRealtimeTransport: RealtimeTransport {
+    var sentCount = 0
+    var closedCount = 0
+    private let lock = NSLock()
+    private var closed = false
+
+    private var isClosed: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return closed
+    }
+
+    func send(text: String) async throws {
+        sentCount += 1
+        while !isClosed {
+            // Intentionally ignore cancellation: a suspended WebSocket send
+            // unblocks only when the transport closes.
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    func receive() async throws -> String? {
+        try await Task.sleep(nanoseconds: 5_000_000)
+        throw RealtimeTranscriptionError.transport("no scripted message")
+    }
+
+    func close() async {
+        lock.lock()
+        closed = true
+        closedCount += 1
+        lock.unlock()
+    }
+}
+
+/// Transport whose audio/commit sends stall while the session handshake is
+/// instant. Proves the append/commit send phase is bounded by
+/// `appendTimeout` instead of keeping the session pending past the watchdog.
+final class AppendStalledRealtimeTransport: RealtimeTransport {
+    var sent: [String] = []
+    var incoming: [String?]
+    var closedCount = 0
+    var appendDelayNanoseconds: UInt64
+
+    init(incoming: [String?] = [], appendDelayNanoseconds: UInt64 = 2_000_000_000) {
+        self.incoming = incoming
+        self.appendDelayNanoseconds = appendDelayNanoseconds
+    }
+
+    func send(text: String) async throws {
+        sent.append(text)
+        if text.contains("session.update") {
+            return
+        }
+        try await Task.sleep(nanoseconds: appendDelayNanoseconds)
+    }
+
+    func receive() async throws -> String? {
+        if incoming.isEmpty {
+            try await Task.sleep(nanoseconds: 5_000_000)
+            throw RealtimeTranscriptionError.transport("no scripted message")
+        }
+        return incoming.removeFirst()
+    }
+
+    func close() async {
+        closedCount += 1
+    }
+}
+
+/// Transport whose audio/commit sends ignore task cancellation and stay
+/// suspended until `close()` unblocks them, modelling a production WebSocket
+/// send suspended in lazy setup. Proves cancellation closes the transport up
+/// front instead of waiting for the stalled send to return.
+final class NonCooperativeAppendRealtimeTransport: RealtimeTransport {
+    var sentCount = 0
+    var incoming: [String?]
+    var closedCount = 0
+    private let lock = NSLock()
+    private var closed = false
+
+    init(incoming: [String?] = []) {
+        self.incoming = incoming
+    }
+
+    private var isClosed: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return closed
+    }
+
+    func send(text: String) async throws {
+        sentCount += 1
+        if text.contains("session.update") {
+            return
+        }
+        while !isClosed {
+            // Intentionally ignore cancellation: the suspended send unblocks
+            // only when the transport closes.
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    func receive() async throws -> String? {
+        if incoming.isEmpty {
+            try await Task.sleep(nanoseconds: 5_000_000)
+            throw RealtimeTranscriptionError.transport("no scripted message")
+        }
+        return incoming.removeFirst()
+    }
+
+    func close() async {
+        lock.lock()
+        closed = true
+        closedCount += 1
+        lock.unlock()
+    }
+}
+
+/// Transport that delivers one scripted ack and then parks `receive()` until
+/// the pump is stopped, so a pending wait is still suspended when `cancel()`
+/// resumes it with nil. Proves the cancelled state wins over close-out.
+final class ParkingRealtimeTransport: RealtimeTransport {
+    var sent: [String] = []
+    var closedCount = 0
+    private let ack: String?
+    private var deliveredAck = false
+
+    init(ack: String?) {
+        self.ack = ack
+    }
+
+    func send(text: String) async throws {
+        sent.append(text)
+    }
+
+    func receive() async throws -> String? {
+        if !deliveredAck {
+            deliveredAck = true
+            return ack
+        }
+        try await Task.sleep(nanoseconds: 10_000_000_000)
+        return nil
+    }
+
+    func close() async {
+        closedCount += 1
+    }
+}
+
+final class RealtimeTranscriptionTests: XCTestCase {
+    private func runAsync(_ name: String, _ body: @escaping () async throws -> Void) {
+        let expectation = expectation(description: name)
+        Task {
+            do {
+                try await body()
+            } catch {
+                XCTFail("Unexpected error: \(error)")
+            }
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 15)
+    }
+
+    private func json(_ dict: [String: Any]) -> String {
+        String(data: try! JSONSerialization.data(withJSONObject: dict), encoding: .utf8)!
+    }
+
+    // MARK: - Event parsing (official schema)
+
+    @objc func testParseDeltaEvent() {
+        let text = json([
+            "type": "conversation.item.input_audio_transcription.delta",
+            "item_id": "item_003",
+            "content_index": 0,
+            "delta": "Hello,",
+        ])
+        let event = RealtimeEventParser.parse(text)
+        XCTAssertEqual(event, .delta(itemID: "item_003", contentIndex: 0, delta: "Hello,"))
+    }
+
+    @objc func testParseCompletedEventWithLanguages() {
+        let text = json([
+            "type": "conversation.item.input_audio_transcription.completed",
+            "item_id": "item_003",
+            "content_index": 0,
+            "transcript": "Bonjour, pouvez-vous m'entendre ?",
+            "languages": [["code": "fr"]],
+        ] as [String: Any])
+        let event = RealtimeEventParser.parse(text)
+        XCTAssertEqual(
+            event,
+            .completed(
+                itemID: "item_003", contentIndex: 0,
+                transcript: "Bonjour, pouvez-vous m'entendre ?",
+                languages: ["fr"]))
+    }
+
+    @objc func testParseFailedAndErrorEvents() {
+        let failed = json([
+            "type": "conversation.item.input_audio_transcription.failed",
+            "item_id": "item_1",
+            "error": ["message": "too much audio"],
+        ] as [String: Any])
+        XCTAssertEqual(
+            RealtimeEventParser.parse(failed), .failed(itemID: "item_1", message: "too much audio"))
+        let error = json(["type": "error", "error": ["message": "bad session"]] as [String: Any])
+        XCTAssertEqual(RealtimeEventParser.parse(error), .errorMessage("bad session"))
+    }
+
+    @objc func testParseInvalidJSONIsUnknown() {
+        XCTAssertEqual(RealtimeEventParser.parse("not json"), .unknown("not json"))
+        XCTAssertEqual(
+            RealtimeEventParser.parse(json(["type": "something.else"])),
+            .unknown("something.else"))
+    }
+
+    // MARK: - Accumulator: no duplication, deterministic final
+
+    @objc func testAccumulatorDeltasAppendWithoutDuplication() {
+        var acc = RealtimeTranscriptAccumulator()
+        _ = acc.apply(.delta(itemID: "a", contentIndex: 0, delta: "Hello,"))
+        _ = acc.apply(.delta(itemID: "a", contentIndex: 0, delta: " how are"))
+        XCTAssertEqual(acc.partialText, "Hello, how are")
+        XCTAssertNil(acc.finalText)
+        // Completed replaces the delta buffer (authoritative, no duplication).
+        _ = acc.apply(.completed(
+            itemID: "a", contentIndex: 0, transcript: "Hello, how are you?", languages: []))
+        XCTAssertEqual(acc.partialText, "Hello, how are you?")
+        XCTAssertEqual(acc.finalText, "Hello, how are you?")
+        // Late duplicate delta after completion is ignored.
+        _ = acc.apply(.delta(itemID: "a", contentIndex: 0, delta: " how are"))
+        XCTAssertEqual(acc.partialText, "Hello, how are you?")
+    }
+
+    @objc func testAccumulatorMultiItemJoinsInOrder() {
+        var acc = RealtimeTranscriptAccumulator()
+        _ = acc.apply(.delta(itemID: "a", contentIndex: 0, delta: "first"))
+        _ = acc.apply(.completed(itemID: "a", contentIndex: 0, transcript: "first done", languages: []))
+        _ = acc.apply(.delta(itemID: "b", contentIndex: 0, delta: "second"))
+        XCTAssertEqual(acc.partialText, "first done second")
+        _ = acc.apply(.completed(itemID: "b", contentIndex: 0, transcript: "second done", languages: []))
+        XCTAssertEqual(acc.finalText, "first done second done")
+    }
+
+    // MARK: - Client builders use the official 24 kHz PCM session shape
+
+    @objc func testSessionUpdatePayloadUses24kPCMTranscription() {
+        let text = RealtimeClientEvents.sessionUpdate(
+            model: "gpt-live-transcribe", language: "en",
+            prompt: "support call", keywords: ["AC-42"], delay: .low)
+        guard let data = text.data(using: .utf8),
+            let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let session = event["session"] as? [String: Any],
+            let audio = session["audio"] as? [String: Any],
+            let input = audio["input"] as? [String: Any],
+            let format = input["format"] as? [String: Any],
+            let transcription = input["transcription"] as? [String: Any]
+        else {
+            XCTFail("session.update payload malformed: \(text)")
+            return
+        }
+        XCTAssertEqual(event["type"] as? String, "session.update")
+        XCTAssertEqual(session["type"] as? String, "transcription")
+        XCTAssertEqual(format["type"] as? String, "audio/pcm")
+        XCTAssertEqual((format["rate"] as? NSNumber)?.intValue, 24000)
+        XCTAssertEqual(transcription["model"] as? String, "gpt-live-transcribe")
+        XCTAssertEqual(transcription["prompt"] as? String, "support call")
+        XCTAssertEqual(transcription["keywords"] as? [String], ["AC-42"])
+        XCTAssertEqual(transcription["languages"] as? [String], ["en"])
+        XCTAssertEqual(transcription["delay"] as? String, "low")
+        XCTAssertTrue(input["turn_detection"] is NSNull)
+    }
+
+    @objc func testSessionUpdateMergesExtraLanguagesWithPrimary() {
+        let text = RealtimeClientEvents.sessionUpdate(
+            model: "gpt-live-transcribe", language: "en",
+            extraLanguages: ["ru", "EN", "xx-invalid!!", "de", "fr", "it"])
+        guard let data = text.data(using: .utf8),
+            let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let session = event["session"] as? [String: Any],
+            let audio = session["audio"] as? [String: Any],
+            let input = audio["input"] as? [String: Any],
+            let transcription = input["transcription"] as? [String: Any]
+        else {
+            XCTFail("session.update payload malformed: \(text)")
+            return
+        }
+        // Primary first, extras normalized (EN dedupes, invalid dropped),
+        // capped at the shared total-languages budget.
+        XCTAssertEqual(transcription["languages"] as? [String], ["en", "ru", "de", "fr"])
+
+        let extrasOnly = RealtimeClientEvents.sessionUpdate(
+            model: "gpt-live-transcribe", extraLanguages: ["ru"])
+        guard let extrasData = extrasOnly.data(using: .utf8),
+            let extrasEvent = try? JSONSerialization.jsonObject(with: extrasData) as? [String: Any],
+            let extrasSession = extrasEvent["session"] as? [String: Any],
+            let extrasAudio = extrasSession["audio"] as? [String: Any],
+            let extrasInput = extrasAudio["input"] as? [String: Any],
+            let extrasTranscription = extrasInput["transcription"] as? [String: Any]
+        else {
+            XCTFail("session.update payload malformed: \(extrasOnly)")
+            return
+        }
+        XCTAssertEqual(extrasTranscription["languages"] as? [String], ["ru"])
+
+        let noHints = RealtimeClientEvents.sessionUpdate(model: "gpt-live-transcribe")
+        XCTAssertFalse(noHints.contains("languages"), "no language hints means no languages field")
+    }
+
+    @objc func testAppendEventCarriesBase64PCM() {
+        let b64 = RealtimePCMConverter.base64PCM(from: [1, -2, 300])
+        let text = RealtimeClientEvents.appendAudio(base64PCM: b64)
+        guard let data = text.data(using: .utf8),
+            let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            XCTFail("append payload malformed")
+            return
+        }
+        XCTAssertEqual(event["type"] as? String, "input_audio_buffer.append")
+        XCTAssertEqual(event["audio"] as? String, b64)
+        XCTAssertEqual(RealtimeClientEvents.commit(), "{\"type\":\"input_audio_buffer.commit\"}")
+    }
+
+    // MARK: - Audio profile: realtime models use 24 kHz PCM16, not batch WAV
+
+    @objc func testRealtimeProfileUses24kPCM16Streaming() {
+        let profile = STTModelRegistry.resolve(adapterID: "openai", model: "gpt-live-transcribe")
+        XCTAssertEqual(profile.capabilities.transport, .streamingSession)
+        XCTAssertEqual(profile.audio.sampleRate, 24000)
+        XCTAssertEqual(profile.audio.channels, 1)
+        XCTAssertEqual(profile.audio.uploadFormat, .pcm16)
+        XCTAssertTrue(STTModelRegistry.isRealtime(adapterID: "openai", model: "gpt-live-transcribe"))
+        XCTAssertTrue(ProviderRequestBuilder.isRealtime(adapterID: "openai", model: "gpt-live-transcribe"))
+        // Snapshot prefix keeps the streaming profile.
+        XCTAssertTrue(STTModelRegistry.isRealtime(adapterID: "openai", model: "gpt-live-transcribe-2026-09-01"))
+        // Batch models are untouched.
+        XCTAssertFalse(STTModelRegistry.isRealtime(adapterID: "openai", model: "gpt-transcribe"))
+        XCTAssertFalse(STTModelRegistry.isRealtime(adapterID: "openai", model: "whisper-1"))
+        XCTAssertEqual(
+            ProviderRequestBuilder.audioProfile(adapterID: "openai", model: "gpt-live-transcribe").sampleRate,
+            24000)
+    }
+
+    @objc func testBatchPlanForStreamingProfileIsInvalidNotSilentFallback() {
+        let spec = ProviderRequestBuilder.plan(
+            adapterID: "openai", baseURL: "", model: "gpt-live-transcribe", apiKey: "k",
+            language: "en", wav: Data([1, 2, 3]))
+        XCTAssertNil(spec.url)
+    }
+
+    // MARK: - Resampling 16 kHz mic -> 24 kHz realtime
+
+    @objc func testResample16kTo24kUpsamplesDeterministically() {
+        XCTAssertEqual(RealtimePCMConverter.resample([100, 200], fromRate: 24000, toRate: 24000), [100, 200])
+        XCTAssertEqual(RealtimePCMConverter.resample([], fromRate: 16000, toRate: 24000), [])
+        let out = RealtimePCMConverter.resample([0, 1000, 2000, 3000], fromRate: 16000, toRate: 24000)
+        XCTAssertEqual(out.count, 6)
+        XCTAssertEqual(out.first, 0)
+        XCTAssertEqual(out.last, 3000)
+        // Monotonic ramp resamples to a monotonic ramp (no aliasing jumps).
+        for i in 1..<out.count {
+            XCTAssertTrue(out[i] >= out[i - 1], "index \(i): \(out)")
+        }
+    }
+
+    @objc func testChunkingPreservesOrder() {
+        let chunks = RealtimePCMConverter.chunk([1, 2, 3, 4, 5], maxSamples: 2)
+        XCTAssertEqual(chunks, [[1, 2], [3, 4], [5]])
+    }
+
+    // MARK: - Session state with mocked transport
+
+    @objc func testSessionConnectStreamsCommitCompletesDeterministically() {
+        runAsync("realtime connect/stream/commit") {
+            let transport = MockRealtimeTransport(incoming: [
+                self.json(["type": "session.updated"]),
+                self.json([
+                    "type": "conversation.item.input_audio_transcription.delta",
+                    "item_id": "item_1", "content_index": 0, "delta": "Hello,",
+                ]),
+                self.json([
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "item_id": "item_1", "content_index": 0,
+                    "transcript": "Hello, how are you?",
+                ]),
+            ])
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(model: "gpt-live-transcribe", sourceSampleRate: 16000),
+                policy: RealtimeSessionPolicy(
+                    connectTimeout: 5, commitTimeout: 5, maxSamplesPerAppend: 2))
+            try await session.connect()
+            let readyState = await session.currentState
+            XCTAssertEqual(readyState, .ready)
+            // One stateful session: first message is session.update.
+            XCTAssertTrue(transport.sent.first?.contains("session.update") ?? false)
+            XCTAssertTrue(transport.sent.first?.contains("gpt-live-transcribe") ?? false)
+            // Continuous PCM streaming: no WAV/RIFF header in append payloads.
+            try await session.appendAudio([0, 1000, 2000, 3000], sourceSampleRate: 16000)
+            let appends = transport.sent.filter { $0.contains("input_audio_buffer.append") }
+            XCTAssertFalse(appends.isEmpty)
+            XCTAssertFalse(appends.joined().contains("RIFF"))
+            try await session.commit()
+            XCTAssertTrue(transport.sent.contains(where: { $0.contains("input_audio_buffer.commit") }))
+            let final = try await session.waitForFinal()
+            XCTAssertEqual(final, "Hello, how are you?")
+            // Partial never duplicated the committed text.
+            let partial = await session.partialText
+            XCTAssertEqual(partial, "Hello, how are you?")
+            await session.close()
+            let closedState = await session.currentState
+            XCTAssertEqual(closedState, .closed)
+            XCTAssertEqual(transport.closedCount, 1)
+        }
+    }
+
+    @objc func testSessionCancelIsDeterministicAndClosesTransportOnce() {
+        runAsync("realtime cancel") {
+            let transport = MockRealtimeTransport(incoming: [self.json(["type": "session.updated"])])
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 2))
+            try await session.connect()
+            await session.cancel()
+            let cancelledState = await session.currentState
+            XCTAssertEqual(cancelledState, .cancelled)
+            await session.close(cancelled: true)
+            XCTAssertEqual(transport.closedCount, 1)
+            do {
+                try await session.appendAudio([1, 2], sourceSampleRate: 16000)
+                XCTFail("append after cancel must throw")
+            } catch let error as RealtimeTranscriptionError {
+                XCTAssertEqual(error, .notConnected)
+            }
+        }
+    }
+
+    @objc func testSessionProviderErrorFailsClosedWithoutBatchFallback() {
+        runAsync("realtime provider error") {
+            let transport = MockRealtimeTransport(incoming: [
+                self.json(["type": "session.updated"]),
+                self.json(["type": "error", "error": ["message": "invalid api key"]] as [String: Any]),
+            ])
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5),
+                fallback: .failClosed)
+            try await session.connect()
+            try await session.appendAudio([1, 2, 3], sourceSampleRate: 24000)
+            try await session.commit()
+            // Feed the error into the session state.
+            _ = await session.handleMessage(
+                self.json(["type": "error", "error": ["message": "invalid api key"]] as [String: Any]))
+            let failedState = await session.currentState
+            XCTAssertEqual(failedState, .failed)
+            let fallback = await session.fallbackPolicy
+            XCTAssertEqual(fallback, .failClosed)
+            do {
+                _ = try await session.waitForFinal()
+                XCTFail("failed session must throw, not silently batch-fallback")
+            } catch let error as RealtimeTranscriptionError {
+                XCTAssertTrue(
+                    error == .sessionFailed("invalid api key") || error == .timeout("no completion within commit timeout"),
+                    "unexpected: \(error)")
+            }
+            await session.close()
+        }
+    }
+
+    @objc func testReconnectPolicyBackoffIsBounded() {
+        let policy = RealtimeSessionPolicy(reconnectBaseDelay: 0.5)
+        XCTAssertEqual(policy.reconnectDelay(forAttempt: 0), 0.5, accuracy: 1e-9)
+        XCTAssertEqual(policy.reconnectDelay(forAttempt: 1), 1.0, accuracy: 1e-9)
+        XCTAssertEqual(policy.reconnectDelay(forAttempt: 2), 2.0, accuracy: 1e-9)
+    }
+
+    @objc func testWatchdogDurationCoversBothSendBudgets() {
+        // The append phase and the commit send each get a full appendTimeout;
+        // the watchdog must cover connect + 2 x append + final wait + close.
+        let policy = RealtimeSessionPolicy()
+        XCTAssertEqual(policy.watchdogDuration(), 70, accuracy: 1e-9)
+        let custom = RealtimeSessionPolicy(
+            connectTimeout: 9, commitTimeout: 19, appendTimeout: 14,
+            closeTimeout: 5)
+        XCTAssertEqual(custom.watchdogDuration(), 9 + 28 + 19 + 5 + 5, accuracy: 1e-9)
+    }
+
+    @objc func testAppendBudgetScalesWithAudioDuration() {
+        let policy = RealtimeSessionPolicy()
+        // Floor: short audio keeps the fixed appendTimeout budget.
+        XCTAssertEqual(policy.appendBudget(forAudioSeconds: 0), 15, accuracy: 1e-9)
+        XCTAssertEqual(policy.appendBudget(forAudioSeconds: 1), 15.5, accuracy: 1e-9)
+        // 60 s recording needs a larger upload window than the 15 s floor.
+        XCTAssertEqual(policy.appendBudget(forAudioSeconds: 60), 45, accuracy: 1e-9)
+        // Cap: very long audio cannot grow the watchdog without bound.
+        XCTAssertEqual(policy.appendBudget(forAudioSeconds: 600), 60, accuracy: 1e-9)
+        // Watchdog covers the same duration-derived append budget.
+        XCTAssertEqual(
+            policy.watchdogDuration(audioSeconds: 60),
+            10 + 45 + 15 + 20 + 5 + 5, accuracy: 1e-9)
+        XCTAssertEqual(policy.watchdogDuration(), 70, accuracy: 1e-9)
+    }
+
+    @objc func testConnectTimeoutFailsClosedInsteadOfReady() {
+        runAsync("realtime connect timeout fails closed") {
+            let transport = MockRealtimeTransport(incoming: [])
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 0.3, commitTimeout: 1))
+            do {
+                try await session.connect()
+                XCTFail("connect without ack must throw")
+            } catch let error as RealtimeTranscriptionError {
+                XCTAssertEqual(error, .timeout("no session ack"))
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+            let state = await session.currentState
+            XCTAssertEqual(state, .failed)
+            let lastError = await session.lastErrorMessage
+            XCTAssertEqual(lastError, "no session ack")
+        }
+    }
+
+    @objc func testConnectStalledSendTimesOutWithinBudget() {
+        runAsync("realtime stalled send times out within budget") {
+            // The initial send includes lazy WebSocket setup and must be
+            // bounded by connectTimeout; a 2s stalled send with a 0.3s
+            // budget must fail fast instead of keeping connect() pending.
+            let transport = StalledSendRealtimeTransport(sendDelayNanoseconds: 2_000_000_000)
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 0.3, commitTimeout: 1))
+            let start = Date()
+            do {
+                try await session.connect()
+                XCTFail("stalled send must throw")
+            } catch let error as RealtimeTranscriptionError {
+                XCTAssertEqual(error, .timeout("no session ack"))
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+            let elapsed = Date().timeIntervalSince(start)
+            XCTAssertTrue(elapsed < 1.5, "stalled send blocked connect for \(elapsed)s")
+            let state = await session.currentState
+            XCTAssertEqual(state, .failed)
+            let lastError = await session.lastErrorMessage
+            XCTAssertEqual(lastError, "no session ack")
+            XCTAssertEqual(transport.closedCount, 1)
+        }
+    }
+
+    @objc func testConnectNonCooperativeStalledSendTimesOutWithinBudget() {
+        runAsync("realtime non-cooperative stalled send times out within budget") {
+            // The stalled send ignores task cancellation (like a production
+            // WebSocket send suspended in lazy setup) and unblocks only when
+            // the transport closes. The timeout must close before draining the
+            // send task so connect() still fails fast within budget.
+            let transport = NonCooperativeStalledSendRealtimeTransport()
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 0.3, commitTimeout: 1))
+            let start = Date()
+            do {
+                try await session.connect()
+                XCTFail("stalled send must throw")
+            } catch let error as RealtimeTranscriptionError {
+                XCTAssertEqual(error, .timeout("no session ack"))
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+            let elapsed = Date().timeIntervalSince(start)
+            XCTAssertTrue(elapsed < 1.5, "non-cooperative send blocked connect for \(elapsed)s")
+            let state = await session.currentState
+            XCTAssertEqual(state, .failed)
+            let lastError = await session.lastErrorMessage
+            XCTAssertEqual(lastError, "no session ack")
+            XCTAssertEqual(transport.closedCount, 1)
+        }
+    }
+
+    @objc func testConnectAckBufferedBehindEOFStillAcknowledges() {
+        runAsync("realtime ack buffered behind EOF still acknowledges") {
+            // Regression coverage for the ack-phase EOF race: a clean EOF
+            // observed before the session ack (back-to-back pump delivery
+            // around a per-poll stream expiry, as in [ack, nil] transports
+            // that close immediately after the ack) must not fail connect
+            // fast; the ack buffered right behind it still acknowledges.
+            let transport = MockRealtimeTransport(incoming: [
+                nil,
+                self.json(["type": "session.updated"]),
+            ])
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5))
+            try await session.connect()
+            let readyState = await session.currentState
+            XCTAssertEqual(readyState, .ready)
+            await session.close()
+        }
+    }
+
+    @objc func testWaitForFinalTransportDropFailsClosed() {
+        runAsync("realtime waitForFinal transport drop") {
+            let transport = MockRealtimeTransport(incoming: [
+                self.json(["type": "session.updated"]),
+                nil,
+            ])
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5))
+            try await session.connect()
+            try await session.appendAudio([1, 2, 3], sourceSampleRate: 24000)
+            try await session.commit()
+            do {
+                _ = try await session.waitForFinal()
+                XCTFail("transport drop must throw")
+            } catch let error as RealtimeTranscriptionError {
+                XCTAssertEqual(error, .transport("transport closed before completion"))
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+            let state = await session.currentState
+            XCTAssertEqual(state, .failed)
+            let lastError = await session.lastErrorMessage
+            XCTAssertEqual(lastError, "transport closed before completion")
+        }
+    }
+
+    @objc func testRunToCompletionTransportDropFailsClosed() {
+        runAsync("realtime runToCompletion transport drop") {
+            let transport = MockRealtimeTransport(incoming: [
+                self.json(["type": "session.updated"]),
+                nil,
+            ])
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5))
+            try await session.connect()
+            try await session.appendAudio([1, 2, 3], sourceSampleRate: 24000)
+            try await session.commit()
+            do {
+                _ = try await session.runToCompletion()
+                XCTFail("transport drop must throw")
+            } catch let error as RealtimeTranscriptionError {
+                XCTAssertEqual(error, .transport("transport closed before completion"))
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+            let state = await session.currentState
+            XCTAssertEqual(state, .failed)
+            let lastError = await session.lastErrorMessage
+            XCTAssertEqual(lastError, "transport closed before completion")
+        }
+    }
+
+    @objc func testWaitForFinalReturnsBufferedPartialOnTransportError() {
+        runAsync("realtime waitForFinal returns buffered partial on transport error") {
+            let transport = MockRealtimeTransport(incoming: [
+                self.json(["type": "session.updated"])
+            ])
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5))
+            try await session.connect()
+            transport.receiveErrors = [RealtimeTranscriptionError.transport("socket reset")]
+            try await session.appendAudio([1, 2, 3], sourceSampleRate: 24000)
+            try await session.commit()
+            _ = await session.handleMessage(
+                self.json([
+                    "type": "conversation.item.input_audio_transcription.delta",
+                    "item_id": "item_1", "content_index": 0, "delta": "Hello,",
+                ]))
+            let text = try await session.waitForFinal()
+            XCTAssertEqual(text, "Hello,")
+            // Buffered close-out does not fail the session.
+            let state = await session.currentState
+            XCTAssertFalse(state == .failed)
+        }
+    }
+
+    @objc func testRunToCompletionReturnsBufferedPartialOnTransportError() {
+        runAsync("realtime runToCompletion returns buffered partial on transport error") {
+            let transport = MockRealtimeTransport(incoming: [
+                self.json(["type": "session.updated"])
+            ])
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5))
+            try await session.connect()
+            transport.receiveErrors = [RealtimeTranscriptionError.transport("socket reset")]
+            try await session.appendAudio([1, 2, 3], sourceSampleRate: 24000)
+            try await session.commit()
+            _ = await session.handleMessage(
+                self.json([
+                    "type": "conversation.item.input_audio_transcription.delta",
+                    "item_id": "item_1", "content_index": 0, "delta": "Hello,",
+                ]))
+            let text = try await session.runToCompletion()
+            XCTAssertEqual(text, "Hello,")
+            let state = await session.currentState
+            XCTAssertFalse(state == .failed)
+        }
+    }
+
+    @objc func testWaitForFinalUnknownReceiveErrorFailsClosed() {
+        struct Boom: Error {}
+        return runAsync("realtime waitForFinal unknown error fails closed") {
+            let transport = MockRealtimeTransport(incoming: [
+                self.json(["type": "session.updated"])
+            ])
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5))
+            try await session.connect()
+            transport.receiveErrors = [Boom()]
+            try await session.appendAudio([1, 2, 3], sourceSampleRate: 24000)
+            try await session.commit()
+            do {
+                _ = try await session.waitForFinal()
+                XCTFail("unknown receive error must throw")
+            } catch let error as RealtimeTranscriptionError {
+                if case .transport = error {
+                } else {
+                    XCTFail("expected transport error, got \(error)")
+                }
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+            let state = await session.currentState
+            XCTAssertEqual(state, .failed)
+            let lastError = await session.lastErrorMessage
+            XCTAssertNotNil(lastError)
+        }
+    }
+
+    @objc func testAckSurvivesMultipleEmptyPollsBeforeArrival() {
+        runAsync("realtime ack survives multiple empty polls") {
+            // Each receive takes 0.7s while the session polls every 0.2s, so
+            // connect() observes several per-poll timeouts with zero messages
+            // before the ack arrives. Timed-out waiters must cancel only
+            // themselves: the later ack must still be delivered, not lost.
+            let transport = DelayedRealtimeTransport(
+                messages: [
+                    self.json(["type": "session.updated"]),
+                    self.json([
+                        "type": "conversation.item.input_audio_transcription.completed",
+                        "item_id": "item_1", "content_index": 0,
+                        "transcript": "late ack win",
+                    ]),
+                ],
+                delayNanoseconds: 700_000_000)
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5))
+            try await session.connect()
+            let readyState = await session.currentState
+            XCTAssertEqual(readyState, .ready)
+            try await session.appendAudio([1, 2, 3], sourceSampleRate: 24000)
+            try await session.commit()
+            let final = try await session.waitForFinal()
+            XCTAssertEqual(final, "late ack win")
+            await session.close()
+        }
+    }
+
+    @objc func testSlowReceiveIsBufferedAcrossPollTimeout() {
+        runAsync("realtime slow receive buffered across poll timeout") {
+            let transport = DelayedRealtimeTransport(messages: [
+                self.json(["type": "session.updated"]),
+                self.json([
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "item_id": "item_1", "content_index": 0,
+                    "transcript": "late win",
+                ]),
+            ])
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5))
+            // Each receive takes 0.3s, longer than the 0.2s per-poll stream
+            // wait. The ack and the completion each arrive after a poll
+            // expiry and must still be delivered (never discarded).
+            try await session.connect()
+            try await session.appendAudio([1, 2, 3], sourceSampleRate: 24000)
+            try await session.commit()
+            let final = try await session.waitForFinal()
+            XCTAssertEqual(final, "late win")
+            await session.close()
+        }
+    }
+
+    @objc func testWaitForFinalCompletionImmediatelyFollowedByEOFReturnsFinal() {
+        runAsync("realtime completion followed by EOF returns final") {
+            // Regression coverage for the timeout-recovery ordering race:
+            // a `.completed` that arrives around a per-poll expiry must be
+            // processed before a buffered EOF that follows it. EOF must never
+            // jump ahead of an earlier completion.
+            let transport = MockRealtimeTransport(incoming: [
+                self.json(["type": "session.updated"]),
+                self.json([
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "item_id": "item_1", "content_index": 0,
+                    "transcript": "hello world",
+                ]),
+                nil,
+            ])
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5))
+            try await session.connect()
+            try await session.appendAudio([1, 2, 3], sourceSampleRate: 24000)
+            try await session.commit()
+            let final = try await session.waitForFinal()
+            XCTAssertEqual(final, "hello world")
+            await session.close()
+        }
+    }
+
+    @objc func testWaitForFinalSlowCompletionFollowedByEOFReturnsFinal() {
+        runAsync("realtime slow completion followed by EOF returns final") {
+            // Same ordering guarantee under per-poll timeouts: the completion
+            // arrives after at least one 0.2s poll expiry and EOF follows
+            // immediately, so a timeout-recovery requeue must preserve
+            // receive order (completion before EOF).
+            let transport = SequenceRealtimeTransport(steps: [
+                (self.json(["type": "session.updated"]), 0),
+                (self.json([
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "item_id": "item_1", "content_index": 0,
+                    "transcript": "slow win",
+                ]), 300_000_000),
+                (nil, 0),
+            ])
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 8))
+            try await session.connect()
+            try await session.appendAudio([1, 2, 3], sourceSampleRate: 24000)
+            try await session.commit()
+            let final = try await session.waitForFinal()
+            XCTAssertEqual(final, "slow win")
+            await session.close()
+        }
+    }
+
+    @objc func testRealtimeDictationRunnerTranscribesViaSession() {
+        runAsync("realtime dictation runner one-shot") {
+            let transport = MockRealtimeTransport(incoming: [
+                self.json(["type": "session.updated"]),
+                self.json([
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "item_id": "item_1", "content_index": 0,
+                    "transcript": "hello realtime",
+                ]),
+            ])
+            let result = try await RealtimeDictationRunner.transcribe(
+                samples: [0, 1000, 2000, 3000],
+                sourceSampleRate: 16000,
+                config: RealtimeSessionConfig(model: "gpt-live-transcribe", sourceSampleRate: 16000),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5),
+                transport: transport)
+            XCTAssertEqual(result.text, "hello realtime")
+            XCTAssertEqual(String(data: result.rawData, encoding: .utf8), "hello realtime")
+            XCTAssertTrue(transport.sent.first?.contains("session.update") ?? false)
+            XCTAssertTrue(transport.sent.contains(where: { $0.contains("input_audio_buffer.append") }))
+            XCTAssertTrue(transport.sent.contains(where: { $0.contains("input_audio_buffer.commit") }))
+            XCTAssertFalse(transport.sent.joined().contains("RIFF"))
+            XCTAssertEqual(transport.closedCount, 1)
+        }
+    }
+
+    @objc func testRealtimeDictationRunnerFailureSurfacesWithoutBatchFallback() {
+        let expectation = self.expectation(description: "realtime runner failure")
+        Task {
+            let transport = MockRealtimeTransport(incoming: [
+                self.json(["type": "error", "error": ["message": "boom"]] as [String: Any])
+            ])
+            do {
+                _ = try await RealtimeDictationRunner.transcribe(
+                    samples: [1, 2, 3],
+                    sourceSampleRate: 16000,
+                    config: RealtimeSessionConfig(model: "gpt-live-transcribe"),
+                    policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 2),
+                    transport: transport)
+                XCTFail("Expected realtime failure")
+            } catch {
+                XCTAssertTrue(transport.closedCount >= 1)
+            }
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 15)
+    }
+
+    @objc func testAppendStalledSendTimesOutWithinBudget() {
+        runAsync("realtime append stalled send times out within budget") {
+            // The audio-send phase must be bounded by appendTimeout: a 2s
+            // stalled append with a 0.3s budget must fail fast instead of
+            // keeping the session pending past the caller's watchdog.
+            let transport = AppendStalledRealtimeTransport(
+                incoming: [self.json(["type": "session.updated"])],
+                appendDelayNanoseconds: 2_000_000_000)
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5, appendTimeout: 0.3))
+            try await session.connect()
+            let start = Date()
+            do {
+                try await session.appendAudio([1, 2, 3], sourceSampleRate: 24000)
+                XCTFail("stalled append must throw")
+            } catch let error as RealtimeTranscriptionError {
+                XCTAssertEqual(error, .timeout("audio append timed out"))
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+            let elapsed = Date().timeIntervalSince(start)
+            XCTAssertTrue(elapsed < 1.5, "stalled append blocked session for \(elapsed)s")
+            let state = await session.currentState
+            XCTAssertEqual(state, .failed)
+            XCTAssertEqual(transport.closedCount, 1)
+        }
+    }
+
+    @objc func testCommitStalledSendTimesOutWithinBudget() {
+        runAsync("realtime commit stalled send times out within budget") {
+            // Same bound for the commit send: a 2s stalled commit with a
+            // 0.3s budget must fail fast with the transport closed.
+            let transport = AppendStalledRealtimeTransport(
+                incoming: [self.json(["type": "session.updated"])],
+                appendDelayNanoseconds: 2_000_000_000)
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5, appendTimeout: 0.3))
+            try await session.connect()
+            let start = Date()
+            do {
+                try await session.commit()
+                XCTFail("stalled commit must throw")
+            } catch let error as RealtimeTranscriptionError {
+                XCTAssertEqual(error, .timeout("commit timed out"))
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+            let elapsed = Date().timeIntervalSince(start)
+            XCTAssertTrue(elapsed < 1.5, "stalled commit blocked session for \(elapsed)s")
+            let state = await session.currentState
+            XCTAssertEqual(state, .failed)
+            XCTAssertEqual(transport.closedCount, 1)
+        }
+    }
+
+    @objc func testAppendCancellationClosesTransportWithoutWaitingForStalledSend() {
+        runAsync("realtime append cancel closes transport") {
+            // The stalled append ignores task cancellation (like a production
+            // WebSocket send suspended in lazy setup) and unblocks only when
+            // the transport closes. Cancelling the awaiting task must close
+            // the transport up front instead of waiting out appendTimeout.
+            let transport = NonCooperativeAppendRealtimeTransport(
+                incoming: [self.json(["type": "session.updated"])])
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5, appendTimeout: 30))
+            try await session.connect()
+            let start = Date()
+            let pending = Task {
+                try await session.appendAudio([1, 2, 3], sourceSampleRate: 24000)
+            }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            pending.cancel()
+            do {
+                try await pending.value
+                XCTFail("cancelled append must throw")
+            } catch is CancellationError {
+                // Acceptable: outer cancellation observed before the session
+                // mapped it to .cancelled.
+            } catch let error as RealtimeTranscriptionError {
+                XCTAssertEqual(error, .cancelled)
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+            let elapsed = Date().timeIntervalSince(start)
+            XCTAssertTrue(elapsed < 5, "cancelled append blocked session for \(elapsed)s")
+            XCTAssertEqual(transport.closedCount, 1)
+        }
+    }
+
+    @objc func testWaitForFinalCancelledWhileParkedThrowsCancelled() {
+        runAsync("realtime waitForFinal cancelled while parked throws cancelled") {
+            let transport = ParkingRealtimeTransport(
+                ack: self.json(["type": "session.updated"]))
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5))
+            try await session.connect()
+            try await session.appendAudio([1, 2, 3], sourceSampleRate: 24000)
+            try await session.commit()
+            _ = await session.handleMessage(
+                self.json([
+                    "type": "conversation.item.input_audio_transcription.delta",
+                    "item_id": "item_1", "content_index": 0, "delta": "Hello,",
+                ]))
+            let waiter = Task {
+                try await session.waitForFinal()
+            }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            await session.cancel()
+            do {
+                _ = try await waiter.value
+                XCTFail("cancelled wait must throw, not return buffered partial")
+            } catch let error as RealtimeTranscriptionError {
+                XCTAssertEqual(error, .cancelled)
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+            let state = await session.currentState
+            XCTAssertEqual(state, .cancelled)
+        }
+    }
+
+    @objc func testRunToCompletionCancelledWhileParkedThrowsCancelled() {
+        runAsync("realtime runToCompletion cancelled while parked throws cancelled") {
+            let transport = ParkingRealtimeTransport(
+                ack: self.json(["type": "session.updated"]))
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5))
+            try await session.connect()
+            try await session.appendAudio([1, 2, 3], sourceSampleRate: 24000)
+            try await session.commit()
+            _ = await session.handleMessage(
+                self.json([
+                    "type": "conversation.item.input_audio_transcription.delta",
+                    "item_id": "item_1", "content_index": 0, "delta": "Hello,",
+                ]))
+            let waiter = Task {
+                try await session.runToCompletion()
+            }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            await session.cancel()
+            do {
+                _ = try await waiter.value
+                XCTFail("cancelled wait must throw, not return buffered partial")
+            } catch let error as RealtimeTranscriptionError {
+                XCTAssertEqual(error, .cancelled)
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+            let state = await session.currentState
+            XCTAssertEqual(state, .cancelled)
+        }
+    }
+}
