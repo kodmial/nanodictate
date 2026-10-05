@@ -33,6 +33,12 @@ permissions:
 jobs:
   gate:
     runs-on: ubuntu-latest
+    # Explicit reviewed no-change signal: the `allow-empty-release` PR label.
+    # Passes --releasable 0 to every gate only when the label is present;
+    # otherwise stays fail-closed at 1. Never inferred from an empty section:
+    # an empty section without this label is missing notes, not a no-op.
+    env:
+      ALLOW_EMPTY_RELEASE: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'allow-empty-release') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -52,14 +58,22 @@ jobs:
             exit 1
           fi
           # The current version section is the canonical release body: it must
-          # exist and must not be header-only (the v0.1.7 failure mode).
-          release_notes_gate_publish "$SWIFT_VERSION" "$SWIFT_VERSION" 1 < CHANGELOG.md
+          # exist and must not be header-only (the v0.1.7 failure mode)
+          # unless an explicit no-change release was reviewed via the
+          # `allow-empty-release` label (ALLOW_EMPTY_RELEASE=true), which
+          # passes 0. The signal is never derived from the section itself.
+          if [[ "${ALLOW_EMPTY_RELEASE:-false}" == "true" ]]; then
+            RELEASABLE=0
+          else
+            RELEASABLE=1
+          fi
+          release_notes_gate_publish "$SWIFT_VERSION" "$SWIFT_VERSION" "$RELEASABLE" < CHANGELOG.md
           # Body-equivalence enforcement: the exact bytes published as the
           # GitHub Release body must equal the canonical section (byte or
           # normalized equality). Exercise the body-file path here so a
           # regression in the equivalence check fails CI before publication.
           BODY_FILE=$(mktemp)
           release_notes_extract_section "$SWIFT_VERSION" < CHANGELOG.md > "$BODY_FILE"
-          release_notes_gate_publish "$SWIFT_VERSION" "$SWIFT_VERSION" 1 "$BODY_FILE" < CHANGELOG.md
+          release_notes_gate_publish "$SWIFT_VERSION" "$SWIFT_VERSION" "$RELEASABLE" "$BODY_FILE" < CHANGELOG.md
           rm -f "$BODY_FILE"
           echo "Canonical section ## [$SWIFT_VERSION] passes the publication gate."

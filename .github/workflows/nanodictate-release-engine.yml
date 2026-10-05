@@ -989,6 +989,27 @@ jobs:
               echo "::error::Existing release body differs from the canonical CHANGELOG.md section; refusing to upload assets."
               exit 1
             fi
+            # Two manual runs on different refs can share one version without
+            # sharing a commit: the loser of `gh release create` must not
+            # upload its assets to a tag created for a different commit.
+            # Resolve TAG through any annotated-tag objects to its commit and
+            # refuse when it differs from the release commit SHA.
+            if ! TAG_REF_JSON=$(gh api "repos/$GH_REPO/git/ref/tags/$TAG" --jq '[.object.type, .object.sha] | @tsv'); then
+              echo "::error::Could not resolve tag $TAG to a commit; refusing to upload assets."
+              exit 1
+            fi
+            read -r TAG_TYPE TAG_SHA <<< "$TAG_REF_JSON"
+            while [[ "$TAG_TYPE" == "tag" ]]; do
+              if ! TAG_REF_JSON=$(gh api "repos/$GH_REPO/git/tags/$TAG_SHA" --jq '[.object.type, .object.sha] | @tsv'); then
+                echo "::error::Could not dereference annotated tag $TAG ($TAG_SHA); refusing to upload assets."
+                exit 1
+              fi
+              read -r TAG_TYPE TAG_SHA <<< "$TAG_REF_JSON"
+            done
+            if [[ -z "${TAG_SHA:-}" || "$TAG_SHA" != "$SHA" ]]; then
+              echo "::error::Existing tag $TAG resolves to ${TAG_SHA:-<unknown>}, not release commit $SHA; refusing to upload assets."
+              exit 1
+            fi
             if gh release view "$TAG" --json assets --jq '.assets[].name' > /tmp/existing-assets.txt 2>/dev/null; then
               MISSING=()
               for f in dist/$CLI_NAME-*.tar.gz dist/$CLI_NAME-*.zip dist/SHA256SUMS.txt; do

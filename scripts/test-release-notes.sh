@@ -385,13 +385,24 @@ REPO_SWIFT=$(grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' "${REPO_ROOT}/Sources/NanoDic
 REPO_FIRST=$(release_notes_first_version < "${REPO_ROOT}/CHANGELOG.md")
 assert_eq 'repo: CHANGELOG first header matches Version.swift' \
   "$REPO_SWIFT" "$REPO_FIRST"
+# Explicit reviewed no-change signal (mirrors .github/workflows/release-notes.yml):
+# ALLOW_EMPTY_RELEASE=true passes --releasable 0; otherwise fail-closed at 1.
+# Never inferred from the section itself.
+REPO_RELEASABLE=1
+if [[ "${ALLOW_EMPTY_RELEASE:-false}" == "true" ]]; then
+  REPO_RELEASABLE=0
+fi
 if release_notes_extract_section "$REPO_SWIFT" < "${REPO_ROOT}/CHANGELOG.md" | release_notes_section_is_empty; then
-  fail 'repo: current version section is non-empty' "## [$REPO_SWIFT] has no notes"
+  if [[ "$REPO_RELEASABLE" == "0" ]]; then
+    pass 'repo: current version section is non-empty (empty allowed via ALLOW_EMPTY_RELEASE)'
+  else
+    fail 'repo: current version section is non-empty' "## [$REPO_SWIFT] has no notes"
+  fi
 else
   pass 'repo: current version section is non-empty'
 fi
 assert_ok 'repo: current version passes the publication gate' \
-  release_notes_gate_publish "$REPO_SWIFT" "$REPO_SWIFT" 1 < "${REPO_ROOT}/CHANGELOG.md"
+  release_notes_gate_publish "$REPO_SWIFT" "$REPO_SWIFT" "$REPO_RELEASABLE" < "${REPO_ROOT}/CHANGELOG.md"
 
 # --- 13. Terminal gate option without a value fails fast ----------------------
 # A trailing option with no value must return an argument error instead of
