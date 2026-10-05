@@ -30,10 +30,6 @@ if command -v ruby >/dev/null 2>&1; then
 fi
 
 for file in "$TPL" "$GEN"; do
-  if ! grep -q '{{appdir}}/NanoDictate\.app' "$file"; then
-    fail "$file must use Homebrew's {{appdir}} install-step token"
-  fi
-
   postflight="$(
     awk '
       /postflight_steps do/ { capture=1 }
@@ -43,6 +39,10 @@ for file in "$TPL" "$GEN"; do
   )"
 
   [ -n "$postflight" ] || fail "$file has no postflight_steps stanza"
+
+  if ! grep -q '{{appdir}}/NanoDictate\.app' <<<"$postflight"; then
+    fail "$file must target {{appdir}}/NanoDictate.app inside postflight_steps"
+  fi
 
   if grep -q '#{appdir}/NanoDictate\.app' <<<"$postflight"; then
     fail "$file must not use Ruby #{appdir} interpolation inside postflight_steps"

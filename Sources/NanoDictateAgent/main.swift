@@ -2320,7 +2320,9 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         guard let self else { return }
         // The decision arrived — the wait is over either way (insert or
         // drop); a physical Return may be swallowed again.
-        self.awaitingReviewDecision = false
+        if self.processingSession == session {
+          self.awaitingReviewDecision = false
+        }
         // Re-validate the entry guard: Esc may have cancelled THIS wait
         // (processingSession advanced, see handleCancel) or a new
         // nanodictate cycle may have started while the user typed the
