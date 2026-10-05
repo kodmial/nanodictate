@@ -2421,7 +2421,8 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         self.overlay.setStatus(
           L10n.tr("overlay.retryError").replacingOccurrences(
             of: "{message}",
-            with: "realtime provider '\(display)' cannot retry a stored recording"))
+            with: L10n.tr("error.realtimeRetryUnsupported")
+              .replacingOccurrences(of: "{provider}", with: display)))
         self.hideAfter(2.0, reason: "retry failed")
       }
       return

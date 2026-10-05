@@ -77,6 +77,8 @@ extension L10n {
     "error.agentLaunchFailed": "Failed to launch dictation agent",
     "error.unsupportedAudioFormat": "Unsupported audio format",
     "error.audioServiceUnavailable": "Audio service unavailable",
+    "error.realtimeRetryUnsupported":
+      "realtime provider '{provider}' cannot retry a stored recording",
     // status.*
     "status.title": "NanoDictate — status",
     "status.logs": "Logs — agent.log ({n} lines total)",
@@ -337,6 +339,8 @@ extension L10n {
     "error.agentLaunchFailed": "Не удалось запустить агент диктовки",
     "error.unsupportedAudioFormat": "Неподдерживаемый аудиоформат",
     "error.audioServiceUnavailable": "Аудио-сервис недоступен",
+    "error.realtimeRetryUnsupported":
+      "realtime-провайдер '{provider}' не может повторить сохранённую запись",
     // status.*
     "status.title": "NanoDictate — статус",
     "status.logs": "Логи — agent.log (всего {n} строк)",
