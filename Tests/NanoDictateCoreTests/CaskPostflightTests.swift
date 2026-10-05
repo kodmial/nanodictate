@@ -3,7 +3,11 @@ import Foundation
 
 // MARK: - Homebrew Cask postflight smoke (issue #156, item 2)
 //
-// Homebrew's structured `postflight_steps` DSL resolves destination paths with\n// template tokens such as `{{appdir}}`; Ruby interpolation (`#{appdir}`) is not\n// available in the install-step DSL and makes the cask unreadable. This suite\n// mirrors scripts/check-cask-postflight.sh and proves the template and generated\n// cask use the supported token while removing only com.apple.quarantine.
+// Homebrew's structured `postflight_steps` DSL resolves destination paths with
+// template tokens such as `{{appdir}}`; Ruby interpolation (`#{appdir}`) is not
+// available in the install-step DSL and makes the cask unreadable. This suite
+// mirrors scripts/check-cask-postflight.sh and proves the template and generated
+// cask use the supported token while removing only com.apple.quarantine.
 
 final class CaskPostflightTests: XCTestCase {
 
