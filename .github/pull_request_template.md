@@ -12,6 +12,15 @@
 - [ ] `swift run -Xlinker "$ARCHIVE" NanoDictateCoreTests`
 - [ ] Ручная проверка (опиши):
 
+## Release note
+
+<!-- One or two sentences describing the user/developer impact, or `None` for
+     intentionally note-free changes (pure refactor, tests, CI, docs). Without
+     this footer the cleaned commit subject is used as a fallback.
+     See docs/release-notes.md for the contract. -->
+
+Release note:
+
 ## Чек-лист
 
 - [ ] Ветка от `main`, цель — `main`

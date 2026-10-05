@@ -80,74 +80,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.15] - 2026-10-01
 
+### Changed
 
-
-### Bug Fixes
-
-* **packaging:** restore v0.1.14 post-release state ([72f6bac](https://github.com/kodmial/nanodictate/commit/72f6bac96e8ee832096cde76d8a6a0bd83afbde4))
+- Release automation now runs through versioned Continuum reusable workflows invoked by thin caller workflows in this repository, replacing the previous inline release implementation. Version ownership (the Release PR owns `Version.swift`), `skip-release`, patch-only versioning, packaging smoke gates and manifest synchronization behave as before ([1894142](https://github.com/kodmial/nanodictate/commit/189414260997346fe98332404dd090a8b6d7314d)).
+- Fixed MacPorts distribution serving a stale tree and added a packaging-manifest sync test so generated manifests cannot lag `Version.swift` again ([5b596c2](https://github.com/kodmial/nanodictate/commit/5b596c2a53e9b7ad2c19a021dcc7d1ce8b2564c0)).
+- Packaging manifests resynced to the v0.1.14 post-release state (Homebrew formula/cask, MacPorts Portfile, installer PIN) ([72f6bac](https://github.com/kodmial/nanodictate/commit/72f6bac96e8ee832096cde76d8a6a0bd83afbde4)).
 
 ## [0.1.14] - 2026-09-29
 
+### Changed
 
-
-### Bug Fixes
-
-* Coverage up to 90.01%, 1027 tests pass ([e7e3c50](https://github.com/kodmial/nanodictate/commit/e7e3c50364e8d388d89911ed29e079ad309ddf79))
+- No user-facing changes. Test coverage for `NanoDictateCore` reached 90.01% with 1027 tests passing ([e7e3c50](https://github.com/kodmial/nanodictate/commit/e7e3c50364e8d388d89911ed29e079ad309ddf79)).
 
 ## [0.1.13] - 2026-09-29
 
+### Changed
 
+- Audio hot path reuses capture buffers and shortens lock hold time, lowering CPU cost during dictation ([caf7d52](https://github.com/kodmial/nanodictate/commit/caf7d528d23abc0a12e80c765b7b39e7e25529a2)).
 
-### Bug Fixes
+### Fixed
 
-* Audio hot path: reuse buffers, cut locks ([caf7d52](https://github.com/kodmial/nanodictate/commit/caf7d528d23abc0a12e80c765b7b39e7e25529a2))
+- Capture callbacks are isolated per tap generation, so a stale audio tap can no longer corrupt samples after an engine wedge swap ([caf7d52](https://github.com/kodmial/nanodictate/commit/caf7d528d23abc0a12e80c765b7b39e7e25529a2)).
 
 ## [0.1.12] - 2026-09-29
 
+### Fixed
 
-
-### Bug Fixes
-
-* Backpressure + coalescing for live STT ([9302009](https://github.com/kodmial/nanodictate/commit/93020099f68474f9193e8a1fb44ae4ff956e34f8))
+- Live STT now applies backpressure with a coalesced drain: a single drain task serves buffered segments, recording and delivery stop after cancellation, and the completion watchdog accounts for buffered plus in-flight batches ([9302009](https://github.com/kodmial/nanodictate/commit/93020099f68474f9193e8a1fb44ae4ff956e34f8)).
 
 ## [0.1.11] - 2026-09-29
 
+### Changed
 
-
-### Bug Fixes
-
-* Default OpenAI model now gpt-transcribe ([7ab2228](https://github.com/kodmial/nanodictate/commit/7ab2228f8bbaddb928268875aaccd29ec721fccb))
+- The default OpenAI transcription model is now `gpt-transcribe` (explicit `whisper-1` remains a compatibility path; empty config resolves to the new default). Language-hint routing follows per-model capabilities (`gpt-transcribe` receives a `languages[]` array) ([7ab2228](https://github.com/kodmial/nanodictate/commit/7ab2228f8bbaddb928268875aaccd29ec721fccb)).
 
 ## [0.1.10] - 2026-09-29
 
+### Added
 
-
-### Bug Fixes
-
-* Added STT benchmark harness + tests ([c779afd](https://github.com/kodmial/nanodictate/commit/c779afd6c58360006cebcaf56456502836f6bfa6))
+- STT benchmark harness (`benchmark` subcommand, `STTBenchmark`) with synthetic-tone latency runs, transcript-bearing WAV overlays for live scoring, and `docs/stt-benchmark.md` ([c779afd](https://github.com/kodmial/nanodictate/commit/c779afd6c58360006cebcaf56456502836f6bfa6)).
 
 ## [0.1.9] - 2026-09-29
 
+### Changed
 
-
-### Bug Fixes
-
-* macOS packaging smoke CI implemented ([640cb97](https://github.com/kodmial/nanodictate/commit/640cb97cce452b86fe35839662fa9ad35a460d0a))
+- Tag releases are gated on the macOS packaging smoke suite (Homebrew and MacPorts lifecycles) and only smoke-tested candidate artifacts are published ([640cb97](https://github.com/kodmial/nanodictate/commit/640cb97cce452b86fe35839662fa9ad35a460d0a)).
 
 ## [0.1.8] - 2026-09-28
 
+### Added
 
+- Overlay header shows a version badge derived from `NanoDictateVersion` (`OverlayVersion.displayString`), staying fully visible during processing. Tag releases are rejected when the tag disagrees with `Version.swift` ([7b4f3d7](https://github.com/kodmial/nanodictate/commit/7b4f3d7762c1c2d2da046b0e4b6307e8862f5f6f)).
 
-### Bug Fixes
+### Fixed
 
-* Added version badge to overlay header ([7b4f3d7](https://github.com/kodmial/nanodictate/commit/7b4f3d7762c1c2d2da046b0e4b6307e8862f5f6f))
-* **release:** preserve notes and complete v0.1.7 sync ([1934840](https://github.com/kodmial/nanodictate/commit/1934840a2cc7c233bdb29a7aefb1c2ac242161fe))
+- The recording-ready cue is emitted only after the audio engine starts successfully; a first buffer arriving while start is pending is held and discarded on failure, cancellation, device change or watchdog timeout. The warmed-converter cache is reset on reuse so resample state cannot leak between sessions ([9a183f5](https://github.com/kodmial/nanodictate/commit/9a183f56288e2630a47b26dfc83964e2a499f279)).
 
 ## [0.1.7] - 2026-09-27
 
-### Bug Fixes
+### Added
 
-- Model-aware STT capabilities added ([883e723](https://github.com/kodmial/nanodictate/commit/883e723c52316f9ca1d1482dff60828a59899e04)).
+- Model-aware STT capabilities: per-model capability negotiation for STT adapters, with batch long-form gating and WAV encoding following declared capabilities. Documented in `docs/stt-capabilities.md` ([883e723](https://github.com/kodmial/nanodictate/commit/883e723c52316f9ca1d1482dff60828a59899e04)).
 
 ## [0.1.6] - 2026-09-27
 
