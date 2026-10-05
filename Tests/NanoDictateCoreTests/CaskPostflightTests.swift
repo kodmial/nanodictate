@@ -3,14 +3,7 @@ import Foundation
 
 // MARK: - Homebrew Cask postflight smoke (issue #156, item 2)
 //
-// Regression: the cask postflight carried a literal `{{appdir}}` placeholder,
-// so the quarantine-removal step targeted a nonexistent path and Gatekeeper
-// kept refusing the first launch. This suite proves (mirroring
-// scripts/check-cask-postflight.sh, which runs without macOS) that both the
-// template — the source of truth consumed by scripts/release-prep.rb and the
-// candidate smoke gate — and the generated cask resolve the REAL installed
-// app path via the Cask DSL interpolation and remove ONLY
-// com.apple.quarantine.
+// Homebrew's structured `postflight_steps` DSL resolves destination paths with\n// template tokens such as `{{appdir}}`; Ruby interpolation (`#{appdir}`) is not\n// available in the install-step DSL and makes the cask unreadable. This suite\n// mirrors scripts/check-cask-postflight.sh and proves the template and generated\n// cask use the supported token while removing only com.apple.quarantine.
 
 final class CaskPostflightTests: XCTestCase {
 
@@ -48,17 +41,21 @@ final class CaskPostflightTests: XCTestCase {
         return String(content[start..<end])
     }
 
-    @objc func testNoLiteralAppdirPlaceholder() {
+    @objc func testPostflightUsesStructuredAppdirToken() {
         guard let casks = Self.caskContents() else {
             XCTFail("cannot read the Homebrew cask files")
             return
         }
-        XCTAssertFalse(
-            casks.template.contains("{{appdir}}"),
-            "template must not contain a literal {{appdir}} placeholder")
-        XCTAssertFalse(
-            casks.generated.contains("{{appdir}}"),
-            "generated cask must not contain a literal {{appdir}} placeholder")
+        for (name, content) in [("template", casks.template), ("generated", casks.generated)] {
+            let stanza = Self.postflightStanza(in: content)
+            XCTAssertFalse(stanza.isEmpty, "\(name): postflight_steps stanza must exist")
+            XCTAssertTrue(
+                stanza.contains("{{appdir}}/NanoDictate.app"),
+                "\(name): postflight must use Homebrew's {{appdir}} install-step token")
+            XCTAssertFalse(
+                stanza.contains("#{appdir}/NanoDictate.app"),
+                "\(name): postflight must not use Ruby interpolation inside postflight_steps")
+        }
     }
 
     @objc func testPostflightResolvesInstalledAppPath() {
@@ -70,8 +67,8 @@ final class CaskPostflightTests: XCTestCase {
             let stanza = Self.postflightStanza(in: content)
             XCTAssertFalse(stanza.isEmpty, "\(name): postflight_steps stanza must exist")
             XCTAssertTrue(
-                stanza.contains("#{appdir}/NanoDictate.app"),
-                "\(name): postflight must resolve the installed app path via #{appdir}")
+                stanza.contains("{{appdir}}/NanoDictate.app"),
+                "\(name): postflight must resolve the installed app path via Homebrew install-step token")
         }
     }
 
