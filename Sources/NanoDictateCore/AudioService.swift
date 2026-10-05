@@ -49,34 +49,66 @@ public protocol AudioLevelDelegate: AnyObject {
 /// `maxSamples` in the buffer (16000 Hz × 60 s = 960 000 samples ≈ 1.9 MB Int16).
 /// Pure testable unit: independent of audio devices, stop decision verified in
 /// mini-XCTest directly.
+///
+/// Fail-safe on invalid configuration: a non-finite or non-positive
+/// `maxDuration` (NaN, ±infinity, zero, negative) falls back to the standard
+/// 60 s instead of disabling the time bound (NaN comparisons are always
+/// false, so an unsanitized NaN would never stop by time) or stopping
+/// immediately (negative durations). An infinite sample budget falls back to
+/// the 960 000-sample budget; huge finite budgets are clamped to a
+/// representable range (converting an out-of-range Double to Int traps).
+/// Normal 60 s behavior is unchanged.
 public struct RecordingLimit {
   public let maxDuration: TimeInterval
   public let maxSamples: Int
+  /// Fallback duration when the configured value is not a finite positive
+  /// number (NaN, ±infinity, zero, negative).
+  public static let fallbackDuration: TimeInterval = 60.0
+  /// Fallback sample budget matching the default session
+  /// (16 000 Hz × 60 s).
+  public static let fallbackMaxSamples = 960_000
   /// Latch: stays `true` once the limit fires — recording cannot resume until
   /// a new session (new instance).
   public private(set) var isExhausted = false
 
   public init(maxDuration: TimeInterval, sampleRate: Int) {
-    self.maxDuration = maxDuration
+    if maxDuration.isFinite, maxDuration > 0 {
+      self.maxDuration = maxDuration
+    } else {
+      self.maxDuration = Self.fallbackDuration
+    }
     // Guard against a pathological zero sampleRate: intake can always accumulate
-    // at least one sample before the forced stop.
-    maxSamples = max(1, Int(Double(sampleRate) * maxDuration))
+    // at least one sample before the forced stop. The budget is additionally
+    // clamped to a representable range: converting an out-of-range Double to
+    // Int traps, so absurd rates fall back instead of crashing.
+    let safeRate = max(1, sampleRate)
+    let computed = Double(safeRate) * self.maxDuration
+    if computed.isFinite {
+      maxSamples = max(1, Int(min(computed, 1_000_000_000_000_000.0)))
+    } else {
+      maxSamples = Self.fallbackMaxSamples
+    }
   }
 
   /// Limit reached (by time OR by volume)? After the first fire the method
   /// always returns `true` — stop is irreversible within the session.
+  /// A NaN `elapsed` never fires the time bound (and never latches it);
+  /// +infinity fires it; -infinity and negative values do not.
   public mutating func shouldStop(elapsed: TimeInterval, totalSamples: Int) -> Bool {
     if isExhausted {
       return true
     }
-    if elapsed >= maxDuration || totalSamples >= maxSamples {
+    // NaN comparisons are always false, so spell the guard out: NaN must
+    // neither stop nor latch, while ±infinity follows the normal comparison.
+    let timeHit = !elapsed.isNaN && elapsed >= maxDuration
+    if timeHit || totalSamples >= maxSamples {
       isExhausted = true
     }
     return isExhausted
   }
 
   public func remainingSamples(after totalSamples: Int) -> Int {
-    max(0, maxSamples - totalSamples)
+    min(maxSamples, max(0, maxSamples - totalSamples))
   }
 }
 

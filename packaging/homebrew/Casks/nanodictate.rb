@@ -83,7 +83,7 @@ cask "nanodictate" do
   # Gatekeeper stays globally enabled and the code signature is untouched.
   postflight_steps do
     run "/usr/bin/xattr",
-        args: ["-dr", "com.apple.quarantine", "{{appdir}}/NanoDictate.app"]
+        args: ["-dr", "com.apple.quarantine", "#{appdir}/NanoDictate.app"]
   end
 
   caveats <<~EOS

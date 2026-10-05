@@ -1392,7 +1392,7 @@ jobs:
           fi
           grep -q '^  postflight_steps do$' packaging/homebrew/Casks/nanodictate.rb
           grep -q 'run "/usr/bin/xattr",' packaging/homebrew/Casks/nanodictate.rb
-          grep -q 'args: \["-dr", "com.apple.quarantine", "{{appdir}}/NanoDictate.app"\]$' packaging/homebrew/Casks/nanodictate.rb
+          grep -q 'args: \["-dr", "com.apple.quarantine", "#{appdir}/NanoDictate.app"\]$' packaging/homebrew/Casks/nanodictate.rb
           # Removing quarantine must not become removing every extended
           # attribute (-c) and must never reach for the Gatekeeper override.
           # Scoped to executable code: full-line comments are stripped first, so
