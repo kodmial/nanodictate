@@ -1,19 +1,15 @@
 #!/usr/bin/env bash
 # check-cask-postflight.sh — static smoke gate for the Homebrew Cask
-# quarantine postflight (issue #156: verify the structured Homebrew token).
+# quarantine postflight.
 #
-# Proves, without macOS/Homebrew, that the cask postflight:
-#   1. resolves the real installed app path through Homebrew's structured\n#      install-step token (`{{appdir}}/NanoDictate.app`), never Ruby interpolation\n#      (`#{appdir}`) inside `postflight_steps` and never a hardcoded /Applications path;
-#   2. removes ONLY `com.apple.quarantine` (`xattr -dr com.apple.quarantine`),
-#      with no blanket attribute wipe (`-c`), no other xattr keys, no
-#      Gatekeeper changes (`spctl`, `gatekeeper`).
-# Checks both the template (packaging/homebrew/Casks/nanodictate.rb.tpl,
-# the source of truth consumed by scripts/release-prep.rb and the candidate
-# smoke gate) and the generated cask, and requires them to agree on the
-# postflight stanza modulo version/SHA placeholders.
+# Homebrew's structured postflight_steps DSL expands template tokens such as
+# {{appdir}}. Ruby interpolation (#{appdir}) is not available inside that DSL.
 #
-# Usage: bash scripts/check-cask-postflight.sh
-# Exit 0 when the contract holds, non-zero with a reason otherwise.
+# Proves that both the template and generated cask:
+#   1. target {{appdir}}/NanoDictate.app;
+#   2. do not use Ruby #{appdir} interpolation in postflight_steps;
+#   3. remove only com.apple.quarantine;
+#   4. keep the template and generated postflight stanzas in sync.
 
 set -euo pipefail
 
@@ -29,40 +25,54 @@ fail() {
 [ -f "$TPL" ] || fail "template missing: $TPL"
 [ -f "$GEN" ] || fail "generated cask missing: $GEN"
 
-# --- 1. Ruby syntax of the generated cask -------------------------------------
 if command -v ruby >/dev/null 2>&1; then
   ruby -c "$GEN" >/dev/null || fail "ruby -c rejects $GEN"
-  echo "check-cask-postflight: ruby -c ok ($GEN)"
-else
-  echo "check-cask-postflight: ruby absent, skipping ruby -c" >&2
 fi
 
 for file in "$TPL" "$GEN"; do
-  # --- 2. Structured install-step token resolves the installed app path --------\n  if ! grep -q '{{appdir}}/NanoDictate\\.app' "$file"; then\n    fail "$file must use Homebrew's {{appdir}} install-step token"\n  fi\n  if grep -q '#{appdir}/NanoDictate\\.app' "$file"; then\n    fail "$file must not use Ruby #{appdir} interpolation inside postflight_steps"\n  fi
-  # --- 4. Only com.apple.quarantine is removed ----------------------------------
-  if ! grep -q '"-dr", "com\.apple\.quarantine"' "$file"; then
-    fail "$file postflight must strip exactly com.apple.quarantine via xattr -dr"
+  if ! grep -q '{{appdir}}/NanoDictate\.app' "$file"; then
+    fail "$file must use Homebrew's {{appdir}} install-step token"
   fi
-  if grep -Eq '"-c"|\bcom\.apple\.(FinderInfo|ResourceFork|metadata|birthtime)\b' "$file"; then
+
+  postflight="$(
+    awk '
+      /postflight_steps do/ { capture=1 }
+      capture { print }
+      capture && /^[[:space:]]*end[[:space:]]*$/ { exit }
+    ' "$file"
+  )"
+
+  [ -n "$postflight" ] || fail "$file has no postflight_steps stanza"
+
+  if grep -q '#{appdir}/NanoDictate\.app' <<<"$postflight"; then
+    fail "$file must not use Ruby #{appdir} interpolation inside postflight_steps"
+  fi
+  if ! grep -q '"-dr", "com\.apple\.quarantine"' <<<"$postflight"; then
+    fail "$file must strip exactly com.apple.quarantine via xattr -dr"
+  fi
+  if grep -Eq '"-c"|\bcom\.apple\.(FinderInfo|ResourceFork|metadata|birthtime)\b' <<<"$postflight"; then
     fail "$file touches extended attributes beyond com.apple.quarantine"
   fi
-  if grep -Eq '\bspctl\b|\bgatekeeper\b' "$file"; then
+  if grep -Eqi '\bspctl\b|\bgatekeeper\b' <<<"$postflight"; then
     fail "$file must not change Gatekeeper state"
   fi
 done
 
-# --- 5. Template and generated cask agree on the postflight stanza -------------
-# (modulo release-prep.rb placeholders: __VERSION__, __ZIP_SHA256_*__).
 normalize() {
   sed -e 's/__VERSION__//g' \
       -e 's/__ZIP_SHA256_ARM64__//g' \
       -e 's/__ZIP_SHA256_X86_64__//g' \
       -e 's/[0-9]\+\.[0-9]\+\.[0-9]\+//g' \
       -e 's/[0-9a-f]\{64\}//g' "$1" \
-    | grep -A4 "postflight_steps"
+    | awk '
+        /postflight_steps do/ { capture=1 }
+        capture { print }
+        capture && /^[[:space:]]*end[[:space:]]*$/ { exit }
+      '
 }
+
 if [ "$(normalize "$TPL")" != "$(normalize "$GEN")" ]; then
   fail "postflight stanza drift between template and generated cask"
 fi
 
-echo "check-cask-postflight: PASS (postflight resolves {{appdir}}/NanoDictate.app, removes only com.apple.quarantine)"
+echo "check-cask-postflight: PASS"
