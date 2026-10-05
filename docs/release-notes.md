@@ -123,6 +123,18 @@ Publication refuses to proceed when:
 - the would-be GitHub Release body differs from the canonical section beyond
   whitespace normalization.
 
+An intentional no-change release passes the gate only through an explicit
+reviewed signal — never inferred from an empty section (an empty section
+without the signal is missing notes, not a no-op):
+
+- PR/push CI (`release-notes.yml`): the `allow-empty-release` PR label.
+  Push runs resolve it from the merged PR for HEAD, and label changes
+  re-run the gate.
+- Publication (`nanodictate-release-engine.yml`): the `allow_empty_release`
+  input (exposed as `allow_empty_release` on the `release.yml`
+  `workflow_dispatch` inputs).
+- Local runs and the regression self-check: `ALLOW_EMPTY_RELEASE=true`.
+
 ## History repair policy
 
 Releases v0.1.7 through v0.1.15 were backfilled from merged-PR and commit

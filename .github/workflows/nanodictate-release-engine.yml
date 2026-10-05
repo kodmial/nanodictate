@@ -933,10 +933,15 @@ jobs:
           fi
           release_notes_extract_section "$RELEASE_VERSION" < CHANGELOG.md > /tmp/canonical-body.md
           # The gate needs the actual releasable-change count, not a hardcoded
-          # constant. Preflight/candidate-gate expose no entry count, so the
-          # count is derived from release evidence available here:
-          #   - a non-empty canonical section passes its rendered bullet
-          #     count (each bullet is one reviewed releasable note);
+          # constant. No numeric count exists upstream: preflight and the
+          # candidate gate expose no entry count, and release-policy yields a
+          # releasable/non-releasable boolean, not a number. The count is
+          # therefore derived from the release evidence available here:
+          #   - a non-empty canonical section passes its releasable-note
+          #     count: bullets under a valid changelog category (including
+          #     legacy Features/Bug Fixes), the same unit the gate's
+          #     emptiness probe uses — each such bullet is one reviewed
+          #     releasable note, and bullets outside a category never count;
           #   - an empty section is fail-closed (RELEASABLE=1, so the gate
           #     rejects it) unless an explicit no-change release was
           #     confirmed via `allow_empty_release`, which passes 0.
@@ -952,7 +957,12 @@ jobs:
               RELEASABLE=1
             fi
           else
-            RELEASABLE=$(grep -cE '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+[^[:space:]]' /tmp/canonical-body.md || true)
+            RELEASABLE=$(awk '
+              /^[[:space:]]*###[[:space:]]+(Added|Changed|Deprecated|Removed|Fixed|Security|Features|Bug Fixes)[[:space:]]*$/ { in_category = 1; next }
+              /^[[:space:]]*###/ { in_category = 0; next }
+              in_category && /^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+[^[:space:]]/ { count++ }
+              END { print count + 0 }
+            ' /tmp/canonical-body.md)
             if [[ -z "$RELEASABLE" || "$RELEASABLE" -eq 0 ]]; then
               RELEASABLE=1
             fi

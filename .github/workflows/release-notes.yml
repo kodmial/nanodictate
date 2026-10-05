@@ -2,6 +2,10 @@ name: Release notes
 
 on:
   pull_request:
+    # Re-run the gate when the reviewed no-change signal changes: adding or
+    # removing the `allow-empty-release` label must re-evaluate the gate
+    # instead of leaving a stale pass/fail behind.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
     paths:
       - 'CHANGELOG.md'
       - 'Sources/NanoDictateCore/Version.swift'
@@ -29,6 +33,9 @@ on:
 
 permissions:
   contents: read
+  # Push runs resolve the reviewed no-change signal from the merged PR for
+  # HEAD, which requires reading PR labels.
+  pull-requests: read
 
 jobs:
   gate:
@@ -43,6 +50,35 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+      - name: Resolve reviewed no-change signal
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # PR events already carry the signal in ALLOW_EMPTY_RELEASE (the
+          # `allow-empty-release` label). Push events have no pull_request
+          # context, so that label check is always false here: resolve the
+          # reviewed signal from the merged PR(s) that introduced this commit
+          # instead. Fail-closed: any lookup failure keeps RELEASABLE=1.
+          # Exported via GITHUB_ENV so the regression suites below and the
+          # gate step all observe the same signal.
+          ALLOW_EMPTY="${ALLOW_EMPTY_RELEASE:-false}"
+          if [[ "$ALLOW_EMPTY" != "true" && "${{ github.event_name }}" == "push" ]]; then
+            if PR_NUMBERS=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" --jq '.[].number' 2>/dev/null); then
+              for PR in $PR_NUMBERS; do
+                [[ -n "$PR" ]] || continue
+                if gh pr view "$PR" --repo "${{ github.repository }}" --json labels --jq '.labels[].name' 2>/dev/null | grep -qxF 'allow-empty-release'; then
+                  ALLOW_EMPTY=true
+                  echo "Push ${{ github.sha }} carries the reviewed no-change signal from PR #$PR."
+                  break
+                fi
+              done
+            else
+              echo "::warning::Could not resolve PRs for ${{ github.sha }} — staying fail-closed (RELEASABLE=1)."
+            fi
+          fi
+          echo "ALLOW_EMPTY_RELEASE=$ALLOW_EMPTY" >> "$GITHUB_ENV"
+          echo "Resolved ALLOW_EMPTY_RELEASE=$ALLOW_EMPTY (event=${{ github.event_name }})."
       - name: Canonical release-note regression suite
         run: bash scripts/test-release-notes.sh
       - name: Release-policy regression suite
@@ -60,8 +96,10 @@ jobs:
           # The current version section is the canonical release body: it must
           # exist and must not be header-only (the v0.1.7 failure mode)
           # unless an explicit no-change release was reviewed via the
-          # `allow-empty-release` label (ALLOW_EMPTY_RELEASE=true), which
-          # passes 0. The signal is never derived from the section itself.
+          # `allow-empty-release` label (ALLOW_EMPTY_RELEASE=true, resolved
+          # from the PR on pull_request events and from the merged PR for
+          # HEAD on push events), which passes 0. The signal is never
+          # derived from the section itself.
           if [[ "${ALLOW_EMPTY_RELEASE:-false}" == "true" ]]; then
             RELEASABLE=0
           else
