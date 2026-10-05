@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 # check-cask-postflight.sh — static smoke gate for the Homebrew Cask
-# quarantine postflight (issue #156: literal `{{appdir}}` regression).
+# quarantine postflight (issue #156: verify the structured Homebrew token).
 #
 # Proves, without macOS/Homebrew, that the cask postflight:
-#   1. resolves the REAL installed app path via the Cask DSL interpolation
-#      (`#{appdir}/NanoDictate.app`), never a literal `{{appdir}}` placeholder
-#      or a hardcoded /Applications path;
+#   1. resolves the real installed app path through Homebrew's structured\n#      install-step token (`{{appdir}}/NanoDictate.app`), never Ruby interpolation\n#      (`#{appdir}`) inside `postflight_steps` and never a hardcoded /Applications path;
 #   2. removes ONLY `com.apple.quarantine` (`xattr -dr com.apple.quarantine`),
 #      with no blanket attribute wipe (`-c`), no other xattr keys, no
 #      Gatekeeper changes (`spctl`, `gatekeeper`).
@@ -40,14 +38,7 @@ else
 fi
 
 for file in "$TPL" "$GEN"; do
-  # --- 2. No literal placeholder ------------------------------------------------
-  if grep -q "{{appdir}}" "$file"; then
-    fail "$file contains a literal {{appdir}} placeholder (postflight would target a nonexistent path)"
-  fi
-  # --- 3. DSL interpolation resolves the installed app path ---------------------
-  if ! grep -q '#{appdir}/NanoDictate\.app' "$file"; then
-    fail "$file does not resolve the installed app path via #{appdir}/NanoDictate.app"
-  fi
+  # --- 2. Structured install-step token resolves the installed app path --------\n  if ! grep -q '{{appdir}}/NanoDictate\\.app' "$file"; then\n    fail "$file must use Homebrew's {{appdir}} install-step token"\n  fi\n  if grep -q '#{appdir}/NanoDictate\\.app' "$file"; then\n    fail "$file must not use Ruby #{appdir} interpolation inside postflight_steps"\n  fi
   # --- 4. Only com.apple.quarantine is removed ----------------------------------
   if ! grep -q '"-dr", "com\.apple\.quarantine"' "$file"; then
     fail "$file postflight must strip exactly com.apple.quarantine via xattr -dr"
@@ -74,4 +65,4 @@ if [ "$(normalize "$TPL")" != "$(normalize "$GEN")" ]; then
   fail "postflight stanza drift between template and generated cask"
 fi
 
-echo "check-cask-postflight: PASS (postflight resolves #{appdir}/NanoDictate.app, removes only com.apple.quarantine)"
+echo "check-cask-postflight: PASS (postflight resolves {{appdir}}/NanoDictate.app, removes only com.apple.quarantine)"
