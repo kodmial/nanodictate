@@ -456,10 +456,15 @@ public actor RealtimeTranscriptionSession {
       lastError = "no session ack"
       await closeTransportOnce()
       throw RealtimeTranscriptionError.timeout("no session ack")
+    } catch is CancellationError {
+      state = .cancelled
+      await closeTransportOnce()
+      throw RealtimeTranscriptionError.cancelled
     } catch {
+      let mapped = Self.realtimeError(from: error)
       state = .failed
-      lastError = error.localizedDescription
-      throw RealtimeTranscriptionError.transport(error.localizedDescription)
+      lastError = Transcriber.describeRealtime(mapped)
+      throw mapped
     }
     let remaining = policy.connectTimeout - Date().timeIntervalSince(connectStart)
     if remaining <= 0 {
@@ -520,15 +525,15 @@ public actor RealtimeTranscriptionSession {
         lastError = "audio append timed out"
         await closeTransportOnce()
         throw RealtimeTranscriptionError.timeout("audio append timed out")
+      } catch is CancellationError {
+        state = .cancelled
+        await closeTransportOnce()
+        throw RealtimeTranscriptionError.cancelled
       } catch {
-        if error is CancellationError {
-          state = .cancelled
-          await closeTransportOnce()
-          throw RealtimeTranscriptionError.cancelled
-        }
+        let mapped = Self.realtimeError(from: error)
         state = .failed
-        lastError = error.localizedDescription
-        throw RealtimeTranscriptionError.transport(error.localizedDescription)
+        lastError = Transcriber.describeRealtime(mapped)
+        throw mapped
       }
     }
   }
@@ -550,15 +555,15 @@ public actor RealtimeTranscriptionSession {
       lastError = "commit timed out"
       await closeTransportOnce()
       throw RealtimeTranscriptionError.timeout("commit timed out")
+    } catch is CancellationError {
+      state = .cancelled
+      await closeTransportOnce()
+      throw RealtimeTranscriptionError.cancelled
     } catch {
-      if error is CancellationError {
-        state = .cancelled
-        await closeTransportOnce()
-        throw RealtimeTranscriptionError.cancelled
-      }
+      let mapped = Self.realtimeError(from: error)
       state = .failed
-      lastError = error.localizedDescription
-      throw RealtimeTranscriptionError.transport(error.localizedDescription)
+      lastError = Transcriber.describeRealtime(mapped)
+      throw mapped
     }
   }
 
@@ -760,6 +765,14 @@ public actor RealtimeTranscriptionSession {
 // MARK: - waitForFinal helpers (kept out of the session body for lint)
 
 extension RealtimeTranscriptionSession {
+  /// Preserve an existing realtime error unchanged; wrap only foreign errors
+  /// so the original transport message survives in `lastError` instead of a
+  /// generic `localizedDescription`.
+  private static func realtimeError(from error: Error) -> RealtimeTranscriptionError {
+    if let realtime = error as? RealtimeTranscriptionError { return realtime }
+    return .transport(error.localizedDescription)
+  }
+
   /// Bounded initial send: lazy WebSocket setup inside `transport.send`
   /// must not keep `connect()` pending past `timeout`. Expiring the wait
   /// closes the transport *before* waiting for the send task to finish: send
