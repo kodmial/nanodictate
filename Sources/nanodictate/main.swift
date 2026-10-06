@@ -1001,6 +1001,11 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
   let bias = STTContextualBias(
     vocabulary: config.vocabulary, extraLanguages: config.extraLanguages)
   let sendOne: BatchTranscriber.SendOne = { _, wav, chunkIndex, prompt in
+    let resolvedModel = ProviderRequestBuilder.resolveModel(provider.model, for: provider.id)
+    if ProviderRequestBuilder.isRealtime(adapterID: provider.id, model: resolvedModel) {
+      throw BatchHTTPError.invalidResponse(
+        String(format: L10n.tr("cli.batch.realtimeUnsupported"), provider.id))
+    }
     guard
       let prepared = BatchRequestBuilder.makeRequest(
         provider: provider,

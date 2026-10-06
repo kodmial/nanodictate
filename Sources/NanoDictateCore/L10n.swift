@@ -277,6 +277,8 @@ extension L10n {
     "cli.routing.listHint": "List: `nanodictate provider list`",
     "progress.avgPerChunk": "%.1fs/chunk",
     "cli.batch.badBaseUrl": "Failed to build request: bad base_url for '%@'",
+    "cli.batch.realtimeUnsupported":
+      "Realtime models are not supported for batch/file transcription: '%@'",
     "cli.batch.parseError": "Failed to parse response: %@",
     "cli.transcribe.writeError": "ERROR: failed to write %@: %@",
     "cli.error.generic": "ERROR: %@",
@@ -543,6 +545,8 @@ extension L10n {
     "cli.routing.listHint": "Список: `nanodictate provider list`",
     "progress.avgPerChunk": "средн. %.1fс/чанк",
     "cli.batch.badBaseUrl": "Не удалось собрать запрос: битый base_url у '%@'",
+    "cli.batch.realtimeUnsupported":
+      "Realtime-модели не поддерживаются для пакетной/файловой транскрибации: '%@'",
     "cli.batch.parseError": "Не удалось разобрать ответ: %@",
     "cli.transcribe.writeError": "ОШИБКА: не удалось записать %@: %@",
     "cli.error.generic": "ОШИБКА: %@",
