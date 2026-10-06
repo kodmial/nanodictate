@@ -29,9 +29,9 @@ incompatibility. The repeatable gate is therefore split:
 2. **Runtime gate (isolated macOS 12 machine or VM, out-of-band).**
    Runs `scripts/macos12-compat-check.sh --full` on **actual macOS 12
    execution** outside GitHub Actions. This is the only pass that validates
-   install/startup, LaunchAgent registration, best-effort audio HAL
-   enumeration, and basic dictation plumbing on the oldest supported major
-   version. Microphone capture, Accessibility insertion, and package
+   install/startup, LaunchAgent registration, and best-effort audio HAL
+   enumeration on the oldest supported major version. Dictation,
+   microphone capture, Accessibility insertion, and package
    installation are **manual checklist items** (below), not automated phases.
    The Actions `runtime handoff` job runs on hosted `macos-15`, records a
    `needs-macos12-host` marker, and uploads it from the supported runner so
