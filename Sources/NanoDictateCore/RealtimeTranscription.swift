@@ -474,6 +474,11 @@ public actor RealtimeTranscriptionSession {
     }
     // Wait for session acknowledgement (created or updated).
     let acknowledged = await waitForAck(timeout: remaining)
+    if state == .cancelled || Task.isCancelled {
+      state = .cancelled
+      await closeTransportOnce()
+      throw RealtimeTranscriptionError.cancelled
+    }
     if state == .failed {
       throw RealtimeTranscriptionError.sessionFailed(lastError ?? "session rejected")
     }
