@@ -11,17 +11,28 @@ on:
   pull_request_review:
     types: [submitted]
 
-  # CodeRabbit finding replies are lifecycle transitions too. Wake the
-  # serialized queue immediately instead of relying on cron or unrelated events.
+  # A CodeRabbit finding verdict is a lifecycle transition too. Wake the
+  # serialized queue immediately after RESOLVED/UNRESOLVED instead of waiting
+  # for cron or an unrelated status/review event.
   pull_request_review_comment:
     types: [created, edited]
 
-  # Manual/safety-net reconciliation. The reusable controller is non-blocking: quota backoff is durable and never sleeps a runner.
+  # Bounded repository-local safety net for deferred quota waits. The
+  # controller is non-blocking and exits immediately when nothing is due, so
+  # a scheduled safety-net tick costs no review slot. Once a durable dueAt
+  # passes without any review/comment/status event, the next tick reconciles
+  # the queue. Offset :03 avoids the busy :00 boundary and the
+  # auto-merge/scheduler slots.
+  schedule:
+    - cron: '3,13,23,33,43,53 * * * *'
+
+  # Manual/safety-net reconciliation.
   workflow_dispatch:
 
 permissions:
-  # The review queue only reads Actions state; exact-finding verification is
-  # owned by the separate auto-merge reconciler.
+  # Keep the caller compatible with already-open PR branches. The review
+  # queue only reads Actions state; exact-finding verification remains owned by
+  # the existing auto-merge reconciler.
   actions: read
   contents: read
   issues: write
