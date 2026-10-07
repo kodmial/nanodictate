@@ -237,6 +237,21 @@ assert_not_ok 'mode: rejection writes no result file' \
 assert_not_ok 'mode: rejection writes no failure summary' \
   test -e "$FULL_SKIP_DIR/failure-summary.txt"
 
+# --- 5b. CLI validation: missing --result-dir value is a usage error ---------
+# Host-independent: argument parsing runs before the macOS-only platform gate,
+# so a missing value must exit 2 with a usage error instead of aborting with
+# an unbound-variable error under `set -u`.
+
+assert_grep 'cli: --result-dir validates its value before reading $2' \
+  "$CHECK_SCRIPT" 'missing value for --result-dir'
+RESULT_DIR_MISSING_LOG="$TMP_DIR/result-dir-missing.log"
+bash "$CHECK_SCRIPT" --static-only --result-dir \
+  > "$RESULT_DIR_MISSING_LOG" 2>&1
+RESULT_DIR_MISSING_STATUS=$?
+assert_eq 'cli: missing --result-dir value exits with a usage error' '2' "$RESULT_DIR_MISSING_STATUS"
+assert_grep 'cli: missing --result-dir value names the option' \
+  "$RESULT_DIR_MISSING_LOG" 'missing value for --result-dir'
+
 # --- 6. CLI/linkage, audio, and Accessibility claims stay accurate ------------
 # Source contracts: these phases are hardware- or TCC-bound, so the wording
 # (and the strictness) of the script itself is what must not drift back into

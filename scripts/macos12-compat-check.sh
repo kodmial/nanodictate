@@ -57,7 +57,9 @@ while [ $# -gt 0 ]; do
     --static-only) MODE="static-only"; shift ;;
     --full) MODE="full"; shift ;;
     --allow-non12-runtime) ALLOW_NON12_RUNTIME=1; shift ;;
-    --result-dir) RESULT_DIR="$2"; shift 2 ;;
+    --result-dir)
+      [ $# -ge 2 ] || { echo "missing value for --result-dir" >&2; exit 2; }
+      RESULT_DIR="$2"; shift 2 ;;
     --skip-build) SKIP_BUILD=1; shift ;;
     -h|--help)
       sed -n '1,43p' "$0"
