@@ -663,6 +663,33 @@ final class RealtimeTranscriptionTests: XCTestCase {
             XCTAssertEqual(state, .failed)
             let lastError = await session.lastErrorMessage
             XCTAssertEqual(lastError, "no session ack")
+            // Ack timeout must not leak the open transport/pump.
+            XCTAssertEqual(transport.closedCount, 1)
+        }
+    }
+
+    @objc func testConnectFailedSessionClosesTransport() {
+        runAsync("realtime connect failed session closes transport") {
+            // An error event during the ack wait fails the session; connect()
+            // must close the transport instead of leaving the pump running.
+            let transport = MockRealtimeTransport(incoming: [
+                self.json(["type": "error", "error": ["message": "bad session"]] as [String: Any]),
+            ])
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 1))
+            do {
+                try await session.connect()
+                XCTFail("failed session must throw")
+            } catch let error as RealtimeTranscriptionError {
+                XCTAssertEqual(error, .sessionFailed("bad session"))
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+            let state = await session.currentState
+            XCTAssertEqual(state, .failed)
+            XCTAssertEqual(transport.closedCount, 1)
         }
     }
 

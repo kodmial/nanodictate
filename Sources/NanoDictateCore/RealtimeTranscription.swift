@@ -470,6 +470,7 @@ public actor RealtimeTranscriptionSession {
     if remaining <= 0 {
       state = .failed
       lastError = "no session ack"
+      await closeTransportOnce()
       throw RealtimeTranscriptionError.timeout("no session ack")
     }
     // Wait for session acknowledgement (created or updated).
@@ -480,11 +481,13 @@ public actor RealtimeTranscriptionSession {
       throw RealtimeTranscriptionError.cancelled
     }
     if state == .failed {
+      await closeTransportOnce()
       throw RealtimeTranscriptionError.sessionFailed(lastError ?? "session rejected")
     }
     if !acknowledged {
       state = .failed
       lastError = "no session ack"
+      await closeTransportOnce()
       throw RealtimeTranscriptionError.timeout("no session ack")
     }
     state = .ready
