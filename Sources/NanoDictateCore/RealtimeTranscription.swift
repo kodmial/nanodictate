@@ -500,7 +500,7 @@ public actor RealtimeTranscriptionSession {
   /// is bounded by a duration-derived budget (`policy.appendBudget`, floor
   /// `policy.appendTimeout`, capped): each chunk send receives only the
   /// unspent remainder, so a stalled upload fails fast instead of outliving
-  /// the caller's watchdog. Timeout/cancellation closes the transport before
+  /// the caller's watchdog. Timeout/cancellation/transport-error closes the transport before
   /// returning (a suspended WebSocket send unblocks only on close).
   public func appendAudio(_ samples: [Int16], sourceSampleRate: Int) async throws {
     try Task.checkCancellation()
@@ -541,6 +541,7 @@ public actor RealtimeTranscriptionSession {
         let mapped = Self.realtimeError(from: error)
         state = .failed
         lastError = Transcriber.describeRealtime(mapped)
+        await closeTransportOnce()
         throw mapped
       }
     }
@@ -549,7 +550,7 @@ public actor RealtimeTranscriptionSession {
   /// End the audio turn: the provider emits the final completion event.
   /// The `commit` send gets its own `policy.appendTimeout` budget (separate
   /// from the `appendAudio` budget) and closes the transport on
-  /// timeout/cancellation, like the append phase above.
+  /// timeout/cancellation/transport-error, like the append phase above.
   public func commit() async throws {
     try Task.checkCancellation()
     guard state == .ready || state == .streaming else {
@@ -571,6 +572,7 @@ public actor RealtimeTranscriptionSession {
       let mapped = Self.realtimeError(from: error)
       state = .failed
       lastError = Transcriber.describeRealtime(mapped)
+      await closeTransportOnce()
       throw mapped
     }
   }
