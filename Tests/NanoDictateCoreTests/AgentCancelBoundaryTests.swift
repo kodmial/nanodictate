@@ -354,6 +354,10 @@ final class AgentCancelBoundaryTests: XCTestCase {
 
     /// retryInsertion must mark the review wait (so Esc can see it) and clear
     /// the mark when the decision arrives, before re-validating the session.
+    /// It must also reject retry results while engine bring-up is in flight
+    /// (isStarting, state still .idle); otherwise a retry arriving during
+    /// startup opens a review that breaks Return swallowing and can insert
+    /// after a failed start without session invalidation.
     @objc func testStructure_RetryInsertionTracksReviewWait() {
         guard let source = Self.agentMainSource() else {
             XCTFail("cannot read Sources/NanoDictateAgent/main.swift")
@@ -377,6 +381,9 @@ final class AgentCancelBoundaryTests: XCTestCase {
         XCTAssertTrue(
             clearRange.lowerBound < gateRange.lowerBound,
             "the review-wait mark must clear before the stale-session check")
+        XCTAssertTrue(
+            body.contains("guard state == .idle, !isStarting else"),
+            "retryInsertion must reject retry results while engine bring-up is in flight")
     }
 
     /// The pending microphone request is cancellable by Esc on two levels:

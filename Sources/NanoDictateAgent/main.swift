@@ -2302,9 +2302,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// recording paths, so the completion re-validates the retry is current).
   private func retryInsertion(_ text: String) {
     // Retry outside the loop's state machine: if the user already started a
-    // new loop (recording/recognition), the stale retry text is not inserted
+    // new loop (recording/recognition) or engine bring-up is in flight
+    // (isStarting, state still .idle), the stale retry text is not inserted
     // and the live loop's overlay is not touched.
-    guard state == .idle else {
+    guard state == .idle, !isStarting else {
       Logger.log(
         "retry result dropped: nanodictate cycle active (state=\(String(describing: state)))",
         level: "info"

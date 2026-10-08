@@ -53,7 +53,7 @@ for file in "$TPL" "$GEN"; do
   if ! grep -q '"-dr", "com\.apple\.quarantine"' <<<"$postflight"; then
     fail "$file must strip exactly com.apple.quarantine via xattr -dr"
   fi
-  if grep -Eq '"-c"|\bcom\.apple\.(FinderInfo|ResourceFork|metadata|birthtime)\b' <<<"$postflight"; then
+  if grep -Eq '"-[^"]*c[^"]*"|\bcom\.apple\.(FinderInfo|ResourceFork|metadata|birthtime)\b' <<<"$postflight"; then
     fail "$file touches extended attributes beyond com.apple.quarantine"
   fi
   if grep -Eqi '\bspctl\b|\bgatekeeper\b' <<<"$postflight"; then

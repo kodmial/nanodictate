@@ -86,8 +86,13 @@ final class CaskPostflightTests: XCTestCase {
             XCTAssertTrue(
                 stanza.contains("\"-dr\", \"com.apple.quarantine\""),
                 "\(name): postflight must strip exactly com.apple.quarantine via xattr -dr")
+            // Any quoted xattr flag containing "c" clears attributes
+            // ("-c", "-cr", "-rc", ...): only the required "-dr" may appear.
+            let clearFlagPattern = try? NSRegularExpression(pattern: "\"-[^\"]*c[^\"]*\"")
+            let hasClearFlag = clearFlagPattern?.firstMatch(
+                in: stanza, range: NSRange(stanza.startIndex..., in: stanza)) != nil
             XCTAssertFalse(
-                stanza.contains("\"-c\""),
+                hasClearFlag,
                 "\(name): postflight must not wipe all extended attributes")
             XCTAssertFalse(
                 stanza.contains("spctl"),
