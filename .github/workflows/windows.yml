@@ -1,0 +1,91 @@
+name: Windows host
+
+# Bootstrap CI for the native Windows host on the production Rust core.
+# Builds the Rust cdylib/DLL with the MSVC target, builds the C# host,
+# runs the C# ABI/ownership/error/session tests, and runs the minimal
+# executable smoke path. This is the application CI for #137; the
+# portability-only DLL artifact in rust.yml remains the shared-engine gate.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'rust/**'
+      - 'windows/**'
+      - 'scripts/build-windows-host.sh'
+      - 'config.example.toml'
+      - '.github/workflows/windows.yml'
+  pull_request:
+    paths:
+      - 'rust/**'
+      - 'windows/**'
+      - 'scripts/build-windows-host.sh'
+      - 'config.example.toml'
+      - '.github/workflows/windows.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Rust DLL + C# host (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Ensure MSVC target
+        run: rustup target add x86_64-pc-windows-msvc
+
+      - name: Install .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Rust tests (shared core)
+        run: cargo test -p nanodictate-core
+        working-directory: rust
+
+      - name: Build Rust DLL (MSVC cdylib)
+        run: cargo build --release -p nanodictate-core
+        working-directory: rust
+
+      - name: Verify DLL artifact exists
+        shell: pwsh
+        run: |
+          $dll = "rust/target/release/nanodictate_core.dll"
+          if (-not (Test-Path $dll)) { throw "Missing $dll" }
+          Get-Item $dll | Format-Table Name, Length
+
+      - name: Build C# host
+        run: dotnet build windows/NanoDictate.sln -c Release
+
+      - name: Stage DLL next to managed binaries
+        shell: pwsh
+        run: |
+          $dll = "rust/target/release/nanodictate_core.dll"
+          $targets = @(
+            "windows/src/NanoDictate.Core/bin/Release/net8.0",
+            "windows/src/NanoDictate.Smoke/bin/Release/net8.0",
+            "windows/tests/NanoDictate.Core.Tests/bin/Release/net8.0"
+          )
+          foreach ($dir in $targets) {
+            if (Test-Path $dir) { Copy-Item $dll $dir -Force }
+          }
+
+      - name: Run C# ABI tests
+        run: dotnet test windows/NanoDictate.sln -c Release --no-build
+
+      - name: Run smoke executable
+        run: dotnet run --project windows/src/NanoDictate.Smoke -c Release --no-build -- config.example.toml
