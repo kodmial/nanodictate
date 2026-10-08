@@ -57,6 +57,7 @@ concurrency:
 
 permissions:
   contents: read
+  statuses: read
 
 jobs:
   static-gate:
@@ -125,22 +126,23 @@ jobs:
           path: .opencode-tmp/macos12-compat-results/
           if-no-files-found: warn
 
-      # A successful artifact upload confirms only that the handoff ran, not
-      # that anything executed on Monterey. An unverified runtime must make
-      # the overall workflow red; the static-floor job remains independently
-      # visible as green. Never convert needs-macos12-host into a PASS.
-      - name: Require verified real macOS 12 execution
+      # A successful handoff upload proves nothing about Monterey. Only an
+      # owner-attested real macOS 12 run bound to this exact HEAD can pass.
+      # The attestation is created by the main-branch-only evidence intake
+      # workflow after validating transferred --full results and manual checks.
+      - name: Require current-HEAD macOS 12 runtime evidence
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
-          result=.opencode-tmp/macos12-compat-results/result.txt
-          environment=.opencode-tmp/macos12-compat-results/environment.txt
-          if [ -f "$result" ] && [ -f "$environment" ] &&
-             grep -Fxq 'result=full-green' "$result" &&
-             grep -Fxq 'runtime_claim=macos-12' "$result" &&
-             grep -Fxq 'macos_major=12' "$environment"; then
-            echo 'Real macOS 12 runtime result present. Manual TCC/UI checks remain separate.'
+          proof_url="$(gh api "repos/$GITHUB_REPOSITORY/commits/$TARGET_SHA/statuses?per_page=100" \
+            --jq '[.[] | select(.context == "macos12/runtime-attested")][0] | select(.state == "success" and .creator.login == "github-actions[bot]" and (.target_url | contains("/actions/runs/"))) | .target_url // empty')"
+          if [ -n "$proof_url" ]; then
+            echo "Verified owner-attested runtime and manual evidence for $TARGET_SHA: $proof_url"
+            echo "Verified owner-attested macOS 12 runtime evidence: $proof_url" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo '::error title=macOS 12 runtime is NOT validated::The hosted macOS 15 handoff is not macOS 12 validation. Execute scripts/macos12-compat-check.sh --full on a real isolated macOS 12 host and securely import the result for this exact source revision. Until then this runtime gate is intentionally failing.'
+            echo '::error title=macOS 12 runtime is NOT validated::The macOS 15 static checks and handoff are not Monterey runtime validation. Run --full on a real macOS 12 host at the current commit, complete manual checks, then dispatch macos12-runtime-evidence.yml as repository owner. The runtime gate deliberately fails until then.'
             exit 1
           fi
