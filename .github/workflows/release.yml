@@ -52,7 +52,48 @@ concurrency:
   group: continuum-swift-release-${{ github.repository }}-${{ github.ref }}
 
 jobs:
+  # The static macOS 12 floor does not qualify a new release. Do not publish
+  # binaries advertised as macOS 12 compatible before trusted, revision-bound
+  # results from real macOS 12 hardware and the manual checklist are recorded.
+  # Reconciliation of an already-published version stays a harmless no-op.
+  macos12-publication-gate:
+    name: Real macOS 12 release qualification
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      statuses: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Require owner-attested runtime evidence before publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run || false }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$DRY_RUN" = true ]; then
+            echo "Dry-run: no release publication; runtime gate not required."
+            exit 0
+          fi
+          VERSION="$(grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' Sources/NanoDictateCore/Version.swift)"
+          [ -n "$VERSION" ] || { echo "::error::Cannot determine release version"; exit 1; }
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "v$VERSION is already published; this is a no-op/reconciliation."
+            exit 0
+          fi
+          TARGET_SHA="$(git rev-parse HEAD)"
+          proof_url="$(gh api "repos/$GITHUB_REPOSITORY/commits/$TARGET_SHA/statuses?per_page=100" \
+            --jq '[.[] | select(.context == "macos12/runtime-attested")][0] | select(.state == "success" and .creator.login == "github-actions[bot]" and (.target_url | contains("/actions/runs/"))) | .target_url // empty')"
+          if [ -z "$proof_url" ]; then
+            echo "::error title=Unqualified macOS 12 release::No owner-attested real macOS 12 runtime and manual-checklist evidence for $TARGET_SHA (v$VERSION). The static macOS 15 floor is not a publication pass."
+            exit 1
+          fi
+          echo "Validated macOS 12 release evidence for v$VERSION at $TARGET_SHA: $proof_url"
+
   call:
+    needs: macos12-publication-gate
     uses: ./.github/workflows/nanodictate-release-engine.yml
     secrets: inherit
     with:
