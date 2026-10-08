@@ -358,7 +358,7 @@ final class RustDeterministicCutoverTests: XCTestCase {
             let resolved = ProviderRequestBuilder.resolveModel(
                 vector.model, for: vector.adapter)
             let engine = RustEngine.requireSTTProfile(
-                adapterID: vector.adapter, model: vector.model)
+                adapterID: vector.adapter, model: resolved)
             let reference = STTModelRegistry.resolve(
                 adapterID: vector.adapter, model: resolved)
             XCTAssertEqual(engine, reference, "profile parity for \(vector)")
