@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.26] - 2026-10-08
+
+
+
+### Fixed
+
+* Fix cancellation races and Homebrew quarantine regression from audit ([2390b53](https://github.com/kodmial/nanodictate/commit/2390b5328a9df0dbc69bab7b66c1d277c0900b67))
+
 ## [0.1.25] - 2026-10-05
 
 
@@ -485,7 +493,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.25...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.26...HEAD
+[0.1.26]: https://github.com/kodmial/nanodictate/compare/v0.1.25...v0.1.26
 [0.1.25]: https://github.com/kodmial/nanodictate/compare/v0.1.24...v0.1.25
 [0.1.24]: https://github.com/kodmial/nanodictate/compare/v0.1.23...v0.1.24
 [0.1.23]: https://github.com/kodmial/nanodictate/compare/v0.1.22...v0.1.23
