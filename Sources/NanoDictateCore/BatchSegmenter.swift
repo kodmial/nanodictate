@@ -73,8 +73,9 @@ public final class ArrayPCMBatchContent: PCMBatchContent {
 }
 
 /// Файловый источник: PCM-сэмплы читаются прямо из WAV через FileHandle.
-/// Заголовок парсится из префикса (WAVDecoder.pcmHeader), сэмплы читаются
-/// по request (seek+read под NSLock), в RAM только окно одного чанка.
+/// Заголовок парсится из префикса shared engine (RustEngine.wavHeader),
+/// сэмплы читаются по request (seek+read под NSLock), в RAM только окно
+/// одного чанка.
 /// Thread-safe: seek+read атомарны под readLock (воркеры вызывают параллельно).
 public final class WAVFilePCMBatchContent: PCMBatchContent {
   public enum WAVFileError: Error, Equatable {
@@ -106,7 +107,13 @@ public final class WAVFilePCMBatchContent: PCMBatchContent {
     let handle = try FileHandle(forReadingFrom: wavURL)
     do {
       let prefix = try handle.read(upToCount: Self.prefixLength) ?? Data()
-      guard let header = WAVDecoder.pcmHeader(in: prefix) else {
+      // Header parsed by the shared engine (canonical WAV metadata for
+      // file-backed batch sources). A non-WAV/non-PCM prefix stays a
+      // product-level invalidWAV, exactly as before.
+      let header: WAVPCMHeader
+      do {
+        header = try RustEngine.wavHeader(prefix)
+      } catch {
         throw WAVFileError.invalidWAV
       }
       // readSamples читает 16-bit сэмплы плоским массивом — стерео WAV

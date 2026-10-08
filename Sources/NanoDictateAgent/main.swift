@@ -1353,7 +1353,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       // (which rejects realtime profiles with an invalid spec). Fail-closed:
       // no implicit batch fallback and no failover chain.
       // Keep manual retry consistent with the current recording on both paths.
-      let wav = WAVEncoder.encode(samples: samples)
+      // Recording bytes encoded by the shared engine (canonical WAV
+      // codec). The encode runs off the realtime capture callback (the tap
+      // only appends); an engine failure traps loudly instead of silently
+      // falling back to the Swift encoder.
+      let wav = RustEngine.requireWAVEncode(samples: samples)
       // Last WAV kept in memory (RetryProvider): manual retry with another
       // provider (`nanodictate retry`) and auto-failover reuse it.
       self.retryProvider.store(wav: wav)

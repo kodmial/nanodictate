@@ -131,16 +131,17 @@ public enum AudioTransportEncoder {
       {
         return EncodedAudioPayload(data: data, format: .flac, filename: filename)
       }
-      let wav = WAVEncoder.encode(
+      // WAV fallback encoded by the shared engine (canonical WAV codec).
+      let wav = RustEngine.requireWAVEncode(
         samples: samples, sampleRate: profile.sampleRate, channels: profile.channels)
       return EncodedAudioPayload(data: wav, format: .wav, filename: filename)
     case .wav:
-      let wav = WAVEncoder.encode(
+      let wav = RustEngine.requireWAVEncode(
         samples: samples, sampleRate: profile.sampleRate, channels: profile.channels)
       return EncodedAudioPayload(data: wav, format: .wav, filename: filename)
     case .opus:
       // No encoder: fall back to WAV (never emit an unsupported body).
-      let wav = WAVEncoder.encode(
+      let wav = RustEngine.requireWAVEncode(
         samples: samples, sampleRate: profile.sampleRate, channels: profile.channels)
       return EncodedAudioPayload(data: wav, format: .wav, filename: filename)
     case .pcm16:

@@ -1040,9 +1040,11 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
       )
     }
     do {
-      return try ProviderRequestBuilder.extractText(
-        from: response.body, path: prepared.transcriptPath
-      )
+      // Chunk response text parsed by the shared engine (canonical
+      // transcript policy); transport stays native URLSession.
+      return try RustEngine.parseTranscriptResponse(
+        body: response.body, path: prepared.transcriptPath
+      ).text
       .trimmingCharacters(in: .whitespacesAndNewlines)
     } catch {
       throw BatchHTTPError.invalidResponse(

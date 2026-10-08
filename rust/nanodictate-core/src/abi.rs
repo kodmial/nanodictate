@@ -416,6 +416,54 @@ pub extern "C" fn nd_wav_decode_info(
     }
 }
 
+/// Full WAV header metadata without copying samples: sample rate,
+/// channels, bits per sample, PCM payload offset/size, and sample count.
+/// Only the window up to the `data` chunk header must be present. This is
+/// the file-backed batch source contract (the streaming capture path never
+/// parses headers). Returns `ND_OK` or a positive `ND_ERR_*` code.
+#[no_mangle]
+pub extern "C" fn nd_wav_header_full(
+    data: *const u8,
+    len: usize,
+    out_sample_rate: *mut u32,
+    out_channels: *mut u16,
+    out_bits_per_sample: *mut u16,
+    out_data_offset: *mut usize,
+    out_data_size: *mut usize,
+    out_sample_count: *mut usize,
+) -> i32 {
+    match catch_unwind(AssertUnwindSafe(|| {
+        let data = slice_from(data, len)?;
+        let header = wav::pcm_header(data).ok_or_else(|| {
+            set_last_error("not a decodable PCM16 WAV".to_string());
+            ND_ERR_DECODE
+        })?;
+        if out_sample_rate.is_null()
+            || out_channels.is_null()
+            || out_bits_per_sample.is_null()
+            || out_data_offset.is_null()
+            || out_data_size.is_null()
+            || out_sample_count.is_null()
+        {
+            set_last_error("null output pointer".to_string());
+            return Err(ND_ERR_NULL);
+        }
+        // SAFETY: caller-owned output slots (ABI contract).
+        unsafe {
+            *out_sample_rate = header.sample_rate;
+            *out_channels = header.channels;
+            *out_bits_per_sample = header.bits_per_sample;
+            *out_data_offset = header.data_offset;
+            *out_data_size = header.data_size;
+            *out_sample_count = header.sample_count();
+        }
+        Ok(ND_OK)
+    })) {
+        Ok(code) => code.unwrap_or_else(|code| code),
+        Err(_) => fail(ND_ERR_PANIC, "panic in nd_wav_header_full".to_string()),
+    }
+}
+
 /// Decodes WAV samples into the caller-provided buffer. Query the required
 /// capacity with [`nd_wav_decode_info`]; `ND_ERR_SMALL_BUFFER` is returned
 /// when `capacity` is too small.
@@ -494,6 +542,29 @@ pub extern "C" fn nd_word_diff(
     }
 }
 
+/// Text tail after the first `word_count` words (post-processing overlap
+/// helper, mirrors `WordDiff.tailAfterWords`). Leading whitespace stays on
+/// the tail; the native insertion layer trims it. NULL only on invalid
+/// UTF-8, null pointers, or panic.
+#[no_mangle]
+pub extern "C" fn nd_word_tail_after_words(
+    text_ptr: *const c_char,
+    text_len: usize,
+    word_count: usize,
+) -> *mut c_char {
+    match catch_unwind(AssertUnwindSafe(|| {
+        let text = str_from(text_ptr, text_len)?;
+        Ok::<*mut c_char, i32>(alloc_string(&word_diff::tail_after_words(word_count, text)))
+    })) {
+        Ok(Ok(ptr)) => ptr,
+        Ok(Err(_)) => std::ptr::null_mut(),
+        Err(_) => {
+            set_last_error("panic in nd_word_tail_after_words".to_string());
+            std::ptr::null_mut()
+        }
+    }
+}
+
 /// Joins `count` chunk texts (`texts`/`lens` arrays) with boundary-overlap
 /// dedup. NULL is returned only on error.
 #[no_mangle]
@@ -531,6 +602,14 @@ fn transport_name(transport: EngineTransport) -> &'static str {
         EngineTransport::BatchMultipart => "batch_multipart",
         EngineTransport::BatchRawAudio => "batch_raw_audio",
         EngineTransport::StreamingSession => "streaming_session",
+    }
+}
+
+fn language_hint_name(hint: stt::LanguageHintMode) -> &'static str {
+    match hint {
+        stt::LanguageHintMode::None => "none",
+        stt::LanguageHintMode::Single => "single",
+        stt::LanguageHintMode::Multi => "multi",
     }
 }
 
@@ -572,20 +651,23 @@ pub extern "C" fn nd_stt_resolve(
         };
         let json = format!(
             "{{\"adapter_id\":{},\"model\":{},\"transport\":\"{}\",\
-            \"audio\":{{\"sample_rate\":{},\"channels\":{},\"upload_format\":\"wav\"}},\
+            \"audio\":{{\"sample_rate\":{},\"channels\":{},\"upload_format\":\"wav\",\
+            \"supports_flac\":{}}},\
             \"response_formats\":[{formats_json}],\
             \"capabilities\":{{\"supports_verbose_json\":{},\"supports_word_timestamps\":{},\
             \"supports_segment_timestamps\":{},\"supports_prompt\":{},\"supports_temperature\":{},\
             \"supports_vad_filter\":{},\"supports_no_speech_threshold\":{},\
             \"supports_compression_ratio_threshold\":{},\"supports_logprob_threshold\":{},\
             \"supports_keyword_biasing\":{},\"supports_server_vad\":{},\
-            \"supports_server_chunking\":{},\"supports_noise_reduction\":{}}},\
+            \"supports_server_chunking\":{},\"supports_noise_reduction\":{},\
+            \"language_hint\":\"{}\"}},\
             \"transcript_path\":{path_json}}}",
             json_string(&profile.adapter_id),
             json_string(&profile.model),
             transport_name(caps.transport),
             profile.audio.sample_rate,
             profile.audio.channels,
+            flag(profile.audio.supports_flac),
             flag(caps.supports_verbose_json),
             flag(caps.supports_word_timestamps),
             flag(caps.supports_segment_timestamps),
@@ -599,6 +681,7 @@ pub extern "C" fn nd_stt_resolve(
             flag(caps.supports_server_vad),
             flag(caps.supports_server_chunking),
             flag(caps.supports_noise_reduction),
+            language_hint_name(caps.language_hint),
         );
         Ok::<*mut c_char, i32>(alloc_string(&json))
     })) {
@@ -606,6 +689,52 @@ pub extern "C" fn nd_stt_resolve(
         Ok(Err(_)) => std::ptr::null_mut(),
         Err(_) => {
             set_last_error("panic in nd_stt_resolve".to_string());
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Default endpoint for an adapter id (empty for manual endpoints that
+/// require an explicit base URL). Mirrors the portable configuration
+/// default so macOS and Windows resolve the same value. NULL only on
+/// invalid UTF-8, null pointers, or panic.
+#[no_mangle]
+pub extern "C" fn nd_stt_default_base_url(
+    adapter_ptr: *const c_char,
+    adapter_len: usize,
+) -> *mut c_char {
+    match catch_unwind(AssertUnwindSafe(|| {
+        let adapter = str_from(adapter_ptr, adapter_len)?;
+        let url = stt::AdapterId::from_id(adapter).default_base_url();
+        Ok::<*mut c_char, i32>(alloc_string(url))
+    })) {
+        Ok(Ok(ptr)) => ptr,
+        Ok(Err(_)) => std::ptr::null_mut(),
+        Err(_) => {
+            set_last_error("panic in nd_stt_default_base_url".to_string());
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Default model for an adapter id (empty when the adapter has none and
+/// the model must come from configuration). Mirrors the portable
+/// configuration default. NULL only on invalid UTF-8, null pointers, or
+/// panic.
+#[no_mangle]
+pub extern "C" fn nd_stt_default_model(
+    adapter_ptr: *const c_char,
+    adapter_len: usize,
+) -> *mut c_char {
+    match catch_unwind(AssertUnwindSafe(|| {
+        let adapter = str_from(adapter_ptr, adapter_len)?;
+        let model = stt::AdapterId::from_id(adapter).default_model();
+        Ok::<*mut c_char, i32>(alloc_string(model))
+    })) {
+        Ok(Ok(ptr)) => ptr,
+        Ok(Err(_)) => std::ptr::null_mut(),
+        Err(_) => {
+            set_last_error("panic in nd_stt_default_model".to_string());
             std::ptr::null_mut()
         }
     }
@@ -648,7 +777,7 @@ pub extern "C" fn nd_transcript_parse(
             set_last_error(format!("transcript extract failed: {e}"));
             ND_ERR_DECODE
         })?;
-        let words = transcript::extract_words(&root);
+        let words = transcript::extract_words_with_path(&root, path.as_deref());
         let mut json = String::from("{\"text\":");
         json.push_str(&json_string(&text));
         json.push_str(",\"words\":[");

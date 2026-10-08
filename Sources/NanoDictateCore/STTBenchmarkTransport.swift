@@ -23,7 +23,9 @@ extension BenchmarkRunner {
   /// a WAV-metadata/FLAC-body hybrid as a valid comparison. Callers must
   /// report FLAC as unsupported for these profiles instead.
   public static func supportsFLAC(config: BenchmarkSTTConfig) -> Bool {
-    let profile = STTModelRegistry.resolve(adapterID: config.adapterID, model: config.model)
+    // Policy from the shared engine (canonical profile); FLAC encoding
+    // itself stays a native capability check.
+    let profile = ProviderRequestBuilder.profile(adapterID: config.adapterID, model: config.model)
     return profile.audio.supportedUploadFormats.contains(.flac)
       && FLACEncoder.canEncode(profile: profile.audio)
   }

@@ -136,7 +136,8 @@ public struct BatchStableMultipartFields: Equatable {
   ) -> BatchStableMultipartFields? {
     guard let params else { return nil }
     let resolvedModel = ProviderRequestBuilder.resolveModel(model, for: adapterID)
-    let caps = STTModelRegistry.resolve(adapterID: adapterID, model: resolvedModel).capabilities
+    // Capability gate from the shared engine (canonical policy).
+    let caps = RustEngine.requireSTTProfile(adapterID: adapterID, model: resolvedModel).capabilities
     guard caps.transport == .batchMultipart else { return nil }
     return BatchStableMultipartFields(
       temperature: caps.supportsTemperature ? params.temperature : nil,

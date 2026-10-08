@@ -135,6 +135,78 @@ public func rustWAVDecodeInfo(_ data: Data) throws -> RustWAVInfo {
     sampleRate: sampleRate, channels: channels, sampleCount: Int(sampleCount))
 }
 
+/// Full WAV header metadata without copying samples (file-backed batch
+/// sources; the streaming capture path never parses headers).
+public struct RustWAVHeader: Equatable {
+  public let sampleRate: UInt32
+  public let channels: UInt16
+  public let bitsPerSample: UInt16
+  public let dataOffset: Int
+  public let dataSize: Int
+  public let sampleCount: Int
+}
+
+/// Reads the full WAV header (rate/channels/bits/payload offset/size).
+/// Throws on non-WAV/non-PCM input.
+public func rustWAVHeaderFull(_ data: Data) throws -> RustWAVHeader {
+  var sampleRate: UInt32 = 0
+  var channels: UInt16 = 0
+  var bitsPerSample: UInt16 = 0
+  var dataOffset = 0
+  var dataSize = 0
+  var sampleCount = 0
+  let code: Int32 = data.withUnsafeBytes { raw in
+    nd_wav_header_full(
+      raw.baseAddress?.assumingMemoryBound(to: UInt8.self),
+      data.count,
+      &sampleRate,
+      &channels,
+      &bitsPerSample,
+      &dataOffset,
+      &dataSize,
+      &sampleCount)
+  }
+  guard code == 0 else {
+    throw RustEngineError(code: code, message: lastErrorMessage())
+  }
+  return RustWAVHeader(
+    sampleRate: sampleRate,
+    channels: channels,
+    bitsPerSample: bitsPerSample,
+    dataOffset: dataOffset,
+    dataSize: dataSize,
+    sampleCount: sampleCount
+  )
+}
+
+/// Decodes a whole WAV file into Int16 samples. Throws on
+/// non-WAV/non-PCM/truncated input.
+public func rustWAVDecodeSamples(_ data: Data) throws -> (
+  sampleRate: UInt32, channels: UInt16, samples: [Int16]
+) {
+  let info = try rustWAVDecodeInfo(data)
+  var samples = [Int16](repeating: 0, count: info.sampleCount)
+  var written = 0
+  let code: Int32 = data.withUnsafeBytes { raw in
+    samples.withUnsafeMutableBufferPointer { out in
+      nd_wav_decode_samples(
+        raw.baseAddress?.assumingMemoryBound(to: UInt8.self),
+        data.count,
+        out.baseAddress,
+        out.count,
+        &written)
+    }
+  }
+  guard code == 0 else {
+    throw RustEngineError(code: code, message: lastErrorMessage())
+  }
+  guard written == samples.count else {
+    throw RustEngineError(
+      code: -1, message: "engine wrote \(written) of \(samples.count) samples")
+  }
+  return (sampleRate: info.sampleRate, channels: info.channels, samples: samples)
+}
+
 // MARK: - Word diff
 
 /// Word-level diff result from the engine. `change == false` means the
@@ -166,6 +238,15 @@ public func rustWordDiff(old: String, new: String) throws -> RustWordDiff {
     spanStartOld: (object["span_start_old"] as? Int) ?? 0,
     spanStartNew: (object["span_start_new"] as? Int) ?? 0
   )
+}
+
+/// Text tail after the first `wordCount` words (post-processing overlap
+/// helper). Leading whitespace stays on the tail; the native insertion
+/// layer trims it.
+public func rustWordTailAfterWords(_ wordCount: Int, in text: String) throws -> String {
+  try text.withUTF8Bytes { ptr, len in
+    try takeString(nd_word_tail_after_words(ptr, len, max(0, wordCount)))
+  }
 }
 
 // MARK: - Text stitching
@@ -213,6 +294,22 @@ public func rustSTTResolve(adapterID: String, model: String) throws -> String {
   }
 }
 
+/// Portable configuration default: endpoint for an adapter id (empty for
+/// manual endpoints). The macOS and Windows hosts resolve the same value.
+public func rustSTTDefaultBaseURL(adapterID: String) throws -> String {
+  try adapterID.withUTF8Bytes { ptr, len in
+    try takeString(nd_stt_default_base_url(ptr, len))
+  }
+}
+
+/// Portable configuration default: model for an adapter id (empty when the
+/// adapter has none and configuration must supply it).
+public func rustSTTDefaultModel(adapterID: String) throws -> String {
+  try adapterID.withUTF8Bytes { ptr, len in
+    try takeString(nd_stt_default_model(ptr, len))
+  }
+}
+
 /// Parses an STT response body into `{"text":...,"words":[...]}` JSON.
 /// `path` selects the transcript field (nil/empty means flat `text`).
 public func rustTranscriptParse(body: String, path: String? = nil) throws -> String {
@@ -249,6 +346,18 @@ public func rustFailoverOrder(ids: [String], failedID: String?, autoFailover: Bo
 /// Exponential backoff delay in milliseconds (deterministic, no jitter).
 public func rustBackoffDelay(attempt: UInt32, baseMs: UInt64, capMs: UInt64) -> UInt64 {
   nd_backoff_delay_ms(attempt, baseMs, capMs)
+}
+
+/// Number of failover candidates the caller may attempt: all with
+/// auto-failover, exactly one without.
+public func rustFailoverCandidateCount(orderLen: Int, autoFailover: Bool) -> Int {
+  nd_failover_candidate_count(orderLen, autoFailover)
+}
+
+/// Whether a failed attempt may fall over to the next provider: true for
+/// provider/transcribe errors, false for anything else (mic etc.).
+public func rustShouldFailover(isTranscribeError: Bool) -> Bool {
+  nd_should_failover(isTranscribeError ? 0 : 1)
 }
 
 // MARK: - Review / gates / policy
