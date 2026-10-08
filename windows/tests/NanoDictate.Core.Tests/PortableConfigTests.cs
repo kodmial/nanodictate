@@ -61,6 +61,35 @@ public sealed class PortableConfigTests
         Assert.Contains(config.Providers[0].Id, order);
     }
 
+    [Fact]
+    public void LoadStripsInlineCommentsOutsideQuotedValues()
+    {
+        var toml = """
+            active_provider = "a" # trailing comment
+            language = "en" # note
+            [providers.a]
+            name = "A" # trailing comment
+            base_url = "https://example.test/#fragment"
+            model = "x" # note
+            """;
+        var path = Path.Combine(Path.GetTempPath(), $"nanodictate-inline-comment-{Guid.NewGuid():N}.toml");
+        File.WriteAllText(path, toml);
+        try
+        {
+            var config = PortableConfig.Load(path);
+            Assert.Equal("a", config.ActiveProvider);
+            Assert.Equal("en", config.Language);
+            var provider = Assert.Single(config.Providers);
+            Assert.Equal("A", provider.Name);
+            Assert.Equal("https://example.test/#fragment", provider.BaseUrl);
+            Assert.Equal("x", provider.Model);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     private static string FindExampleConfig()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);

@@ -65,7 +65,7 @@ public sealed class PortableConfig
                 continue;
             }
             var key = line.Substring(0, eq).Trim();
-            var value = Unquote(line.Substring(eq + 1).Trim());
+            var value = Unquote(StripInlineComment(line.Substring(eq + 1).Trim()));
             if (currentProvider is not null)
             {
                 switch (key)
@@ -102,6 +102,47 @@ public sealed class PortableConfig
             SegmentProvider = segment,
             FinalProvider = final,
         };
+    }
+
+    private static string StripInlineComment(string value)
+    {
+        var inDouble = false;
+        var inSingle = false;
+        for (var i = 0; i < value.Length; i++)
+        {
+            var c = value[i];
+            if (inDouble)
+            {
+                if (c == '\\' && i + 1 < value.Length)
+                {
+                    i++;
+                }
+                else if (c == '"')
+                {
+                    inDouble = false;
+                }
+            }
+            else if (inSingle)
+            {
+                if (c == '\'')
+                {
+                    inSingle = false;
+                }
+            }
+            else if (c == '"')
+            {
+                inDouble = true;
+            }
+            else if (c == '\'')
+            {
+                inSingle = true;
+            }
+            else if (c == '#')
+            {
+                return value.Substring(0, i).TrimEnd();
+            }
+        }
+        return value;
     }
 
     private static string Unquote(string value)
