@@ -378,7 +378,8 @@ final class RustDeterministicCutoverTests: XCTestCase {
             let content = try WAVFilePCMBatchContent(wavURL: url)
             XCTAssertEqual(content.sampleRate, 16000)
             XCTAssertEqual(content.sampleCount, samples.count)
-            XCTAssertEqual(try content.readSamples(0..<samples.count), samples)
+            let decoded = try content.readSamples(0..<samples.count)
+            XCTAssertEqual(decoded, samples)
             try? FileManager.default.removeItem(at: url)
         } catch {
             XCTFail("Unexpected error: \(error)")
