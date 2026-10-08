@@ -17,10 +17,20 @@ Migration Step 2 is complete and Step 3 is implemented at the parity-test/founda
   below. `Tests/NanoDictateCoreTests/RustParityTests.swift` runs the same
   input vectors against the Swift reference implementations and the
   engine, requiring equivalent output.
-- Not yet done: switching production call sites to the engine (one
-  subsystem at a time, after the macOS hardware parity gate passes),
-  removing the superseded Swift implementations, and the Windows native
-  layer (blocked on this refactor by design).
+- Production cutover (#132): the default shipping path drives the engine
+  for the deterministic subsystems through `Sources/NanoDictateCore/
+  RustEngine.swift` — model/profile resolution and portable STT defaults,
+  transcript parsing, failover ordering and deterministic retry/backoff,
+  chunk text joining, word diff and overlap tails, review decisions, and
+  offline WAV encode/decode. Native networking (`URLSession`/proxy/cookie
+  transport), realtime capture/VAD/gain/autostop/segmenter behavior, and
+  macOS integration stay in Swift. `Tests/NanoDictateCoreTests/
+  RustDeterministicCutoverTests.swift` proves the shipping call sites
+  exercise the engine; the Swift references stay until the final parity
+  gate below removes them.
+- Not yet done: removing the superseded Swift implementations, the
+  realtime-algorithm activation (#133), and the Windows native layer
+  (blocked on this refactor by design).
 
 ## Non-negotiable principle
 

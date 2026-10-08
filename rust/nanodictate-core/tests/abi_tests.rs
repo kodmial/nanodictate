@@ -150,6 +150,104 @@ fn stt_resolve_json_shape() {
 }
 
 #[test]
+fn stt_resolve_reports_portable_policy_for_host_transport() {
+    // gpt-transcribe: multi-language hint, no temperature, FLAC accepted.
+    let adapter = to_c("openai");
+    let model = to_c("gpt-transcribe");
+    let json = read_string(nd_stt_resolve(
+        adapter.as_ptr(),
+        adapter.as_bytes().len(),
+        model.as_ptr(),
+        model.as_bytes().len(),
+    ));
+    assert!(json.contains("\"language_hint\":\"multi\""), "{json}");
+    assert!(json.contains("\"supports_temperature\":false"), "{json}");
+    assert!(json.contains("\"supports_flac\":true"), "{json}");
+    // Unknown models stay conservative and WAV-only.
+    let future = to_c("some-future-model");
+    let json = read_string(nd_stt_resolve(
+        adapter.as_ptr(),
+        adapter.as_bytes().len(),
+        future.as_ptr(),
+        future.as_bytes().len(),
+    ));
+    assert!(json.contains("\"language_hint\":\"single\""), "{json}");
+    assert!(json.contains("\"supports_flac\":false"), "{json}");
+}
+
+#[test]
+fn stt_portable_defaults_through_abi() {
+    let openai = to_c("openai");
+    let url = read_string(nd_stt_default_base_url(
+        openai.as_ptr(),
+        openai.as_bytes().len(),
+    ));
+    assert_eq!(url, "https://api.openai.com/v1/audio/transcriptions");
+    let model = read_string(nd_stt_default_model(
+        openai.as_ptr(),
+        openai.as_bytes().len(),
+    ));
+    assert_eq!(model, "gpt-transcribe");
+
+    let groq = to_c("groq");
+    let model = read_string(nd_stt_default_model(groq.as_ptr(), groq.as_bytes().len()));
+    assert_eq!(model, "whisper-large-v3");
+
+    // Manual endpoints have no defaults.
+    let custom = to_c("my-custom-provider");
+    let url = read_string(nd_stt_default_base_url(
+        custom.as_ptr(),
+        custom.as_bytes().len(),
+    ));
+    assert_eq!(url, "");
+    let model = read_string(nd_stt_default_model(
+        custom.as_ptr(),
+        custom.as_bytes().len(),
+    ));
+    assert_eq!(model, "");
+}
+
+#[test]
+fn wav_full_header_and_word_tail_through_abi() {
+    let samples: Vec<i16> = vec![1, -2, 300, -4000];
+    let mut out = NdByteBuffer {
+        data: std::ptr::null_mut(),
+        len: 0,
+        cap: 0,
+    };
+    assert_eq!(
+        nd_wav_encode(samples.as_ptr(), samples.len(), 16000, 1, &mut out),
+        0
+    );
+    let (mut rate, mut channels, mut bits, mut offset, mut size, mut count) =
+        (0u32, 0u16, 0u16, 0usize, 0usize, 0usize);
+    let code = nd_wav_header_full(
+        out.data,
+        out.len,
+        &mut rate,
+        &mut channels,
+        &mut bits,
+        &mut offset,
+        &mut size,
+        &mut count,
+    );
+    assert_eq!(code, 0);
+    assert_eq!((rate, channels, bits), (16000, 1, 16));
+    assert_eq!(offset, 44);
+    assert_eq!(size, samples.len() * 2);
+    assert_eq!(count, samples.len());
+    nd_bytes_free(out);
+
+    let text = to_c("hello brave world");
+    let tail = read_string(nd_word_tail_after_words(
+        text.as_ptr(),
+        text.as_bytes().len(),
+        1,
+    ));
+    assert_eq!(tail, " brave world");
+}
+
+#[test]
 fn transcript_parse_through_abi() {
     let body = to_c(r#"{"text": "hi", "words": [{"word": "hi", "start": 0.0, "end": 0.2}]}"#);
     let json = read_string(nd_transcript_parse(

@@ -276,11 +276,13 @@ public final class Transcriber {
 
   /// Attempt #`retryIndex` (1st, 2nd, ...) sleeps before the retry:
   /// exponential base interval `0.5 * 2^n` s + jitter `jitter` s (random
-  /// 0…0.25 by default — spreads coincident clients).
+  /// 0…0.25 by default — spreads coincident clients). The deterministic
+  /// base comes from the shared engine; only the jitter stays native.
   static func backoffDelay(
     beforeRetry retryIndex: Int, jitter: Double = Double.random(in: 0...0.25)
   ) -> TimeInterval {
-    0.5 * pow(2.0, Double(retryIndex)) + jitter
+    let baseMs = RustEngine.retryBackoffBaseMs(attempt: UInt32(max(0, retryIndex)))
+    return Double(baseMs) / 1000.0 + jitter
   }
 
   /// `Retry-After` from response headers (seconds), when set and parseable.
@@ -552,7 +554,10 @@ public final class Transcriber {
         effectiveFormat: .flac
       )
     }
-    guard let pcm = WAVDecoder.decodePCM16(wav), pcm.channels == 1,
+    // PCM recovery through the shared engine (canonical WAV decode); any
+    // decode/encode failure falls back to WAV so the request path stays
+    // total and never mislabels bytes.
+    guard let pcm = try? RustEngine.wavDecodeSamples(wav), pcm.channels == 1,
       let flac = FLACEncoder.encode(
         samples: pcm.samples, sampleRate: pcm.sampleRate, channels: pcm.channels)
     else {
@@ -636,7 +641,9 @@ public final class Transcriber {
   /// - else text extracted via the adapter JSON path (cloudflare).
   /// Word timestamps (if the provider returned them) go to `result.words`;
   /// broken/empty array — not an error (empty).
-  /// Errors and their strings — exactly as in the adapter path (see tests).
+  /// Parsed by the shared engine (canonical policy); transport, retries and
+  /// error classification stay native. Errors and their strings — exactly
+  /// as in the adapter path (see tests).
   private static func parseResponse(_ response: STTHTTPResponse, transcriptPath: [String]? = nil)
     throws -> TranscriptionResult
   {  // swiftlint:disable:this opening_brace
@@ -649,9 +656,8 @@ public final class Transcriber {
       }
       throw TranscribeError.http(status, String(text.prefix(500)))
     }
-    let text = try ProviderRequestBuilder.extractText(from: body, path: transcriptPath)
-    let words = ProviderRequestBuilder.extractWords(from: body, path: transcriptPath)
-    return TranscriptionResult(text: text, rawData: body, words: words)
+    let parsed = try RustEngine.parseTranscriptResponse(body: body, path: transcriptPath)
+    return TranscriptionResult(text: parsed.text, rawData: body, words: parsed.words)
   }
 }
 
