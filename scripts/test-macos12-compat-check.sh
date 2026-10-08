@@ -313,6 +313,21 @@ assert_grep 'lifecycle: config path preflight expects the isolated HOME' \
   "$CHECK_SCRIPT" 'EXPECTED_CONFIG_PATH="\$ISOLATED_HOME/.config/nanodictate/config.toml"'
 assert_grep 'lifecycle: non-isolated config path fails the gate' \
   "$CHECK_SCRIPT" 'config path is not isolated'
+# A failed preflight must not arm cleanup: LIFECYCLE_STARTED=1 stays after
+# the isolation preflight and config init, immediately before the first start.
+PREFLIGHT_LINE=$(grep -n 'config path is not isolated' "$CHECK_SCRIPT" | head -n1 | cut -d: -f1)
+CONFIG_INIT_LINE=$(grep -n 'config.toml not created in isolated HOME' "$CHECK_SCRIPT" | head -n1 | cut -d: -f1)
+ARM_LINE=$(grep -n '^  LIFECYCLE_STARTED=1' "$CHECK_SCRIPT" | head -n1 | cut -d: -f1)
+FIRST_START_LINE=$(grep -n 'nanodictate start registers the canonical job' "$CHECK_SCRIPT" | head -n1 | cut -d: -f1)
+if [[ -n "$PREFLIGHT_LINE" && -n "$CONFIG_INIT_LINE" && -n "$ARM_LINE" && -n "$FIRST_START_LINE" ]] \
+  && [[ "$ARM_LINE" -gt "$PREFLIGHT_LINE" ]] \
+  && [[ "$ARM_LINE" -gt "$CONFIG_INIT_LINE" ]] \
+  && [[ "$ARM_LINE" -lt "$FIRST_START_LINE" ]]; then
+  pass 'lifecycle: cleanup arms only after the isolation preflight and config init'
+else
+  fail 'lifecycle: cleanup arms only after the isolation preflight and config init' \
+    "preflight=$PREFLIGHT_LINE config_init=$CONFIG_INIT_LINE arm=$ARM_LINE first_start=$FIRST_START_LINE"
+fi
 
 # --- 7. Documentation must not claim more than the gate automates ------------
 

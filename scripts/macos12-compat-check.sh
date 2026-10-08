@@ -250,7 +250,6 @@ else
     fi
   }
   trap lifecycle_cleanup EXIT
-  LIFECYCLE_STARTED=1
   set_check "config path resolves inside isolated HOME"
   EXPECTED_CONFIG_PATH="$ISOLATED_HOME/.config/nanodictate/config.toml"
   CONFIG_PATH="$("$BIN" config path 2>/dev/null)" \
@@ -261,6 +260,9 @@ else
   "$BIN" config init >/dev/null 2>&1 || fail "config init failed in isolated HOME"
   [ -f "$ISOLATED_HOME/.config/nanodictate/config.toml" ] \
     || fail "config.toml not created in isolated HOME"
+  # Arm cleanup only after the isolation preflight and config init succeed,
+  # so a failed preflight cannot trigger "$BIN" stop against the real home.
+  LIFECYCLE_STARTED=1
   set_check "nanodictate start registers the canonical job"
   "$BIN" start >/dev/null 2>&1 || fail "nanodictate start failed on macOS ${MACOS_VERSION}"
   sleep 3
