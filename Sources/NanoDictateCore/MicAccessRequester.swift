@@ -75,6 +75,23 @@ public final class MicAccessRequester {
     inFlight
   }
 
+  /// Explicit user-cancellation boundary (Esc while the system TCC dialog is
+  /// pending): invalidates the outstanding request's session token so a late
+  /// system answer is dropped by the token mismatch and can never start
+  /// recording after cancellation. The in-flight guard is deliberately NOT
+  /// cleared here — the system request is still unresolved, and clearing it
+  /// would let a retry pile a second dialog onto the pending one (dialog
+  /// storm). Only the system callback releases the coordinator (clearing both
+  /// flags); a retry while the invalidated request is still pending resolves
+  /// exactly like a duplicate while in flight. The pending watchdog is
+  /// disarmed by the same token bump: it must neither deliver `.timedOut`
+  /// over an explicit user cancel nor count the storm-policy timeout for it.
+  /// No-op when no request is outstanding (the token simply advances; the
+  /// next request captures a fresh token).
+  public func invalidatePending() {
+    session += 1
+  }
+
   /// Full cycle: check status → request if needed → wait for answer with
   /// watchdog. `completion` called EXACTLY once: synchronously (status known —
   /// granted/denied) or on main queue (answer / timeout / anti-storm).
