@@ -156,11 +156,10 @@ jobs:
     secrets: inherit
     with:
       continuum_ref: main
-      # Every knob below is forwarded as a bare `inputs.*` passthrough, never a
-      # literal. An empty passthrough is what lets the engine fall back to the
-      # consumer's `vars.AUTOMATION_*` value; pinning a literal here would
-      # override that repository variable for every installed caller.
-      wip_limit: "${{ inputs.wip_limit }}"
+      # NanoDictate keeps four implementation slots available so review
+      # backlog cannot freeze issue pickup. A manual dispatch may temporarily
+      # override the limit for diagnostics.
+      wip_limit: "${{ inputs.wip_limit || '4' }}"
       lease_minutes: "${{ inputs.lease_minutes }}"
       max_dispatch_attempts: "${{ inputs.max_dispatch_attempts }}"
       dispatch_marker: "${{ inputs.dispatch_marker }}"

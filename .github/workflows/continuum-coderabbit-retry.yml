@@ -17,14 +17,13 @@ on:
   pull_request_review_comment:
     types: [created, edited]
 
-  # Reuse existing periodic control-plane wakes instead of introducing another
-  # cron. Wake only after controllers that observe a stable PR HEAD: direct
-  # main-push / issue-scheduler wakes can race auto-merge's update-branch sync
-  # and make CodeRabbit abort with "Head commit changed".
+  # PR-Agent recovery is the periodic safety-net wake. Auto-merge already
+  # dispatches this controller explicitly when a review is missing, so also
+  # subscribing to every auto-merge completion creates duplicate cancellation
+  # storms without adding a recovery path.
   workflow_run:
     workflows:
       - PR-Agent recovery
-      - Auto-merge reviewed pull requests
     types: [completed]
 
   # Manual/safety-net reconciliation.
