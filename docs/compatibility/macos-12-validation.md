@@ -161,6 +161,31 @@ scripts/macos12-compat-check.sh --static-only --skip-build
 
 Results land in `.opencode-tmp/macos12-compat-results/` (never committed).
 
+## CI status is not a runtime pass
+
+The `macOS 12 compat` workflow has two independently identifiable jobs.
+`static floor (hosted)` may pass on macOS 15 and proves **only** the
+deployment target and build checks. The other job, `runtime qualification
+(requires actual macOS 12)`, must **fail closed** when the only available
+result is `needs-macos12-host`. Uploading the handoff artifact is not runtime
+validation and can never make that job or the workflow green.
+
+To satisfy runtime qualification, execute `--full` on a real macOS 12 host
+using the exact source revision under evaluation and provide its
+`result.txt` (`result=full-green`, `runtime_claim=macos-12`) and
+`environment.txt` (`macos_major=12`) to the trusted verification runner.
+The release-critical manual TCC, microphone, text insertion and packaging
+checklist must also be signed off separately; `full-green` by itself does
+not establish those checks.
+
+**Current infrastructure limitation:** the hosted handoff job only produces
+`needs-macos12-host`. A secure, revision-bound import of results from an
+isolated macOS 12 host is not provisioned, so runtime qualification remains
+red until that integration and a genuine macOS 12 run exist. Neither CI
+retries nor a successful hosted static build can close this gap. Do not
+replace the failing gate with a successful no-op or waive it through a
+non-Monterey diagnostic run.
+
 ## Failure visibility before release
 
 - `.github/workflows/macos-12-compat.yml` runs the static gate on every PR
