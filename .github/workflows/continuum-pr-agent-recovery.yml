@@ -21,6 +21,9 @@ permissions:
 
 jobs:
   call:
+    if: >-
+      (vars.CONTINUUM_REVIEW_PROVIDER || 'none') == 'pr-agent' &&
+      vars.CONTINUUM_ROLE != 'child'
     uses: kodmial/continuum/.github/workflows/continuum-pr-agent-recovery.yml@main
     secrets: inherit
     with:
