@@ -122,11 +122,16 @@ compat_runtime_gate() {
 MACOS_VERSION="$(sw_vers_product)"
 MACOS_MAJOR="$(compat_macos_major "$MACOS_VERSION")"
 ARCH="$(/usr/bin/arch 2>/dev/null || uname -m)"
+SOURCE_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+if [ "$MODE" = "full" ] && [[ ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+  fail "full runtime evidence requires a pinned Git checkout with an exact commit SHA"
+fi
 {
   echo "macos_version=${MACOS_VERSION}"
   echo "macos_major=${MACOS_MAJOR}"
   echo "arch=${ARCH}"
   echo "mode=${MODE}"
+  echo "source_sha=${SOURCE_SHA}"
 } > "$RESULT_DIR/environment.txt"
 log "host: macOS ${MACOS_VERSION} (${ARCH}), mode=${MODE}"
 
@@ -331,7 +336,7 @@ printf 'accessibility=manual-check-required\n' >> "$RESULT_DIR/environment.txt"
 phase "result"
 if [ "$MACOS_MAJOR" = "12" ]; then
   log "FULL GREEN on actual macOS ${MACOS_VERSION} (${ARCH})"
-  printf 'result=full-green\nruntime_claim=macos-12\nmacos=%s\narch=%s\n' "$MACOS_VERSION" "$ARCH" > "$RESULT_DIR/result.txt"
+  printf 'result=full-green\nruntime_claim=macos-12\nmacos=%s\narch=%s\nsource_sha=%s\n' "$MACOS_VERSION" "$ARCH" "$SOURCE_SHA" > "$RESULT_DIR/result.txt"
 else
   log "DIAGNOSTICS-ONLY complete on macOS ${MACOS_VERSION} (not a release pass)"
 fi
