@@ -42,6 +42,8 @@ permissions:
 
 jobs:
   call:
+    # Continuum owns review convergence, including cooldown-driven re-review
+    # of summary-only CodeRabbit verdicts; the consumer supplies no manual gate.
     uses: kodmial/continuum/.github/workflows/continuum-auto-merge.yml@main
     secrets: inherit
     with:
