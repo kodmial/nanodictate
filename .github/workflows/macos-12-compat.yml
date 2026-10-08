@@ -80,7 +80,7 @@ jobs:
           if-no-files-found: warn
 
   runtime-gate:
-    name: runtime handoff (isolated macOS 12)
+    name: runtime qualification (requires actual macOS 12)
     # Supported host only. JavaScript actions require Node 24 (Node 20 was
     # removed on September 23, 2026) and Node 24 cannot run on macOS 13.4 or
     # earlier, so checkout/upload-artifact cannot execute on macOS 12. The
@@ -124,3 +124,23 @@ jobs:
           name: macos12-runtime-${{ github.run_id }}
           path: .opencode-tmp/macos12-compat-results/
           if-no-files-found: warn
+
+      # A successful artifact upload confirms only that the handoff ran, not
+      # that anything executed on Monterey. An unverified runtime must make
+      # the overall workflow red; the static-floor job remains independently
+      # visible as green. Never convert needs-macos12-host into a PASS.
+      - name: Require verified real macOS 12 execution
+        shell: bash
+        run: |
+          set -euo pipefail
+          result=.opencode-tmp/macos12-compat-results/result.txt
+          environment=.opencode-tmp/macos12-compat-results/environment.txt
+          if [ -f "$result" ] && [ -f "$environment" ] &&
+             grep -Fxq 'result=full-green' "$result" &&
+             grep -Fxq 'runtime_claim=macos-12' "$result" &&
+             grep -Fxq 'macos_major=12' "$environment"; then
+            echo 'Real macOS 12 runtime result present. Manual TCC/UI checks remain separate.'
+          else
+            echo '::error title=macOS 12 runtime is NOT validated::The hosted macOS 15 handoff is not macOS 12 validation. Execute scripts/macos12-compat-check.sh --full on a real isolated macOS 12 host and securely import the result for this exact source revision. Until then this runtime gate is intentionally failing.'
+            exit 1
+          fi
