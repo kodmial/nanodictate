@@ -2,7 +2,10 @@ name: Merge trusted release automation PRs
 
 on:
   workflow_run:
-    workflows: ["CI"]
+    # Release PRs contain only version/changelog metadata and are validated by
+    # the Release notes gate. Manifest PRs still use full CI. Either completion
+    # wakes the same exact-head trusted merger.
+    workflows: ["CI", "Release notes"]
     types: [completed]
   push:
     branches: [main]
