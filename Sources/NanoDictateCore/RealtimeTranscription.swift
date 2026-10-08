@@ -464,6 +464,7 @@ public actor RealtimeTranscriptionSession {
       let mapped = Self.realtimeError(from: error)
       state = .failed
       lastError = Transcriber.describeRealtime(mapped)
+      await closeTransportOnce()
       throw mapped
     }
     let remaining = policy.connectTimeout - Date().timeIntervalSince(connectStart)
