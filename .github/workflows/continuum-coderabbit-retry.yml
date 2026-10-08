@@ -17,14 +17,10 @@ on:
   pull_request_review_comment:
     types: [created, edited]
 
-  # PR-Agent recovery is the periodic safety-net wake. Auto-merge already
-  # dispatches this controller explicitly when a review is missing, so also
-  # subscribing to every auto-merge completion creates duplicate cancellation
-  # storms without adding a recovery path.
-  workflow_run:
-    workflows:
-      - PR-Agent recovery
-    types: [completed]
+  # Provider-owned safety net. CodeRabbit recovery must never depend on
+  # PR-Agent workflow completion.
+  schedule:
+    - cron: "3,13,23,33,43,53 * * * *"
 
   # Manual/safety-net reconciliation.
   workflow_dispatch:
