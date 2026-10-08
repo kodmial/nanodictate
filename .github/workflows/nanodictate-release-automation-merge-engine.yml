@@ -116,7 +116,7 @@ jobs:
               );
             }
 
-            async function latestSuccessfulCi(pr) {
+            async function latestSuccessfulWorkflow(pr, workflowName) {
               const runs = await github.paginate(
                 github.rest.actions.listWorkflowRunsForRepo,
                 {
@@ -128,7 +128,9 @@ jobs:
                 }
               );
               const latest = runs
-                .filter(item => item.name === 'CI' && item.head_sha === pr.head.sha)
+                .filter(item =>
+                  item.name === workflowName && item.head_sha === pr.head.sha
+                )
                 .sort(
                   (a, b) =>
                     new Date(b.created_at).getTime() -
@@ -139,6 +141,15 @@ jobs:
                 latest.status === 'completed' &&
                 latest.conclusion === 'success'
               );
+            }
+
+            function requiredWorkflowFor(pr) {
+              // release-please changes exactly the three metadata files
+              // validated below, so Release notes is its semantic exact-head
+              // qualification. Installer-manifest PRs still require full CI.
+              return pr.head.ref === 'release-please--branches--main'
+                ? 'Release notes'
+                : 'CI';
             }
 
             async function compareWithMain(headSha) {
@@ -286,8 +297,9 @@ jobs:
             );
 
             if (run && run.conclusion !== 'success') {
-              core.info(`CI run ${run.id} concluded ${run.conclusion}; no automation PR can merge.`);
-              return;
+              core.info(
+                `${run.name || 'workflow'} run ${run.id} concluded ${run.conclusion}; exact-head validation will wait for its required successful gate.`
+              );
             }
 
             for (const listed of candidates) {
@@ -296,11 +308,19 @@ jobs:
                 continue;
               }
 
-              const ciOk = run
-                ? pr.head.sha === run.head_sha
-                : await latestSuccessfulCi(pr);
-              if (!ciOk) {
-                core.info(`PR #${pr.number}: waiting for successful CI on current head ${pr.head.sha}.`);
+              const requiredWorkflow = requiredWorkflowFor(pr);
+              const runMatchesRequiredWorkflow = Boolean(
+                run &&
+                run.name === requiredWorkflow &&
+                pr.head.sha === run.head_sha
+              );
+              const gateOk = runMatchesRequiredWorkflow
+                ? run.conclusion === 'success'
+                : await latestSuccessfulWorkflow(pr, requiredWorkflow);
+              if (!gateOk) {
+                core.info(
+                  `PR #${pr.number}: waiting for successful ${requiredWorkflow} on current head ${pr.head.sha}.`
+                );
                 continue;
               }
 
@@ -343,8 +363,10 @@ jobs:
                 core.info(`PR #${pr.number}: state/head changed during validation; merge cancelled.`);
                 continue;
               }
-              if (!run && !(await latestSuccessfulCi(pr))) {
-                core.info(`PR #${pr.number}: CI state changed during validation; merge cancelled.`);
+              if (!(await latestSuccessfulWorkflow(pr, requiredWorkflow))) {
+                core.info(
+                  `PR #${pr.number}: ${requiredWorkflow} state changed during validation; merge cancelled.`
+                );
                 continue;
               }
               const finalComparison = await compareWithMain(pr.head.sha);
