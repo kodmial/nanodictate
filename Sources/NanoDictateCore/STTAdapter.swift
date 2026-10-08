@@ -174,7 +174,8 @@ public enum ProviderRequestBuilder {
     // Model-aware profile drives every parameter decision below: a parameter
     // is sent only when the concrete (adapterID, model) profile supports it,
     // never merely because the provider family supports it on another model.
-    let profile = STTModelRegistry.resolve(adapterID: adapterID, model: resolvedModel)
+    // The profile is resolved by the shared engine (canonical policy).
+    let profile = RustEngine.requireSTTProfile(adapterID: adapterID, model: resolvedModel)
     let caps = profile.capabilities
     // Batch chaining prompt wins over explicit; contextual bias (vocabulary)
     // is appended after the chain context where prompt is supported.
@@ -261,25 +262,25 @@ public enum ProviderRequestBuilder {
   }
 
   public static func resolveBaseURL(_ baseURL: String, for adapterID: String) -> String {
-    if !baseURL.isEmpty {
-      return baseURL
-    }
-    return STTAdapterID.from(adapterID).defaultBaseURL
+    // Portable configuration default owned by the shared engine: the macOS
+    // and Windows hosts resolve the same value. Native networking still
+    // consumes the result; only the default lives in Rust.
+    RustEngine.requireSTTBaseURL(baseURL, for: adapterID)
   }
 
   public static func resolveModel(_ model: String, for adapterID: String) -> String {
-    if !model.isEmpty {
-      return model
-    }
-    return STTAdapterID.from(adapterID).defaultModel
+    // Same portable-default contract as resolveBaseURL above.
+    RustEngine.requireSTTModel(model, for: adapterID)
   }
 
   /// Model-aware profile for a concrete (adapterID, model) pair.
   /// Single entry point for request construction, stable-field gating and
   /// audio preparation — callers never branch on provider/model themselves.
+  /// Resolved by the shared engine (canonical policy); the Swift registry
+  /// remains only as the parity reference.
   public static func profile(adapterID: String, model: String) -> STTModelProfile {
     let resolvedModel = resolveModel(model, for: adapterID)
-    return STTModelRegistry.resolve(adapterID: adapterID, model: resolvedModel)
+    return RustEngine.requireSTTProfile(adapterID: adapterID, model: resolvedModel)
   }
 
   /// Model-aware capabilities for a concrete (adapterID, model) pair.
@@ -527,7 +528,9 @@ extension ProviderRequestBuilder {
     // guarantees support AND the processing mode requires them (chunked/live
     // segment overlap stitching). Normal single-request push-to-talk sends
     // plain transcription. Keywords — only where supportsKeywordBiasing.
-    let caps = capabilities ?? STTModelRegistry.resolve(adapterID: adapterID, model: model).capabilities
+    // Capabilities come from the shared engine (canonical policy).
+    let caps =
+      capabilities ?? RustEngine.requireSTTProfile(adapterID: adapterID, model: model).capabilities
     let timestamps = needsWordTimestamps && caps.supportsWordTimestamps
     let verbose = needsWordTimestamps && caps.supportsVerboseJSON
     let effectiveKeywords = caps.supportsKeywordBiasing ? keywords : []

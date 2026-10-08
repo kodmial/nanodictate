@@ -121,6 +121,8 @@ typedef struct NdByteBuffer {
 
 
 
+
+
 /**
  * Returns the ABI version ([`ND_ABI_VERSION`]).
  */
@@ -184,6 +186,22 @@ int32_t nd_wav_decode_info(const uint8_t *data,
                            size_t *out_sample_count);
 
 /**
+ * Full WAV header metadata without copying samples: sample rate,
+ * channels, bits per sample, PCM payload offset/size, and sample count.
+ * Only the window up to the `data` chunk header must be present. This is
+ * the file-backed batch source contract (the streaming capture path never
+ * parses headers). Returns `ND_OK` or a positive `ND_ERR_*` code.
+ */
+int32_t nd_wav_header_full(const uint8_t *data,
+                           size_t len,
+                           uint32_t *out_sample_rate,
+                           uint16_t *out_channels,
+                           uint16_t *out_bits_per_sample,
+                           size_t *out_data_offset,
+                           size_t *out_data_size,
+                           size_t *out_sample_count);
+
+/**
  * Decodes WAV samples into the caller-provided buffer. Query the required
  * capacity with [`nd_wav_decode_info`]; `ND_ERR_SMALL_BUFFER` is returned
  * when `capacity` is too small.
@@ -202,6 +220,14 @@ int32_t nd_wav_decode_samples(const uint8_t *data,
 char *nd_word_diff(const char *old_ptr, size_t old_len, const char *new_ptr, size_t new_len);
 
 /**
+ * Text tail after the first `word_count` words (post-processing overlap
+ * helper, mirrors `WordDiff.tailAfterWords`). Leading whitespace stays on
+ * the tail; the native insertion layer trims it. NULL only on invalid
+ * UTF-8, null pointers, or panic.
+ */
+char *nd_word_tail_after_words(const char *text_ptr, size_t text_len, size_t word_count);
+
+/**
  * Joins `count` chunk texts (`texts`/`lens` arrays) with boundary-overlap
  * dedup. NULL is returned only on error.
  */
@@ -216,6 +242,22 @@ char *nd_stt_resolve(const char *adapter_ptr,
                      size_t adapter_len,
                      const char *model_ptr,
                      size_t model_len);
+
+/**
+ * Default endpoint for an adapter id (empty for manual endpoints that
+ * require an explicit base URL). Mirrors the portable configuration
+ * default so macOS and Windows resolve the same value. NULL only on
+ * invalid UTF-8, null pointers, or panic.
+ */
+char *nd_stt_default_base_url(const char *adapter_ptr, size_t adapter_len);
+
+/**
+ * Default model for an adapter id (empty when the adapter has none and
+ * the model must come from configuration). Mirrors the portable
+ * configuration default. NULL only on invalid UTF-8, null pointers, or
+ * panic.
+ */
+char *nd_stt_default_model(const char *adapter_ptr, size_t adapter_len);
 
 /**
  * Parses an STT response body into `{"text":...,"words":[...]}` JSON.

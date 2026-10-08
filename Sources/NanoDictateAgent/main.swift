@@ -1264,7 +1264,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       // dictation) or the loop already ended with a terminal event (the
       // "STT timeout" watchdog set state to .idle) — terminal calls become
       // no-ops; a repeated failTranscription/completeInsertion is impossible.
-      let wav = WAVEncoder.encode(samples: samples)
+      // Recording bytes encoded by the shared engine (canonical WAV
+      // codec). The encode runs off the realtime capture callback (the tap
+      // only appends); an engine failure traps loudly instead of silently
+      // falling back to the Swift encoder.
+      let wav = RustEngine.requireWAVEncode(samples: samples)
       // Last WAV kept in memory (RetryProvider): manual retry with another
       // provider (`nanodictate retry`) and auto-failover reuse it.
       self.retryProvider.store(wav: wav)

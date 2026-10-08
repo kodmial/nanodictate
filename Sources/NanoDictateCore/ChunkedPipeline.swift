@@ -119,14 +119,22 @@ public struct ChunkedPipeline {
   /// inside overlap by timestamps (`end <= overlapSeconds`), cut tail by
   /// CHAR offset (raw slice — internal punctuation intact). No timestamps —
   /// text untouched: final word-diff pass cleans duplicates (corrupt/empty
-  /// `words` does NOT break pipeline).
+  /// `words` does NOT break pipeline). The tail itself comes from the
+  /// shared engine (canonical word-diff logic); an engine failure traps
+  /// loudly instead of silently falling back to the Swift implementation
+  /// (valid input never fails to resolve).
   public static func dedupeOverlap(text: String, words: [TimedWord], overlapSeconds: TimeInterval)
     -> String
   {  // swiftlint:disable:this opening_brace
     guard overlapSeconds > 0, !words.isEmpty else { return text }
     let overlapWordCount = words.prefix { $0.end <= overlapSeconds }.count
     guard overlapWordCount > 0 else { return text }
-    let tail = WordDiff.tailAfterWords(overlapWordCount, in: text)
+    let tail: String
+    do {
+      tail = try RustEngine.tailAfterWords(overlapWordCount, in: text)
+    } catch {
+      preconditionFailure("Rust engine word tail failed: \(error)")
+    }
     return String(tail.drop { $0.isWhitespace })
   }
 
@@ -187,7 +195,9 @@ public struct ChunkedPipeline {
     filename: String = "segment.wav",
     overlap: TimeInterval = 0
   ) async throws -> (insertText: String, promptText: String) {
-    let bytes = WAVEncoder.encode(samples: samples, sampleRate: sampleRate)
+    // Segment bytes encoded by the shared engine (canonical WAV codec).
+    let bytes = try RustEngine.wavEncode(
+      samples: samples, sampleRate: UInt32(sampleRate), channels: 1)
     return try await recognizeWAV(
       bytes,
       index: index,
@@ -211,11 +221,14 @@ public struct ChunkedPipeline {
     onFinalizing: (() -> Void)? = nil
   ) async throws -> (finalText: String, changed: Bool) {
     onFinalizing?()
-    let finalWAV = WAVEncoder.encode(samples: samples, sampleRate: sampleRate)
+    // Whole-recording bytes encoded by the shared engine (canonical WAV
+    // codec); the inserted-vs-final diff comes from the engine as well.
+    let finalWAV = try RustEngine.wavEncode(
+      samples: samples, sampleRate: UInt32(sampleRate), channels: 1)
     let finalResult = try await stt(finalWAV, "final.wav", nil)
     let finalText = TextRefinement.finalize(finalResult.text)
 
-    guard let change = WordDiff.change(old: insertedText, new: finalText) else {
+    guard let change = try RustEngine.wordDiffChange(old: insertedText, new: finalText) else {
       return (finalText, false)
     }
     insert(.replaceTail(old: change.tailOld, new: change.tailNew))
@@ -279,7 +292,8 @@ public struct ChunkedPipeline {
       onPhase?(.segment(index))
       // Materialize/encode only the segment being sent: overlap tail + body
       // straight from the source buffer, no retained per-segment PCM arrays.
-      let bytes = WAVEncoder.encodeSegment(
+      // Encoded by the shared engine (canonical WAV codec).
+      let bytes = try RustEngine.wavEncodeSegment(
         source: samples,
         bodyRange: spec.bodyRange,
         overlapRange: spec.overlapRange,
