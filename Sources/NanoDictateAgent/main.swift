@@ -990,6 +990,16 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       Logger.log("record start ignored: already starting", level: "info")
       return
     }
+    // A pending retry review (opened in .idle) is superseded by the new
+    // recording: clear the Return pass-through flag and invalidate its
+    // session so a late decision cannot insert after this loop starts.
+    // During recording the pending flag would make
+    // shouldSwallowReturnKeyEvent return false instead of swallowing.
+    if awaitingReviewDecision {
+      awaitingReviewDecision = false
+      processingSession += 1
+      Logger.log("pending retry review superseded by new recording")
+    }
     // Label "what recognition goes through" ("<provider> · <model>") — from
     // THE SAME resolved provider the session transcriber was built with in
     // init (resolvedConfig): single source of truth, config not re-read here.
@@ -2505,6 +2515,13 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     scheduledEnterPoster.cancelScheduled()
     switch state {
     case .recording:
+      // A retry review pending across the recording start (superseded above,
+      // or raced) must stay invalidated: advance the session so its late
+      // decision still drops after Esc returns the agent to .idle.
+      if hadPendingReview {
+        processingSession += 1
+        Logger.log("pending retry review cancelled by Esc")
+      }
       audio.cancel()
       // Invalidate the live loop: a segment being recognized on
       // liveExecutor right now will not insert (the liveSession guard in
@@ -2516,6 +2533,12 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       liveRunState = nil
       Logger.log("record cancelled")
     case .transcribing:
+      // Same retry-review invalidation as in .recording: Esc ends the wait
+      // regardless of agent state, so a late .insert cannot pass the gate.
+      if hadPendingReview {
+        processingSession += 1
+        Logger.log("pending retry review cancelled by Esc")
+      }
       cancelRecognition = true
       // Esc during transcription stops the queued work immediately, not only
       // at the next segment: the isCancelled guard in finishLiveRun drops the

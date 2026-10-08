@@ -108,7 +108,7 @@ public struct RecordingLimit {
   }
 
   public func remainingSamples(after totalSamples: Int) -> Int {
-    min(maxSamples, max(0, maxSamples - totalSamples))
+    maxSamples - min(maxSamples, max(0, totalSamples))
   }
 }
 

@@ -47,6 +47,9 @@ for file in "$TPL" "$GEN"; do
   if grep -q '#{appdir}/NanoDictate\.app' <<<"$postflight"; then
     fail "$file must not use Ruby #{appdir} interpolation inside postflight_steps"
   fi
+  if ! grep -q 'run "/usr/bin/xattr"' <<<"$postflight"; then
+    fail "$file must invoke run \"/usr/bin/xattr\" inside postflight_steps"
+  fi
   if ! grep -q '"-dr", "com\.apple\.quarantine"' <<<"$postflight"; then
     fail "$file must strip exactly com.apple.quarantine via xattr -dr"
   fi
