@@ -137,6 +137,40 @@ scripts/macos12-compat-check.sh --full
 # scp -r .opencode-tmp/macos12-compat-results user@supported-mac:/tmp/macos12-results
 ```
 
+### Owner-only evidence intake (after the real macOS 12 run)
+
+Run the `--full` probe from the **exact commit** being qualified on an
+isolated macOS 12 machine. Complete and record all manual checklist items.
+Transfer its `result.txt` and `environment.txt` to a supported machine.
+Both files contain `source_sha`; the intake rejects mismatched revisions.
+
+From a trusted, authenticated GitHub CLI on the supported machine (not on the
+isolated macOS 12 host), with the project owner account:
+
+```sh
+# Run from the tested checkout after transferring the two evidence files:
+TARGET_SHA="$(git rev-parse HEAD)"
+RESULT_B64="$(base64 < .opencode-tmp/macos12-compat-results/result.txt | tr -d '\n')"
+ENV_B64="$(base64 < .opencode-tmp/macos12-compat-results/environment.txt | tr -d '\n')"
+gh workflow run macos12-runtime-evidence.yml --repo kodmial/nanodictate --ref main \
+  -f source_sha="$TARGET_SHA" \
+  -f result_base64="$RESULT_B64" \
+  -f environment_base64="$ENV_B64" \
+  -f manual_checklist=PASS
+```
+
+Only use `manual_checklist=PASS` if **every required** manual check actually
+passed. Review the evidence-intake Actions run and immutable uploaded artifact.
+Then rerun the previously failing PR `macOS 12 compat` check on the **same SHA**
+to let it read the `macos12/runtime-attested` status. Remove the
+`no-auto-merge` safeguard on PR #102 only after reviewing the complete
+evidence and successful checks. Any new PR commit invalidates the attestation
+for that PR HEAD and requires a new real-host run.
+
+The `Release` workflow also blocks **new publication** unless the exact
+release-source commit SHA has its own owner-attested macOS 12 evidence.
+Already-published versions and dry runs are not republished.
+
 Attach `environment.txt` and `result.txt` (`result=full-green`,
 `runtime_claim=macos-12`) as PR or release evidence. The Actions
 `runtime handoff` job uploads its own `needs-macos12-host` marker from
@@ -178,13 +212,23 @@ The release-critical manual TCC, microphone, text insertion and packaging
 checklist must also be signed off separately; `full-green` by itself does
 not establish those checks.
 
-**Current infrastructure limitation:** the hosted handoff job only produces
-`needs-macos12-host`. A secure, revision-bound import of results from an
-isolated macOS 12 host is not provisioned, so runtime qualification remains
-red until that integration and a genuine macOS 12 run exist. Neither CI
-retries nor a successful hosted static build can close this gap. Do not
-replace the failing gate with a successful no-op or waive it through a
-non-Monterey diagnostic run.
+The hosted handoff job always produces `needs-macos12-host` and cannot
+self-certify a runtime pass. The protected-main workflow
+`.github/workflows/macos12-runtime-evidence.yml` accepts a **repository-owner
+attestation only**, after the real host results are transferred to a supported
+machine. It verifies the original `--full` outputs, macOS major 12, source
+SHA, and operator's `PASS` for every manual checklist item, stores an immutable
+Actions artifact, and adds the `macos12/runtime-attested` success commit
+status linking to that workflow run. The PR runtime job checks this status
+on the **exact current HEAD**, not an older reviewed version.
+
+This is an explicit trusted-operator attestation, **not** a cryptographic
+remote-execution proof. The owner must actually run on macOS 12 and inspect
+the transferred evidence. The intake workflow does not execute untrusted PR
+code or grant credentials to the macOS 12 host. No attestations currently
+exist for an untested revision. Until genuine results are submitted the
+runtime job remains red; neither CI retries nor a macOS 15 static build
+can close the gap. Never waive it via `--allow-non12-runtime`.
 
 ## Failure visibility before release
 
