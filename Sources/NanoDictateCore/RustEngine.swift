@@ -59,9 +59,11 @@ public enum RustEngine {
   }
 
   /// Typed word-level diff for the insertion layer: nil when the texts
-  /// match word-wise (nothing to change). The change spans and scalar
-  /// offsets come from the engine; the tail slices stay native `String`
-  /// computation (grapheme clusters remain the insertion layer's job).
+  /// match word-wise (nothing to change). The engine reports divergence
+  /// starts as Unicode scalar offsets; they are mapped to Swift `Character`
+  /// offsets here so the tail slices land on valid grapheme boundaries
+  /// (a common prefix containing a multi-scalar cluster, such as `e` plus
+  /// a combining accent, otherwise selects the wrong tail or traps).
   /// Engine failure throws loudly — never a silent Swift fallback.
   public static func wordDiffChange(old: String, new: String) throws -> WordDiff.Change? {
     let diff = try wordDiff(old: old, new: new)
@@ -71,9 +73,28 @@ public enum RustEngine {
       newText: new,
       spanOld: diff.spanOld,
       spanNew: diff.spanNew,
-      spanStartOld: diff.spanStartOld,
-      spanStartNew: diff.spanStartNew
+      spanStartOld: characterOffset(forScalarOffset: diff.spanStartOld, in: old),
+      spanStartNew: characterOffset(forScalarOffset: diff.spanStartNew, in: new)
     )
+  }
+
+  /// Maps a Rust scalar (`char`) offset to the Swift `Character` offset of
+  /// the same position, snapped forward to the next grapheme boundary when
+  /// the scalar position falls inside a multi-scalar cluster. Out-of-range
+  /// input clamps to the text bounds so tail slicing never traps.
+  static func characterOffset(forScalarOffset scalarOffset: Int, in text: String) -> Int {
+    guard scalarOffset > 0 else { return 0 }
+    guard scalarOffset < text.unicodeScalars.count else { return text.count }
+    var scalarsSeen = 0
+    var charsSeen = 0
+    for character in text {
+      scalarsSeen += character.unicodeScalars.count
+      charsSeen += 1
+      if scalarsSeen >= scalarOffset {
+        return charsSeen
+      }
+    }
+    return charsSeen
   }
 
   /// Text tail after the first `wordCount` words (overlap helper).

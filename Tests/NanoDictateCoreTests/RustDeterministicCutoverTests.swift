@@ -75,6 +75,33 @@ final class RustDeterministicCutoverTests: XCTestCase {
         }
     }
 
+    /// Engine word-diff offsets arrive as Unicode scalar counts; the typed
+    /// change maps them to Swift character boundaries so tails stay valid
+    /// when the common prefix holds a multi-scalar grapheme cluster.
+    @objc func testWordDiffChangeConvertsScalarOffsetsForCombiningMarks() {
+        let old = "e\u{301} foo bar."
+        let new = "e\u{301} foo baz."
+        let change: WordDiff.Change?
+        do {
+            change = try RustEngine.wordDiffChange(old: old, new: new)
+        } catch {
+            XCTFail("wordDiffChange threw: \(error)")
+            return
+        }
+        guard let change else {
+            XCTFail("expected a word diff change")
+            return
+        }
+        let expected = WordDiff.change(old: old, new: new)
+        XCTAssertNotNil(expected)
+        XCTAssertEqual(change.spanOld, "bar.")
+        XCTAssertEqual(change.spanNew, "baz.")
+        XCTAssertEqual(change.spanStartOld, expected?.spanStartOld)
+        XCTAssertEqual(change.spanStartNew, expected?.spanStartNew)
+        XCTAssertEqual(change.tailOld, " bar.")
+        XCTAssertEqual(change.tailNew, " baz.")
+    }
+
     /// Segment WAV bytes on the wire are engine-encoded (byte-identical to
     /// the reference encoder).
     @objc func testRecognizeSegmentEncodesThroughEngine() {
