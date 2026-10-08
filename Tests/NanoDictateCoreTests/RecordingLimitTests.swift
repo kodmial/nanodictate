@@ -141,4 +141,83 @@ final class RecordingLimitTests: XCTestCase {
         XCTAssertEqual(limit.remainingSamples(after: 8_000), 0)
         XCTAssertTrue(limit.isExhausted)
     }
+
+    // MARK: - Fail-safe на некорректной длительности (аудит #156, пункт 5)
+
+    @objc func testNaNDurationFallsBackTo60Seconds() {
+        let limit = RecordingLimit(maxDuration: .nan, sampleRate: 16000)
+        XCTAssertEqual(limit.maxDuration, 60.0)
+        XCTAssertEqual(limit.maxSamples, 960_000)
+    }
+
+    @objc func testInfiniteDurationFallsBackTo60Seconds() {
+        for invalid in [Double.infinity, -Double.infinity] {
+            let limit = RecordingLimit(maxDuration: invalid, sampleRate: 16000)
+            XCTAssertEqual(limit.maxDuration, 60.0)
+            XCTAssertEqual(limit.maxSamples, 960_000)
+        }
+    }
+
+    @objc func testNonPositiveDurationFallsBackTo60Seconds() {
+        for invalid in [0.0, -1.0, -60.0] {
+            let limit = RecordingLimit(maxDuration: invalid, sampleRate: 16000)
+            XCTAssertEqual(limit.maxDuration, 60.0)
+            XCTAssertEqual(limit.maxSamples, 960_000)
+        }
+    }
+
+    @objc func testFallbackLimitKeepsNormal60SecondBehavior() {
+        var limit = RecordingLimit(maxDuration: .nan, sampleRate: 16000)
+        XCTAssertFalse(limit.shouldStop(elapsed: 59.999, totalSamples: 0))
+        XCTAssertTrue(limit.shouldStop(elapsed: 60.0, totalSamples: 0))
+        XCTAssertTrue(limit.isExhausted)
+    }
+
+    @objc func testAbsurdSampleRateCannotTrap() {
+        // Int(Double) conversion traps out of range — absurd rates must fall
+        // back (or clamp) instead of crashing the process.
+        let huge = RecordingLimit(maxDuration: 60.0, sampleRate: Int.max)
+        XCTAssertGreaterThanOrEqual(huge.maxSamples, 1)
+        // Degenerate rates collapse to the minimum per-second budget (a tiny
+        // but bounded recording), never to an unbounded session.
+        let zero = RecordingLimit(maxDuration: 60.0, sampleRate: 0)
+        XCTAssertEqual(zero.maxSamples, 60)
+        let negative = RecordingLimit(maxDuration: 60.0, sampleRate: -44100)
+        XCTAssertEqual(negative.maxSamples, 60)
+    }
+
+    // MARK: - Fail-safe на некорректном elapsed (аудит #156, пункт 5)
+
+    @objc func testNaNElapsedNeverStopsNorLatches() {
+        var limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
+        XCTAssertFalse(limit.shouldStop(elapsed: .nan, totalSamples: 0))
+        XCTAssertFalse(limit.isExhausted)
+        // The limit still works afterwards — NaN left no latch behind.
+        XCTAssertFalse(limit.shouldStop(elapsed: 59.0, totalSamples: 0))
+        XCTAssertTrue(limit.shouldStop(elapsed: 60.0, totalSamples: 0))
+    }
+
+    @objc func testInfiniteElapsedStops() {
+        var limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
+        XCTAssertTrue(limit.shouldStop(elapsed: .infinity, totalSamples: 0))
+        XCTAssertTrue(limit.isExhausted)
+    }
+
+    @objc func testNegativeElapsedDoesNotStop() {
+        var limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
+        XCTAssertFalse(limit.shouldStop(elapsed: -5.0, totalSamples: 0))
+        XCTAssertFalse(limit.shouldStop(elapsed: -.infinity, totalSamples: 0))
+        XCTAssertFalse(limit.isExhausted)
+    }
+
+    @objc func testNegativeSampleCountDoesNotStop() {
+        var limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
+        XCTAssertFalse(limit.shouldStop(elapsed: 0, totalSamples: -1))
+        XCTAssertFalse(limit.isExhausted)
+    }
+
+    @objc func testRemainingSamplesClampedForNegativeInput() {
+        let limit = RecordingLimit(maxDuration: 60.0, sampleRate: 16000)
+        XCTAssertEqual(limit.remainingSamples(after: -100), 960_000)
+    }
 }
