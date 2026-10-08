@@ -1,0 +1,83 @@
+name: macOS 12 runtime evidence intake
+
+# Trusted owner attestation for results transferred from an isolated macOS 12
+# host. No unreviewed PR checkout, no execution on the old OS, no host secrets.
+# This is NOT a substitute for running --full on real macOS 12 hardware.
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: "Exact 40-char commit SHA tested on the macOS 12 host"
+        required: true
+        type: string
+      result_base64:
+        description: "base64 -w0 of actual --full result.txt from that host"
+        required: true
+        type: string
+      environment_base64:
+        description: "base64 -w0 of actual --full environment.txt from that host"
+        required: true
+        type: string
+      manual_checklist:
+        description: "Set PASS only after every required TCC/microphone/insertion/install/manual check passed"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  record-evidence:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Validate owner-attested runtime and manual evidence
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RESULT_B64: ${{ inputs.result_base64 }}
+          ENVIRONMENT_B64: ${{ inputs.environment_base64 }}
+          MANUAL_CHECKLIST: ${{ inputs.manual_checklist }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Expected exact source SHA"; exit 1; }
+          [ "$MANUAL_CHECKLIST" = PASS ] || { echo "::error::Manual macOS 12 checklist has not passed"; exit 1; }
+          mkdir -p macos12-evidence
+          printf '%s' "$RESULT_B64" | base64 -d > macos12-evidence/result.txt
+          printf '%s' "$ENVIRONMENT_B64" | base64 -d > macos12-evidence/environment.txt
+          grep -Fxq 'result=full-green' macos12-evidence/result.txt
+          grep -Fxq 'runtime_claim=macos-12' macos12-evidence/result.txt
+          grep -Eq '^macos=12\.[0-9]+(\.[0-9]+)?$' macos12-evidence/result.txt
+          grep -Fxq "source_sha=$SOURCE_SHA" macos12-evidence/result.txt
+          grep -Fxq 'macos_major=12' macos12-evidence/environment.txt
+          grep -Fxq 'mode=full' macos12-evidence/environment.txt
+          grep -Fxq "source_sha=$SOURCE_SHA" macos12-evidence/environment.txt
+          grep -Eq '^macos_version=12\.[0-9]+(\.[0-9]+)?$' macos12-evidence/environment.txt
+          grep -Eq '^arch=.+$' macos12-evidence/environment.txt
+          gh api "repos/$GITHUB_REPOSITORY/commits/$SOURCE_SHA" --silent
+          printf 'owner=%s\nsource_sha=%s\nmanual_checklist=PASS\nactions_run=%s\n' \
+            "$GITHUB_ACTOR" "$SOURCE_SHA" "$GITHUB_RUN_ID" > macos12-evidence/attestation.txt
+          echo "Verified evidence fields and commit binding for $SOURCE_SHA"
+      - name: Publish immutable evidence artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: macos12-attested-${{ inputs.source_sha }}
+          path: macos12-evidence/
+          if-no-files-found: error
+      - name: Set attested commit status after evidence upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$SOURCE_SHA" \
+            -f state=success \
+            -f context='macos12/runtime-attested' \
+            -f description='Owner-attested real macOS 12 run and manual checks' \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --silent
+          echo "Owner attestation recorded for $SOURCE_SHA"
