@@ -94,6 +94,29 @@ final class CaskPostflightTests: XCTestCase {
             XCTAssertFalse(
                 hasClearFlag,
                 "\(name): postflight must not wipe all extended attributes")
+            // Exactly one xattr invocation: a second run with a different
+            // attribute alongside the required call must fail (mirrors
+            // scripts/check-cask-postflight.sh).
+            let xattrRuns = stanza.components(separatedBy: "run \"/usr/bin/xattr\"").count - 1
+            XCTAssertEqual(
+                xattrRuns, 1,
+                "\(name): postflight must contain exactly one xattr quarantine-removal call")
+            // Exactly one attribute-deletion flag ("-dr"): a second "-d*"
+            // removal for another attribute must fail.
+            let deleteFlagPattern = try? NSRegularExpression(pattern: "\"-[^\"]*d[^\"]*\"")
+            let deleteMatches = deleteFlagPattern?.numberOfMatches(
+                in: stanza, range: NSRange(stanza.startIndex..., in: stanza)) ?? -1
+            XCTAssertEqual(
+                deleteMatches, 1,
+                "\(name): postflight must contain exactly one xattr deletion flag (\"-dr\")")
+            // No attribute other than com.apple.quarantine may appear.
+            let stripped = stanza.replacingOccurrences(of: "com.apple.quarantine", with: "")
+            let otherAttrPattern = try? NSRegularExpression(pattern: "\\bcom\\.[A-Za-z0-9_.-]+")
+            let hasOtherAttr = otherAttrPattern?.firstMatch(
+                in: stripped, range: NSRange(stripped.startIndex..., in: stripped)) != nil
+            XCTAssertFalse(
+                hasOtherAttr,
+                "\(name): postflight must not remove attributes other than com.apple.quarantine")
             XCTAssertFalse(
                 stanza.contains("spctl"),
                 "\(name): postflight must not change Gatekeeper state")

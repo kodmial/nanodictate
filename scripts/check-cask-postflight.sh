@@ -56,6 +56,25 @@ for file in "$TPL" "$GEN"; do
   if grep -Eq '"-[^"]*c[^"]*"|\bcom\.apple\.(FinderInfo|ResourceFork|metadata|birthtime)\b' <<<"$postflight"; then
     fail "$file touches extended attributes beyond com.apple.quarantine"
   fi
+  # Exactly one xattr invocation: a second `run "/usr/bin/xattr"` with a
+  # different attribute alongside the required call must fail even when both
+  # stanzas stay in sync.
+  xattr_runs="$(grep -c 'run "/usr/bin/xattr"' <<<"$postflight" || true)"
+  if [ "$xattr_runs" -ne 1 ]; then
+    fail "$file must contain exactly one xattr quarantine-removal call inside postflight_steps (found $xattr_runs)"
+  fi
+  # Exactly one attribute-deletion flag: the required "-dr" is the only
+  # deletion; a second "-d*"-style removal (even for another attribute) fails.
+  delete_flags="$(grep -o '"-[^"]*d[^"]*"' <<<"$postflight" | wc -l | tr -d ' ' || true)"
+  if [ "$delete_flags" -ne 1 ]; then
+    fail "$file must contain exactly one xattr deletion flag (\"-dr\") inside postflight_steps"
+  fi
+  # No attribute other than com.apple.quarantine: strip the single allowed
+  # token, then reject any remaining reverse-DNS identifier.
+  stripped_postflight="$(sed 's/com\.apple\.quarantine//g' <<<"$postflight")"
+  if grep -Eq '\bcom\.[A-Za-z0-9_.-]+' <<<"$stripped_postflight"; then
+    fail "$file must not remove attributes other than com.apple.quarantine"
+  fi
   if grep -Eqi '\bspctl\b|\bgatekeeper\b' <<<"$postflight"; then
     fail "$file must not change Gatekeeper state"
   fi
