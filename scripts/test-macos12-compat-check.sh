@@ -203,6 +203,15 @@ assert_grep 'workflow: checkout does not persist credentials' \
   "$WORKFLOW" 'persist-credentials: false'
 assert_grep 'workflow: runtime records an isolated-host handoff instead of claiming a pass' \
   "$WORKFLOW" 'needs-macos12-host'
+assert_grep 'workflow: current HEAD must have trusted runtime attestation' \
+  "$WORKFLOW" 'macos12/runtime-attested'
+assert_grep 'workflow: missing runtime attestation is a hard failure' \
+  "$WORKFLOW" 'macOS 12 runtime is NOT validated'
+assert_grep 'runtime results include their tested source revision' \
+  "$CHECK_SCRIPT" 'source_sha=%s'
+assert_grep 'runtime environment includes its tested source revision' \
+  "$CHECK_SCRIPT" 'source_sha=\${SOURCE_SHA}'
+
 assert_grep 'workflow: Rust core changes trigger the compatibility gate' \
   "$WORKFLOW" "rust/\*\*"
 
