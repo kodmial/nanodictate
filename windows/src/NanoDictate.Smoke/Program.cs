@@ -32,6 +32,10 @@ internal static class Program
 
         // 2. Portable configuration through the Rust contracts.
         var configPath = args.Length > 0 ? args[0] : FindExampleConfig();
+        if (args.Length > 0 && (configPath is null || !File.Exists(configPath)))
+        {
+            throw new FileNotFoundException("Configuration file was not found.", configPath);
+        }
         if (configPath is not null && File.Exists(configPath))
         {
             var config = PortableConfig.Load(configPath);
