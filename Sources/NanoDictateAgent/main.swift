@@ -287,6 +287,16 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// Application Support). Lives in Core so late-grant watchdog behavior is
   /// covered by mini-XCTest (NanoDictateCoreTests).
   private let micAccessRequester: MicAccessRequester
+  /// Microphone-request session generation: incremented on every new TCC
+  /// request and on every Esc (handleCancel). The pending request completion
+  /// captures its generation and starts recording only while it is still
+  /// current — a late `.granted` arriving after Esc (or after a newer
+  /// request) is dropped and never starts recording. Complements the
+  /// coordinator-level token (MicAccessRequester.invalidatePending, which
+  /// drops the late answer inside the coordinator): both boundaries must
+  /// agree before recording starts. Never weakens the anti-storm/in-flight
+  /// protection — a pending system dialog still accepts no second request.
+  private var micRequestSession = 0
   /// Cooldown for terminal mic errors (showMicrophoneError): while mic access
   /// is not granted / engine not up, each Alt+Alt must not replay Basso and
   /// flash the overlay — message once per 3 s.
@@ -922,11 +932,24 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       showMicrophoneError(L10n.tr("error.micPermissionUnhandled"))
       return
     }
+    // New microphone-request generation: the completion below captures it and
+    // starts recording only while it is still current (see the .granted
+    // guard). Esc bumps it again (handleCancel), invalidating this request.
+    micRequestSession += 1
+    let micSession = micRequestSession
     micAccessRequester.requestIfNeeded { [weak self] outcome in
       guard let self else { return }
       switch outcome {
       case .granted:
         Logger.log("mic permission request result: granted", level: "info")
+        // Session generation: Esc while the TCC dialog was pending bumps
+        // micRequestSession (see handleCancel), so a late grant must not
+        // start recording after cancellation. Normal grants (generation
+        // still current) start exactly one recording, as before.
+        guard self.micRequestSession == micSession else {
+          Logger.log("mic permission late grant dropped: session superseded (Esc or newer request)", level: "info")
+          return
+        }
         self.startRecording(triggerNanos: triggerNanos)
       case .denied:
         Logger.log("mic permission request result: denied", level: "info")
@@ -966,6 +989,16 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     guard !isStarting else {
       Logger.log("record start ignored: already starting", level: "info")
       return
+    }
+    // A pending retry review (opened in .idle) is superseded by the new
+    // recording: clear the Return pass-through flag and invalidate its
+    // session so a late decision cannot insert after this loop starts.
+    // During recording the pending flag would make
+    // shouldSwallowReturnKeyEvent return false instead of swallowing.
+    if awaitingReviewDecision {
+      awaitingReviewDecision = false
+      processingSession += 1
+      Logger.log("pending retry review superseded by new recording")
     }
     // Label "what recognition goes through" ("<provider> · <model>") — from
     // THE SAME resolved provider the session transcriber was built with in
@@ -2269,9 +2302,10 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// recording paths, so the completion re-validates the retry is current).
   private func retryInsertion(_ text: String) {
     // Retry outside the loop's state machine: if the user already started a
-    // new loop (recording/recognition), the stale retry text is not inserted
+    // new loop (recording/recognition) or engine bring-up is in flight
+    // (isStarting, state still .idle), the stale retry text is not inserted
     // and the live loop's overlay is not touched.
-    guard state == .idle else {
+    guard state == .idle, !isStarting else {
       Logger.log(
         "retry result dropped: nanodictate cycle active (state=\(String(describing: state)))",
         level: "info"
@@ -2287,10 +2321,23 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       // cannot be clobbered by the stale retry text.
       processingSession += 1
       let session = processingSession
+      // The review wait is pending in .idle: mark it so Esc (handleCancel)
+      // can invalidate this exact wait (processingSession bump) — otherwise
+      // the .idle state guard alone cannot tell a pending retry review from
+      // a settled agent, and a late decision would still insert text after
+      // cancellation. Cleared when the decision arrives and on Esc.
+      awaitingReviewDecision = true
       ReviewGate.confirmAsync(text: text) { [weak self] decision in
         guard let self else { return }
-        // Re-validate the entry guard: a new nanodictate cycle may have
-        // started while the user typed the decision.
+        // The decision arrived — the wait is over either way (insert or
+        // drop); a physical Return may be swallowed again.
+        if self.processingSession == session {
+          self.awaitingReviewDecision = false
+        }
+        // Re-validate the entry guard: Esc may have cancelled THIS wait
+        // (processingSession advanced, see handleCancel) or a new
+        // nanodictate cycle may have started while the user typed the
+        // decision.
         guard !RetryInsertionGate.shouldDropRetry(
           state: self.state,
           processingSession: self.processingSession,
@@ -2445,12 +2492,23 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// this is not an error), exactly one hide. Every terminal point schedules
   /// hide exactly once.
   private func handleCancel() {
-    // Esc ends a pending review wait: the flag is set only in the review
-    // paths (state == .transcribing) and must clear before ANY branch — after
-    // Esc the pending review completion's state guard fails (state → .idle)
-    // and would never clear it, so without this reset a stale flag would
-    // linger into the next cycle.
+    // Esc ends a pending review wait: the flag is set in the review paths
+    // (main, chunked and retry review) and must clear before ANY branch —
+    // after Esc the pending review completion's state guard fails (state →
+    // .idle) and would never clear it, so without this reset a stale flag
+    // would linger into the next cycle. Captured first: the .idle branch
+    // below needs to know a retry-review wait was pending (retry review
+    // runs in .idle, so the state guard alone cannot invalidate it).
+    let hadPendingReview = awaitingReviewDecision
     awaitingReviewDecision = false
+    // Esc is a terminal cancellation boundary for a pending microphone
+    // request as well: bump the agent-level generation AND invalidate the
+    // coordinator token, so a late `.granted` can never start recording
+    // afterwards. The in-flight/anti-storm protection is untouched — a still
+    // unresolved system dialog still accepts no second request (only the
+    // system callback releases it).
+    micRequestSession += 1
+    micAccessRequester.invalidatePending()
     // Esc cancels an ALREADY SCHEDULED synthetic Enter: the latch was
     // consumed at insertion time, the post hangs in the OS queue — cancel
     // it before any branch (including .idle, where an early return would
@@ -2458,6 +2516,13 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     scheduledEnterPoster.cancelScheduled()
     switch state {
     case .recording:
+      // A retry review pending across the recording start (superseded above,
+      // or raced) must stay invalidated: advance the session so its late
+      // decision still drops after Esc returns the agent to .idle.
+      if hadPendingReview {
+        processingSession += 1
+        Logger.log("pending retry review cancelled by Esc")
+      }
       audio.cancel()
       // Invalidate the live loop: a segment being recognized on
       // liveExecutor right now will not insert (the liveSession guard in
@@ -2469,6 +2534,12 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       liveRunState = nil
       Logger.log("record cancelled")
     case .transcribing:
+      // Same retry-review invalidation as in .recording: Esc ends the wait
+      // regardless of agent state, so a late .insert cannot pass the gate.
+      if hadPendingReview {
+        processingSession += 1
+        Logger.log("pending retry review cancelled by Esc")
+      }
       cancelRecognition = true
       // Esc during transcription stops the queued work immediately, not only
       // at the next segment: the isCancelled guard in finishLiveRun drops the
@@ -2488,15 +2559,25 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       // abort the pending startup race-safely. The session token is
       // invalidated so a late engine-start completion only cancels its stray
       // engine and a late capture-ready never emits the success cue.
+      // Esc during a pending retry review (state .idle, review wait open):
+      // advance the processing session so the late review completion's
+      // RetryInsertionGate re-validation fails and no stale text is
+      // inserted afterwards.
       // Falls through to the shared terminal tail below (single hideAfter):
-      // bring-up cancel hides exactly like a regular cancel.
-      guard isStarting else { return }
-      startSession += 1
-      isStarting = false
-      engineStartSucceeded = false
-      pendingCaptureInfo = nil
-      audio.cancel()
-      Logger.log("record start cancelled during bring-up")
+      // bring-up/review cancel hides exactly like a regular cancel.
+      guard isStarting || hadPendingReview else { return }
+      if hadPendingReview {
+        processingSession += 1
+        Logger.log("pending retry review cancelled by Esc")
+      }
+      if isStarting {
+        startSession += 1
+        isStarting = false
+        engineStartSucceeded = false
+        pendingCaptureInfo = nil
+        audio.cancel()
+        Logger.log("record start cancelled during bring-up")
+      }
     }
     // Spec: Esc extinguishes the synthetic-Enter latch — a cancelled
     // recording/recognition does not post Enter. In .idle we return above
