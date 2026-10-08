@@ -251,6 +251,12 @@ else
   }
   trap lifecycle_cleanup EXIT
   LIFECYCLE_STARTED=1
+  set_check "config path resolves inside isolated HOME"
+  EXPECTED_CONFIG_PATH="$ISOLATED_HOME/.config/nanodictate/config.toml"
+  CONFIG_PATH="$("$BIN" config path 2>/dev/null)" \
+    || fail "could not resolve the config path under isolated HOME"
+  [ "$CONFIG_PATH" = "$EXPECTED_CONFIG_PATH" ] \
+    || fail "config path is not isolated: $CONFIG_PATH"
   set_check "nanodictate config init in isolated HOME"
   "$BIN" config init >/dev/null 2>&1 || fail "config init failed in isolated HOME"
   [ -f "$ISOLATED_HOME/.config/nanodictate/config.toml" ] \

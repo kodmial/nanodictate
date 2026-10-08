@@ -307,6 +307,12 @@ assert_not_ok 'lifecycle: missing agent binary no longer only warns' \
   grep -q 'agent binary missing.*non-fatal' "$CHECK_SCRIPT"
 assert_grep 'lifecycle: probe uses the agent built in this run' \
   "$CHECK_SCRIPT" 'export NANODICTATE_AGENT_BIN="\$AGENT_BIN"'
+assert_grep 'lifecycle: config path preflight queries the resolved path' \
+  "$CHECK_SCRIPT" '"\$BIN" config path'
+assert_grep 'lifecycle: config path preflight expects the isolated HOME' \
+  "$CHECK_SCRIPT" 'EXPECTED_CONFIG_PATH="\$ISOLATED_HOME/.config/nanodictate/config.toml"'
+assert_grep 'lifecycle: non-isolated config path fails the gate' \
+  "$CHECK_SCRIPT" 'config path is not isolated'
 
 # --- 7. Documentation must not claim more than the gate automates ------------
 
