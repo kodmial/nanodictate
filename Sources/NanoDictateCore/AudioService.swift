@@ -252,6 +252,38 @@ public final class AudioService {
     return rustSessionSequence
   }
 
+  /// Diagnostic: true while the current session processes audio through
+  /// the shared Rust realtime composition (a live `RustRealtimeAudio`
+  /// exists for the active session). Counts only, never audio content.
+  public var isRustAudioActive: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return rustAudio != nil
+  }
+
+  /// Diagnostic: engine-ingested audio blocks since the service was
+  /// created (cumulative across sessions). Proves the shipping path
+  /// executes the Rust audio composition per buffer; never audio content.
+  public var rustAudioBlockCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return rustAudioBlocksIngested
+  }
+
+  /// Diagnostic snapshot of shipping-path realtime audio
+  /// instrumentation: callback overhead, block/error counts, worst block.
+  /// Timing only, never audio content.
+  public var realtimeAudioStats: RealtimeAudioStats {
+    lock.lock()
+    defer { lock.unlock() }
+    return RealtimeAudioStats(
+      blocks: rustAudioBlocksIngested,
+      engineErrors: rustAudioEngineErrors,
+      totalNanos: rustAudioTotalNanos,
+      maxNanos: rustAudioMaxNanos
+    )
+  }
+
   // var, not let: replaceEngineAfterWedge() swaps a "wedged" engine for a fresh
   // instance (recovery after a record-start timeout).
   private var engine: AudioEngineLike
@@ -304,9 +336,10 @@ public final class AudioService {
   /// Auto-stop: silence threshold/duration + `enabled` kill switch (from init;
   /// Agent takes them from environment — see `AutoStopConfig.fromEnvironment`)
   /// and the "finalization already scheduled" latch — in the `session` ledger
-  /// (autoStop bit), like the limit: exactly one callback.
+  /// (autoStop bit), like the limit: exactly one callback. The detector
+  /// itself runs on the shared engine (see `rustAudio`); this config is the
+  /// host policy the engine composition is built from.
   private let autoStopConfig: AutoStopConfig
-  private var autoStopDetector = SilenceAutoStopDetector()
   /// First session buffer logged separately (debug): piece duration and energy
   /// show whether real sound reached the engine after start.
   private var didLogFirstBuffer = false
@@ -480,26 +513,64 @@ public final class AudioService {
   static func hwSignature(sampleRate: Double, channels: UInt32) -> String {
     "\(Int(sampleRate))Hz-ch\(channels)"
   }
-  /// Digital input gain (AGC): applied to the Float32 buffer AFTER 16 kHz/mono
-  /// conversion and BEFORE Int16 conversion/level metering — level animation
-  /// and recording see the conditioned signal. VAD and auto-stop decisions use
-  /// the raw/pre-gain RMS, never the amplified value (issue #21).
-  /// Env config (`NANODICTATE_GAIN_*`); kill switch
-  /// `NANODICTATE_GAIN_DISABLED=1` passes the buffer unchanged.
-  private let gain: InputGain
-  /// Adaptive speech detector on the raw/pre-gain signal (issue #21):
-  /// noise-floor tracker plus hysteresis. Independent from the AGC floor
-  /// tracker on purpose — level conditioning never drives speech decisions.
-  private var vad = AdaptiveVAD()
+  /// Digital input gain (AGC) policy: applied to the Float32 buffer AFTER
+  /// 16 kHz/mono conversion and BEFORE Int16 conversion/level metering —
+  /// level animation and recording see the conditioned signal. VAD and
+  /// auto-stop decisions use the raw/pre-gain RMS, never the amplified
+  /// value (issue #21). Env config (`NANODICTATE_GAIN_*`); kill switch
+  /// `NANODICTATE_GAIN_DISABLED=1` passes the buffer unchanged. The gain
+  /// itself runs on the shared engine (see `rustAudio`); this config is
+  /// the host policy the engine composition is built from.
+  private let gainConfig: InputGainConfig
+  /// Adaptive speech-detection policy on the raw/pre-gain signal
+  /// (issue #21): noise-floor tracker plus hysteresis. Independent from
+  /// the AGC floor tracker on purpose — level conditioning never drives
+  /// speech decisions. The detector itself runs on the shared engine
+  /// (see `rustAudio`); this config is the host policy the engine
+  /// composition is built from.
+  private let vadConfig: AdaptiveVADConfig
   /// Last VAD speech state for debug transition logs (no raw audio logged).
   private var lastVadSpeech = false
+
+  // MARK: - Shared Rust realtime audio (production cutover #133)
+  //
+  // The shipping realtime path (per-block RMS metrics, adaptive VAD,
+  // input gain, silence auto-stop) executes through this engine
+  // composition. Created once per start attempt from the host policy
+  // configs; a creation failure fails the start loudly (fail-closed,
+  // never a silent Swift-only fallback). The Swift reference
+  // implementations stay available only as parity oracles for tests
+  // until the final hardware gate in #123.
+
+  /// Factory for the per-session realtime audio composition. Production
+  /// default builds a live `RustRealtimeAudio` from the session configs;
+  /// tests may inject a throwing factory to prove the shipping path
+  /// fails loudly instead of silently falling back to Swift audio.
+  private let rustAudioFactory: () throws -> RustRealtimeAudio
+  /// Live realtime audio composition for the current dictation lifecycle
+  /// (nil when no session is active). Created once per start attempt;
+  /// confined to the audio thread while recording (see
+  /// `RustRealtimeAudio`); created, snapshotted, and dropped only while
+  /// holding `lock`.
+  private var rustAudio: RustRealtimeAudio?
+  /// Engine-ingested blocks since the service was created (cumulative
+  /// across sessions). Diagnostic proving the shipping path executes the
+  /// Rust audio composition; never audio content.
+  private var rustAudioBlocksIngested = 0
+  /// Blocks dropped on engine errors (fail-closed; never Swift-processed).
+  private var rustAudioEngineErrors = 0
+  /// Total engine block nanos across all sessions (callback overhead).
+  private var rustAudioTotalNanos: UInt64 = 0
+  /// Worst single engine block in nanos.
+  private var rustAudioMaxNanos: UInt64 = 0
 
   // MARK: - Live-VAD (stepwise dictation)
 
   /// Live-VAD pause handling: `segmenterConfig.pauseDuration` closes an
   /// utterance. Speech/silence classification itself is adaptive on the
-  /// raw signal (see `vad`); the fixed `segmenterConfig.silenceRMS` threshold
-  /// no longer drives live decisions (issue #21).
+  /// raw signal via the shared engine (see `rustAudio`); the fixed
+  /// `segmenterConfig.silenceRMS` threshold no longer drives live
+  /// decisions (issue #21).
   /// Pause ≥ this many samples (16 kHz) closes an utterance.
   private let livePauseSamples: Int
   /// Pre-roll: speech samples (16 kHz) captured BEFORE the detected utterance
@@ -570,7 +641,8 @@ public final class AudioService {
     autoStopConfig: AutoStopConfig = .defaults,
     gainConfig: InputGainConfig = .fromEnvironment(),
     vadConfig: AdaptiveVADConfig = .defaults,
-    rustSessionFactory: (() throws -> RustSession)? = nil
+    rustSessionFactory: (() throws -> RustSession)? = nil,
+    rustAudioFactory: (() throws -> RustRealtimeAudio)? = nil
   ) {
     self.logLevel = logLevel
     self.rustSessionFactory = rustSessionFactory ?? { try RustSession() }
@@ -600,18 +672,20 @@ public final class AudioService {
     session = SessionLedger(generation: 0)
     engineQueue = DispatchQueue(label: "nanodictate.audio.engine", qos: .userInitiated)
     self.autoStopConfig = autoStopConfig
-    gain = InputGain(config: gainConfig)
-    vad = AdaptiveVAD(config: vadConfig)
-    autoStopDetector = SilenceAutoStopDetector(
-      silenceRMSThreshold: autoStopConfig.silenceRMSThreshold,
-      speechRMSThreshold: autoStopConfig.speechRMSThreshold,
-      requiredSilenceDuration: autoStopConfig.requiredSilenceDuration,
-      gracePeriod: autoStopConfig.gracePeriod,
-      minSpeechRun: autoStopConfig.minSpeechRun,
-      minRecordingDuration: autoStopConfig.minRecordingDuration
-    )
+    self.gainConfig = gainConfig
+    self.vadConfig = vadConfig
+    // Shipping realtime audio composition: built per session from these
+    // policies (see startOnEngineQueue). Tests may inject a throwing
+    // factory to prove the shipping path fails loudly instead of
+    // silently falling back to the Swift reference implementations.
+    self.rustAudioFactory =
+      rustAudioFactory
+      ?? {
+        try RustEngine.makeRealtimeAudio(
+          gainConfig: gainConfig, vadConfig: vadConfig, autoStopConfig: autoStopConfig)
+      }
     // Live-VAD pause handling reuses the offline pause duration; speech/silence
-    // classification is adaptive on the raw signal (issue #21).
+    // classification is adaptive on the raw signal via the shared engine (issue #21).
     livePauseSamples = max(1, Int((segmenterConfig.pauseDuration * 16000).rounded()))
     // Pre-roll 0.5 s (8000 samples) and post-roll 0.25 s (4000 samples) at
     // 16 kHz — margin keeping word attack and tail uncut.
@@ -941,9 +1015,6 @@ public final class AudioService {
       // Auto-stop latch — in the ledger (autoStop bit): a new session starts
       // without "finalization already scheduled".
       session.clearAutoStop()
-      autoStopDetector.reset()
-      gain.reset()  // new session — zero gain, no residue from the previous recording
-      vad.reset()
       lastVadSpeech = false
       liveLastCutIndex = 0
       resetLiveVADLocked()
@@ -970,16 +1041,24 @@ public final class AudioService {
       // loud — the start fails below instead of silently running Swift-only.
       rustSession = nil
       rustSessionGeneration = nil
+      // One Rust realtime audio composition per dictation lifecycle,
+      // created from the host policy configs under the same lock: VAD,
+      // gain, and auto-stop state start clean for every session, and a
+      // creation failure fails the start loudly (fail-closed — the
+      // session never records through a Swift-only fallback).
+      rustAudio = nil
       do {
         try beginRustSessionLocked()
+        try beginRustAudioLocked()
       } catch {
         rustSetupError = error
         rustSession = nil
         rustSessionGeneration = nil
+        rustAudio = nil
       }
     }
     lock.unlock()
-    // Rust session bootstrap failed (ABI/link mismatch or handle failure):
+    // Rust engine bootstrap failed (ABI/link mismatch or handle failure):
     // no silent fallback — the start fails loudly before touching hardware.
     if let rustSetupError {
       guard isCurrentGeneration(startGeneration) else {
@@ -987,7 +1066,7 @@ public final class AudioService {
       }
       setRecording(false)
       Logger.log(
-        "record engine: rust session bootstrap failed: \(rustSetupError.localizedDescription)",
+        "record engine: rust engine bootstrap failed: \(rustSetupError.localizedDescription)",
         level: "error")
       return .failure(rustSetupError)
     }
@@ -1375,9 +1454,9 @@ public final class AudioService {
       level: "info"
     )
     Logger.log(
-      "record input-gain: enabled=\(gain.config.enabled), "
-        + "target=\(String(format: "%.1f", gain.config.targetRmsDb)) dBFS, "
-        + "max=\(String(format: "%.1f", gain.config.maxGainDb)) dB",
+      "record input-gain: enabled=\(gainConfig.enabled), "
+        + "target=\(String(format: "%.1f", gainConfig.targetRmsDb)) dBFS, "
+        + "max=\(String(format: "%.1f", gainConfig.maxGainDb)) dB (engine)",
       level: "info"
     )
     return .success(())
@@ -1403,6 +1482,12 @@ public final class AudioService {
     // The handle stays live for the agent's `notifyTranscriptionDone`
     // (Transcribing -> Idle); only that call ends the Rust lifecycle.
     driveRustLocked(.stopRequested)
+    // Realtime audio composition ends with the recording: snapshot the
+    // reference for the finale diagnostics, then drop it so the next
+    // session builds a clean one. In-flight callbacks hold their own
+    // snapshot (see takeBufferedSnapshot) and are unaffected.
+    let finishedAudio = rustAudio
+    endRustAudioLocked()
     // "Tail" range + COW snapshot under one lock (VAD state and recording
     // buffer stay consistent); Array materialization AFTER unlock so the
     // lock holds only O(1) bookkeeping.
@@ -1437,7 +1522,8 @@ public final class AudioService {
         self.teardownEngineOnly(using: engine)
       }
     }
-    logRecordingFinale(samples: samples, duration: duration, rmsHistory: rms)
+    logRecordingFinale(
+      samples: samples, duration: duration, rmsHistory: rms, audio: finishedAudio)
     // Open utterance recognized as the last segment: no speech since its
     // start, so it covers the final phrase whole.
     if !tail.isEmpty {
@@ -1459,6 +1545,10 @@ public final class AudioService {
         captureReadyLive = false
         captureReadyFired = true
       }
+      // A bring-up cancelled before the recording flag still built its
+      // realtime audio composition at session reset: drop it so no
+      // half-built session can process buffers afterwards.
+      endRustAudioLocked()
       lock.unlock()
       return
     }
@@ -1472,6 +1562,7 @@ public final class AudioService {
     // Native cancel event ends the Rust lifecycle (Recording -> Idle): no
     // transcription follows a cancel, so no handle outlives this call.
     endRustSessionLocked(after: .cancelled)
+    endRustAudioLocked()
     collectedSamples.removeAll(keepingCapacity: true)
     // Cancel discards EVERYTHING, including the open utterance: no
     // onSpeechSegment callback (Esc = no delivery).
@@ -1565,6 +1656,7 @@ public final class AudioService {
     // unblocks later sees the generation mismatch and never touches the
     // fresh session.
     endRustSessionLocked(after: .engineFailed)
+    endRustAudioLocked()
     lock.unlock()
     // Device-change subscription belonged to the OLD engine: its
     // configuration-change must not stop recording on the fresh pair.
@@ -1629,8 +1721,10 @@ public final class AudioService {
     rmsHistory.removeAll(keepingCapacity: true)
     liveLastCutIndex = 0
     session.clearAutoStop()
-    autoStopDetector.reset()
-    vad.reset()
+    // Session-scoped realtime audio composition ends with teardown; the
+    // next start builds a clean one (per-session VAD/gain/auto-stop
+    // state, no residue from the previous recording).
+    endRustAudioLocked()
     lastVadSpeech = false
     resetLiveVADLocked()
     // Session ended: capture readiness lapses with it (next start resets).
@@ -1874,6 +1968,28 @@ public final class AudioService {
       level: "info")
   }
 
+  /// Creates the per-session Rust realtime audio composition for a new
+  /// dictation start. Called on the engine queue under `lock` at session
+  /// reset. A creation failure is loud (logged + thrown) — the start
+  /// fails instead of silently recording through Swift-only audio.
+  private func beginRustAudioLocked() throws {
+    guard rustEngineAvailable else {
+      throw RustEngineError(
+        code: -1,
+        message: "shared Rust engine unavailable (ABI check failed at startup)")
+    }
+    rustAudio = try rustAudioFactory()
+    Logger.log("rust realtime audio active (vad+gain+autostop via engine)", level: "info")
+  }
+
+  /// Ends the live realtime audio composition for a finished session.
+  /// Must be called while holding `lock`. In-flight audio callbacks hold
+  /// their own snapshot reference, so dropping here never frees handles
+  /// under a running block.
+  private func endRustAudioLocked() {
+    rustAudio = nil
+  }
+
   /// Drives one native macOS event into the live Rust session. Best-effort
   /// by design: a bridge misuse logs loudly but never crashes capture, and
   /// the readiness gate below stays fail-closed (no cue without Rust
@@ -1899,14 +2015,16 @@ public final class AudioService {
   }
 
   /// Drives `.engineFailed` into the live Rust session for a failed start of
-  /// the current generation, then ends the session. Stale starts (superseded
-  /// by a wedge swap) never touch the live session: their late failure must
-  /// not corrupt the new dictation lifecycle.
+  /// the current generation, then ends the session and drops the realtime
+  /// audio composition built for the failed attempt. Stale starts
+  /// (superseded by a wedge swap) never touch the live session: their late
+  /// failure must not corrupt the new dictation lifecycle.
   private func failRustSessionForStartGeneration(_ startGeneration: Int) {
     lock.lock()
     defer { lock.unlock() }
     guard session.isCurrentGeneration(startGeneration) else { return }
     endRustSessionLocked(after: .engineFailed)
+    endRustAudioLocked()
   }
 
   /// Drives `.engineStarted` into the live Rust session after a successful
@@ -1956,12 +2074,15 @@ public final class AudioService {
     return tapInstalled
   }
 
-  /// Intake-state snapshot under one lock: recording flag, forced-stop flags
-  /// and the converter. Closes the start/stop/swap race — process sees a
-  /// consistent trio.
+  /// Intake-state snapshot under one lock: recording flag, forced-stop flags,
+  /// the converter, and the realtime audio composition. Closes the
+  /// start/stop/swap race — process sees a consistent set. The composition
+  /// reference is retained by the snapshot, so a session teardown racing
+  /// this callback can never free the engine handles under a running block.
   private struct BufferedSnapshot {
     var alive: Bool
     var converter: AVAudioConverter?
+    var audio: RustRealtimeAudio?
   }
 
   private func takeBufferedSnapshot() -> BufferedSnapshot {
@@ -1970,15 +2091,15 @@ public final class AudioService {
     // tap thread gets to see "no recording" and exits instead of queueing
     // behind the lock. The counter latches at session start, so a live buffer
     // after the flag cleared is not needed. Then the full-weight snapshot
-    // (converter) — under NSLock; both sources are consistent because the
-    // session-owner thread writes both.
+    // (converter, audio composition) — under NSLock; both sources are
+    // consistent because the session-owner thread writes both.
     guard isRecordingLocked else {
-      return BufferedSnapshot(alive: false, converter: nil)
+      return BufferedSnapshot(alive: false, converter: nil, audio: nil)
     }
     lock.lock()
     defer { lock.unlock() }
     let alive = !limit.isExhausted && !isAutoStopScheduled
-    return BufferedSnapshot(alive: alive, converter: converter)
+    return BufferedSnapshot(alive: alive, converter: converter, audio: rustAudio)
   }
 
   /// Session-lifecycle ledger: takes NSLock (mutex with possible syscall and
@@ -2197,10 +2318,11 @@ public final class AudioService {
     // but `replaceEngineAfterWedge()` may have advanced the generation since —
     // a stale callback must not touch the fresh session's buffers or state.
     guard isCurrentGeneration(tapGeneration) else { return }
-    // Early "is recording?" guard BEFORE conversion and AGC: after stop()/start()
-    // a late buffer of the old tap must not touch InputGain state — reset() of
-    // the new session (engineQueue, under lock) and apply (audio stream) do
-    // not overlap (the guard below stays — protection duplicated).
+    // Early "is recording?" guard BEFORE conversion and engine ingest: after
+    // stop()/start() a late buffer of the old tap must not touch realtime
+    // audio state — the new session builds a clean engine composition at
+    // reset (engineQueue, under lock) and ingest (audio stream) do not
+    // overlap (the guard below stays — protection duplicated).
     // All flags and the converter are taken under lock in one snapshot: the
     // lock-free guard is gone — start/stop race closed (see takeBufferedSnapshot).
     // First raw tap callback stamp (before conversion): proves HAL delivery
@@ -2217,6 +2339,13 @@ public final class AudioService {
     guard isCurrentGeneration(tapGeneration) else { return }
     guard let converter = snapshot.converter else {
       logDroppedBuffer(reason: "converter is nil (stopped?)", frames: buffer.frameLength)
+      return
+    }
+    // Fail-closed audio composition: the session always builds one at
+    // reset, so a missing composition means the session is gone — drop
+    // the buffer loudly instead of processing it in Swift.
+    guard let audio = snapshot.audio else {
+      logDroppedBuffer(reason: "rust realtime audio is nil (stopped?)", frames: buffer.frameLength)
       return
     }
     // Per-generation checkout of the reuse buffers (O(1) under lock). A tag
@@ -2278,38 +2407,66 @@ public final class AudioService {
     let converted = result.converted
     let frameLength = Int(converted.frameLength)
 
-    // RMS BEFORE gain — raw/pre-gain signal. VAD and auto-stop decide on this
-    // raw value (issue #21); AGC conditions the buffer below without driving
-    // speech decisions.
-    var sum: Float = 0
-    for i in 0..<frameLength {
-      let sample = channel[i]
-      sum += sample * sample
+    // Shipping realtime audio through the shared engine (block-oriented
+    // FFI only): raw RMS metrics on the pre-gain signal, then the
+    // adaptive VAD decision on that raw value (issue #21), then AGC
+    // applied to the block in place. VAD and auto-stop decide on the raw
+    // value; AGC conditions the buffer below without driving speech
+    // decisions, and its floor tracker stays independent from the VAD
+    // floor on purpose — level conditioning never drives VAD.
+    // process() runs on the audio thread; engine state is confined here
+    // behind the session liveness checks (takeBufferedSnapshot +
+    // isRecordingLocked below). Session reset/teardown run under lock on
+    // other queues but only when not recording, so no concurrent mutation
+    // with live buffers. Timing covers the engine block calls for the
+    // callback-overhead instrumentation below.
+    let ingestStart = Self.monotonicNanos()
+    let outcome: RustRealtimeAudio.IngestOutcome
+    do {
+      outcome = try audio.ingest(
+        channel: channel,
+        frameLength: frameLength,
+        sampleRate: UInt32(targetFormat.sampleRate)
+      )
+    } catch {
+      // Fail-closed: an engine error drops the block loudly (counted in
+      // the instrumentation) instead of processing it in Swift. Valid
+      // pointers with a nonzero rate never fail; this guards ABI/link
+      // breakage, never normal audio.
+      let ingestEnd = Self.monotonicNanos()
+      let ingestNanos = ingestEnd >= ingestStart ? ingestEnd - ingestStart : 0
+      Logger.log(
+        "record engine audio block failed: \(error.localizedDescription)", level: "error")
+      lock.lock()
+      rustAudioEngineErrors += 1
+      rustAudioTotalNanos += ingestNanos
+      rustAudioMaxNanos = max(rustAudioMaxNanos, ingestNanos)
+      if isCurrentGeneration(tapGeneration),
+        reusableBuffersGeneration == tapGeneration
+      {
+        scratchInt16 = localScratch
+      }
+      lock.unlock()
+      return
     }
-    let rms = frameLength > 0 ? sqrt(sum / Float(frameLength)) : 0
-    let bufferDuration = frameLength > 0 ? Double(frameLength) / Double(targetFormat.sampleRate) : 0
-    // Adaptive speech decision on the raw signal (noise floor + hysteresis).
-    // Independent from the AGC floor tracker: gain never drives VAD.
-    // process() runs on the audio thread; vad state is confined here behind
-    // the session liveness checks (takeBufferedSnapshot + isRecordingLocked
-    // below). Teardown/start resets run under lock on other queues but only
-    // when not recording, so no concurrent mutation with live buffers.
-    vad.update(rms: rms, duration: bufferDuration)
-    let vadIsSpeech: Bool = vad.isSpeech
-    let vadFloor = vad.noiseFloor
-    let vadEnter = vad.enterThreshold
-    let vadExit = vad.exitThreshold
-    // Digital gain (AGC) here, mutating the buffer in place: level metric and
-    // Int16 recording see the conditioned signal. Metering recomputed from the
-    // amplified buffer (soft limiter accounted); with AGC off
+    let ingestEnd = Self.monotonicNanos()
+    let ingestNanos = ingestEnd >= ingestStart ? ingestEnd - ingestStart : 0
+    let rms = outcome.rawRMS
+    let vadIsSpeech = outcome.isSpeech
+    // Digital gain (AGC) already applied in place above: level metric and
+    // Int16 recording see the conditioned signal. Metering is the
+    // engine-returned amplified RMS (soft limiter accounted); with AGC off
     // (`NANODICTATE_GAIN_DISABLED=1`) the buffer passes unchanged, metric = rms.
-    let meteredRms = gain.apply(
-      to: channel,
-      frameLength: frameLength,
-      rms: rms,
-      sampleRate: Int(targetFormat.sampleRate)
-    )
-    let appliedGainDb = gain.currentGainDb
+    let meteredRms = outcome.amplifiedRMS
+    // Engine VAD/gain diagnostics feed the debug meter logs below only:
+    // skip the extra FFI on the shipping (non-debug) hot path.
+    let appliedGainDb: Float = isDebug ? audio.currentGainDb : 0
+    // Engine VAD diagnostics for the meter/first-buffer logs below
+    // (best-effort: logging never drops the block).
+    let engineDiagnostics = isDebug ? try? audio.vadDiagnostics() : nil
+    let vadFloor = engineDiagnostics?.floor ?? 0
+    let vadEnter = engineDiagnostics?.enterThreshold ?? 0
+    let vadExit = engineDiagnostics?.exitThreshold ?? 0
     // Float32->Int16 staging OUTSIDE the shared lock: per-sample clipping here,
     // bulk append under the lock below. `localScratch` is the checked-out
     // per-generation staging (grows only), so steady state allocates no
@@ -2376,8 +2533,13 @@ public final class AudioService {
       return
     }
     // Per-buffer RMS history — final level summary metrics. 60 s at 1024
-    // frames and 48 kHz ≈ 2800 values — memory fine.
+    // frames and 48 kHz ≈ 2800 values — memory fine. Engine block
+    // instrumentation (callback overhead proof) rides the same hold: O(1)
+    // counter updates, never FFI under the lock.
     rmsHistory.append(meteredRms)
+    rustAudioBlocksIngested += 1
+    rustAudioTotalNanos += ingestNanos
+    rustAudioMaxNanos = max(rustAudioMaxNanos, ingestNanos)
 
     // First session buffer — proof sound really reached the engine (piece
     // duration and energy; broken mic → rms ≈ 0). Includes raw level, adaptive
@@ -2569,27 +2731,39 @@ public final class AudioService {
     // same path as a user stop.
     let elapsed = CFAbsoluteTimeGetCurrent() - recordStartTime
     let shouldStop = limit.shouldStop(elapsed: elapsed, totalSamples: collectedSamples.count)
-    // Auto-stop on continuous silence (~3 s): fed with the raw/pre-gain RMS
-    // (issue #21 — VAD-side decision, never the amplified level), ONLY
-    // when the feature is on (`autoStopConfig.enabled` — env kill switch,
-    // see AutoStopConfig.fromEnvironment) and the limit did not fire in this
-    // buffer (limit wins — the recording ends either way, one finalization
-    // type). The adaptive VAD speech flag opens the speech gate so raw quiet
-    // speech below the fixed speech threshold still arms auto-stop; VAD
-    // silence counts as silence even when raw RMS is loud, so steady noise
+    // Auto-stop on continuous silence (~3 s) through the shared engine:
+    // fed with the raw/pre-gain RMS (issue #21 — VAD-side decision, never
+    // the amplified level), ONLY when the feature is on
+    // (`autoStopConfig.enabled` — env kill switch, see
+    // AutoStopConfig.fromEnvironment; enforced inside the engine
+    // composition) and the limit did not fire in this buffer (limit wins
+    // — the recording ends either way, one finalization type). The
+    // adaptive VAD speech flag opens the speech gate so raw quiet speech
+    // below the fixed speech threshold still arms auto-stop; VAD silence
+    // counts as silence even when raw RMS is loud, so steady noise
     // converged to the adaptive floor does not block auto-stop (issue #21).
     // Buffer duration — real:
     // converted frames / target rate 16 kHz.
     // Accumulation by audio time, not buffer count — callback frequency
     // tracks the tap request size (1024 frames ≈ 21 ms @ 48 kHz, ≈ 23 ms
     // @ 44.1 kHz), "3 s of silence" measured by sound.
-    let autoStopFired =
-      autoStopConfig.enabled && !shouldStop
-      && autoStopDetector.feed(
-        rms: rms,
-        duration: Double(frameLength) / Double(targetFormat.sampleRate),
-        isSpeech: vadIsSpeech
-      )
+    // An engine error here is fail-closed (no stop scheduled for this
+    // block, counted loudly) — it never falls back to the Swift detector.
+    let autoStopFired: Bool = {
+      guard !shouldStop else { return false }
+      do {
+        return try audio.feedAutoStop(
+          rms: rms,
+          duration: Double(frameLength) / Double(targetFormat.sampleRate),
+          isSpeech: vadIsSpeech
+        )
+      } catch {
+        Logger.log(
+          "record engine auto-stop block failed: \(error.localizedDescription)", level: "error")
+        rustAudioEngineErrors += 1
+        return false
+      }
+    }()
     lock.unlock()
     // Capture-ready delivery (outside the state lock): measurable startup
     // timeline + the truthful ready signal. Exactly once per session, on main
@@ -2735,6 +2909,9 @@ public final class AudioService {
     // the handle stays live for the agent's `notifyTranscriptionDone`, as in
     // stop().
     driveRustLocked(.stopRequested)
+    // Realtime audio composition ends with the recording (see stop()).
+    let finishedAudio = rustAudio
+    endRustAudioLocked()
     let rms = rmsHistory
     rmsHistory = []
     // Same range+snapshot tail handoff as stop(): copy after unlock.
@@ -2771,7 +2948,8 @@ public final class AudioService {
         self.teardownEngineOnly(using: engine)
       }
     }
-    logRecordingFinale(samples: samples, duration: duration, rmsHistory: rms)
+    logRecordingFinale(
+      samples: samples, duration: duration, rmsHistory: rms, audio: finishedAudio)
     if !tail.isEmpty {
       onSpeechSegment?(tail, true)
     }
@@ -2786,8 +2964,11 @@ public final class AudioService {
   /// Single final recording log for `stop()` and forced stop by limit:
   /// lifecycle (always, `info`) + level metering (only when
   /// `logLevel == "debug"`). Never throws: logging must not drop the
-  /// recording.
-  private func logRecordingFinale(samples: [Int16], duration: TimeInterval, rmsHistory: [Float]) {
+  /// recording. Engine diagnostics come from the finished session
+  /// composition snapshot (nil after a session that never built one).
+  private func logRecordingFinale(
+    samples: [Int16], duration: TimeInterval, rmsHistory: [Float], audio: RustRealtimeAudio?
+  ) {
     Logger.log(
       String(
         format: "record stop: duration=%.2f s, sampleRate=%d, channels=%d, frames=%d, bytes=%d",
@@ -2802,6 +2983,9 @@ public final class AudioService {
 
     guard isDebug else { return }
     let summary = AudioMetrics.summarize(rmsValues: rmsHistory)
+    // Engine VAD/gain diagnostics are best-effort here: logging must not
+    // drop the recording, and the composition may already be gone.
+    let diagnostics = try? audio?.vadDiagnostics()
     Logger.log(
       String(
         format:
@@ -2813,9 +2997,21 @@ public final class AudioService {
         Double(summary.maxRMS),
         Double(AudioMetrics.dbfs(summary.maxRMS)),
         summary.nearSilence ? "true" : "false",
-        Double(vad.noiseFloor),
-        Double(AudioMetrics.dbfs(vad.noiseFloor)),
-        Double(gain.currentGainDb)
+        Double(diagnostics?.floor ?? 0),
+        Double(AudioMetrics.dbfs(diagnostics?.floor ?? 0)),
+        Double(audio?.currentGainDb ?? 0)
+      ),
+      level: "debug"
+    )
+    let stats = realtimeAudioStats
+    Logger.log(
+      String(
+        format:
+          "record realtime audio: engine blocks=%d errors=%d mean=%.3f ms max=%.3f ms",
+        stats.blocks,
+        stats.engineErrors,
+        stats.meanBlockMs,
+        stats.maxBlockMs
       ),
       level: "debug"
     )

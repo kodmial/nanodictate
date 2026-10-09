@@ -420,3 +420,335 @@ fn rms_and_metrics_error_conventions() {
     assert!(nd_rms_i16(std::ptr::null(), 3) < 0.0);
     assert!((nd_dbfs(1.0) - 0.0).abs() < 1e-5);
 }
+
+#[test]
+fn configured_handles_match_default_behavior() {
+    // Explicit default-equivalent configs behave like the default handles.
+    let vad = nd_vad_new_with_config(8.0, 4.0, -60.0, -25.0);
+    assert!(!vad.is_null());
+    for _ in 0..30 {
+        assert_eq!(nd_vad_feed(vad, 0.0005, 0.085), 0);
+    }
+    assert_eq!(nd_vad_feed(vad, 0.02, 0.085), 1);
+    let (mut floor, mut enter, mut exit, mut speech) = (0.0f32, 0.0f32, 0.0f32, 0i32);
+    assert_eq!(
+        nd_vad_diagnostics(vad, &mut floor, &mut enter, &mut exit, &mut speech),
+        0
+    );
+    assert!(
+        floor > 0.0 && floor < 0.02,
+        "floor follows the signal, got {floor}"
+    );
+    assert!(exit < enter, "hysteresis keeps exit below enter");
+    assert_eq!(speech, 1, "speech latches after the attack");
+    assert!(
+        nd_vad_diagnostics(
+            vad,
+            std::ptr::null_mut(),
+            &mut enter,
+            &mut exit,
+            &mut speech
+        ) > 0
+    );
+    assert!(
+        nd_vad_diagnostics(
+            std::ptr::null_mut(),
+            &mut floor,
+            &mut enter,
+            &mut exit,
+            &mut speech
+        ) != 0
+    );
+    assert_eq!(nd_vad_reset(vad), 0);
+    assert_eq!(
+        nd_vad_diagnostics(vad, &mut floor, &mut enter, &mut exit, &mut speech),
+        0
+    );
+    assert_eq!(speech, 0, "reset returns to silence");
+    nd_vad_free(vad);
+
+    // Config clamping mirrors the Swift invariants (hysteresis floor 1 dB).
+    let clamped = nd_vad_new_with_config(8.0, 0.0, -25.0, -60.0);
+    assert!(!clamped.is_null());
+    let mut exit_only = 0.0f32;
+    assert_eq!(
+        nd_vad_diagnostics(clamped, &mut floor, &mut enter, &mut exit_only, &mut speech),
+        0
+    );
+    assert!(
+        exit_only < enter,
+        "clamped hysteresis still separates exit from enter"
+    );
+    nd_vad_free(clamped);
+
+    // Gain with an explicit config lifts quiet speech and reports its state.
+    let gain = nd_gain_new_with_config(true, -20.0, 30.0, 0.025, 0.3);
+    assert!(!gain.is_null());
+    let mut buf = vec![0.004f32; 1600];
+    let out = nd_gain_apply(gain, buf.as_mut_ptr(), buf.len(), 0.004, 16000);
+    assert!(
+        out > 0.004,
+        "configured AGC must lift quiet speech, got {out}"
+    );
+    assert!(
+        nd_gain_current_db(gain) > 0.0,
+        "smoothed gain must be positive"
+    );
+    assert_eq!(nd_gain_reset(gain), 0);
+    assert_eq!(
+        nd_gain_current_db(gain),
+        0.0,
+        "reset zeroes the smoothed gain"
+    );
+    assert!(nd_gain_reset(std::ptr::null_mut()) != 0);
+    assert!(nd_gain_current_db(std::ptr::null_mut()) < 0.0);
+    nd_gain_free(gain);
+
+    // Disabled gain passes the buffer through untouched.
+    let off = nd_gain_new_with_config(false, -20.0, 30.0, 0.025, 0.3);
+    assert!(!off.is_null());
+    let mut passthrough = vec![0.1f32; 160];
+    let out = nd_gain_apply(
+        off,
+        passthrough.as_mut_ptr(),
+        passthrough.len(),
+        0.01,
+        16000,
+    );
+    assert_eq!(out, 0.01);
+    assert!(passthrough.iter().all(|&s| s == 0.1));
+    nd_gain_free(off);
+
+    // Auto-stop with an explicit config fires after sustained silence.
+    let stop = nd_autostop_new_with_config(0.00562, 0.00126, 3.0, 2.0, 0.3, 3.0);
+    assert!(!stop.is_null());
+    for _ in 0..5 {
+        assert_eq!(nd_autostop_feed(stop, 0.02, 0.1, -1), 0);
+    }
+    let mut fired = false;
+    for _ in 0..60 {
+        fired = nd_autostop_feed(stop, 0.0005, 0.1, -1) == 1;
+    }
+    assert!(
+        fired,
+        "configured auto-stop must fire after sustained silence"
+    );
+    assert_eq!(nd_autostop_reset(stop), 0);
+    assert_eq!(
+        nd_autostop_feed(stop, 0.0005, 0.1, -1),
+        0,
+        "reset clears the gate: silence alone never stops"
+    );
+    assert!(nd_autostop_reset(std::ptr::null_mut()) != 0);
+    nd_autostop_free(stop);
+
+    // Hysteresis invariant: a speech threshold below silence clamps up.
+    let inv = nd_autostop_new_with_config(0.0001, 0.01, 0.5, 0.0, 0.0, 0.0);
+    assert!(!inv.is_null());
+    assert_eq!(
+        nd_autostop_feed(inv, 0.005, 0.6, -1),
+        0,
+        "gray-zone input holds state"
+    );
+    nd_autostop_free(inv);
+}
+
+#[test]
+fn live_and_batch_plan_through_abi() {
+    // 4 s of speech, 2 s of pause, 4 s of speech at 16 kHz.
+    let rate = 16000u32;
+    let mut samples = vec![2000i16; 4 * rate as usize];
+    samples.extend(vec![0i16; 2 * rate as usize]);
+    samples.extend(vec![2000i16; 4 * rate as usize]);
+    let config = NdSegmenterConfig {
+        pause_duration: 1.0,
+        min_segment: 1.0,
+        max_segment: 45.0,
+        overlap: 1.0,
+        silence_rms: 0.00316,
+        use_adaptive_vad: false,
+        enter_margin_db: 8.0,
+        hysteresis_db: 4.0,
+        min_enter_db: -60.0,
+        max_enter_db: -25.0,
+    };
+    // NULL output queries the required entry count.
+    let mut needed = 0usize;
+    assert_eq!(
+        nd_live_plan(
+            samples.as_ptr(),
+            samples.len(),
+            rate,
+            &config,
+            std::ptr::null_mut(),
+            0,
+            &mut needed
+        ),
+        0
+    );
+    assert_eq!(needed, 2, "pause splits the recording in two");
+    let mut specs = vec![
+        NdLiveSegment {
+            index: 0,
+            start_seconds: 0.0,
+            end_seconds: 0.0,
+            body_start: 0,
+            body_end: 0,
+            has_overlap: false,
+            overlap_start: 0,
+            overlap_end: 0,
+            overlap_seconds: 0.0,
+        };
+        needed
+    ];
+    let mut written = 0usize;
+    assert_eq!(
+        nd_live_plan(
+            samples.as_ptr(),
+            samples.len(),
+            rate,
+            &config,
+            specs.as_mut_ptr(),
+            specs.len(),
+            &mut written
+        ),
+        0
+    );
+    assert_eq!(written, 2);
+    assert!(!specs[0].has_overlap, "first segment carries no overlap");
+    assert!(
+        specs[1].has_overlap,
+        "second segment glues the previous tail"
+    );
+    assert_eq!(specs[1].overlap_end - specs[1].overlap_start, rate as usize);
+    assert!((specs[1].overlap_seconds - 1.0).abs() < 1e-9);
+    // Bodies are ordered and non-overlapping; the pause belongs to neither.
+    assert!(specs[0].body_end <= specs[1].body_start);
+    // A short buffer is a clean error carrying the required count.
+    let mut short = vec![specs[0]; 1];
+    let mut short_written = 0usize;
+    assert_eq!(
+        nd_live_plan(
+            samples.as_ptr(),
+            samples.len(),
+            rate,
+            &config,
+            short.as_mut_ptr(),
+            short.len(),
+            &mut short_written
+        ),
+        4 // ND_ERR_SMALL_BUFFER
+    );
+    assert_eq!(short_written, 2);
+    // Zero sample rate and null count slots are argument errors.
+    assert_eq!(
+        nd_live_plan(
+            samples.as_ptr(),
+            samples.len(),
+            0,
+            &config,
+            std::ptr::null_mut(),
+            0,
+            &mut needed
+        ),
+        3
+    );
+    assert_eq!(
+        nd_live_plan(
+            samples.as_ptr(),
+            samples.len(),
+            rate,
+            &config,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut()
+        ),
+        1
+    );
+    // NULL config means defaults; empty input plans to nothing.
+    let mut empty_needed = 0usize;
+    assert_eq!(
+        nd_live_plan(
+            samples.as_ptr(),
+            0,
+            rate,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            0,
+            &mut empty_needed
+        ),
+        0
+    );
+    assert_eq!(empty_needed, 0);
+
+    // Fixed-length batch planning covers the source exactly once.
+    let total = 65 * rate as usize;
+    let mut batch_needed = 0usize;
+    assert_eq!(
+        nd_batch_plan(
+            total,
+            rate,
+            30.0,
+            2.5,
+            std::ptr::null_mut(),
+            0,
+            &mut batch_needed
+        ),
+        0
+    );
+    assert_eq!(batch_needed, 3);
+    let mut chunks = vec![
+        NdBatchChunk {
+            index: 0,
+            body_start_seconds: 0.0,
+            body_end_seconds: 0.0,
+            body_start: 0,
+            body_end: 0,
+            has_overlap: false,
+            overlap_start: 0,
+            overlap_end: 0,
+        };
+        batch_needed
+    ];
+    let mut batch_written = 0usize;
+    assert_eq!(
+        nd_batch_plan(
+            total,
+            rate,
+            30.0,
+            2.5,
+            chunks.as_mut_ptr(),
+            chunks.len(),
+            &mut batch_written
+        ),
+        0
+    );
+    assert_eq!(batch_written, 3);
+    assert_eq!(chunks[0].body_start, 0);
+    assert_eq!(chunks[0].body_end, 30 * rate as usize);
+    assert!(!chunks[0].has_overlap);
+    assert!(chunks[1].has_overlap);
+    assert_eq!(
+        chunks[1].overlap_end - chunks[1].overlap_start,
+        (2.5 * rate as f64) as usize
+    );
+    for pair in chunks.windows(2) {
+        assert_eq!(
+            pair[0].body_end, pair[1].body_start,
+            "bodies stay contiguous"
+        );
+    }
+    assert_eq!(
+        nd_batch_plan(
+            0,
+            rate,
+            30.0,
+            2.5,
+            std::ptr::null_mut(),
+            0,
+            &mut batch_needed
+        ),
+        0
+    );
+    assert_eq!(batch_needed, 0);
+}
