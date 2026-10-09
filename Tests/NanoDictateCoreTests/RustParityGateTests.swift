@@ -459,28 +459,81 @@ final class RustParityGateTests: XCTestCase {
 
   /// Provenance for the evidence-to-verdict test: exercises one real
   /// linked-engine call per automated coverage area and records the area
-  /// only when its probe succeeds. A throwing probe fails the test, so the
-  /// returned set can never silently claim an area that did not run green
-  /// on this runner. This replaces the previous unconditional
-  /// `fullAutomated()` constant in the real validation path; synthetic
-  /// `fullAutomated()` remains only in gate-logic unit tests.
+  /// only when its probe returns the expected behavioral result (not
+  /// merely when the call does not throw). A throwing probe, a failed
+  /// expectation, or a rejected qualifier fails the test, so the returned
+  /// set can never silently claim an area that did not run green on this
+  /// runner. This replaces the previous unconditional `fullAutomated()`
+  /// constant in the real validation path; synthetic `fullAutomated()`
+  /// remains only in gate-logic unit tests.
+  ///
+  /// The `*Qualifies` helpers below encode the expected results as pure
+  /// predicates so `testProvenEvidenceRejectsIncorrectNonThrowingResults`
+  /// can prove that an incorrect but non-throwing result cannot qualify
+  /// its area.
+  private func sessionLifecycleQualifies(readyAfterStart: Bool, readyAfterFirstBuffer: Bool) -> Bool {
+    readyAfterStart == false && readyAfterFirstBuffer == true
+  }
+
+  private func failoverQualifies(
+    order: [String],
+    backoffMs: UInt64,
+    failoverOnTranscribe: Bool,
+    failoverOnOther: Bool,
+    transcriptJSON: String
+  ) -> Bool {
+    order == ["b", "a"]
+      && backoffMs == 1000
+      && failoverOnTranscribe == true
+      && failoverOnOther == false
+      && transcriptJSON.contains("\"text\"")
+      && transcriptJSON.contains("hi")
+  }
+
+  private func textInsertionQualifies(
+    change: WordDiff.Change?,
+    tail: String,
+    joined: String,
+    reviewHelloInserts: Bool
+  ) -> Bool {
+    guard let change else { return false }
+    return change.spanOld == ""
+      && change.spanNew == "two"
+      && tail == " two three."
+      && joined == "One two three."
+      && reviewHelloInserts == false
+  }
+
   private func collectProvenAutomatedChecks() -> Set<RustParityGate.AutomatedCheck> {
     var proven: Set<RustParityGate.AutomatedCheck> = []
     do {
       let vad = try RustVAD()
       _ = try vad.feedSamples([Float](repeating: 0.02, count: 160), sampleRate: 16000)
-      _ = try vad.diagnostics()
-      _ = try RustEngine.wordDiff(old: "One three.", new: "One two three.")
-      let wav = try RustEngine.wavEncode(samples: [0, 1000, -1000], sampleRate: 16000, channels: 1)
-      _ = try RustEngine.wavDecodeSamples(wav)
+      let diagnostics = try vad.diagnostics()
+      XCTAssertTrue(
+        diagnostics.floor.isFinite && diagnostics.enterThreshold.isFinite
+          && diagnostics.exitThreshold.isFinite,
+        "abi-lifetime-ownership diagnostics must be finite: \(diagnostics)")
+      let diff = try RustEngine.wordDiff(old: "One three.", new: "One two three.")
+      XCTAssertTrue(diff.change, "abi probe word diff must report a change")
+      XCTAssertEqual(diff.spanNew, "two", "abi probe word diff span: \(diff)")
+      let samples: [Int16] = [0, 1000, -1000]
+      let wav = try RustEngine.wavEncode(samples: samples, sampleRate: 16000, channels: 1)
+      let decoded = try RustEngine.wavDecodeSamples(wav)
+      XCTAssertEqual(decoded.samples, samples, "abi probe WAV round-trip must preserve samples")
+      XCTAssertEqual(decoded.sampleRate, 16000, "abi probe WAV rate must round-trip")
+      XCTAssertEqual(decoded.channels, 1, "abi probe WAV channels must round-trip")
       proven.insert(.abiLifetimeOwnership)
     } catch {
       XCTFail("abi-lifetime-ownership probe failed: \(error)")
     }
     do {
       try RustEngine.checkAvailable()
-      _ = try RustEngine.wordDiff(old: "a", new: "a")
-      _ = try RustEngine.resolveSTTProfile(adapterID: "groq", model: "whisper-large-v3-turbo")
+      let identical = try RustEngine.wordDiffChange(old: "a", new: "a")
+      XCTAssertNil(identical, "identical texts must report no change")
+      let profile = try RustEngine.sttModelProfile(adapterID: "groq", model: "whisper-large-v3-turbo")
+      XCTAssertEqual(profile.adapterID, "groq", "bridge probe profile adapter must resolve")
+      XCTAssertEqual(profile.model, "whisper-large-v3-turbo", "bridge probe profile model must resolve")
       proven.insert(.swiftBridge)
     } catch {
       XCTFail("swift-bridge probe failed: \(error)")
@@ -488,20 +541,49 @@ final class RustParityGateTests: XCTestCase {
     do {
       let (session, generation) = try RustEngine.makeSession()
       try session.onEvent(.engineStarted, generation: generation)
+      let readyAfterStart = session.isCaptureReady
+      XCTAssertFalse(readyAfterStart, "engine start alone must not report readiness")
       try session.onEvent(.firstBuffer, generation: generation)
+      let readyAfterFirstBuffer = session.isCaptureReady
+      XCTAssertTrue(readyAfterFirstBuffer, "first buffer must fire capture readiness")
       try session.onEvent(.stopRequested, generation: generation)
       try session.onEvent(.transcriptionDone, generation: generation)
-      XCTAssertTrue(session.isCaptureReady || !session.isCaptureReady)
-      proven.insert(.sessionLifecycle)
+      if sessionLifecycleQualifies(
+        readyAfterStart: readyAfterStart, readyAfterFirstBuffer: readyAfterFirstBuffer)
+      {
+        proven.insert(.sessionLifecycle)
+      } else {
+        XCTFail(
+          "session-lifecycle probe returned unexpected transitions "
+            + "(afterStart: \(readyAfterStart), afterFirstBuffer: \(readyAfterFirstBuffer))")
+      }
     } catch {
       XCTFail("session-lifecycle probe failed: \(error)")
     }
     do {
-      _ = try RustEngine.failoverOrder(ids: ["a", "b"], failedID: "a", autoFailover: true)
-      _ = RustEngine.retryBackoffBaseMs(attempt: 1)
-      _ = RustEngine.shouldFailover(error: TranscribeError.network("probe"))
-      _ = try RustEngine.parseTranscript(body: "{\"text\":\"hi\"}", path: nil)
-      proven.insert(.sttRetryFailover)
+      let order = try RustEngine.failoverOrder(ids: ["a", "b"], failedID: "a", autoFailover: true)
+      let backoffMs = RustEngine.retryBackoffBaseMs(attempt: 1)
+      let failoverOnTranscribe = RustEngine.shouldFailover(error: TranscribeError.network("probe"))
+      let failoverOnOther = RustEngine.shouldFailover(
+        error: NSError(domain: "probe", code: 1, userInfo: nil))
+      let transcriptJSON = try RustEngine.parseTranscript(body: "{\"text\":\"hi\"}", path: nil)
+      XCTAssertEqual(order, ["b", "a"], "failover probe order must rotate the failed id: \(order)")
+      XCTAssertEqual(backoffMs, 1000, "failover probe backoff for attempt 1 must be 1000ms")
+      XCTAssertTrue(failoverOnTranscribe, "transcribe errors must allow failover")
+      XCTAssertFalse(failoverOnOther, "non-transcribe errors must not fail over")
+      XCTAssertTrue(
+        transcriptJSON.contains("hi"), "failover probe transcript must carry text: \(transcriptJSON)")
+      if failoverQualifies(
+        order: order,
+        backoffMs: backoffMs,
+        failoverOnTranscribe: failoverOnTranscribe,
+        failoverOnOther: failoverOnOther,
+        transcriptJSON: transcriptJSON)
+      {
+        proven.insert(.sttRetryFailover)
+      } else {
+        XCTFail("stt-retry-failover probe returned unexpected results (order: \(order))")
+      }
     } catch {
       XCTFail("stt-retry-failover probe failed: \(error)")
     }
@@ -514,21 +596,153 @@ final class RustParityGateTests: XCTestCase {
       var samples = [Float](repeating: 0.02, count: 160)
       let gain = try RustInputGain()
       _ = try vad.feedSamples(samples, sampleRate: 16000)
-      _ = try gain.apply(samples: &samples, rms: 0.02, sampleRate: 16000)
+      let amplified = try gain.apply(samples: &samples, rms: 0.02, sampleRate: 16000)
+      XCTAssertTrue(amplified.isFinite && amplified > 0, "realtime gain must return finite RMS")
+      XCTAssertTrue(
+        samples.allSatisfy { abs($0) <= 1.0 }, "realtime gain output must stay bounded")
       proven.insert(.realtimeAudioVAD)
     } catch {
       XCTFail("realtime-audio-vad probe failed: \(error)")
     }
     do {
-      _ = try RustEngine.wordDiffChange(old: "One three.", new: "One two three.")
-      _ = try RustEngine.tailAfterWords(1, in: "One two three.")
-      _ = try RustEngine.joinChunkTexts(["One two", "two three."])
-      _ = try RustEngine.reviewDecide(line: "hello")
-      proven.insert(.textInsertion)
+      let change = try RustEngine.wordDiffChange(old: "One three.", new: "One two three.")
+      let tail = try RustEngine.tailAfterWords(1, in: "One two three.")
+      let joined = try RustEngine.joinChunkTexts(["One two", "two three."])
+      let reviewHelloInserts = try RustEngine.reviewDecide(line: "hello")
+      XCTAssertNotNil(change, "text probe word diff must report a change")
+      XCTAssertEqual(change?.spanNew, "two", "text probe diff span must be 'two'")
+      XCTAssertEqual(change?.spanOld, "", "text probe diff must be a pure insertion")
+      XCTAssertEqual(tail, " two three.", "text probe tail must keep the overlap tail: '\(tail)'")
+      XCTAssertEqual(joined, "One two three.", "text probe join must dedup the overlap: '\(joined)'")
+      XCTAssertFalse(reviewHelloInserts, "text probe review decision for 'hello' must cancel")
+      if textInsertionQualifies(
+        change: change, tail: tail, joined: joined, reviewHelloInserts: reviewHelloInserts)
+      {
+        proven.insert(.textInsertion)
+      } else {
+        XCTFail("text-insertion probe returned unexpected results")
+      }
     } catch {
       XCTFail("text-insertion probe failed: \(error)")
     }
     return proven
+  }
+
+  @objc func testProvenEvidenceRejectsIncorrectNonThrowingResults() {
+    // An incorrect but non-throwing probe result must not qualify its
+    // area: the qualifiers gate `collectProvenAutomatedChecks`, so a
+    // silently wrong engine answer can never become passing evidence.
+    XCTAssertFalse(
+      sessionLifecycleQualifies(readyAfterStart: true, readyAfterFirstBuffer: true),
+      "readiness on start alone must not qualify session lifecycle")
+    XCTAssertFalse(
+      sessionLifecycleQualifies(readyAfterStart: false, readyAfterFirstBuffer: false),
+      "missing readiness after the first buffer must not qualify session lifecycle")
+    XCTAssertFalse(
+      failoverQualifies(
+        order: ["a", "b"],
+        backoffMs: 1000,
+        failoverOnTranscribe: true,
+        failoverOnOther: false,
+        transcriptJSON: "{\"text\":\"hi\"}"),
+      "unrotated failover order must not qualify")
+    XCTAssertFalse(
+      failoverQualifies(
+        order: ["b", "a"],
+        backoffMs: 999,
+        failoverOnTranscribe: true,
+        failoverOnOther: false,
+        transcriptJSON: "{\"text\":\"hi\"}"),
+      "wrong backoff must not qualify")
+    XCTAssertFalse(
+      failoverQualifies(
+        order: ["b", "a"],
+        backoffMs: 1000,
+        failoverOnTranscribe: false,
+        failoverOnOther: false,
+        transcriptJSON: "{\"text\":\"hi\"}"),
+      "refused transcribe failover must not qualify")
+    XCTAssertFalse(
+      failoverQualifies(
+        order: ["b", "a"],
+        backoffMs: 1000,
+        failoverOnTranscribe: true,
+        failoverOnOther: true,
+        transcriptJSON: "{\"text\":\"hi\"}"),
+      "failover on non-transcribe errors must not qualify")
+    XCTAssertFalse(
+      failoverQualifies(
+        order: ["b", "a"],
+        backoffMs: 1000,
+        failoverOnTranscribe: true,
+        failoverOnOther: false,
+        transcriptJSON: "{\"text\":\"\"}"),
+      "empty transcript text must not qualify")
+    XCTAssertTrue(
+      failoverQualifies(
+        order: ["b", "a"],
+        backoffMs: 1000,
+        failoverOnTranscribe: true,
+        failoverOnOther: false,
+        transcriptJSON: "{\"text\":\"hi\"}"),
+      "correct failover results must qualify")
+    let wrongChange = WordDiff.Change(
+      oldText: "One three.",
+      newText: "One two three.",
+      spanOld: "three.",
+      spanNew: "WRONG",
+      spanStartOld: 4,
+      spanStartNew: 4)
+    XCTAssertFalse(
+      textInsertionQualifies(
+        change: nil, tail: " two three.", joined: "One two three.", reviewHelloInserts: false),
+      "missing diff change must not qualify text insertion")
+    XCTAssertFalse(
+      textInsertionQualifies(
+        change: wrongChange,
+        tail: " two three.",
+        joined: "One two three.",
+        reviewHelloInserts: false),
+      "wrong diff span must not qualify text insertion")
+    XCTAssertFalse(
+      textInsertionQualifies(
+        change: WordDiff.Change(
+          oldText: "One three.",
+          newText: "One two three.",
+          spanOld: "",
+          spanNew: "two",
+          spanStartOld: 4,
+          spanStartNew: 4),
+        tail: "WRONG",
+        joined: "One two three.",
+        reviewHelloInserts: false),
+      "wrong tail must not qualify text insertion")
+    XCTAssertFalse(
+      textInsertionQualifies(
+        change: WordDiff.Change(
+          oldText: "One three.",
+          newText: "One two three.",
+          spanOld: "",
+          spanNew: "two",
+          spanStartOld: 4,
+          spanStartNew: 4),
+        tail: " two three.",
+        joined: "One two two three.",
+        reviewHelloInserts: false),
+      "unduplicated join must not qualify text insertion")
+    XCTAssertFalse(
+      textInsertionQualifies(
+        change: WordDiff.Change(
+          oldText: "One three.",
+          newText: "One two three.",
+          spanOld: "",
+          spanNew: "two",
+          spanStartOld: 4,
+          spanStartNew: 4),
+        tail: " two three.",
+        joined: "One two three.",
+        reviewHelloInserts: true),
+      "wrong review decision must not qualify text insertion")
   }
 
   @objc func testSoftwareGatePassesOnRealEngineMeasurements() {
