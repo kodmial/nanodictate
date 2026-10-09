@@ -60,13 +60,19 @@ permissions:
   pull-requests: read
   actions: write
 
-# Packaging macOS runners are scarce, so collapse repeated runs for the same
-# PR/ref before they can queue. Gating here rather than in the callee is what
-# actually frees the runner slots. The group name stays Continuum's own, so a
-# shipped stub never carries a consumer's product name; the repository part
-# keeps the group unambiguous in the Actions UI.
+# Packaging macOS runners are scarce, so collapse repeated candidate runs for
+# the same PR/ref before they can queue. Production verification
+# (workflow_run post-publish, schedule canary, manual workflow_dispatch) must
+# never cancel a run that is already verifying the public channels: each
+# production run carries its own run_id so overlapping Release completions
+# queue/run independently instead of superseding each other (issue #172: run
+# 485 was cancelled by run 487 and the cancelled legs filed a false P0).
+# Gating here rather than in the callee is what actually frees the runner
+# slots. The group name stays Continuum's own, so a shipped stub never carries
+# a consumer's product name; the repository part keeps the group unambiguous
+# in the Actions UI.
 concurrency:
-  group: continuum-swift-packaging-smoke-${{ github.repository }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
+  group: continuum-swift-packaging-smoke-${{ github.repository }}-${{ github.event_name }}-${{ github.event.pull_request.number || (github.event_name == 'workflow_run' && github.run_id) || (github.event_name == 'schedule' && github.run_id) || (github.event_name == 'workflow_dispatch' && github.run_id) || github.ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:
