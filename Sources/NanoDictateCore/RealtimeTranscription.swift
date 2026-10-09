@@ -487,10 +487,9 @@ public actor RealtimeTranscriptionSession {
     }
     if !acknowledged {
       state = .failed
-      let reason = lastError ?? "no session ack"
-      lastError = reason
+      lastError = "no session ack"
       await closeTransportOnce()
-      throw RealtimeTranscriptionError.timeout(reason)
+      throw RealtimeTranscriptionError.timeout("no session ack")
     }
     state = .ready
     connectAttempts += 1
@@ -849,11 +848,9 @@ extension RealtimeTranscriptionSession {
         switch item {
         case .text(let message):
           text = message
-        case .failure(let failure):
+        case .failure:
           // Transport noise while waiting for ack: keep waiting until the
           // ack deadline (same as unknown messages below).
-          // Remember the cause so a final timeout reports it.
-          lastError = Transcriber.describeRealtime(failure)
           continue
         }
         guard let text else {
