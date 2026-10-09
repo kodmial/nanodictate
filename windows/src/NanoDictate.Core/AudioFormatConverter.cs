@@ -67,9 +67,30 @@ public sealed class AudioFormatConverter
         {
             throw new NanoException(-1, "device frame count exceeds input span");
         }
-        if (frameCount == 0 || output.Length == 0)
+        if (frameCount == 0)
         {
             return 0;
+        }
+
+        // Validate capacity before mutating any conversion state: a short
+        // span must fail loudly instead of silently dropping frames or
+        // corrupting the resample phase.
+        int required;
+        if (_device.SampleRate == AudioFormat.EngineSampleRate)
+        {
+            required = frameCount;
+        }
+        else if (_position >= frameCount)
+        {
+            required = 0;
+        }
+        else
+        {
+            required = (int)Math.Ceiling((frameCount - _position) / _step);
+        }
+        if (output.Length < required)
+        {
+            throw new NanoException(-1, "output span too small for converted block");
         }
 
         // Downmix to mono first (bounded scratch on the stack for small

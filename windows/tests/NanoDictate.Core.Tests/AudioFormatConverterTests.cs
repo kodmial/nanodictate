@@ -108,6 +108,32 @@ public sealed class AudioFormatConverterTests
     }
 
     [Fact]
+    public void UndersizedOutputThrowsWithoutMutatingState()
+    {
+        // Passthrough path: 4 frames need 4 output samples.
+        var passthrough = new AudioFormatConverter(new AudioFormat(16000, 1, 32, true));
+        var input = new float[] { 0.1f, -0.2f, 0.3f, 0.0f };
+        Assert.Throws<NanoException>(() => passthrough.Convert(input, 4, new float[2]));
+        Assert.Equal(0, passthrough.DeviceFramesConsumed);
+        Assert.Equal(0, passthrough.EngineSamplesEmitted);
+        // Retry with sufficient capacity still converts the full block.
+        var output = new float[8];
+        Assert.Equal(4, passthrough.Convert(input, 4, output));
+        Assert.Equal(input, output[..4]);
+
+        // Resampling path: 480 frames at 48 kHz need 160 output samples.
+        var resampler = new AudioFormatConverter(new AudioFormat(48000, 1, 32, true));
+        var frames = new float[480];
+        Array.Fill(frames, 0.01f);
+        Assert.Throws<NanoException>(() => resampler.Convert(frames, 480, new float[100]));
+        Assert.Equal(0, resampler.DeviceFramesConsumed);
+        Assert.Equal(0, resampler.EngineSamplesEmitted);
+        Assert.Equal(160, resampler.Convert(frames, 480, new float[512]));
+        Assert.Equal(480, resampler.DeviceFramesConsumed);
+        Assert.Equal(160, resampler.EngineSamplesEmitted);
+    }
+
+    [Fact]
     public void AudioFormatValidation()
     {
         Assert.Throws<NanoException>(() => new AudioFormat(0, 1, 32, true).Validate());

@@ -44,6 +44,9 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
     private object? _device;
     private IAudioClient? _client;
     private IAudioCaptureClient? _capture;
+    // Set when Stop times out while the worker still uses the COM objects;
+    // the worker releases them on exit and Start is blocked until then.
+    private bool _releaseDeferred;
 
     public WasapiCaptureSource()
     {
@@ -70,6 +73,10 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
         lock (_gate)
         {
             ThrowIfDisposed();
+            if (_releaseDeferred)
+            {
+                throw new NanoException(-1, "capture worker is still stopping");
+            }
             if (_running)
             {
                 return;
@@ -102,10 +109,20 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
             worker = _worker;
             _worker = null;
         }
-        worker?.Join(TimeSpan.FromSeconds(5));
+        var joined = worker is null || worker.Join(TimeSpan.FromSeconds(5));
         lock (_gate)
         {
-            ReleaseLocked();
+            // Release COM objects only after confirmed worker exit; on a
+            // join timeout the worker still uses them and releases them
+            // itself on exit.
+            if (joined)
+            {
+                ReleaseLocked();
+            }
+            else
+            {
+                _releaseDeferred = true;
+            }
         }
     }
 
@@ -225,10 +242,7 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
             while (_running)
             {
                 int hr = capture.GetNextPacketSize(out var packetFrames);
-                if (hr < 0)
-                {
-                    break;
-                }
+                ThrowOnHResult(hr, "get next packet size");
                 if (packetFrames == 0)
                 {
                     Thread.Sleep(5);
@@ -237,10 +251,7 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
                 hr = capture.GetBuffer(
                     out var data, out var frames, out var flags,
                     out _, out _);
-                if (hr < 0)
-                {
-                    break;
-                }
+                ThrowOnHResult(hr, "get capture buffer");
                 try
                 {
                     var count = (int)frames;
@@ -261,6 +272,19 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
         catch (Exception ex)
         {
             DeviceChanged?.Invoke(ex);
+        }
+        finally
+        {
+            // Complete a deferred Stop: release the COM objects the worker
+            // was still using when the join timed out.
+            lock (_gate)
+            {
+                if (_releaseDeferred)
+                {
+                    _releaseDeferred = false;
+                    ReleaseLocked();
+                }
+            }
         }
     }
 
@@ -367,7 +391,7 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
 
         public void OnDefaultDeviceChanged(DataFlow flow, Role role, string? defaultDeviceId)
         {
-            if (flow != DataFlow.Capture)
+            if (flow != DataFlow.Capture || role != Role.Console)
             {
                 return;
             }

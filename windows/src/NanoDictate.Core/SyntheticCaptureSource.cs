@@ -124,6 +124,8 @@ public sealed class SyntheticCaptureSource : IAudioCaptureSource
         {
             (float[] Frames, int Count) next = default;
             var hasBlock = false;
+            Action<CapturedBlock>? handler = null;
+            var disposed = false;
             lock (_gate)
             {
                 while (_running && _script.Count == 0)
@@ -138,19 +140,13 @@ public sealed class SyntheticCaptureSource : IAudioCaptureSource
                 {
                     next = _script.Dequeue();
                     hasBlock = true;
-                }
-            }
-            if (hasBlock)
-            {
-                bool disposed;
-                lock (_gate)
-                {
+                    handler = BlockAvailable;
                     disposed = _disposed;
                 }
-                if (!disposed)
-                {
-                    BlockAvailable?.Invoke(new CapturedBlock(next.Frames, next.Count, Format));
-                }
+            }
+            if (hasBlock && !disposed)
+            {
+                handler?.Invoke(new CapturedBlock(next.Frames, next.Count, Format));
             }
             // Pace emissions like a device callback.
             Thread.Sleep(1);
@@ -167,10 +163,21 @@ public sealed class SyntheticCaptureSource : IAudioCaptureSource
 
     public void Dispose()
     {
+        Thread? worker;
         lock (_gate)
         {
             _disposed = true;
+            _running = false;
+            Monitor.PulseAll(_gate);
+            worker = _worker;
+            _worker = null;
         }
-        Stop();
+        // Guarantee no callback is active after disposal returns: the timed
+        // join covers the cooperative path, and the blocking fallback covers
+        // a callback that outlasts the timeout.
+        if (worker is not null && !worker.Join(TimeSpan.FromSeconds(5)))
+        {
+            worker.Join();
+        }
     }
 }

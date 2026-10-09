@@ -136,6 +136,23 @@ public sealed class CaptureServiceTests
     }
 }
 
+/// <summary>Synthetic source shutdown: Dispose joins the worker.</summary>
+public sealed class SyntheticLifecycleTests
+{
+    [Fact]
+    public void DisposeAfterStartStopsWorkerAndPreventsRestart()
+    {
+        var source = new SyntheticCaptureSource(new AudioFormat(48000, 2, 32, true));
+        source.Start();
+        Assert.True(source.IsRunning);
+        source.Dispose();
+        Assert.False(source.IsRunning);
+        Assert.Throws<ObjectDisposedException>(() => source.Start());
+        // Second dispose is harmless.
+        source.Dispose();
+    }
+}
+
 /// <summary>Platform gate for the Windows-native WASAPI source.</summary>
 public sealed class WasapiSourceTests
 {
