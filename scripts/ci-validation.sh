@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+# CI validation for NanoDictateCore: lint, build, and NanoDictateCoreTests.
+#
+# Software-gate evidence (#123): a green run of this script IS the automated
+# software-gate evidence consumed by release publication. NanoDictateCoreTests
+# contains the `RustParityGate.evaluateSoftware` unit coverage plus the real
+# block-oriented FFI overhead probes measured against the linked engine on
+# this runner (startup latency, mean/max block-call overhead vs
+# `RustParityGate.Budgets`). Fixed `passingMeasurements()` fixtures in
+# `RustParityGateTests` are unit-test oracles for the gate logic only and are
+# never release evidence on their own. The release `candidate-gate`
+# (`.github/workflows/nanodictate-release-engine.yml`) requires this exact-head
+# CI run to be green alongside the exact-head Packaging smoke run; packaging
+# success alone never publishes.
 set -euo pipefail
 
 selected=""

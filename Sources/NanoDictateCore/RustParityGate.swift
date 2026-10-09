@@ -17,7 +17,13 @@ import Foundation
 //   microphone latency or resource parity from mocks). No human-operated
 //   hardware run, owner attestation, or out-of-band evidence is required.
 //   Passing this gate unblocks the dependent Windows implementation
-//   (#137/#167) and release publication.
+//   (#137/#167) and release publication. Release publication enforces it:
+//   the release candidate-gate requires the exact-head CI run (which executes
+//   `NanoDictateCoreTests` via `scripts/ci-validation.sh`, including the
+//   `evaluateSoftware` unit coverage and the real FFI overhead probes) to be
+//   green alongside the exact-head Packaging smoke run; fixed
+//   `passingMeasurements()` fixtures in gate unit tests are oracles for the
+//   gate logic, not release evidence on their own.
 // - Real-hardware and manual validation (`ChecklistItem` / `evaluate`)
 //   remains tracked separately in #35 and must not block Windows work or
 //   release publication. A macOS 15 CI run is not a macOS 12 runtime test;

@@ -6,6 +6,16 @@ import NanoDictateRustBridge
 // evidence alone, while real-hardware qualification stays tracked in #35.
 // FFI probes use block-oriented calls only (no per-sample FFI, no audio
 // hardware) so CI measures the linked engine deterministically.
+//
+// NOTE on evidence: `passingMeasurements()` below is a unit-test oracle for
+// the gate logic (it pins what "in budget" means). Release evidence is a
+// green CI run of this whole suite: the `evaluateSoftware` unit coverage
+// plus the real FFI probes at the bottom of this file
+// (`testEngineStartupLatencyWithinBudget`,
+// `testRealtimeBlockFFIOverheadWithinBudget`), which measure the linked
+// engine on the CI runner. The release candidate-gate requires that
+// exact-head CI run alongside Packaging smoke; packaging alone never
+// publishes.
 final class RustParityGateTests: XCTestCase {
 
   private func passingMeasurements() -> RustParityGate.Measurements {

@@ -225,9 +225,18 @@ Two tracks, per #123:
   regression. Tests use fake audio devices and permissions; physical
   microphone latency or resource parity is never asserted from mocks.
   A coding agent completes this gate using existing CI alone: no
-  human-operated hardware run, owner attestation, or out-of-band
-  evidence is required. Passing it unblocks the Windows implementation
-  (#137/#167) and release publication.
+   human-operated hardware run, owner attestation, or out-of-band
+   evidence is required. Passing it unblocks the Windows implementation
+   (#137/#167) and release publication. Release publication enforces this:
+   the release `candidate-gate`
+   (`.github/workflows/nanodictate-release-engine.yml`) requires both the
+   exact-head Packaging smoke run and the exact-head CI run to be green.
+   The CI run executes `scripts/ci-validation.sh` → `NanoDictateCoreTests`,
+   which carries the `evaluateSoftware` unit coverage plus the real
+   block-oriented FFI overhead probes measured against the linked engine;
+   fixed `passingMeasurements()` fixtures in `RustParityGateTests` are
+   unit-test oracles for the gate logic, not release evidence. Packaging
+   success alone never publishes.
 - Real-hardware qualification (tracked in #35, never blocking). The
   same gate model keeps the hardware checklist
   (`ChecklistItem` / `evaluate`): repeated start/stop, rapid speech
