@@ -493,6 +493,23 @@ jobs:
             exit 1
           fi
 
+          # A run-level `success` is not sufficient: the macOS build-and-test
+          # job is skipped for documentation-only or trusted generated PRs
+          # (`classify-changes` -> `build_required == 'false'`), and a skipped
+          # job still yields a successful run. A tag release pointing at such
+          # a commit must not publish without `NanoDictateCoreTests` evidence,
+          # so require the macOS job itself to have run green. Jobs from the
+          # reusable engine workflow surface as "<caller job id> / <called job
+          # name>" (here: "call / Build & Test (macOS)"), so normalize to the
+          # called job name — the same convention as the Packaging smoke gate
+          # above.
+          TEST_CONCLUSIONS="$(gh api "repos/$REPO/actions/runs/$CI_RUN_ID/jobs?per_page=100" \
+            --jq '.jobs[] | select(.name | split(" / ") | last == "Build & Test (macOS)") | .conclusion')"
+          if [[ -z "$TEST_CONCLUSIONS" ]] || grep -qvx 'success' <<<"$TEST_CONCLUSIONS"; then
+            echo "::error::CI run $CI_RUN_ID did not execute a successful Build & Test (macOS) job. Publication is blocked."
+            exit 1
+          fi
+
           echo "ci_run_id=$CI_RUN_ID" >> "$GITHUB_OUTPUT"
           echo "::notice::Release publication is bound to green CI software-gate run $CI_RUN_ID for $SHA."
 
