@@ -471,8 +471,24 @@ jobs:
           # tags or manual dispatch).
           CI_RUN_ID=""
           for _ in {1..40}; do
-            CI_RUN_ID="$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&per_page=100" \
-              --jq '[.workflow_runs[].id] | first // empty')"
+            while read -r CANDIDATE_ID; do
+              [[ -n "$CANDIDATE_ID" ]] || continue
+              # A SHA can have several ci.yml runs (retries, re-runs): the
+              # first returned run may have failed or skipped the macOS job
+              # while a later run for the same SHA is green. Inspect every
+              # exact-SHA candidate and bind to one whose macOS
+              # build-and-test job already succeeded, instead of taking the
+              # first run unconditionally.
+              if gh api "repos/$REPO/actions/runs/$CANDIDATE_ID/jobs?per_page=100" \
+                --jq -e '[.jobs[] | select(.name | split(" / ") | last == "Build & Test (macOS)") | .conclusion] | any(. == "success")' \
+                >/dev/null; then
+                CI_RUN_ID="$CANDIDATE_ID"
+                break
+              fi
+            done < <(
+              gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&per_page=100" \
+                --jq '.workflow_runs[].id'
+            )
             if [[ -n "$CI_RUN_ID" ]]; then
               break
             fi
@@ -480,7 +496,7 @@ jobs:
           done
 
           if [[ -z "$CI_RUN_ID" ]]; then
-            echo "::error::No CI run exists for release commit $SHA. The software gate (NanoDictateCoreTests via scripts/ci-validation.sh) has no exact-head evidence. Publication is blocked."
+            echo "::error::No eligible CI run with a successful Build & Test (macOS) job exists for release commit $SHA. The software gate (NanoDictateCoreTests via scripts/ci-validation.sh) has no exact-head evidence. Publication is blocked."
             exit 1
           fi
 
