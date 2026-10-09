@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>NanoDictate.Smoke</RootNamespace>
+    <AssemblyName>NanoDictate.Smoke</AssemblyName>
+    <Description>Minimal executable smoke path for the Windows host on the shared Rust engine.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\NanoDictate.Core\NanoDictate.Core.csproj" />
+  </ItemGroup>
+
+</Project>
