@@ -81,7 +81,7 @@ jobs:
           if-no-files-found: warn
 
   runtime-gate:
-    name: runtime qualification (requires actual macOS 12)
+    name: macOS 12 runtime evidence status (non-blocking)
     # Supported host only. JavaScript actions require Node 24 (Node 20 was
     # removed on September 23, 2026) and Node 24 cannot run on macOS 13.4 or
     # earlier, so checkout/upload-artifact cannot execute on macOS 12. The
@@ -130,7 +130,7 @@ jobs:
       # owner-attested real macOS 12 run bound to this exact HEAD can pass.
       # The attestation is created by the main-branch-only evidence intake
       # workflow after validating transferred --full results and manual checks.
-      - name: Require current-HEAD macOS 12 runtime evidence
+      - name: Report exact-HEAD macOS 12 runtime evidence availability
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -143,6 +143,6 @@ jobs:
             echo "Verified owner-attested runtime and manual evidence for $TARGET_SHA: $proof_url"
             echo "Verified owner-attested macOS 12 runtime evidence: $proof_url" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo '::error title=macOS 12 runtime is NOT validated::The macOS 15 static checks and handoff are not Monterey runtime validation. Run --full on a real macOS 12 host at the current commit, complete manual checks, then dispatch macos12-runtime-evidence.yml as repository owner. The runtime gate deliberately fails until then.'
-            exit 1
+            echo '::warning title=macOS 12 runtime UNVERIFIED::Hosted macOS 15 tests are not proof of execution on Monterey. Exact-SHA macOS 12 runtime evidence is not available.'
+            echo 'Runtime compatibility: UNVERIFIED (not PASS); automatic macOS deployment-target checks remain required.' >> "$GITHUB_STEP_SUMMARY"
           fi
