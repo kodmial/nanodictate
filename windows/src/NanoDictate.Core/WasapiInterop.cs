@@ -230,7 +230,7 @@ internal static class WasapiInterop
             tag = subTag;
             channels = native.Channels;
         }
-        if (tag != WaveFormatIeeeFloat)
+        if (tag != WaveFormatIeeeFloat || bits != 32)
         {
             throw new NanoException(-1, $"unsupported WASAPI mix format tag {tag} (Float32 required)");
         }

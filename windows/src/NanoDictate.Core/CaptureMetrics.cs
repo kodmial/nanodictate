@@ -31,7 +31,7 @@ public readonly record struct CaptureMetrics(
 /// <summary>Monotonic clock helpers shared by the capture pipeline.</summary>
 internal static class CaptureClock
 {
-    public static ulong Nanos => (ulong)(Stopwatch.GetTimestamp() * 1_000_000_000L / Stopwatch.Frequency);
+    public static ulong Nanos => (ulong)((System.Int128)Stopwatch.GetTimestamp() * 1_000_000_000L / Stopwatch.Frequency);
 
     public static double MsBetween(ulong start, ulong end) =>
         end >= start ? (double)(end - start) / 1_000_000.0 : 0.0;

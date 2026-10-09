@@ -142,7 +142,15 @@ public sealed class SyntheticCaptureSource : IAudioCaptureSource
             }
             if (hasBlock)
             {
-                BlockAvailable?.Invoke(new CapturedBlock(next.Frames, next.Count, Format));
+                bool disposed;
+                lock (_gate)
+                {
+                    disposed = _disposed;
+                }
+                if (!disposed)
+                {
+                    BlockAvailable?.Invoke(new CapturedBlock(next.Frames, next.Count, Format));
+                }
             }
             // Pace emissions like a device callback.
             Thread.Sleep(1);
@@ -162,8 +170,7 @@ public sealed class SyntheticCaptureSource : IAudioCaptureSource
         lock (_gate)
         {
             _disposed = true;
-            _running = false;
-            Monitor.PulseAll(_gate);
         }
+        Stop();
     }
 }

@@ -173,33 +173,44 @@ public sealed class RealtimeAudioPipeline : IDisposable
     /// </summary>
     public void IngestDeviceBlock(CapturedBlock block)
     {
-        // Convert under the session lock: the resample phase is session
-        // state and callbacks are serialized with stop/flush the same way
-        // the engine handles are. Conversion itself is pure managed math.
+        // Convert and stage under the session lock: the resample phase
+        // and the staging buffer are session state shared with
+        // Start/HarvestTailLocked. Full engine blocks are copied aside
+        // and driven through the engine after the lock is released, so
+        // CaptureReady/AutoStop handlers never run while _gate is held.
         var capacity = Math.Max(
             EngineBlockSamples * 2,
             (int)((long)block.FrameCount * EngineSampleRate / Math.Max(1, block.Format.SampleRate)) + 16);
         var outBuffer = new float[capacity];
-        int produced;
+        List<float[]>? ready = null;
         lock (_gate)
         {
-            produced = _converter.Convert(
+            var produced = _converter.Convert(
                 block.InterleavedFrames.AsSpan(), block.FrameCount, outBuffer.AsSpan());
             _deviceFramesConsumed = _converter.DeviceFramesConsumed;
             _engineSamplesEmitted = _converter.EngineSamplesEmitted;
-        }
-        var offset = 0;
-        while (offset < produced)
-        {
-            var room = EngineBlockSamples - _staged;
-            var take = Math.Min(room, produced - offset);
-            Array.Copy(outBuffer, offset, _staging, _staged, take);
-            _staged += take;
-            offset += take;
-            if (_staged == EngineBlockSamples)
+            var offset = 0;
+            while (offset < produced)
             {
-                IngestEngineBlock(_staging);
-                _staged = 0;
+                var room = EngineBlockSamples - _staged;
+                var take = Math.Min(room, produced - offset);
+                Array.Copy(outBuffer, offset, _staging, _staged, take);
+                _staged += take;
+                offset += take;
+                if (_staged == EngineBlockSamples)
+                {
+                    var copy = new float[EngineBlockSamples];
+                    Array.Copy(_staging, copy, EngineBlockSamples);
+                    (ready ??= new List<float[]>()).Add(copy);
+                    _staged = 0;
+                }
+            }
+        }
+        if (ready is not null)
+        {
+            foreach (var engineBlock in ready)
+            {
+                IngestEngineBlock(engineBlock);
             }
         }
     }

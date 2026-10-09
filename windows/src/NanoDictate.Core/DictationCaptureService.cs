@@ -87,26 +87,35 @@ public sealed class DictationCaptureService : IDisposable
     /// </summary>
     public PipelineStopResult Stop()
     {
+        Exception? sourceError = null;
         try
         {
             _source.Stop();
         }
-        finally
+        catch (Exception ex)
         {
-            // Pipeline stop owns the session transition even when the
-            // source stop throws.
+            sourceError = ex;
         }
+        PipelineStopResult result;
         if (IsRunning)
         {
-            return _pipeline.Stop();
+            result = _pipeline.Stop();
         }
-        if (_pipeline.TryHarvestAborted(out var aborted))
+        else if (_pipeline.TryHarvestAborted(out var aborted))
         {
-            return aborted;
+            result = aborted;
         }
-        var snapshot = _pipeline.Snapshot();
-        return new PipelineStopResult(
-            Array.Empty<short>(), Array.Empty<NanoEngine.LiveSegment>(), snapshot);
+        else
+        {
+            var snapshot = _pipeline.Snapshot();
+            result = new PipelineStopResult(
+                Array.Empty<short>(), Array.Empty<NanoEngine.LiveSegment>(), snapshot);
+        }
+        if (sourceError is not null)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(sourceError).Throw();
+        }
+        return result;
     }
 
     /// <summary>Cancels the live session without producing a recording.</summary>
