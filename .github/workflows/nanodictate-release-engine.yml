@@ -981,6 +981,18 @@ jobs:
             fi
           fi
           release_notes_gate_publish "$RELEASE_VERSION" "$SWIFT_VERSION" "$RELEASABLE" /tmp/canonical-body.md < CHANGELOG.md
+          # Recovered main-push runs keep their original SHA even when main
+          # advances while they wait for Actions capacity. Publishing old
+          # source bytes as the next release is forbidden. Recheck the live
+          # main ref at the final publication boundary. Existing tag reruns
+          # remain available for repairing previously published assets.
+          if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
+            LIVE_MAIN_SHA="$(gh api "repos/$GH_REPO/branches/main" --jq '.commit.sha')"
+            if [[ "$SHA" != "$LIVE_MAIN_SHA" ]]; then
+              echo "::error::Stale Release source $SHA: main is $LIVE_MAIN_SHA. Refusing to publish outdated release artifacts."
+              exit 1
+            fi
+          fi
           if gh release create "$TAG" \
             dist/$CLI_NAME-*.tar.gz \
             dist/$CLI_NAME-*.zip \
