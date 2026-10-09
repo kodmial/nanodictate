@@ -216,9 +216,18 @@ pub fn live_segments(
     for (index, range) in ranges.iter().enumerate() {
         let body_start = range.start * window_size;
         let body_end = (range.end * window_size).min(samples.len());
-        let overlap_range = if index > 0 {
+        // The overlap window is the tail of the previous body. It is absent
+        // for the first segment and whenever no overlap samples are
+        // configured (an empty window must read as absent, not as an empty
+        // range, so every host maps it to the same nil/no-overlap value).
+        let overlap_range = if index > 0 && overlap_count > 0 {
             let prev_end = (ranges[index - 1].end * window_size).min(samples.len());
-            Some(prev_end.saturating_sub(overlap_count)..prev_end)
+            let from = prev_end.saturating_sub(overlap_count);
+            if from < prev_end {
+                Some(from..prev_end)
+            } else {
+                None
+            }
         } else {
             None
         };

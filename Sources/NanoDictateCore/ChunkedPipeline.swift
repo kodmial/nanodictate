@@ -142,9 +142,18 @@ public struct ChunkedPipeline {
 
   /// Single segmentation entry for the legacy chunked path: computed once per
   /// recording for the pipeline policy. Returns range-based specs; PCM stays
-  /// in the source buffer until per-segment encode.
+  /// in the source buffer until per-segment encode. Boundaries come from the
+  /// shared engine (canonical chunk math for the shipping path); the Swift
+  /// reference (`AudioSegmenter.plan`) stays available only as the parity
+  /// oracle. An engine failure traps loudly instead of silently falling
+  /// back (valid input never fails to plan).
   public func plan(samples: [Int16]) -> [AudioSegmentSpec] {
-    AudioSegmenter.plan(samples: samples, sampleRate: sampleRate, config: segmenterConfig)
+    do {
+      return try RustEngine.livePlan(
+        samples: samples, sampleRate: sampleRate, config: segmenterConfig)
+    } catch {
+      preconditionFailure("Rust engine live plan failed: \(error)")
+    }
   }
 
   /// STT request count for an already-computed plan (segments + final pass).
@@ -237,18 +246,17 @@ public struct ChunkedPipeline {
 
   // MARK: - Прогон (single-pass, lazy materialization)
 
-  /// Run with segmentation computed once inside: single RMS scan via
-  /// `AudioSegmenter.plan`, then per-segment WAV encode straight from the
-  /// source buffer. Only the segment being sent is materialized.
+  /// Run with segmentation computed once inside: single engine plan via
+  /// `plan(samples:)` (shared-engine boundaries), then per-segment WAV
+  /// encode straight from the source buffer. Only the segment being sent
+  /// is materialized.
   public func run(
     samples: [Int16],
     stt: STTHandler,
     insert: InsertHandler,
     onPhase: PhaseHandler? = nil
   ) async throws -> Outcome {
-    let specs = AudioSegmenter.plan(
-      samples: samples, sampleRate: sampleRate, config: segmenterConfig
-    )
+    let specs = plan(samples: samples)
     return try await run(
       samples: samples, plannedSegments: specs, stt: stt, insert: insert, onPhase: onPhase)
   }

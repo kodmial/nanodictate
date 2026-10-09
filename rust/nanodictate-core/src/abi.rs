@@ -38,13 +38,15 @@ use crate::error::{
     fail, last_error, set_last_error, ND_ERR_ARG, ND_ERR_DECODE, ND_ERR_NULL, ND_ERR_PANIC,
     ND_ERR_SMALL_BUFFER, ND_ERR_UTF8, ND_OK,
 };
-use crate::input_gain::InputGain;
+use crate::input_gain::{InputGain, InputGainConfig};
 use crate::retry::{backoff_delay_ms, candidate_count, failover_order, TranscribeKind};
+use crate::segmenter::SegmenterConfig;
 use crate::session::{
     mic_request_allowed, overlay_should_hide, review_decide, should_drop_retry, DictationSession,
     DictationState, EnterSendLatch, MicErrorCooldown, ReviewDecision, SessionEvent,
 };
 use crate::stt::TransportKind as EngineTransport;
+use crate::vad::AdaptiveVadConfig;
 use crate::{audio_metrics, stt, transcript, vad, wav, word_diff};
 use std::ffi::CString;
 use std::os::raw::{c_char, c_double, c_float};
@@ -1051,6 +1053,69 @@ pub extern "C" fn nd_vad_reset(handle: *mut NdVad) -> i32 {
     }
 }
 
+/// Creates an adaptive VAD handle with an explicit configuration. The
+/// margins and clamps mirror the host-side `AdaptiveVADConfig` default
+/// semantics: the hysteresis width is at least 1 dB and the enter clamp
+/// keeps `max >= min`. NULL only on panic.
+#[no_mangle]
+pub extern "C" fn nd_vad_new_with_config(
+    enter_margin_db: c_float,
+    hysteresis_db: c_float,
+    min_enter_db: c_float,
+    max_enter_db: c_float,
+) -> *mut NdVad {
+    match catch_unwind(AssertUnwindSafe(|| {
+        let config =
+            AdaptiveVadConfig::new(enter_margin_db, hysteresis_db, min_enter_db, max_enter_db);
+        Box::into_raw(Box::new(NdVad {
+            inner: vad::AdaptiveVad::new(config, vad::NoiseFloorTracker::default()),
+        }))
+    })) {
+        Ok(ptr) => ptr,
+        Err(_) => {
+            set_last_error("panic in nd_vad_new_with_config".to_string());
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Reads live VAD diagnostics without disturbing detector state: the
+/// current noise floor, the enter/exit thresholds (linear RMS), and the
+/// speech flag (1 = speech, 0 = silence). Observability for the host
+/// level meter and debug logs; never part of the speech decision.
+/// Returns `ND_OK` or a positive `ND_ERR_*` code.
+#[no_mangle]
+pub extern "C" fn nd_vad_diagnostics(
+    handle: *mut NdVad,
+    out_floor: *mut c_float,
+    out_enter: *mut c_float,
+    out_exit: *mut c_float,
+    out_is_speech: *mut i32,
+) -> i32 {
+    match catch_unwind(AssertUnwindSafe(|| {
+        let vad = with_handle(handle, "vad")?;
+        if out_floor.is_null()
+            || out_enter.is_null()
+            || out_exit.is_null()
+            || out_is_speech.is_null()
+        {
+            set_last_error("null output pointer".to_string());
+            return Err(ND_ERR_NULL);
+        }
+        // SAFETY: caller-owned output slots (ABI contract).
+        unsafe {
+            *out_floor = vad.inner.noise_floor();
+            *out_enter = vad.inner.enter_threshold();
+            *out_exit = vad.inner.exit_threshold();
+            *out_is_speech = i32::from(vad.inner.is_speech);
+        }
+        Ok(ND_OK)
+    })) {
+        Ok(code) => code.unwrap_or_else(|code| code),
+        Err(_) => fail(ND_ERR_PANIC, "panic in nd_vad_diagnostics".to_string()),
+    }
+}
+
 /// Creates an input-gain handle with default configuration.
 #[no_mangle]
 pub extern "C" fn nd_gain_new() -> *mut NdGain {
@@ -1063,6 +1128,71 @@ pub extern "C" fn nd_gain_new() -> *mut NdGain {
         Err(_) => {
             set_last_error("panic in nd_gain_new".to_string());
             std::ptr::null_mut()
+        }
+    }
+}
+
+/// Creates an input-gain handle with an explicit configuration. The
+/// target and ceiling are clamped to the same invariants as the default
+/// constructor (`target` in -120..-1 dBFS, `max_gain` in 1..60 dB, time
+/// constants at least 1 ms), so host environment overrides can never
+/// break the gain invariants. NULL only on panic.
+#[no_mangle]
+pub extern "C" fn nd_gain_new_with_config(
+    enabled: bool,
+    target_rms_db: c_float,
+    max_gain_db: c_float,
+    attack_time: c_double,
+    release_time: c_double,
+) -> *mut NdGain {
+    match catch_unwind(AssertUnwindSafe(|| {
+        let config = InputGainConfig::new(
+            enabled,
+            target_rms_db,
+            max_gain_db,
+            attack_time,
+            release_time,
+        );
+        Box::into_raw(Box::new(NdGain {
+            inner: InputGain::new(config),
+        }))
+    })) {
+        Ok(ptr) => ptr,
+        Err(_) => {
+            set_last_error("panic in nd_gain_new_with_config".to_string());
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Resets an input-gain handle (zero gain, fresh noise floor) for a new
+/// recording session. Returns `ND_OK` or a positive `ND_ERR_*` code.
+#[no_mangle]
+pub extern "C" fn nd_gain_reset(handle: *mut NdGain) -> i32 {
+    match catch_unwind(AssertUnwindSafe(|| {
+        let gain = with_handle(handle, "gain")?;
+        gain.inner.reset();
+        Ok(ND_OK)
+    })) {
+        Ok(code) => code.unwrap_or_else(|code| code),
+        Err(_) => fail(ND_ERR_PANIC, "panic in nd_gain_reset".to_string()),
+    }
+}
+
+/// Current smoothed gain in dB (0 = none) for host diagnostics and tests.
+/// Returns a negative sentinel and records an error on a null handle;
+/// the gain itself is never negative, so the sentinel is unambiguous.
+#[no_mangle]
+pub extern "C" fn nd_gain_current_db(handle: *mut NdGain) -> c_float {
+    match catch_unwind(AssertUnwindSafe(|| {
+        let gain = with_handle(handle, "gain")?;
+        Ok::<c_float, i32>(gain.inner.current_gain_db)
+    })) {
+        Ok(Ok(value)) => value,
+        Ok(Err(_)) => -1.0,
+        Err(_) => {
+            set_last_error("panic in nd_gain_current_db".to_string());
+            -1.0
         }
     }
 }
@@ -1123,6 +1253,56 @@ pub extern "C" fn nd_autostop_new() -> *mut NdAutoStop {
     }
 }
 
+/// Creates an auto-stop handle with an explicit configuration. The
+/// hysteresis invariant holds as in the default constructor (the speech
+/// threshold never goes below the silence threshold), so host overrides
+/// can never break the detector. The feature kill switch stays host-side
+/// (the host skips the feed when disabled); the engine only accumulates.
+/// NULL only on panic.
+#[no_mangle]
+pub extern "C" fn nd_autostop_new_with_config(
+    speech_rms: c_float,
+    silence_rms: c_float,
+    required_silence: c_double,
+    grace: c_double,
+    min_speech_run: c_double,
+    min_recording: c_double,
+) -> *mut NdAutoStop {
+    match catch_unwind(AssertUnwindSafe(|| {
+        Box::into_raw(Box::new(NdAutoStop {
+            inner: SilenceAutoStopDetector::new(
+                silence_rms,
+                speech_rms,
+                required_silence,
+                grace,
+                min_speech_run,
+                min_recording,
+            ),
+        }))
+    })) {
+        Ok(ptr) => ptr,
+        Err(_) => {
+            set_last_error("panic in nd_autostop_new_with_config".to_string());
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Resets an auto-stop handle (clears the silence accumulator, the
+/// recording clock, and the speech gate) for a new recording session.
+/// Returns `ND_OK` or a positive `ND_ERR_*` code.
+#[no_mangle]
+pub extern "C" fn nd_autostop_reset(handle: *mut NdAutoStop) -> i32 {
+    match catch_unwind(AssertUnwindSafe(|| {
+        let detector = with_handle(handle, "autostop")?;
+        detector.inner.reset();
+        Ok(ND_OK)
+    })) {
+        Ok(code) => code.unwrap_or_else(|code| code),
+        Err(_) => fail(ND_ERR_PANIC, "panic in nd_autostop_reset".to_string()),
+    }
+}
+
 /// Releases an auto-stop handle. NULL is accepted and ignored.
 #[no_mangle]
 pub extern "C" fn nd_autostop_free(handle: *mut NdAutoStop) {
@@ -1158,6 +1338,236 @@ pub extern "C" fn nd_autostop_feed(
         Err(_) => -fail(ND_ERR_PANIC, "panic in nd_autostop_feed".to_string()),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Live segmentation and batch chunk planning.
+// ---------------------------------------------------------------------------
+
+/// Portable live-segmentation configuration. Mirrors the host-side
+/// segmenter policy: pause length that closes an utterance, minimum and
+/// maximum segment lengths, glued overlap, and the adaptive speech
+/// classifier (fixed legacy threshold when `use_adaptive_vad` is false).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NdSegmenterConfig {
+    pub pause_duration: c_double,
+    pub min_segment: c_double,
+    pub max_segment: c_double,
+    pub overlap: c_double,
+    pub silence_rms: c_float,
+    pub use_adaptive_vad: bool,
+    pub enter_margin_db: c_float,
+    pub hysteresis_db: c_float,
+    pub min_enter_db: c_float,
+    pub max_enter_db: c_float,
+}
+
+/// One live segment plan entry. Sample ranges address the source buffer
+/// at `sample_rate` (0-based, end-exclusive); the overlap window is the
+/// tail of the previous body (`has_overlap` false for the first
+/// segment). The host owns the samples and materializes PCM on demand
+/// through these ranges; the engine only decides boundaries.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NdLiveSegment {
+    pub index: usize,
+    pub start_seconds: c_double,
+    pub end_seconds: c_double,
+    pub body_start: usize,
+    pub body_end: usize,
+    pub has_overlap: bool,
+    pub overlap_start: usize,
+    pub overlap_end: usize,
+    pub overlap_seconds: c_double,
+}
+
+/// One fixed-length batch chunk plan entry. Bodies cover the source back
+/// to back with no gaps and no overlaps; every chunk but the first
+/// starts with the tail of the previous body as context overlap.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NdBatchChunk {
+    pub index: usize,
+    pub body_start_seconds: c_double,
+    pub body_end_seconds: c_double,
+    pub body_start: usize,
+    pub body_end: usize,
+    pub has_overlap: bool,
+    pub overlap_start: usize,
+    pub overlap_end: usize,
+}
+
+fn segmenter_config_from(raw: &NdSegmenterConfig) -> SegmenterConfig {
+    SegmenterConfig::new(
+        raw.pause_duration,
+        raw.min_segment,
+        raw.max_segment,
+        raw.overlap,
+        raw.silence_rms,
+        raw.use_adaptive_vad,
+        AdaptiveVadConfig::new(
+            raw.enter_margin_db,
+            raw.hysteresis_db,
+            raw.min_enter_db,
+            raw.max_enter_db,
+        ),
+    )
+}
+
+/// Splits Int16 PCM samples into live segments with overlap (the offline
+/// counterpart of the streaming utterance logic: pause-gated boundaries,
+/// minimum segment glue, maximum segment hard cap, junction silence owned
+/// by no segment). Single pass over the source; the engine allocates
+/// only internal scratch (RMS timeline, plan) and never retains PCM.
+/// Offline call, not for the realtime callback. `config` NULL
+/// means defaults. When `out_specs` is NULL (or `capacity` is 0) the
+/// required entry count is written to `out_written` and `ND_OK` is
+/// returned; otherwise up to `capacity` entries are written and
+/// `ND_ERR_SMALL_BUFFER` is returned with the required count when the
+/// buffer is too small. Returns `ND_OK` or a positive `ND_ERR_*` code.
+#[no_mangle]
+pub extern "C" fn nd_live_plan(
+    samples: *const i16,
+    count: usize,
+    sample_rate: u32,
+    config: *const NdSegmenterConfig,
+    out_specs: *mut NdLiveSegment,
+    capacity: usize,
+    out_written: *mut usize,
+) -> i32 {
+    match catch_unwind(AssertUnwindSafe(|| {
+        let samples = slice_from(samples, count)?;
+        if out_written.is_null() {
+            set_last_error("null output pointer".to_string());
+            return Err(ND_ERR_NULL);
+        }
+        if sample_rate == 0 {
+            set_last_error("sample rate must be nonzero".to_string());
+            return Err(ND_ERR_ARG);
+        }
+        // SAFETY: the caller guarantees a valid config or NULL (ABI contract).
+        let engine_config = if config.is_null() {
+            SegmenterConfig::default()
+        } else {
+            segmenter_config_from(unsafe { &*config })
+        };
+        let rate = f64::from(sample_rate);
+        let plan = crate::segmenter::live_segments(samples, sample_rate, &engine_config);
+        // SAFETY: caller-owned count slot (ABI contract).
+        unsafe {
+            *out_written = plan.len();
+        }
+        if out_specs.is_null() || capacity == 0 {
+            return Ok(ND_OK);
+        }
+        if capacity < plan.len() {
+            set_last_error(format!(
+                "buffer too small: need {}, have {capacity}",
+                plan.len()
+            ));
+            return Err(ND_ERR_SMALL_BUFFER);
+        }
+        // SAFETY: the caller guarantees room for `capacity` entries.
+        let out = unsafe { std::slice::from_raw_parts_mut(out_specs, plan.len().min(capacity)) };
+        for (index, spec) in plan.iter().enumerate() {
+            let (has_overlap, overlap_start, overlap_end, overlap_seconds) =
+                match spec.overlap_range.clone() {
+                    Some(range) => (
+                        true,
+                        range.start,
+                        range.end,
+                        (range.end - range.start) as f64 / rate,
+                    ),
+                    None => (false, 0, 0, 0.0),
+                };
+            out[index] = NdLiveSegment {
+                index,
+                start_seconds: spec.start_seconds,
+                end_seconds: spec.end_seconds,
+                body_start: spec.body_range.start,
+                body_end: spec.body_range.end,
+                has_overlap,
+                overlap_start,
+                overlap_end,
+                overlap_seconds,
+            };
+        }
+        Ok(ND_OK)
+    })) {
+        Ok(code) => code.unwrap_or_else(|code| code),
+        Err(_) => fail(ND_ERR_PANIC, "panic in nd_live_plan".to_string()),
+    }
+}
+
+/// Fixed-length batch chunk planning math over sample counts (no audio
+/// content crosses the boundary): chunk bodies cover the source back to
+/// back with overlap tails, exactly like the host-side fixed-length
+/// planner. Buffering contract mirrors [`nd_live_plan`]: NULL output
+/// queries the required count, a short buffer yields
+/// `ND_ERR_SMALL_BUFFER` with the required count. Returns `ND_OK` or a
+/// positive `ND_ERR_*` code.
+#[no_mangle]
+pub extern "C" fn nd_batch_plan(
+    sample_count: usize,
+    sample_rate: u32,
+    max_segment: c_double,
+    overlap: c_double,
+    out_specs: *mut NdBatchChunk,
+    capacity: usize,
+    out_written: *mut usize,
+) -> i32 {
+    match catch_unwind(AssertUnwindSafe(|| {
+        if out_written.is_null() {
+            set_last_error("null output pointer".to_string());
+            return Err(ND_ERR_NULL);
+        }
+        if sample_rate == 0 {
+            set_last_error("sample rate must be nonzero".to_string());
+            return Err(ND_ERR_ARG);
+        }
+        let plan = crate::segmenter::batch_plan(sample_count, sample_rate, max_segment, overlap);
+        // SAFETY: caller-owned count slot (ABI contract).
+        unsafe {
+            *out_written = plan.len();
+        }
+        if out_specs.is_null() || capacity == 0 {
+            return Ok(ND_OK);
+        }
+        if capacity < plan.len() {
+            set_last_error(format!(
+                "buffer too small: need {}, have {capacity}",
+                plan.len()
+            ));
+            return Err(ND_ERR_SMALL_BUFFER);
+        }
+        // SAFETY: the caller guarantees room for `capacity` entries.
+        let out = unsafe { std::slice::from_raw_parts_mut(out_specs, plan.len().min(capacity)) };
+        for (spec, slot) in plan.iter().zip(out.iter_mut()) {
+            let (has_overlap, overlap_start, overlap_end) = match spec.overlap_range.clone() {
+                Some(range) => (true, range.start, range.end),
+                None => (false, 0, 0),
+            };
+            *slot = NdBatchChunk {
+                index: spec.index,
+                body_start_seconds: spec.body_start_seconds,
+                body_end_seconds: spec.body_end_seconds,
+                body_start: spec.body_range.start,
+                body_end: spec.body_range.end,
+                has_overlap,
+                overlap_start,
+                overlap_end,
+            };
+        }
+        Ok(ND_OK)
+    })) {
+        Ok(code) => code.unwrap_or_else(|code| code),
+        Err(_) => fail(ND_ERR_PANIC, "panic in nd_batch_plan".to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dictation session.
+// ---------------------------------------------------------------------------
 
 /// Creates a dictation session handle in the idle state.
 #[no_mangle]

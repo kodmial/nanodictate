@@ -11,15 +11,20 @@ import NanoDictateRustBridge
 // The deterministic subsystems listed below run on the engine by default:
 // model/profile resolution and portable STT defaults, transcript parsing,
 // failover ordering and deterministic retry/backoff, chunk text joining,
-// word diff and overlap tails, review decisions, and offline WAV
-// encode/decode. Each entry point fails loudly on engine errors — the
-// shipping path never silently falls back to the Swift reference.
-// Realtime VAD/input-gain/autostop/segmenter capture, networking
-// (URLSession/proxy/cookie transport), and macOS integration stay native.
+// word diff and overlap tails, review decisions, offline WAV
+// encode/decode, realtime audio (per-block RMS metrics, adaptive VAD,
+// input gain, silence auto-stop), and portable live/batch
+// segmentation/chunk-boundary planning. Each entry point fails loudly on
+// engine errors — the shipping path never silently falls back to the
+// Swift reference.
+// AVAudioEngine capture, AVAudioConverter/native resampling, device
+// handling, permissions, networking (URLSession/proxy/cookie transport),
+// the live pause/chunk state machine, PCM staging/materialization, and
+// macOS integration stay native.
 // The Swift reference implementations are retained until the final parity
 // gate in #123 removes them (see Tests/NanoDictateCoreTests/
-// RustDeterministicCutoverTests.swift for production-path proof and
-// RustParityTests.swift for reference parity).
+// RustDeterministicCutoverTests.swift and RustRealtimeAudioCutoverTests.swift
+// for production-path proof and RustParityTests.swift for reference parity).
 //
 // New code that needs deterministic shared behavior should enter through
 // this seam so the cutover is a call-site change, not a redesign.
@@ -349,6 +354,87 @@ public enum RustEngine {
   /// native). Engine failure throws loudly — never a silent Swift fallback.
   public static func reviewDecide(line: String?) throws -> Bool {
     try rustReviewDecide(line: line)
+  }
+
+  // MARK: - Realtime audio and segmentation (production cutover #133)
+
+  /// Builds the shipping realtime audio composition (per-block RMS
+  /// metrics, adaptive VAD, input gain, silence auto-stop) from the host
+  /// policy configs. Any handle failure throws loudly — the caller fails
+  /// the dictation start instead of silently running Swift-only audio.
+  public static func makeRealtimeAudio(
+    gainConfig: InputGainConfig,
+    vadConfig: AdaptiveVADConfig,
+    autoStopConfig: AutoStopConfig
+  ) throws -> RustRealtimeAudio {
+    try checkAvailable()
+    return try RustRealtimeAudio(
+      gainConfig: gainConfig, vadConfig: vadConfig, autoStopConfig: autoStopConfig)
+  }
+
+  /// Splits Int16 PCM samples into live segments with overlap through the
+  /// shared engine: the canonical boundary math for the shipping chunked
+  /// path. Engine equivalent of `AudioSegmenter.plan` (pause-gated
+  /// boundaries, minimum-segment glue, maximum-segment hard cap, glued
+  /// overlap tails); PCM stays in the source buffer until per-segment
+  /// encode. Engine failure throws loudly — never a silent Swift fallback.
+  public static func livePlan(
+    samples: [Int16],
+    sampleRate: Int = 16000,
+    config: AudioSegmenterConfig = .defaults
+  ) throws -> [AudioSegmentSpec] {
+    let engineConfig = RustSegmenterConfig(
+      pauseDuration: config.pauseDuration,
+      minSegment: config.minSegment,
+      maxSegment: config.maxSegment,
+      overlap: config.overlap,
+      silenceRMS: config.silenceRMS,
+      useAdaptiveVAD: config.useAdaptiveVAD,
+      enterMarginDb: config.vadConfig.enterMarginDb,
+      hysteresisDb: config.vadConfig.hysteresisDb,
+      minEnterDb: config.vadConfig.minEnterDb,
+      maxEnterDb: config.vadConfig.maxEnterDb
+    )
+    let segments = try rustLivePlan(
+      samples: samples, sampleRate: UInt32(max(0, sampleRate)), config: engineConfig)
+    return segments.map { spec in
+      AudioSegmentSpec(
+        index: spec.index,
+        start: spec.startSeconds,
+        end: spec.endSeconds,
+        bodyRange: spec.bodyRange,
+        overlapRange: spec.overlapRange,
+        overlapSeconds: spec.overlapSeconds
+      )
+    }
+  }
+
+  /// Fixed-length batch chunk boundaries through the shared engine:
+  /// bodies cover the source back to back with overlap tails, exactly
+  /// like the host-side fixed-length planner (no audio content crosses
+  /// the boundary, only counts). Engine failure throws loudly — never a
+  /// silent Swift fallback.
+  public static func batchBodySpecs(
+    sampleCount: Int,
+    sampleRate: Int,
+    maxSegment: TimeInterval,
+    overlap: TimeInterval
+  ) throws -> [BatchBodySpec] {
+    let chunks = try rustBatchPlan(
+      sampleCount: max(0, sampleCount),
+      sampleRate: UInt32(max(0, sampleRate)),
+      maxSegment: maxSegment,
+      overlap: overlap
+    )
+    return chunks.map { chunk in
+      BatchBodySpec(
+        index: chunk.index,
+        bodyStart: chunk.bodyStartSeconds,
+        bodyEnd: chunk.bodyEndSeconds,
+        bodyRange: chunk.bodyRange,
+        overlapRange: chunk.overlapRange
+      )
+    }
   }
 
   // MARK: - Private decoding

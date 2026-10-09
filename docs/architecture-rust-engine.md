@@ -136,16 +136,33 @@ requiring every future platform to expose identical ones.
 Native capture stays responsible for obtaining valid audio. The
 ingress into the engine is narrow and block-oriented:
 
-- `nd_vad_feed_samples` / `nd_gain_apply` transfer whole Float32 blocks
-  with explicit sample-rate metadata; there are no per-sample FFI calls.
-- The engine performs O(n) math with no allocation, no locks, no I/O,
-  and no synchronous network work on this path.
+- `nd_rms_f32` meters one Float32 block; `nd_vad_feed` /
+  `nd_vad_feed_samples` decide speech per block; `nd_gain_apply`
+  conditions the block in place; `nd_autostop_feed` accumulates silence
+  with the VAD hint. There are no per-sample FFI calls.
+- Handles are configured at construction (`nd_vad_new_with_config`,
+  `nd_gain_new_with_config`, `nd_autostop_new_with_config`) so host
+  policy (gain targets, VAD margins, auto-stop thresholds) is honored
+  without a Swift fallback; `nd_gain_reset` / `nd_autostop_reset` /
+  `nd_vad_reset` and `nd_vad_diagnostics` / `nd_gain_current_db` cover
+  session lifecycle and meter observability.
+- Offline boundary math is a single block call per recording or file:
+  `nd_live_plan` (pause-gated live segments with overlap) and
+  `nd_batch_plan` (fixed-length chunk bodies with overlap). The host
+  keeps owning the samples and materializes PCM through the returned
+  ranges.
+- Per-block realtime calls perform O(n) math with no allocation, no
+  locks, no I/O, and no synchronous network work on this path. The
+  offline planners (`nd_live_plan`, `nd_batch_plan`) allocate only
+  internal scratch (RMS timeline, plan) and never retain PCM; they are
+  not for the realtime callback.
 - VAD/autostop decisions consume the raw (pre-gain) signal; the
   amplified signal feeds only level meters and the recording.
-- Overhead is measured on the macOS side around the bridge call; if a
-  boundary ever shows material latency/copy/allocation regression, the
-  boundary is rebatched before any algorithm is accepted into the
-  engine.
+- Overhead is measured on the macOS side around the bridge call
+  (`RealtimeAudioStats` on the shipping path; `RustParityGate`
+  budgets); if a boundary ever shows material latency/copy/allocation
+  regression, the boundary is rebatched before any algorithm is accepted
+  into the engine.
 
 ## Host capability model
 
