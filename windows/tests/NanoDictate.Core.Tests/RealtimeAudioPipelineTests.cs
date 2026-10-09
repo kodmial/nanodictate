@@ -175,6 +175,74 @@ public sealed class RealtimeAudioPipelineTests
     }
 
     [Fact]
+    public void ConverterBindsToFirstBlockFormatInsteadOfConstructorFormat()
+    {
+        // The constructor format may be the unresolved device placeholder
+        // (WASAPI resolves the mix format after the pipeline is built); the
+        // converter must follow the first captured block instead.
+        using var pipeline = new RealtimeAudioPipeline(Device48kStereo);
+        pipeline.Start();
+        var resolved = new AudioFormat(16000, 1, 32, true);
+        var frames = new float[480];
+        Array.Fill(frames, 0.02f);
+        for (var i = 0; i < 4; i++)
+        {
+            pipeline.IngestDeviceBlock(new CapturedBlock(frames, 480, resolved));
+        }
+        Assert.True(pipeline.BlocksIngested >= 1);
+        pipeline.Cancel();
+    }
+
+    [Fact]
+    public void MidSessionFormatChangeIsRejected()
+    {
+        using var pipeline = new RealtimeAudioPipeline(Device48kStereo);
+        pipeline.Start();
+        pipeline.IngestDeviceBlock(ConstantBlock(0.02f));
+        var changed = new AudioFormat(44100, 2, 32, true);
+        var frames = new float[480 * changed.Channels];
+        Assert.Throws<NanoException>(
+            () => pipeline.IngestDeviceBlock(new CapturedBlock(frames, 480, changed)));
+        pipeline.Cancel();
+    }
+
+    [Fact]
+    public void AbortedSessionHarvestsExactlyOnce()
+    {
+        using var pipeline = new RealtimeAudioPipeline(Device48kStereo);
+        pipeline.Start();
+        FeedEngineBlocks(pipeline, 0.02f, 2);
+        pipeline.Abort();
+        Assert.Equal(DictationState.Idle, pipeline.State);
+        Assert.True(pipeline.TryHarvestAborted(out var first));
+        Assert.True(first.Samples.Count > 0);
+        Assert.False(pipeline.TryHarvestAborted(out _));
+    }
+
+    [Fact]
+    public void CancelledSessionIsNotHarvestable()
+    {
+        using var pipeline = new RealtimeAudioPipeline(Device48kStereo);
+        pipeline.Start();
+        FeedEngineBlocks(pipeline, 0.02f, 2);
+        pipeline.Cancel();
+        Assert.False(pipeline.TryHarvestAborted(out _));
+    }
+
+    [Fact]
+    public void StoppedSessionIsNotHarvestable()
+    {
+        using var pipeline = new RealtimeAudioPipeline(Device48kStereo);
+        pipeline.Start();
+        FeedEngineBlocks(pipeline, 0.02f, 2);
+        var stopped = pipeline.Stop();
+        Assert.True(stopped.Samples.Count > 0);
+        Assert.False(pipeline.TryHarvestAborted(out _));
+        pipeline.FinishTranscription();
+        Assert.Equal(DictationState.Idle, pipeline.State);
+    }
+
+    [Fact]
     public void SegmentationPlansThroughSharedEngine()
     {
         // Batch planning is pure count math: deterministic chunk cover.

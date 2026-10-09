@@ -153,7 +153,7 @@ public sealed class DictationCaptureService : IDisposable
         {
             // Best effort: the session abort below is authoritative.
         }
-        _pipeline.Cancel();
+        _pipeline.Abort();
         DeviceChanged?.Invoke(error);
     }
 

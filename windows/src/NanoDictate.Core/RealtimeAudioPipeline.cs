@@ -40,7 +40,8 @@ public sealed class RealtimeAudioPipeline : IDisposable
 
     private readonly object _gate = new();
     private readonly SessionHandle _session = new();
-    private readonly AudioFormatConverter _converter;
+    private AudioFormatConverter _converter;
+    private bool _formatBound;
     private readonly float[] _staging;
     private int _staged;
 
@@ -50,6 +51,7 @@ public sealed class RealtimeAudioPipeline : IDisposable
 
     private bool _sessionLive;
     private ulong _generation;
+    private bool _harvestable;
     private bool _captureReadyFired;
     private bool _autoStopFired;
     private bool _disposed;
@@ -78,6 +80,9 @@ public sealed class RealtimeAudioPipeline : IDisposable
 
     public RealtimeAudioPipeline(AudioFormat deviceFormat)
     {
+        // Placeholder binding only: WASAPI resolves the endpoint mix format
+        // during Start, after this pipeline is constructed. The converter
+        // rebinds to the first CapturedBlock.Format (see IngestDeviceBlock).
         deviceFormat.Validate();
         _converter = new AudioFormatConverter(deviceFormat);
         _staging = new float[EngineBlockSamples];
@@ -136,6 +141,8 @@ public sealed class RealtimeAudioPipeline : IDisposable
             _stop = new AutoStopHandle();
 
             _converter.Reset();
+            _formatBound = false;
+            _harvestable = false;
             _collected.Clear();
             _staged = 0;
             _captureReadyFired = false;
@@ -189,6 +196,19 @@ public sealed class RealtimeAudioPipeline : IDisposable
         IReadOnlyList<short>? stopToFire = null;
         lock (_gate)
         {
+            // Bind to the resolved capture format on the first block: the
+            // constructor format may be the unresolved device placeholder.
+            // A format change mid-session invalidates resample state, so the
+            // block is rejected loudly instead of silently desyncing.
+            if (!_formatBound)
+            {
+                _converter = new AudioFormatConverter(block.Format);
+                _formatBound = true;
+            }
+            else if (_converter.Device != block.Format)
+            {
+                throw new NanoException(-1, "capture block format changed during session");
+            }
             var produced = _converter.Convert(
                 block.InterleavedFrames.AsSpan(), block.FrameCount, outBuffer.AsSpan());
             _deviceFramesConsumed = _converter.DeviceFramesConsumed;
@@ -322,6 +342,7 @@ public sealed class RealtimeAudioPipeline : IDisposable
             HarvestTailLocked();
             _session.OnEvent(SessionEvent.StopRequested, _generation);
             _sessionLive = false;
+            _harvestable = false;
             samples = new List<short>(_collected);
             metrics = SnapshotLocked();
         }
@@ -377,6 +398,9 @@ public sealed class RealtimeAudioPipeline : IDisposable
     {
         lock (_gate)
         {
+            // A user cancel discards the session: prior aborted audio must
+            // not become harvestable afterwards either.
+            _harvestable = false;
             if (!_sessionLive)
             {
                 return;
@@ -387,11 +411,34 @@ public sealed class RealtimeAudioPipeline : IDisposable
     }
 
     /// <summary>
-    /// Harvests whatever was captured before an abort (device change or
-    /// cancel): flushes the converter remainder through the engine and
-    /// returns the partial recording with engine-planned segments.
-    /// Returns false when nothing was captured. Unlike <see cref="Stop"/>,
-    /// this never drives session events: the session already ended.
+    /// Aborts the live session on a device change (state -> Idle, readiness
+    /// suppressed) while preserving the partial recording for a single
+    /// <see cref="TryHarvestAborted"/> harvest. Unlike <see cref="Cancel"/>,
+    /// the captured audio remains retrievable exactly once.
+    /// </summary>
+    public void Abort()
+    {
+        lock (_gate)
+        {
+            if (!_sessionLive)
+            {
+                return;
+            }
+            _session.OnEvent(SessionEvent.Cancelled, _generation);
+            _sessionLive = false;
+            _harvestable = true;
+        }
+    }
+
+    /// <summary>
+    /// Harvests whatever was captured before a device-change abort (see
+    /// <see cref="Abort"/>): flushes the converter remainder through the
+    /// engine and returns the partial recording with engine-planned
+    /// segments. Single-use: succeeds at most once per abort; normal
+    /// <see cref="Stop"/> and user <see cref="Cancel"/> are never
+    /// harvestable. Returns false when nothing was captured. Unlike
+    /// <see cref="Stop"/>, this never drives session events: the session
+    /// already ended.
     /// </summary>
     public bool TryHarvestAborted(out PipelineStopResult result)
     {
@@ -400,11 +447,12 @@ public sealed class RealtimeAudioPipeline : IDisposable
         lock (_gate)
         {
             ThrowIfDisposed();
-            if (_sessionLive || (_blocksIngested == 0 && _collected.Count == 0))
+            if (_sessionLive || !_harvestable || (_blocksIngested == 0 && _collected.Count == 0))
             {
                 result = null!;
                 return false;
             }
+            _harvestable = false;
             HarvestTailLocked();
             samples = new List<short>(_collected);
             metrics = SnapshotLocked();

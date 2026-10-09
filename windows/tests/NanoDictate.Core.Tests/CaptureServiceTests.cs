@@ -116,6 +116,31 @@ public sealed class CaptureServiceTests
     }
 
     [Fact]
+    public void AbortedHarvestIsSingleUseAndCancelYieldsNothing()
+    {
+        using var source = new SyntheticCaptureSource(Device48kStereo);
+        using var service = new DictationCaptureService(source);
+        service.DeviceChanged += _ => { };
+        EnqueueSpeech(source, 30);
+        service.Start();
+        Assert.True(WaitFor(() => service.IsCaptureReady, TimeSpan.FromSeconds(10)));
+        source.SimulateDeviceChange();
+        Assert.True(WaitFor(() => !service.IsRunning, TimeSpan.FromSeconds(5)));
+        var first = service.Stop();
+        Assert.True(first.Samples.Count > 0);
+        // A second harvest must not replay the aborted recording.
+        var second = service.Stop();
+        Assert.Empty(second.Samples);
+        // A user cancel likewise produces no harvestable recording, even
+        // with captured audio pending.
+        EnqueueSpeech(source, 30);
+        service.Start();
+        Assert.True(WaitFor(() => service.IsCaptureReady, TimeSpan.FromSeconds(10)));
+        service.Cancel();
+        Assert.Empty(service.Stop().Samples);
+    }
+
+    [Fact]
     public void NoDroppedInitialSamples()
     {
         using var source = new SyntheticCaptureSource(Device48kStereo);

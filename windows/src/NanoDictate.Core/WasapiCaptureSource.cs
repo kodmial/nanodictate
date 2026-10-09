@@ -257,6 +257,7 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
         var client = _client;
         var capture = _capture;
         AudioFormat format;
+        Exception? deviceError = null;
         lock (_gate)
         {
             format = _format;
@@ -299,7 +300,11 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
         }
         catch (Exception ex)
         {
-            DeviceChanged?.Invoke(ex);
+            // Retained until cleanup completes: raising DeviceChanged here
+            // would run before the finally block releases the COM objects,
+            // so a subscriber restarting synchronously would hit "capture
+            // worker is still stopping".
+            deviceError = ex;
         }
         finally
         {
@@ -325,6 +330,13 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
                     _worker = null;
                 }
             }
+        }
+        // Notify after cleanup so a subscriber can restart immediately, and
+        // only while capture was active: failures surfacing after Stop or
+        // Dispose began are shutdown races, not device failures.
+        if (deviceError is not null && _running)
+        {
+            DeviceChanged?.Invoke(deviceError);
         }
     }
 
