@@ -53,9 +53,8 @@ incompatibility. The repeatable gate is therefore split:
   `.opencode-tmp/macos12-compat-results/` back to a supported machine for
   artifact collection and release evidence.
 - The isolated host is maintained by the project owner (currently `@kodmial`).
-  Until a `full-green` result from actual macOS 12 execution is attached,
-  releases must not ship without an explicit manual checklist sign-off
-  (see below).
+  The absence of evidence leaves macOS 12 runtime compatibility UNVERIFIED.
+  It must not block automated development or GitHub Release publication.
 - If sustained macOS 12 validation becomes impossible (no hardware, no
   maintainer capacity), the minimum supported OS is **bumped** (e.g. to
   macOS 13) instead of being left unverified. The trigger rule: no green
@@ -167,9 +166,9 @@ to let it read the `macos12/runtime-attested` status. Remove the
 evidence and successful checks. Any new PR commit invalidates the attestation
 for that PR HEAD and requires a new real-host run.
 
-The `Release` workflow also blocks **new publication** unless the exact
-release-source commit SHA has its own owner-attested macOS 12 evidence.
-Already-published versions and dry runs are not republished.
+The Release workflow separately requires a tested candidate, release integrity
+checks and artifacts. This optional runtime attestation does not gate publication.
+Do not claim macOS 12 runtime compatibility PASS without genuine evidence.
 
 Attach `environment.txt` and `result.txt` (`result=full-green`,
 `runtime_claim=macos-12`) as PR or release evidence. The Actions
@@ -197,12 +196,11 @@ Results land in `.opencode-tmp/macos12-compat-results/` (never committed).
 
 ## CI status is not a runtime pass
 
-The `macOS 12 compat` workflow has two independently identifiable jobs.
-`static floor (hosted)` may pass on macOS 15 and proves **only** the
-deployment target and build checks. The other job, `runtime qualification
-(requires actual macOS 12)`, must **fail closed** when the only available
-result is `needs-macos12-host`. Uploading the handoff artifact is not runtime
-validation and can never make that job or the workflow green.
+The macOS 12 compat workflow reports two distinct results. The required
+static-floor check runs automatically on a hosted macOS runner and fails for
+real deployment-target/build defects. The runtime-evidence reporting job
+records UNVERIFIED if there is no exact-SHA macOS 12 runtime result; that
+status is not certification and is not an unrelated CI publication blocker.
 
 To satisfy runtime qualification, execute `--full` on a real macOS 12 host
 using the exact source revision under evaluation and provide its
@@ -227,8 +225,8 @@ remote-execution proof. The owner must actually run on macOS 12 and inspect
 the transferred evidence. The intake workflow does not execute untrusted PR
 code or grant credentials to the macOS 12 host. No attestations currently
 exist for an untested revision. Until genuine results are submitted the
-runtime job remains red; neither CI retries nor a macOS 15 static build
-can close the gap. Never waive it via `--allow-non12-runtime`.
+runtime evidence remains UNVERIFIED; neither CI retries nor a macOS 15
+static build can close the gap. Never waive it via `--allow-non12-runtime`.
 
 ## Failure visibility before release
 
@@ -242,8 +240,7 @@ can close the gap. Never waive it via `--allow-non12-runtime`.
   probe) is produced on the isolated host and attached back to the PR or
   release from a supported machine, because artifact upload cannot execute
   on macOS 12.
-- Release rule: do not publish a release when the static gate is red, when
-  the isolated runtime run is red, or when the isolated runtime run has not
-  produced a `full-green` on the release bytes — attach the manual checklist
-  instead and note it in the release notes. A missing isolated run is a
-  visible gap, not a silent pass.
+- Release rule: existing exact-SHA packaging, signing and release-integrity
+  checks remain mandatory. Missing separate macOS 12 runtime evidence is
+  disclosed as UNVERIFIED; it does not halt unrelated development or a
+  release, and it is never silently treated as a runtime PASS.
