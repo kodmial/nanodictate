@@ -118,11 +118,64 @@ permissions:
   pull-requests: write
 
 jobs:
+  # Only the control-plane lookup runs on Linux. Native macOS task coding,
+  # review repair and qualification execute on macOS after the platform lookup.
+  resolve-platform:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: read
+      pull-requests: read
+    outputs:
+      runner_os: ${{ steps.route.outputs.runner_os }}
+    steps:
+      - name: Select the implementation runner from task platform labels
+        id: route
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        env:
+          TASK_ISSUE_NUMBER: ${{ inputs.issue_number }}
+          TASK_PR_NUMBER: ${{ inputs.pr_number }}
+          TASK_HEAD_REF: ${{ inputs.head_ref }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const positive = raw => {
+              const n = Number(raw || 0);
+              return Number.isSafeInteger(n) && n > 0 ? n : 0;
+            };
+            const eventPR = positive(context.payload.pull_request?.number) ||
+              (context.payload.issue?.pull_request ? positive(context.payload.issue.number) : 0);
+            const prNumber = positive(process.env.TASK_PR_NUMBER) || eventPR;
+            let issueNumber = positive(process.env.TASK_ISSUE_NUMBER) ||
+              (!eventPR ? positive(context.payload.issue?.number) : 0);
+            const labels = new Set();
+            const collect = item => (item?.labels || []).forEach(
+              label => labels.add(typeof label === 'string' ? label : label.name)
+            );
+
+            if (prNumber) {
+              const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+              collect(pr);
+              // Follow the immutable implementation issue identity rather
+              // than guessing platform from a PR title or a model prompt.
+              issueNumber ||= positive(pr.body?.match(/continuum-task-context[^>]*issue=(\d+)/)?.[1]) ||
+                positive(pr.head.ref.match(/^opencode\/issue(\d+)-/)?.[1]);
+            }
+            issueNumber ||= positive((process.env.TASK_HEAD_REF || '').match(/^opencode\/issue(\d+)-/)?.[1]);
+            if (issueNumber) {
+              const { data: issue } = await github.rest.issues.get({ owner, repo, issue_number: issueNumber });
+              collect(issue);
+            }
+            const runner = labels.has('platform:macos') ? 'macos-15' : '';
+            core.setOutput('runner_os', runner);
+            core.notice(`Native coding runner: ${runner || 'existing Continuum default'}; issue #${issueNumber || '-'}, PR #${prNumber || '-'}, labels: ${[...labels].join(', ')}`);
+
   call:
+    needs: resolve-platform
     uses: kodmial/continuum/.github/workflows/continuum-opencode.yml@main
     secrets: inherit
     with:
       continuum_ref: main
+      runner_os: "${{ needs.resolve-platform.outputs.runner_os }}"
       mode: "${{ inputs.mode }}"
       issue_number: "${{ inputs.issue_number }}"
       pr_number: "${{ inputs.pr_number }}"
