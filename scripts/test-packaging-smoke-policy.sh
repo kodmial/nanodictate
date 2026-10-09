@@ -25,6 +25,14 @@ set -uo pipefail
 REPO_ROOT=$(git rev-parse --show-toplevel) || exit 1
 CALLER="${REPO_ROOT}/.github/workflows/packaging-smoke.yml"
 ENGINE="${REPO_ROOT}/.github/workflows/nanodictate-packaging-smoke-engine.yml"
+DECISION="${REPO_ROOT}/scripts/packaging-smoke-incident-decision.sh"
+SELF="${REPO_ROOT}/scripts/test-packaging-smoke-policy.sh"
+
+# Single source of truth for the incident decision: the workflow decision
+# step executes this script and the matrix below exercises the same function,
+# so the test cannot pass against a stale copy of the workflow logic.
+# shellcheck source=scripts/packaging-smoke-incident-decision.sh
+source "$DECISION"
 
 mkdir -p "${REPO_ROOT}/.opencode-tmp" || exit 1
 TMP_DIR=$(mktemp -d "${REPO_ROOT}/.opencode-tmp/packaging-smoke-policy-tests.XXXXXX") || exit 1
@@ -57,25 +65,9 @@ assert_contains() {
   fi
 }
 
-# Mirror of the engine's incident decision (keep in sync with the inline
-# github-script in nanodictate-packaging-smoke-engine.yml):
-#   green        -> success/success
-#   incident     -> any leg failure/timed_out
-#   superseded   -> not green but no failure (cancelled/skipped)
-smoke_incident_decision() {
-  local hb=$1 mp=$2
-  local hb_failed=0 mp_failed=0
-  [[ "$hb" == "failure" || "$hb" == "timed_out" ]] && hb_failed=1
-  [[ "$mp" == "failure" || "$mp" == "timed_out" ]] && mp_failed=1
-  if [[ "$hb" == "success" && "$mp" == "success" ]]; then
-    printf 'green'
-  elif [[ $hb_failed -eq 1 || $mp_failed -eq 1 ]]; then
-    printf 'incident'
-  else
-    printf 'superseded'
-  fi
-}
-
+# `smoke_incident_decision` is defined in scripts/packaging-smoke-incident-decision.sh
+# (sourced above) and executed by the engine workflow decision step; the
+# matrix below exercises that shared implementation directly.
 assert_decision() {
   local name=$1 hb=$2 mp=$3 expected=$4
   local actual
@@ -125,12 +117,20 @@ fi
 
 assert_contains 'incident: engine workflow exists' \
   "$ENGINE" 'production-incident:'
-assert_contains 'incident: failure predicate covers failure and timed_out' \
-  "$ENGINE" "const failed = (r) => r === 'failure' || r === 'timed_out'"
-assert_contains 'incident: anyFailed combines both channels' \
-  "$ENGINE" 'const anyFailed = failed(hb) || failed(mp)'
+assert_contains 'incident: shared decision script exists' \
+  "$DECISION" 'smoke_incident_decision()'
+# The needle intentionally holds the literal `$DECISION`.
+# shellcheck disable=SC2016
+assert_contains 'incident: policy test sources the shared decision (no copy)' \
+  "$SELF" 'source "$DECISION"'
+assert_contains 'incident: workflow delegates to the shared decision script' \
+  "$ENGINE" 'scripts/packaging-smoke-incident-decision.sh'
+assert_contains 'incident: decision step publishes the shared outcome' \
+  "$ENGINE" 'incident-decision'
+assert_contains 'incident: reporter consumes the shared decision' \
+  "$ENGINE" "steps.incident-decision.outputs.decision"
 assert_contains 'incident: superseded runs return without filing' \
-  "$ENGINE" 'if (!allGreen && !anyFailed)'
+  "$ENGINE" "decision === 'superseded'"
 assert_contains 'incident: superseded path does not call setFailed' \
   "$ENGINE" 'superseded or skipped run carries no product signal'
 assert_contains 'incident: real failures still fail the job' \
@@ -138,7 +138,7 @@ assert_contains 'incident: real failures still fail the job' \
 assert_contains 'incident: recovery still closes the issue when green' \
   "$ENGINE" 'Closed recovered incident'
 
-# --- 3. Decision matrix (mirrors the engine JS) ------------------------------
+# --- 3. Decision matrix (shared implementation) ------------------------------
 
 assert_decision 'decision: success/success is green' success success green
 assert_decision 'decision: failure/success files an incident' failure success incident

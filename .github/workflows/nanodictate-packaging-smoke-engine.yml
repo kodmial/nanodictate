@@ -698,6 +698,21 @@ jobs:
       contents: read
       issues: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          # The incident decision script is read from the worktree; the token
+          # must not stay in .git/config where workflow code could reuse it
+          # (CWE-522). The incident reporter authenticates explicitly via
+          # github-token below.
+          persist-credentials: false
+
+      - name: Decide incident handling
+        id: incident-decision
+        run: |
+          decision="$(bash scripts/packaging-smoke-incident-decision.sh "${{ needs.production-homebrew.result }}" "${{ needs.production-macports.result }}")"
+          printf 'decision=%s\n' "$decision" >> "$GITHUB_OUTPUT"
+
       - name: Download production smoke results
         if: always()
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
@@ -720,10 +735,11 @@ jobs:
 
             const hb = '${{ needs.production-homebrew.result }}';
             const mp = '${{ needs.production-macports.result }}';
-            const green = (r) => r === 'success';
-            const failed = (r) => r === 'failure' || r === 'timed_out';
-            const allGreen = green(hb) && green(mp);
-            const anyFailed = failed(hb) || failed(mp);
+            // Single source of truth for the incident decision:
+            // scripts/packaging-smoke-incident-decision.sh, executed by the
+            // Decide incident handling step above.
+            const decision = '${{ steps.incident-decision.outputs.decision }}';
+            const anyFailed = decision === 'incident';
 
             function readDirTree(dir, out) {
               if (!fs.existsSync(dir)) return;
@@ -832,11 +848,11 @@ jobs:
             // its own. Filing a P0 for a superseded run was issue #172 (run
             // 485 cancelled by run 487 with a green Homebrew lifecycle and a
             // healthy MacPorts install, yet a P0 was filed).
-            if (!allGreen && !anyFailed) {
+            if (decision === 'superseded') {
               core.notice('Production legs did not fail (homebrew=' + hb + ' macports=' + mp + '); superseded or skipped run carries no product signal, so no incident is filed. The superseding run reports on its own.');
               return;
             }
-            if (!allGreen) {
+            if (anyFailed) {
               if (existing) {
                 await github.rest.issues.createComment({
                   owner, repo, issue_number: existing.number,
