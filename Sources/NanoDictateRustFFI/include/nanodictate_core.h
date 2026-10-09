@@ -123,6 +123,8 @@ typedef struct NdByteBuffer {
 
 
 
+
+
 /**
  * Returns the ABI version ([`ND_ABI_VERSION`]).
  */
