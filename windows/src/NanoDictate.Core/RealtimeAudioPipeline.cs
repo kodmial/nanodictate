@@ -25,10 +25,11 @@ namespace NanoDictate.Core;
 /// stop/cancel/failure. Stale generations are rejected by the engine.
 ///
 /// Realtime bounds: per-block work is O(n) math with no allocation beyond
-/// the block itself, no locks held across engine calls... (the single
-/// instance lock serializes handle access because the handles are not
-/// thread-safe), no I/O, and no network work. Engine errors drop the
-/// block fail-closed (counted, never Swift/C#-processed).
+/// the block itself, no I/O, and no network work. The single instance
+/// lock is held across conversion, staging, and per-block engine
+/// composition because the handles are not thread-safe; engine errors
+/// drop the block fail-closed (counted, never Swift/C#-processed), and
+/// CaptureReady/AutoStop handlers always run after the lock is released.
 /// </summary>
 public sealed class RealtimeAudioPipeline : IDisposable
 {
@@ -173,16 +174,19 @@ public sealed class RealtimeAudioPipeline : IDisposable
     /// </summary>
     public void IngestDeviceBlock(CapturedBlock block)
     {
-        // Convert and stage under the session lock: the resample phase
-        // and the staging buffer are session state shared with
-        // Start/HarvestTailLocked. Full engine blocks are copied aside
-        // and driven through the engine after the lock is released, so
-        // CaptureReady/AutoStop handlers never run while _gate is held.
+        // Conversion, staging, and per-block engine composition run as one
+        // _gate-protected operation: the resample phase, the staging
+        // buffer, and the session latches are shared with
+        // Start/Stop/Cancel/HarvestTailLocked, so no Stop/Cancel/Start can
+        // interleave between staging a full block and driving it through
+        // the engine. Event payloads are collected under the lock and the
+        // CaptureReady/AutoStop handlers run after it is released.
         var capacity = Math.Max(
             EngineBlockSamples * 2,
             (int)((long)block.FrameCount * EngineSampleRate / Math.Max(1, block.Format.SampleRate)) + 16);
         var outBuffer = new float[capacity];
-        List<float[]>? ready = null;
+        CaptureMetrics? readyToFire = null;
+        IReadOnlyList<short>? stopToFire = null;
         lock (_gate)
         {
             var produced = _converter.Convert(
@@ -199,105 +203,102 @@ public sealed class RealtimeAudioPipeline : IDisposable
                 offset += take;
                 if (_staged == EngineBlockSamples)
                 {
-                    var copy = new float[EngineBlockSamples];
-                    Array.Copy(_staging, copy, EngineBlockSamples);
-                    (ready ??= new List<float[]>()).Add(copy);
+                    ulong start = CaptureClock.Nanos;
+                    try
+                    {
+                        if (_sessionLive && _vad is not null && _gain is not null && _stop is not null)
+                        {
+                            ProcessEngineBlockLocked(
+                                _staging.AsSpan(),
+                                out var firedReady,
+                                out var readyMetrics,
+                                out var firedStop,
+                                out var stopSnapshot);
+                            if (firedReady && readyToFire is null)
+                            {
+                                readyToFire = readyMetrics;
+                            }
+                            if (firedStop && stopToFire is null && stopSnapshot is not null)
+                            {
+                                stopToFire = stopSnapshot;
+                            }
+                        }
+                    }
+                    catch (NanoException)
+                    {
+                        _engineErrors++;
+                    }
+                    finally
+                    {
+                        ulong elapsed = CaptureClock.Nanos - start;
+                        _totalBlockNanos += elapsed;
+                        if (elapsed > _maxBlockNanos)
+                        {
+                            _maxBlockNanos = elapsed;
+                        }
+                    }
                     _staged = 0;
                 }
             }
         }
-        if (ready is not null)
+        if (readyToFire.HasValue)
         {
-            foreach (var engineBlock in ready)
-            {
-                IngestEngineBlock(engineBlock);
-            }
+            CaptureReady?.Invoke(readyToFire.Value);
+        }
+        if (stopToFire is not null)
+        {
+            AutoStop?.Invoke(stopToFire);
         }
     }
 
     /// <summary>
-    /// One realtime engine block through the shared Rust composition.
-    /// Fail-closed: engine errors drop the block and count it.
+    /// Runs the Rust composition for one full engine block. Caller holds
+    /// <c>_gate</c>; the session is live and the handles are non-null.
+    /// Fail-closed: engine errors propagate to the caller, which counts
+    /// the dropped block. Event payloads are returned for invocation
+    /// after the lock is released.
     /// </summary>
-    private void IngestEngineBlock(float[] monoBlock)
+    private void ProcessEngineBlockLocked(
+        Span<float> span,
+        out bool firedReady,
+        out CaptureMetrics readyMetrics,
+        out bool firedStop,
+        out IReadOnlyList<short>? stopSnapshot)
     {
-        ulong start = CaptureClock.Nanos;
-        bool firedReady = false;
-        bool firedStop = false;
-        IReadOnlyList<short>? stopSnapshot = null;
-        CaptureMetrics readyMetrics = CaptureMetrics.Empty;
-        try
-        {
-            float rawRms;
-            bool isSpeech;
-            float amplifiedRms;
-            lock (_gate)
-            {
-                if (!_sessionLive || _vad is null || _gain is null || _stop is null)
-                {
-                    return;
-                }
-                var span = monoBlock.AsSpan();
-                rawRms = NanoEngine.RmsF32(span);
-                isSpeech = _vad.FeedSamples(span, EngineSampleRate);
-                // AGC conditions the block in place; the recording below
-                // sees the amplified signal, VAD/auto-stop saw the raw one.
-                amplifiedRms = _gain.Apply(span, rawRms, EngineSampleRate);
-                var duration = (double)monoBlock.Length / EngineSampleRate;
-                var shouldStop = _stop.Feed(rawRms, duration, isSpeech);
-                _ = amplifiedRms;
+        var rawRms = NanoEngine.RmsF32(span);
+        var isSpeech = _vad!.FeedSamples(span, EngineSampleRate);
+        // AGC conditions the block in place; the recording below
+        // sees the amplified signal, VAD/auto-stop saw the raw one.
+        var amplifiedRms = _gain!.Apply(span, rawRms, EngineSampleRate);
+        var duration = (double)span.Length / EngineSampleRate;
+        var shouldStop = _stop!.Feed(rawRms, duration, isSpeech);
+        _ = amplifiedRms;
 
-                // Stage amplified PCM for the recording (float -> int16).
-                foreach (var s in span)
-                {
-                    var clamped = Math.Clamp(s, -1.0f, 1.0f);
-                    _collected.Add((short)Math.Round(clamped * 32767.0f));
-                }
-                _blocksIngested++;
+        // Stage amplified PCM for the recording (float -> int16).
+        foreach (var s in span)
+        {
+            var clamped = Math.Clamp(s, -1.0f, 1.0f);
+            _collected.Add((short)Math.Round(clamped * 32767.0f));
+        }
+        _blocksIngested++;
 
-                if (!_captureReadyFired)
-                {
-                    _session.OnEvent(SessionEvent.FirstBuffer, _generation);
-                    _firstBufferNanos = CaptureClock.Nanos;
-                    _captureReadyFired = true;
-                    firedReady = true;
-                    readyMetrics = SnapshotLocked();
-                }
-                if (shouldStop && !_autoStopFired)
-                {
-                    _autoStopFired = true;
-                    firedStop = true;
-                    stopSnapshot = _collected.ToArray();
-                }
-            }
-            if (firedReady)
-            {
-                CaptureReady?.Invoke(readyMetrics);
-            }
-            if (firedStop && stopSnapshot is not null)
-            {
-                AutoStop?.Invoke(stopSnapshot);
-            }
-        }
-        catch (NanoException)
+        firedReady = false;
+        readyMetrics = CaptureMetrics.Empty;
+        if (!_captureReadyFired)
         {
-            lock (_gate)
-            {
-                _engineErrors++;
-            }
-            // Fail-closed: the block is dropped, never C#-processed.
+            _session.OnEvent(SessionEvent.FirstBuffer, _generation);
+            _firstBufferNanos = CaptureClock.Nanos;
+            _captureReadyFired = true;
+            firedReady = true;
+            readyMetrics = SnapshotLocked();
         }
-        finally
+        firedStop = false;
+        stopSnapshot = null;
+        if (shouldStop && !_autoStopFired)
         {
-            ulong elapsed = CaptureClock.Nanos - start;
-            lock (_gate)
-            {
-                _totalBlockNanos += elapsed;
-                if (elapsed > _maxBlockNanos)
-                {
-                    _maxBlockNanos = elapsed;
-                }
-            }
+            _autoStopFired = true;
+            firedStop = true;
+            stopSnapshot = _collected.ToArray();
         }
     }
 
