@@ -119,6 +119,62 @@ typedef struct NdByteBuffer {
   size_t cap;
 } NdByteBuffer;
 
+/**
+ * Portable live-segmentation configuration. Mirrors the host-side
+ * segmenter policy: pause length that closes an utterance, minimum and
+ * maximum segment lengths, glued overlap, and the adaptive speech
+ * classifier (fixed legacy threshold when `use_adaptive_vad` is false).
+ */
+typedef struct NdSegmenterConfig {
+  double pause_duration;
+  double min_segment;
+  double max_segment;
+  double overlap;
+  float silence_rms;
+  bool use_adaptive_vad;
+  float enter_margin_db;
+  float hysteresis_db;
+  float min_enter_db;
+  float max_enter_db;
+} NdSegmenterConfig;
+
+/**
+ * One live segment plan entry. Sample ranges address the source buffer
+ * at `sample_rate` (0-based, end-exclusive); the overlap window is the
+ * tail of the previous body (`has_overlap` false for the first
+ * segment). The host owns the samples and materializes PCM on demand
+ * through these ranges; the engine only decides boundaries.
+ */
+typedef struct NdLiveSegment {
+  size_t index;
+  double start_seconds;
+  double end_seconds;
+  size_t body_start;
+  size_t body_end;
+  bool has_overlap;
+  size_t overlap_start;
+  size_t overlap_end;
+  double overlap_seconds;
+} NdLiveSegment;
+
+/**
+ * One fixed-length batch chunk plan entry. Bodies cover the source back
+ * to back with no gaps and no overlaps; every chunk but the first
+ * starts with the tail of the previous body as context overlap.
+ */
+typedef struct NdBatchChunk {
+  size_t index;
+  double body_start_seconds;
+  double body_end_seconds;
+  size_t body_start;
+  size_t body_end;
+  bool has_overlap;
+  size_t overlap_start;
+  size_t overlap_end;
+} NdBatchChunk;
+
+
+
 
 
 /**
@@ -184,6 +240,22 @@ int32_t nd_wav_decode_info(const uint8_t *data,
                            size_t *out_sample_count);
 
 /**
+ * Full WAV header metadata without copying samples: sample rate,
+ * channels, bits per sample, PCM payload offset/size, and sample count.
+ * Only the window up to the `data` chunk header must be present. This is
+ * the file-backed batch source contract (the streaming capture path never
+ * parses headers). Returns `ND_OK` or a positive `ND_ERR_*` code.
+ */
+int32_t nd_wav_header_full(const uint8_t *data,
+                           size_t len,
+                           uint32_t *out_sample_rate,
+                           uint16_t *out_channels,
+                           uint16_t *out_bits_per_sample,
+                           size_t *out_data_offset,
+                           size_t *out_data_size,
+                           size_t *out_sample_count);
+
+/**
  * Decodes WAV samples into the caller-provided buffer. Query the required
  * capacity with [`nd_wav_decode_info`]; `ND_ERR_SMALL_BUFFER` is returned
  * when `capacity` is too small.
@@ -202,6 +274,14 @@ int32_t nd_wav_decode_samples(const uint8_t *data,
 char *nd_word_diff(const char *old_ptr, size_t old_len, const char *new_ptr, size_t new_len);
 
 /**
+ * Text tail after the first `word_count` words (post-processing overlap
+ * helper, mirrors `WordDiff.tailAfterWords`). Leading whitespace stays on
+ * the tail; the native insertion layer trims it. NULL only on invalid
+ * UTF-8, null pointers, or panic.
+ */
+char *nd_word_tail_after_words(const char *text_ptr, size_t text_len, size_t word_count);
+
+/**
  * Joins `count` chunk texts (`texts`/`lens` arrays) with boundary-overlap
  * dedup. NULL is returned only on error.
  */
@@ -216,6 +296,22 @@ char *nd_stt_resolve(const char *adapter_ptr,
                      size_t adapter_len,
                      const char *model_ptr,
                      size_t model_len);
+
+/**
+ * Default endpoint for an adapter id (empty for manual endpoints that
+ * require an explicit base URL). Mirrors the portable configuration
+ * default so macOS and Windows resolve the same value. NULL only on
+ * invalid UTF-8, null pointers, or panic.
+ */
+char *nd_stt_default_base_url(const char *adapter_ptr, size_t adapter_len);
+
+/**
+ * Default model for an adapter id (empty when the adapter has none and
+ * the model must come from configuration). Mirrors the portable
+ * configuration default. NULL only on invalid UTF-8, null pointers, or
+ * panic.
+ */
+char *nd_stt_default_model(const char *adapter_ptr, size_t adapter_len);
 
 /**
  * Parses an STT response body into `{"text":...,"words":[...]}` JSON.
@@ -316,9 +412,59 @@ int32_t nd_vad_feed_samples(struct NdVad *handle,
 int32_t nd_vad_reset(struct NdVad *handle);
 
 /**
+ * Creates an adaptive VAD handle with an explicit configuration. The
+ * margins and clamps mirror the host-side `AdaptiveVADConfig` default
+ * semantics: the hysteresis width is at least 1 dB and the enter clamp
+ * keeps `max >= min`. NULL only on panic.
+ */
+struct NdVad *nd_vad_new_with_config(float enter_margin_db,
+                                     float hysteresis_db,
+                                     float min_enter_db,
+                                     float max_enter_db);
+
+/**
+ * Reads live VAD diagnostics without disturbing detector state: the
+ * current noise floor, the enter/exit thresholds (linear RMS), and the
+ * speech flag (1 = speech, 0 = silence). Observability for the host
+ * level meter and debug logs; never part of the speech decision.
+ * Returns `ND_OK` or a positive `ND_ERR_*` code.
+ */
+int32_t nd_vad_diagnostics(struct NdVad *handle,
+                           float *out_floor,
+                           float *out_enter,
+                           float *out_exit,
+                           int32_t *out_is_speech);
+
+/**
  * Creates an input-gain handle with default configuration.
  */
 struct NdGain *nd_gain_new(void);
+
+/**
+ * Creates an input-gain handle with an explicit configuration. The
+ * target and ceiling are clamped to the same invariants as the default
+ * constructor (`target` in -120..-1 dBFS, `max_gain` in 1..60 dB, time
+ * constants at least 1 ms), so host environment overrides can never
+ * break the gain invariants. NULL only on panic.
+ */
+struct NdGain *nd_gain_new_with_config(bool enabled,
+                                       float target_rms_db,
+                                       float max_gain_db,
+                                       double attack_time,
+                                       double release_time);
+
+/**
+ * Resets an input-gain handle (zero gain, fresh noise floor) for a new
+ * recording session. Returns `ND_OK` or a positive `ND_ERR_*` code.
+ */
+int32_t nd_gain_reset(struct NdGain *handle);
+
+/**
+ * Current smoothed gain in dB (0 = none) for host diagnostics and tests.
+ * Returns a negative sentinel and records an error on a null handle;
+ * the gain itself is never negative, so the sentinel is unambiguous.
+ */
+float nd_gain_current_db(struct NdGain *handle);
 
 /**
  * Releases an input-gain handle. NULL is accepted and ignored.
@@ -341,6 +487,28 @@ float nd_gain_apply(struct NdGain *handle,
 struct NdAutoStop *nd_autostop_new(void);
 
 /**
+ * Creates an auto-stop handle with an explicit configuration. The
+ * hysteresis invariant holds as in the default constructor (the speech
+ * threshold never goes below the silence threshold), so host overrides
+ * can never break the detector. The feature kill switch stays host-side
+ * (the host skips the feed when disabled); the engine only accumulates.
+ * NULL only on panic.
+ */
+struct NdAutoStop *nd_autostop_new_with_config(float speech_rms,
+                                               float silence_rms,
+                                               double required_silence,
+                                               double grace,
+                                               double min_speech_run,
+                                               double min_recording);
+
+/**
+ * Resets an auto-stop handle (clears the silence accumulator, the
+ * recording clock, and the speech gate) for a new recording session.
+ * Returns `ND_OK` or a positive `ND_ERR_*` code.
+ */
+int32_t nd_autostop_reset(struct NdAutoStop *handle);
+
+/**
  * Releases an auto-stop handle. NULL is accepted and ignored.
  */
 void nd_autostop_free(struct NdAutoStop *handle);
@@ -351,6 +519,44 @@ void nd_autostop_free(struct NdAutoStop *handle);
  * conditions hold, 0 otherwise, negative on error.
  */
 int32_t nd_autostop_feed(struct NdAutoStop *handle, float rms, double duration, int32_t is_speech);
+
+/**
+ * Splits Int16 PCM samples into live segments with overlap (the offline
+ * counterpart of the streaming utterance logic: pause-gated boundaries,
+ * minimum segment glue, maximum segment hard cap, junction silence owned
+ * by no segment). Single pass over the source; the engine allocates
+ * only internal scratch (RMS timeline, plan) and never retains PCM.
+ * Offline call, not for the realtime callback. `config` NULL
+ * means defaults. When `out_specs` is NULL (or `capacity` is 0) the
+ * required entry count is written to `out_written` and `ND_OK` is
+ * returned; otherwise up to `capacity` entries are written and
+ * `ND_ERR_SMALL_BUFFER` is returned with the required count when the
+ * buffer is too small. Returns `ND_OK` or a positive `ND_ERR_*` code.
+ */
+int32_t nd_live_plan(const int16_t *samples,
+                     size_t count,
+                     uint32_t sample_rate,
+                     const struct NdSegmenterConfig *config,
+                     struct NdLiveSegment *out_specs,
+                     size_t capacity,
+                     size_t *out_written);
+
+/**
+ * Fixed-length batch chunk planning math over sample counts (no audio
+ * content crosses the boundary): chunk bodies cover the source back to
+ * back with overlap tails, exactly like the host-side fixed-length
+ * planner. Buffering contract mirrors [`nd_live_plan`]: NULL output
+ * queries the required count, a short buffer yields
+ * `ND_ERR_SMALL_BUFFER` with the required count. Returns `ND_OK` or a
+ * positive `ND_ERR_*` code.
+ */
+int32_t nd_batch_plan(size_t sample_count,
+                      uint32_t sample_rate,
+                      double max_segment,
+                      double overlap,
+                      struct NdBatchChunk *out_specs,
+                      size_t capacity,
+                      size_t *out_written);
 
 /**
  * Creates a dictation session handle in the idle state.

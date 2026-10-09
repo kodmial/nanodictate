@@ -73,8 +73,9 @@ public final class ArrayPCMBatchContent: PCMBatchContent {
 }
 
 /// Файловый источник: PCM-сэмплы читаются прямо из WAV через FileHandle.
-/// Заголовок парсится из префикса (WAVDecoder.pcmHeader), сэмплы читаются
-/// по request (seek+read под NSLock), в RAM только окно одного чанка.
+/// Заголовок парсится из префикса shared engine (RustEngine.wavHeader),
+/// сэмплы читаются по request (seek+read под NSLock), в RAM только окно
+/// одного чанка.
 /// Thread-safe: seek+read атомарны под readLock (воркеры вызывают параллельно).
 public final class WAVFilePCMBatchContent: PCMBatchContent {
   public enum WAVFileError: Error, Equatable {
@@ -106,7 +107,13 @@ public final class WAVFilePCMBatchContent: PCMBatchContent {
     let handle = try FileHandle(forReadingFrom: wavURL)
     do {
       let prefix = try handle.read(upToCount: Self.prefixLength) ?? Data()
-      guard let header = WAVDecoder.pcmHeader(in: prefix) else {
+      // Header parsed by the shared engine (canonical WAV metadata for
+      // file-backed batch sources). A non-WAV/non-PCM prefix stays a
+      // product-level invalidWAV, exactly as before.
+      let header: WAVPCMHeader
+      do {
+        header = try RustEngine.wavHeader(prefix)
+      } catch {
         throw WAVFileError.invalidWAV
       }
       // readSamples читает 16-bit сэмплы плоским массивом — стерео WAV
@@ -273,6 +280,12 @@ public enum BatchSegmenter {
   /// - каждый чанк (кроме первого) начинает сэмплы с хвоста тела
   ///   предыдущего чанка длиной `overlap` секунд (контекст границы);
   /// - пустые входные сэмплы дают пустой результат.
+  /// Границы тел и оверлэп-окна считает shared engine
+  /// (`RustEngine.batchBodySpecs` — каноническая математика чанков);
+  /// сэмплы материализуются нативно из исходного буфера. Вырожденные
+  /// конфиги планировщика (неположительный/бесконечный maxSegment,
+  /// неположительный sampleRate, нефинитный overlap) — ошибка
+  /// программиста: громкий trap вместо тихого мусора нарезки.
   public static func segments(
     samples: [Int16],
     sampleRate: Int = 16000,
@@ -280,37 +293,35 @@ public enum BatchSegmenter {
     overlap: TimeInterval = 2.5
   ) -> [BatchChunk] {
     guard !samples.isEmpty else { return [] }
-    let bodySize = max(1, Int((maxSegment * Double(sampleRate)).rounded()))
-    let overlapCount = max(0, min(Int((overlap * Double(sampleRate)).rounded()), samples.count))
-
-    var result: [BatchChunk] = []
-    var bodyStart = 0
-    var prevBodyEnd: Int?
-    var index = 0
-
-    while bodyStart < samples.count {
-      let bodyEnd = min(bodyStart + bodySize, samples.count)
-      let body = Array(samples[bodyStart..<bodyEnd])
-
-      var chunkSamples = body
-      if let prevBodyEnd, overlapCount > 0 {
-        let overlapFrom = max(0, prevBodyEnd - overlapCount)
-        chunkSamples = Array(samples[overlapFrom..<prevBodyEnd]) + body
-      }
-
-      result.append(
-        BatchChunk(
-          index: index,
-          bodyStart: TimeInterval(bodyStart) / Double(sampleRate),
-          bodyEnd: TimeInterval(bodyEnd) / Double(sampleRate),
-          samples: chunkSamples
-        ))
-
-      index += 1
-      prevBodyEnd = bodyEnd
-      bodyStart = bodyEnd
+    guard maxSegment.isFinite, maxSegment > 0, sampleRate > 0, overlap.isFinite else {
+      preconditionFailure(
+        "BatchSegmenter.segments needs a finite positive maxSegment/sampleRate"
+          + " and finite overlap"
+      )
     }
-    return result
+    let specs: [BatchBodySpec]
+    do {
+      specs = try RustEngine.batchBodySpecs(
+        sampleCount: samples.count,
+        sampleRate: sampleRate,
+        maxSegment: maxSegment,
+        overlap: overlap
+      )
+    } catch {
+      preconditionFailure("Rust engine batch plan failed: \(error)")
+    }
+    return specs.map { spec in
+      var chunkSamples = Array(samples[spec.bodyRange])
+      if let overlapRange = spec.overlapRange, !overlapRange.isEmpty {
+        chunkSamples = Array(samples[overlapRange]) + chunkSamples
+      }
+      return BatchChunk(
+        index: spec.index,
+        bodyStart: spec.bodyStart,
+        bodyEnd: spec.bodyEnd,
+        samples: chunkSamples
+      )
+    }
   }
 
   // MARK: - Unified plan() — boundaries через PCMBatchContent (read-окна)

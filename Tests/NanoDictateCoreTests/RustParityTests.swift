@@ -132,20 +132,28 @@ final class RustParityTests: XCTestCase {
       let swift = STTModelRegistry.resolve(adapterID: vector.adapter, model: vector.model)
       guard let data = json.data(using: .utf8),
         let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-        let caps = object["capabilities"] as? [String: Bool]
+        let caps = object["capabilities"] as? [String: Any],
+        let audio = object["audio"] as? [String: Any]
       else {
         XCTFail("malformed profile JSON for \(vector)")
         continue
       }
       XCTAssertEqual(
-        caps["supports_verbose_json"], swift.capabilities.supportsVerboseJSON,
+        caps["supports_verbose_json"] as? Bool, swift.capabilities.supportsVerboseJSON,
         "verbose_json for \(vector)")
       XCTAssertEqual(
-        caps["supports_word_timestamps"], swift.capabilities.supportsWordTimestamps,
+        caps["supports_word_timestamps"] as? Bool, swift.capabilities.supportsWordTimestamps,
         "word timestamps for \(vector)")
       XCTAssertEqual(
-        caps["supports_temperature"], swift.capabilities.supportsTemperature,
+        caps["supports_temperature"] as? Bool, swift.capabilities.supportsTemperature,
         "temperature for \(vector)")
+      XCTAssertEqual(
+        caps["language_hint"] as? String, swift.capabilities.languageHint.rawValue,
+        "language_hint for \(vector)")
+      XCTAssertEqual(
+        audio["supports_flac"] as? Bool,
+        swift.audio.supportedUploadFormats.contains(.flac),
+        "supports_flac for \(vector)")
       XCTAssertEqual(
         object["transport"] as? String,
         swift.capabilities.transport == .batchMultipart ? "batch_multipart" : "batch_raw_audio",

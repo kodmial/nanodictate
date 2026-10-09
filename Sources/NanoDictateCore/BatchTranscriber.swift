@@ -675,7 +675,9 @@ public enum BatchTranscriber {
       }
 
       let chunkSamples = try spec.samples(from: content)
-      let wav = WAVEncoder.encode(samples: chunkSamples, sampleRate: sampleRate)
+      // Chunk bytes encoded by the shared engine (canonical WAV codec).
+      let wav = try RustEngine.wavEncode(
+        samples: chunkSamples, sampleRate: UInt32(sampleRate), channels: 1)
       // Контекстная склейка (chaining): следующий чанк получает prompt'ом
       // хвост текста последнего УСПЕШНО распознанного чанка (рекомендация
       // «Практики длинной речи»). Плейсхолдеры "[…]" не цепляются; первый
@@ -732,7 +734,7 @@ public enum BatchTranscriber {
       )
     }
 
-    return makeOutcome(
+    return try makeOutcome(
       records: records.compactMap { $0 },
       totalSegments: specs.count,
       started: started
@@ -781,7 +783,7 @@ public enum BatchTranscriber {
     // Пустых работ не осталось — весь прогон уже в чекпоинте.
     if completedCount == specs.count {
       let records = slots.compactMap { $0 }
-      return makeOutcome(records: records, totalSegments: specs.count, started: started)
+      return try makeOutcome(records: records, totalSegments: specs.count, started: started)
     }
 
     let workers = min(maxConcurrent, specs.count - completedCount)
@@ -792,7 +794,9 @@ public enum BatchTranscriber {
           while let job = state.takeJob() {
             let spec = specs[job]
             let chunkSamples = try spec.samples(from: content)
-            let wav = WAVEncoder.encode(samples: chunkSamples, sampleRate: sampleRate)
+            // Chunk bytes encoded by the shared engine (canonical WAV codec).
+            let wav = try RustEngine.wavEncode(
+              samples: chunkSamples, sampleRate: UInt32(sampleRate), channels: 1)
             let text: String
             let status: String
             do {
@@ -866,7 +870,7 @@ public enum BatchTranscriber {
     }
 
     let records = state.resolvedRecords()
-    return makeOutcome(
+    return try makeOutcome(
       records: records,
       totalSegments: specs.count,
       started: started
@@ -896,8 +900,9 @@ public enum BatchTranscriber {
 
   private static func makeOutcome(
     records: [BatchSegmentRecord], totalSegments: Int, started: TimeInterval
-  ) -> BatchOutcome {
-    let joined = BatchTextJoiner.join(records.map(\.text))
+  ) throws -> BatchOutcome {
+    // Chunk texts joined by the shared engine (canonical overlap dedup).
+    let joined = try RustEngine.joinChunkTexts(records.map(\.text))
     let skippedIndexes = records.enumerated()
       .filter { $0.element.status == BatchSegmentRecord.statusSkipped }
       .map { $0.offset + 1 }

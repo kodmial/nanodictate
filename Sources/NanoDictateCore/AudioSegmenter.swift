@@ -406,15 +406,24 @@ public enum AudioSegmenter {
 
   /// Split Int16 PCM samples (16 kHz) into segments with overlap.
   /// Samples treated as continuous from recording start.
-  /// Legacy owned-PCM wrapper over `plan(samples:)`: boundaries are computed
-  /// once via the single-pass plan, then each segment materializes its own
-  /// PCM. New code should use `plan` + on-demand materialization instead.
+  /// Shipping wrapper over the shared engine plan: boundaries come from
+  /// the canonical engine math (`RustEngine.livePlan`), then each segment
+  /// materializes its own PCM natively. The pure-Swift `plan(samples:)`
+  /// stays available as the parity oracle until the final hardware gate
+  /// in #123. New code should use range-based specs plus on-demand
+  /// materialization instead. An engine failure traps loudly instead of
+  /// silently falling back (valid input never fails to plan).
   public static func segments(
     samples: [Int16],
     sampleRate: Int = 16000,
     config: AudioSegmenterConfig = .defaults
   ) -> [AudioSegment] {
-    let specs = plan(samples: samples, sampleRate: sampleRate, config: config)
+    let specs: [AudioSegmentSpec]
+    do {
+      specs = try RustEngine.livePlan(samples: samples, sampleRate: sampleRate, config: config)
+    } catch {
+      preconditionFailure("Rust engine live plan failed: \(error)")
+    }
     return specs.map { spec in
       AudioSegment(
         start: spec.start,
