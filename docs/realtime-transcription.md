@@ -20,7 +20,9 @@ Batch behavior is unchanged. Realtime is selected by the model profile
 
 ## Provider requirements (realtime)
 
-- Provider id `openai`, model `gpt-live-transcribe` (or `gpt-live-*` snapshot).
+- Provider id `openai`, model `gpt-live-transcribe` (or a dated
+  `gpt-live-transcribe-*` snapshot). Other `gpt-live-*` models (for example
+  voice-conversation models such as `gpt-live-1`) stay on the batch path.
 - WebSocket endpoint `wss://api.openai.com/v1/realtime?intent=transcription`
   with `Authorization: Bearer <key>`.
 - Realtime bypasses custom routing: configured `base_url`, `http_proxy`
