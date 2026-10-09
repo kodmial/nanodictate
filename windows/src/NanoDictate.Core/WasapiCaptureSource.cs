@@ -129,16 +129,21 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
         }
         lock (_gate)
         {
+            // Only the owner of the current worker may change lifecycle state
+            // or release COM objects. If the worker already released and a new
+            // Start created a new session, _worker no longer matches and the
+            // new session must be left untouched.
+            if (!ReferenceEquals(_worker, worker))
+            {
+                return;
+            }
             if (!worker.IsAlive)
             {
                 // Worker terminated: this thread owns the COM cleanup. The
                 // worker's finally block skips cleanup once the flag is
                 // cleared, so repeated stops cannot double-release while the
                 // worker is active.
-                if (ReferenceEquals(_worker, worker))
-                {
-                    _worker = null;
-                }
+                _worker = null;
                 _releaseDeferred = false;
                 ReleaseLocked();
             }
