@@ -739,6 +739,31 @@ final class BatchTranscriberTests: XCTestCase {
         XCTAssertNil(prepared, "битый base_url — запрос собраться не должен")
     }
 
+    @objc func testRealtimeProfileDetectedBeforeBatchRequest() throws {
+        let provider = AppConfig.Provider(
+            id: "openai", name: "",
+            baseURL: "https://api.openai.com/v1/audio/transcriptions",
+            model: "gpt-live-transcribe",
+            apiKey: "", apiKeyFile: nil, proxyKey: ""
+        )
+        let resolvedModel = ProviderRequestBuilder.resolveModel(provider.model, for: provider.id)
+        XCTAssertTrue(
+            ProviderRequestBuilder.isRealtime(adapterID: provider.id, model: resolvedModel),
+            "gpt-live-transcribe обязан определяться как realtime до сборки батч-запроса")
+        let prepared = BatchRequestBuilder.makeRequest(
+            provider: provider,
+            apiKey: "secret-token-123",
+            language: "ru",
+            timeout: 60,
+            wav: Data("RIFF".utf8),
+            chunkIndex: 0
+        )
+        XCTAssertNil(prepared, "realtime-профиль не имеет батч-представления — запрос nil")
+        XCTAssertNotEqual(
+            L10n.tr("cli.batch.realtimeUnsupported"), "cli.batch.realtimeUnsupported",
+            "локализация обязана содержать dedicated batch-ошибку для realtime-моделей")
+    }
+
     @objc func testMakeRequestIncludesProviderFieldsInMultipart() throws {
         guard let prepared = BatchRequestBuilder.makeRequest(
             provider: makeBatchProvider(),

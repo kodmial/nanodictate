@@ -240,23 +240,20 @@ public enum ProviderRequestBuilder {
         keywords: applied.keywordsField ?? []
       )
     case .streamingSession:
-      // Reserved for future WebSocket streaming (non-goal): no profile uses
-      // it yet; fall back to multipart so the request path stays total.
-      return planOpenAICompatible(
-        adapterID: adapterID,
-        baseURL: resolvedBaseURL,
-        model: resolvedModel,
-        apiKey: apiKey,
-        language: effectiveLanguage,
-        languages: effectiveLanguages,
-        wav: wav,
-        filename: effectiveFilename,
-        prompt: effectivePrompt,
-        needsWordTimestamps: needsWordTimestamps,
-        stable: stable,
-        capabilities: caps,
-        audioFormat: effectiveFormat,
-        keywords: applied.keywordsField ?? []
+      // Realtime profiles have no batch representation (24 kHz raw PCM16
+      // streamed over a stateful WebSocket, not a 16 kHz WAV upload).
+      // Return an invalid spec (nil URL) instead of a silent multipart
+      // fallback so batch callers cannot turn one failed realtime session
+      // into repeated duplicate uploads. Realtime callers use
+      // RealtimeTranscriptionSession; .allowBatch is reserved and behaves
+      // like fail-closed today, so no explicit batch fallback is started here.
+      return STTRequestSpec(
+        url: nil,
+        headers: [],
+        body: .multipart(
+          data: Data(),
+          contentType: "multipart/form-data; boundary=invalid-realtime-profile"),
+        transcriptPath: nil
       )
     }
   }
@@ -290,7 +287,8 @@ public enum ProviderRequestBuilder {
 
   /// Model-specific audio requirements (sample rate / channels / format).
   /// Audio preparation consults this instead of assuming the common batch
-  /// profile; all built-in models currently require 16 kHz mono WAV.
+  /// profile; batch models require 16 kHz mono WAV/FLAC while realtime
+  /// profiles require 24 kHz mono raw PCM16.
   public static func audioProfile(adapterID: String, model: String) -> STTAudioProfile {
     profile(adapterID: adapterID, model: model).audio
   }

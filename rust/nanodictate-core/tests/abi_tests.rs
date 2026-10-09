@@ -179,6 +179,27 @@ fn stt_resolve_reports_portable_policy_for_host_transport() {
 }
 
 #[test]
+fn stt_resolve_realtime_uses_streaming_24k_pcm16() {
+    // Task #25: gpt-live-transcribe resolves to one stateful session with
+    // 24 kHz raw PCM16, not the 16 kHz batch WAV profile.
+    let adapter = to_c("openai");
+    let model = to_c("gpt-live-transcribe");
+    let json = read_string(nd_stt_resolve(
+        adapter.as_ptr(),
+        adapter.as_bytes().len(),
+        model.as_ptr(),
+        model.as_bytes().len(),
+    ));
+    assert!(
+        json.contains("\"transport\":\"streaming_session\""),
+        "{json}"
+    );
+    assert!(json.contains("\"sample_rate\":24000"), "{json}");
+    assert!(json.contains("\"upload_format\":\"pcm16\""), "{json}");
+    assert!(json.contains("\"language_hint\":\"multi\""), "{json}");
+}
+
+#[test]
 fn stt_portable_defaults_through_abi() {
     let openai = to_c("openai");
     let url = read_string(nd_stt_default_base_url(
