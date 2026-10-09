@@ -57,6 +57,7 @@ public sealed class PortableConfigTests
         Assert.NotEmpty(config.Providers);
         var profile = config.ResolveActiveProfile();
         Assert.Contains("\"adapter_id\"", profile);
+        Assert.Contains("\"model\":\"gigaam-v3-ctc-sherpa\"", profile);
         var order = config.ResolveFailoverOrder(null, false);
         Assert.Contains(config.Providers[0].Id, order);
     }
