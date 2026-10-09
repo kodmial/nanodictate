@@ -4,5 +4,5 @@
 /// through the automated Release PR, never by hand in feature PRs
 /// (see release-please-config.json).
 public enum NanoDictateVersion {
-  public static let string = "0.1.27" // x-release-please-version
+  public static let string = "0.1.28" // x-release-please-version
 }
