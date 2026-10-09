@@ -119,14 +119,22 @@ public struct ChunkedPipeline {
   /// inside overlap by timestamps (`end <= overlapSeconds`), cut tail by
   /// CHAR offset (raw slice — internal punctuation intact). No timestamps —
   /// text untouched: final word-diff pass cleans duplicates (corrupt/empty
-  /// `words` does NOT break pipeline).
+  /// `words` does NOT break pipeline). The tail itself comes from the
+  /// shared engine (canonical word-diff logic); an engine failure traps
+  /// loudly instead of silently falling back to the Swift implementation
+  /// (valid input never fails to resolve).
   public static func dedupeOverlap(text: String, words: [TimedWord], overlapSeconds: TimeInterval)
     -> String
   {  // swiftlint:disable:this opening_brace
     guard overlapSeconds > 0, !words.isEmpty else { return text }
     let overlapWordCount = words.prefix { $0.end <= overlapSeconds }.count
     guard overlapWordCount > 0 else { return text }
-    let tail = WordDiff.tailAfterWords(overlapWordCount, in: text)
+    let tail: String
+    do {
+      tail = try RustEngine.tailAfterWords(overlapWordCount, in: text)
+    } catch {
+      preconditionFailure("Rust engine word tail failed: \(error)")
+    }
     return String(tail.drop { $0.isWhitespace })
   }
 
@@ -134,9 +142,18 @@ public struct ChunkedPipeline {
 
   /// Single segmentation entry for the legacy chunked path: computed once per
   /// recording for the pipeline policy. Returns range-based specs; PCM stays
-  /// in the source buffer until per-segment encode.
+  /// in the source buffer until per-segment encode. Boundaries come from the
+  /// shared engine (canonical chunk math for the shipping path); the Swift
+  /// reference (`AudioSegmenter.plan`) stays available only as the parity
+  /// oracle. An engine failure traps loudly instead of silently falling
+  /// back (valid input never fails to plan).
   public func plan(samples: [Int16]) -> [AudioSegmentSpec] {
-    AudioSegmenter.plan(samples: samples, sampleRate: sampleRate, config: segmenterConfig)
+    do {
+      return try RustEngine.livePlan(
+        samples: samples, sampleRate: sampleRate, config: segmenterConfig)
+    } catch {
+      preconditionFailure("Rust engine live plan failed: \(error)")
+    }
   }
 
   /// STT request count for an already-computed plan (segments + final pass).
@@ -187,7 +204,9 @@ public struct ChunkedPipeline {
     filename: String = "segment.wav",
     overlap: TimeInterval = 0
   ) async throws -> (insertText: String, promptText: String) {
-    let bytes = WAVEncoder.encode(samples: samples, sampleRate: sampleRate)
+    // Segment bytes encoded by the shared engine (canonical WAV codec).
+    let bytes = try RustEngine.wavEncode(
+      samples: samples, sampleRate: UInt32(sampleRate), channels: 1)
     return try await recognizeWAV(
       bytes,
       index: index,
@@ -211,11 +230,14 @@ public struct ChunkedPipeline {
     onFinalizing: (() -> Void)? = nil
   ) async throws -> (finalText: String, changed: Bool) {
     onFinalizing?()
-    let finalWAV = WAVEncoder.encode(samples: samples, sampleRate: sampleRate)
+    // Whole-recording bytes encoded by the shared engine (canonical WAV
+    // codec); the inserted-vs-final diff comes from the engine as well.
+    let finalWAV = try RustEngine.wavEncode(
+      samples: samples, sampleRate: UInt32(sampleRate), channels: 1)
     let finalResult = try await stt(finalWAV, "final.wav", nil)
     let finalText = TextRefinement.finalize(finalResult.text)
 
-    guard let change = WordDiff.change(old: insertedText, new: finalText) else {
+    guard let change = try RustEngine.wordDiffChange(old: insertedText, new: finalText) else {
       return (finalText, false)
     }
     insert(.replaceTail(old: change.tailOld, new: change.tailNew))
@@ -224,18 +246,17 @@ public struct ChunkedPipeline {
 
   // MARK: - Прогон (single-pass, lazy materialization)
 
-  /// Run with segmentation computed once inside: single RMS scan via
-  /// `AudioSegmenter.plan`, then per-segment WAV encode straight from the
-  /// source buffer. Only the segment being sent is materialized.
+  /// Run with segmentation computed once inside: single engine plan via
+  /// `plan(samples:)` (shared-engine boundaries), then per-segment WAV
+  /// encode straight from the source buffer. Only the segment being sent
+  /// is materialized.
   public func run(
     samples: [Int16],
     stt: STTHandler,
     insert: InsertHandler,
     onPhase: PhaseHandler? = nil
   ) async throws -> Outcome {
-    let specs = AudioSegmenter.plan(
-      samples: samples, sampleRate: sampleRate, config: segmenterConfig
-    )
+    let specs = plan(samples: samples)
     return try await run(
       samples: samples, plannedSegments: specs, stt: stt, insert: insert, onPhase: onPhase)
   }
@@ -279,7 +300,8 @@ public struct ChunkedPipeline {
       onPhase?(.segment(index))
       // Materialize/encode only the segment being sent: overlap tail + body
       // straight from the source buffer, no retained per-segment PCM arrays.
-      let bytes = WAVEncoder.encodeSegment(
+      // Encoded by the shared engine (canonical WAV codec).
+      let bytes = try RustEngine.wavEncodeSegment(
         source: samples,
         bodyRange: spec.bodyRange,
         overlapRange: spec.overlapRange,

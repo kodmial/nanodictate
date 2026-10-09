@@ -202,16 +202,20 @@ public final class RetryProvider {
     guard !order.isEmpty else {
       throw TranscribeError.invalidResponse("no providers configured for failover")
     }
-    var attempts = order
-    // Last-failed провайдер — в конец очереди: повторная попытка после всех
-    // остальных. При выключенном autoFailover порядок attempts не трогаем.
-    if autoFailover, let failed = lastFailedProviderID {
-      if let index = attempts.firstIndex(where: { $0.id == failed }) {
-        let provider = attempts.remove(at: index)
-        attempts.append(provider)
-      }
+    // Failover queue policy from the shared engine (canonical ordering):
+    // with auto-failover the last-failed provider moves to the end of the
+    // queue so it is retried only after every other candidate; without
+    // auto-failover the order is untouched (only the first candidate runs).
+    // Engine failure throws loudly — never a silent Swift-only order.
+    let orderedIDs = try RustEngine.failoverOrder(
+      ids: order.map(\.id), failedID: lastFailedProviderID, autoFailover: autoFailover)
+    var byID: [String: AppConfig.Provider] = [:]
+    for provider in order {
+      byID[provider.id] = provider
     }
-    let candidateCount = autoFailover ? attempts.count : min(1, attempts.count)
+    let attempts = orderedIDs.compactMap { byID[$0] }
+    let candidateCount = RustEngine.failoverCandidateCount(
+      orderLen: attempts.count, autoFailover: autoFailover)
     let candidates = Array(attempts.prefix(candidateCount))
 
     var lastError: TranscribeError?
@@ -221,6 +225,12 @@ public final class RetryProvider {
         lastFailedProviderID = nil
         return (result, provider.id)
       } catch let error as TranscribeError {
+        // Failover classification from the shared engine: provider
+        // (`TranscribeError`) failures proceed to the next candidate.
+        // Anything else (mic etc.) rethrows at once, no failover.
+        guard RustEngine.shouldFailover(error: error) else {
+          throw error
+        }
         lastError = error
         lastFailedProviderID = provider.id
       } catch {

@@ -1297,7 +1297,11 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       // dictation) or the loop already ended with a terminal event (the
       // "STT timeout" watchdog set state to .idle) — terminal calls become
       // no-ops; a repeated failTranscription/completeInsertion is impossible.
-      let wav = WAVEncoder.encode(samples: samples)
+      // Recording bytes encoded by the shared engine (canonical WAV
+      // codec). The encode runs off the realtime capture callback (the tap
+      // only appends); an engine failure traps loudly instead of silently
+      // falling back to the Swift encoder.
+      let wav = RustEngine.requireWAVEncode(samples: samples)
       // Last WAV kept in memory (RetryProvider): manual retry with another
       // provider (`nanodictate retry`) and auto-failover reuse it.
       self.retryProvider.store(wav: wav)
@@ -1360,8 +1364,17 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     // (N segments, count > 1 ⇒ one more final even when the policy may skip
     // it). Same session-token mechanism as processSingleRequest.
     // Segmentation runs once per recording: the plan below is reused by the
-    // pipeline run (no rerun for watchdog limits).
-    let chunkedPlan = AudioSegmenter.plan(samples: samples)
+    // pipeline run (no rerun for watchdog limits). Boundaries come from the
+    // shared engine (canonical chunk math for the shipping path); an engine
+    // failure traps loudly instead of silently falling back (valid input
+    // never fails to plan).
+    let chunkedPlan: [AudioSegmentSpec] = {
+      do {
+        return try RustEngine.livePlan(samples: samples)
+      } catch {
+        preconditionFailure("Rust engine live plan failed: \(error)")
+      }
+    }()
     let requestCount = AudioSegmenter.watchdogRequestCount(for: chunkedPlan)
     let chunkedMaxDuration = Double(requestCount) * Transcriber.networkRequestTimeout + 5
 

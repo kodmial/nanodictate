@@ -159,6 +159,9 @@ jobs:
       - name: Test the release policy
         run: bash scripts/test-release-policy.sh
 
+      - name: Test the packaging smoke policy
+        run: bash scripts/test-packaging-smoke-policy.sh
+
   # Version ownership: only the automated Release PR branch may touch
   # Sources/NanoDictateCore/Version.swift or .release-please-manifest.json.
   # Ordinary PRs never reserve the next version, so concurrent merges cannot

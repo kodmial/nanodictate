@@ -721,7 +721,9 @@ jobs:
             const hb = '${{ needs.production-homebrew.result }}';
             const mp = '${{ needs.production-macports.result }}';
             const green = (r) => r === 'success';
+            const failed = (r) => r === 'failure' || r === 'timed_out';
             const allGreen = green(hb) && green(mp);
+            const anyFailed = failed(hb) || failed(mp);
 
             function readDirTree(dir, out) {
               if (!fs.existsSync(dir)) return;
@@ -823,6 +825,17 @@ jobs:
             ].join('\n');
 
             const existing = await findOpenIncident();
+            // Only a real leg failure pages the production channel. A
+            // cancelled or skipped leg (superseded run, infra cancellation,
+            // manually cancelled run) carries no product signal: the
+            // superseding run verifies the same public channel and reports on
+            // its own. Filing a P0 for a superseded run was issue #172 (run
+            // 485 cancelled by run 487 with a green Homebrew lifecycle and a
+            // healthy MacPorts install, yet a P0 was filed).
+            if (!allGreen && !anyFailed) {
+              core.notice('Production legs did not fail (homebrew=' + hb + ' macports=' + mp + '); superseded or skipped run carries no product signal, so no incident is filed. The superseding run reports on its own.');
+              return;
+            }
             if (!allGreen) {
               if (existing) {
                 await github.rest.issues.createComment({

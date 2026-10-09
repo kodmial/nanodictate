@@ -51,6 +51,9 @@ permissions:
 concurrency:
   group: continuum-swift-release-${{ github.repository }}-${{ github.ref }}
 
+# macOS 12 real-hardware compatibility is qualified independently (issue #35).
+# Release publication retains exact-source candidate/packaging and release
+# integrity checks in the reusable release engine.
 jobs:
   call:
     uses: ./.github/workflows/nanodictate-release-engine.yml

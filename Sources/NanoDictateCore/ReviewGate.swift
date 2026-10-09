@@ -25,16 +25,22 @@ public enum ReviewGate {
   }()
 
   /// Show text, await decision: Enter/empty/y/Y → .insert; else (incl. Esc) → .cancel.
+  /// Terminal I/O stays native; the decision itself comes from the shared
+  /// engine (canonical policy). End of input cancels, as before.
   public static func confirm(text: String) -> Decision {
     print("\(L10n.tr("review.prompt")): \(text)")
     print(L10n.tr("review.confirmInsert"), terminator: " ")
     fflush(stdout)
-    guard let input = readLineFunction() else { return .cancel }
-    let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
-    if trimmed.isEmpty || trimmed == "y" || trimmed == "Y" {
-      return .insert
+    let line = readLineFunction()
+    do {
+      return try RustEngine.reviewDecide(line: line) ? .insert : .cancel
+    } catch {
+      // Fail-closed: an engine failure cancels the insertion and is logged
+      // loudly — never a silent Swift decision on the shipping path.
+      Logger.log(
+        "review decision engine failed: \(error.localizedDescription)", level: "error")
+      return .cancel
     }
-    return .cancel
   }
 
   /// Asynchronous confirmation (CR16): runs the same prompt + read as

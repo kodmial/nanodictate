@@ -327,12 +327,14 @@ pub fn parse_json(text: &str) -> Result<JsonValue, ParseError> {
 
 /// Extracts the transcript text following `path` (`None` means the flat
 /// `text` field). Empty or whitespace-only text counts as an empty result.
+/// Path segments may address object keys or array indices (mirrors the
+/// Swift `ProviderRequestBuilder.extractText` walk).
 pub fn extract_text(root: &JsonValue, path: Option<&[String]>) -> Result<String, ParseError> {
     let mut node = root;
     if let Some(segments) = path {
         for segment in segments {
-            node = node.get(segment).ok_or_else(|| ParseError {
-                message: format!("missing transcript field '{segment}'"),
+            node = descend(node, segment).ok_or_else(|| ParseError {
+                message: format!("missing transcript field '{}'", segments.join(".")),
             })?;
         }
     } else {
@@ -347,12 +349,57 @@ pub fn extract_text(root: &JsonValue, path: Option<&[String]>) -> Result<String,
         })
 }
 
+/// Descends one path segment into an object key or an array index.
+fn descend<'a>(node: &'a JsonValue, segment: &str) -> Option<&'a JsonValue> {
+    if let Some(next) = node.get(segment) {
+        return Some(next);
+    }
+    if let JsonValue::Array(items) = node {
+        if let Ok(index) = segment.parse::<usize>() {
+            return items.get(index);
+        }
+    }
+    None
+}
+
 /// Extracts word-level timestamps from a `verbose_json` response
 /// (`words: [{word, start, end}]`). Missing or malformed word entries
-/// degrade to an empty list, never to an error.
+/// degrade to an empty list, never to an error. With a transcript `path`
+/// (for example Cloudflare `result.text`), words are read from the sibling
+/// `words` array under the path parent (mirrors the Swift
+/// `ProviderRequestBuilder.extractWords` walk); a short path degrades to
+/// an empty list. Both `word` and `punctuated_word` keys are accepted.
 pub fn extract_words(root: &JsonValue) -> Vec<TimedWord> {
+    extract_words_with_path(root, None)
+}
+
+/// Path-aware word extraction (see [`extract_words`]).
+pub fn extract_words_with_path(root: &JsonValue, path: Option<&[String]>) -> Vec<TimedWord> {
     let mut out = Vec::new();
-    let words = root.get("words").and_then(|v| match v {
+    let container: &JsonValue = match path {
+        None => root,
+        Some(segments) => {
+            if segments.len() <= 1 {
+                return out;
+            }
+            let mut node = root;
+            let mut valid = true;
+            for segment in &segments[..segments.len() - 1] {
+                match descend(node, segment) {
+                    Some(next) => node = next,
+                    None => {
+                        valid = false;
+                        break;
+                    }
+                }
+            }
+            if !valid {
+                return out;
+            }
+            node
+        }
+    };
+    let words = container.get("words").and_then(|v| match v {
         JsonValue::Array(items) => Some(items),
         _ => None,
     });
@@ -361,8 +408,12 @@ pub fn extract_words(root: &JsonValue) -> Vec<TimedWord> {
         None => return out,
     };
     for item in items {
+        let word = item
+            .get("word")
+            .and_then(JsonValue::as_str)
+            .or_else(|| item.get("punctuated_word").and_then(JsonValue::as_str));
         let (Some(word), Some(start), Some(end)) = (
-            item.get("word").and_then(JsonValue::as_str),
+            word,
             item.get("start").and_then(JsonValue::as_f64),
             item.get("end").and_then(JsonValue::as_f64),
         ) else {
@@ -383,7 +434,7 @@ pub fn extract_words(root: &JsonValue) -> Vec<TimedWord> {
 pub fn parse_transcript(body: &str, path: Option<&[String]>) -> Result<Transcript, ParseError> {
     let root = parse_json(body)?;
     let text = extract_text(&root, path)?;
-    let words = extract_words(&root);
+    let words = extract_words_with_path(&root, path);
     Ok(Transcript { text, words })
 }
 
@@ -465,5 +516,52 @@ mod tests {
     fn empty_text_is_empty_result_not_error() {
         let t = parse_transcript(r#"{"text": "   "}"#, None).unwrap();
         assert!(t.text.trim().is_empty());
+    }
+
+    #[test]
+    fn punctuated_word_fallback_matches_swift() {
+        let t = parse_transcript(
+            r#"{"text": "hi", "words": [{"punctuated_word": "Hi,", "start": 0.0, "end": 0.3}]}"#,
+            None,
+        )
+        .unwrap();
+        assert_eq!(t.words.len(), 1);
+        assert_eq!(t.words[0].word, "Hi,");
+    }
+
+    #[test]
+    fn nested_path_reads_sibling_words_like_swift() {
+        // Cloudflare-style: words live under the path parent (result.words).
+        let path = ["result".to_string(), "text".to_string()];
+        let t = parse_transcript(
+            r#"{"result": {"text": "nested ok", "words": [{"word": "nested", "start": 0.0, "end": 0.4}]}}"#,
+            Some(&path),
+        )
+        .unwrap();
+        assert_eq!(t.text, "nested ok");
+        assert_eq!(t.words.len(), 1);
+        // Top-level words are NOT read when a path selects a nested text.
+        let top = parse_transcript(
+            r#"{"result": {"text": "nested ok"}, "words": [{"word": "top", "start": 0.0, "end": 0.1}]}"#,
+            Some(&path),
+        )
+        .unwrap();
+        assert!(top.words.is_empty());
+        // A single-segment path degrades to an empty word list, never an error.
+        let short = ["text".to_string()];
+        let t = parse_transcript(r#"{"text": "hi"}"#, Some(&short)).unwrap();
+        assert!(t.words.is_empty());
+    }
+
+    #[test]
+    fn array_index_path_segments() {
+        let path = ["items".to_string(), "1".to_string(), "text".to_string()];
+        let t = parse_transcript(
+            r#"{"items": [{"text": "first"}, {"text": "second"}]}"#,
+            Some(&path),
+        )
+        .unwrap();
+        assert_eq!(t.text, "second");
+        assert!(parse_transcript(r#"{"items": [{"text": "first"}]}"#, Some(&path)).is_err());
     }
 }
