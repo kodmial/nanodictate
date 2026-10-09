@@ -230,12 +230,25 @@ final class RustRealtimeAudioCutoverTests: XCTestCase {
                 "VAD agreement at raw RMS \(amplitude)")
             XCTAssertEqual(outcome.rawRMS, amplitude, accuracy: 0.0005)
             var swiftBlock = [Float](repeating: amplitude, count: 1360)
+            // Parity uses the engine-measured RMS so both gain stages see
+            // the same input: the engine derives raw RMS from the block
+            // while the ideal amplitude above differs by Float rounding.
             let swiftRMS = swiftGain.apply(
-                to: &swiftBlock, rms: amplitude, sampleRate: 16000)
+                to: &swiftBlock, rms: outcome.rawRMS, sampleRate: 16000)
             XCTAssertEqual(
                 outcome.amplifiedRMS, swiftRMS, accuracy: 0.002,
                 "amplified RMS parity at \(amplitude)")
-            XCTAssertEqual(block, swiftBlock, "conditioned samples match the reference")
+            // Cross-language sample parity is within tolerance, not
+            // bit-identical: the shared engine stays platform-neutral for
+            // Swift and C#/PInvoke (no Darwin libm bit-exactness in Rust),
+            // so a 1e-5 tolerance (~-100 dBFS here) still fails loudly on
+            // any material gain/limiter drift.
+            XCTAssertEqual(block.count, swiftBlock.count, "conditioned length matches")
+            for (index, pair) in zip(block, swiftBlock).enumerated() {
+                XCTAssertEqual(
+                    pair.0, pair.1, accuracy: 1e-05,
+                    "conditioned sample \(index) parity at \(amplitude)")
+            }
         }
     }
 
