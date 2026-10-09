@@ -205,8 +205,8 @@ assert_grep 'workflow: runtime records an isolated-host handoff instead of claim
   "$WORKFLOW" 'needs-macos12-host'
 assert_grep 'workflow: current HEAD must have trusted runtime attestation' \
   "$WORKFLOW" 'macos12/runtime-attested'
-assert_grep 'workflow: missing runtime attestation is a hard failure' \
-  "$WORKFLOW" 'macOS 12 runtime is NOT validated'
+assert_grep 'workflow: absent runtime evidence is explicit UNVERIFIED warning, not a false PASS' \
+  "$WORKFLOW" 'macOS 12 runtime UNVERIFIED'
 assert_grep 'runtime results include their tested source revision' \
   "$CHECK_SCRIPT" 'source_sha=%s'
 assert_grep 'runtime environment includes its tested source revision' \
