@@ -47,12 +47,15 @@ jobs:
             exit 0
           fi
 
-          # Only touch the latest push-triggered Release run for this exact
-          # immutable commit. No release version bump, no bypass of the
-          # candidate gate, and no retry of unrelated failures.
-          RUNS="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml/runs?event=push&head_sha=$CANDIDATE_SHA&per_page=100")"
+          # Only touch the latest push-triggered Release run on main for this
+          # exact immutable commit. A v* tag push can share the same SHA, so
+          # require head_branch == main (and branch=main server-side) to avoid
+          # rerunning the tag Release while the failed main Release stays red.
+          # No release version bump, no bypass of the candidate gate, and no
+          # retry of unrelated failures.
+          RUNS="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml/runs?branch=main&event=push&head_sha=$CANDIDATE_SHA&per_page=100")"
           RELEASE="$(jq -c --arg sha "$CANDIDATE_SHA" '
-            [.workflow_runs[] | select(.head_sha == $sha and .event == "push")]
+            [.workflow_runs[] | select(.head_sha == $sha and .event == "push" and .head_branch == "main")]
             | sort_by(.created_at) | reverse | .[0] // empty
           ' <<<"$RUNS")"
           if [[ -z "$RELEASE" ]]; then
@@ -82,6 +85,18 @@ jobs:
               and .conclusion == "failure")] | length > 0
           ' <<<"$JOBS" >/dev/null; then
             echo "Release $ID did not fail its candidate gate; no automatic rerun."
+            exit 0
+          fi
+
+          # A rerun executes at the Release run's original SHA, so re-read main
+          # immediately before requesting it: main may have advanced while this
+          # job inspected the Release run. Publication itself stays bound to
+          # the exact-SHA candidate gate in nanodictate-release-engine.yml
+          # ("Require tested release candidate"), which only accepts the
+          # tested SHA's own green Packaging smoke artifacts.
+          FRESH_MAIN_SHA="$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')"
+          if [[ "$CANDIDATE_SHA" != "$FRESH_MAIN_SHA" ]]; then
+            echo "Main advanced to $FRESH_MAIN_SHA while reconciling; candidate $CANDIDATE_SHA is stale. No recovery."
             exit 0
           fi
 
