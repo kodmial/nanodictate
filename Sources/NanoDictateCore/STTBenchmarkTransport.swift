@@ -278,3 +278,103 @@ public struct BenchmarkTransportComparison: Codable, Equatable {
   }
 }
 
+// MARK: - Request-body memory comparison (issue #32)
+//
+// Near-60-second benchmark for transient request-body memory: audio bytes,
+// full body bytes, multipart overhead, the upload strategy production would
+// use (file-backed at or above `Transcriber.fileBackedUploadThresholdBytes`
+// on the real network path, in-memory below it) and peak-transient estimates
+// for both strategies (see `STTRequestMemoryReport`).
+
+/// Per-fixture request-body memory accounting (Codable for machine output
+/// alongside `BenchmarkReport`).
+public struct STTRequestMemoryRow: Codable, Equatable {
+  public var fixtureID: String
+  public var durationBucket: String
+  public var durationSeconds: Double
+  public var audioBytes: Int
+  public var bodyBytes: Int
+  public var overheadBytes: Int
+  public var duplicationRatio: Double
+  public var strategy: String
+  public var peakInMemoryBytes: Int
+  public var peakFileBackedBytes: Int
+
+  public init(
+    fixtureID: String,
+    durationBucket: String,
+    durationSeconds: Double,
+    audioBytes: Int,
+    bodyBytes: Int,
+    overheadBytes: Int,
+    duplicationRatio: Double,
+    strategy: String,
+    peakInMemoryBytes: Int,
+    peakFileBackedBytes: Int
+  ) {
+    self.fixtureID = fixtureID
+    self.durationBucket = durationBucket
+    self.durationSeconds = durationSeconds
+    self.audioBytes = audioBytes
+    self.bodyBytes = bodyBytes
+    self.overheadBytes = overheadBytes
+    self.duplicationRatio = duplicationRatio
+    self.strategy = strategy
+    self.peakInMemoryBytes = peakInMemoryBytes
+    self.peakFileBackedBytes = peakFileBackedBytes
+  }
+
+  public static func markdown(_ rows: [STTRequestMemoryRow]) -> String {
+    var lines: [String] = []
+    lines.append("## Request memory (audio vs body, in-memory vs file-backed)")
+    lines.append("")
+    lines.append(
+      "| fixture | audio | body | overhead | dup | strategy | peak in-mem | peak file |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+    for row in rows {
+      lines.append(
+        "| \(row.fixtureID) | \(row.audioBytes)B | \(row.bodyBytes)B"
+          + " | \(row.overheadBytes)B"
+          + " | \(String(format: "%.3f", row.duplicationRatio))"
+          + " | \(row.strategy)"
+          + " | \(row.peakInMemoryBytes)B | \(row.peakFileBackedBytes)B |")
+    }
+    return lines.joined(separator: "\n") + "\n"
+  }
+}
+
+extension BenchmarkRunner {
+  /// Request-body memory accounting for one fixture set: exact body bytes
+  /// come from the request the adapter would send (multipart framing
+  /// included). The strategy mirrors production (`fileBacked` at or above
+  /// the threshold on the real network path, else `inMemory`); both peak
+  /// estimates are reported so the before/after is visible in one row.
+  public static func requestMemoryRows(
+    fixtures: [BenchmarkFixture],
+    config: BenchmarkSTTConfig,
+    audioFormat: STTUploadFormat = .wav
+  ) -> [STTRequestMemoryRow] {
+    fixtures.map { fixture in
+      let wav = WAVEncoder.encode(samples: fixture.samples, sampleRate: fixture.sampleRate)
+      let bodyBytes = uploadBytes(config: config, wav: wav, audioFormat: audioFormat)
+      let inMemory = STTRequestMemoryReport(
+        audioBytes: wav.count, bodyBytes: bodyBytes, strategy: .inMemory)
+      let fileBacked = STTRequestMemoryReport(
+        audioBytes: wav.count, bodyBytes: bodyBytes, strategy: .fileBacked)
+      let strategy: STTUploadStrategy =
+        bodyBytes >= Transcriber.fileBackedUploadThresholdBytes ? .fileBacked : .inMemory
+      return STTRequestMemoryRow(
+        fixtureID: fixture.id,
+        durationBucket: fixture.durationBucket.rawValue,
+        durationSeconds: fixture.durationSeconds,
+        audioBytes: wav.count,
+        bodyBytes: bodyBytes,
+        overheadBytes: inMemory.overheadBytes,
+        duplicationRatio: inMemory.duplicationRatio,
+        strategy: strategy.rawValue,
+        peakInMemoryBytes: inMemory.peakTransientBytes,
+        peakFileBackedBytes: fileBacked.peakTransientBytes)
+    }
+  }
+}
+
