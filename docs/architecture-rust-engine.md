@@ -151,8 +151,11 @@ ingress into the engine is narrow and block-oriented:
   `nd_batch_plan` (fixed-length chunk bodies with overlap). The host
   keeps owning the samples and materializes PCM through the returned
   ranges.
-- The engine performs O(n) math with no allocation, no locks, no I/O,
-  and no synchronous network work on this path.
+- Per-block realtime calls perform O(n) math with no allocation, no
+  locks, no I/O, and no synchronous network work on this path. The
+  offline planners (`nd_live_plan`, `nd_batch_plan`) allocate only
+  internal scratch (RMS timeline, plan) and never retain PCM; they are
+  not for the realtime callback.
 - VAD/autostop decisions consume the raw (pre-gain) signal; the
   amplified signal feeds only level meters and the recording.
 - Overhead is measured on the macOS side around the bridge call

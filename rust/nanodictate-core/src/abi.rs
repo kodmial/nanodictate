@@ -1413,7 +1413,8 @@ fn segmenter_config_from(raw: &NdSegmenterConfig) -> SegmenterConfig {
 /// counterpart of the streaming utterance logic: pause-gated boundaries,
 /// minimum segment glue, maximum segment hard cap, junction silence owned
 /// by no segment). Single pass over the source; the engine allocates
-/// nothing on top of the output array the host sized. `config` NULL
+/// only internal scratch (RMS timeline, plan) and never retains PCM.
+/// Offline call, not for the realtime callback. `config` NULL
 /// means defaults. When `out_specs` is NULL (or `capacity` is 0) the
 /// required entry count is written to `out_written` and `ND_OK` is
 /// returned; otherwise up to `capacity` entries are written and
