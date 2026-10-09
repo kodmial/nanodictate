@@ -613,6 +613,10 @@ fn language_hint_name(hint: stt::LanguageHintMode) -> &'static str {
     }
 }
 
+fn upload_format_name(format: stt::UploadFormat) -> &'static str {
+    format.as_str()
+}
+
 /// Resolves the model profile for an (adapter id, model) pair as JSON.
 /// Never fails on unknown ids (conservative fallback); NULL only on
 /// invalid UTF-8, null pointers, or panic.
@@ -651,7 +655,7 @@ pub extern "C" fn nd_stt_resolve(
         };
         let json = format!(
             "{{\"adapter_id\":{},\"model\":{},\"transport\":\"{}\",\
-            \"audio\":{{\"sample_rate\":{},\"channels\":{},\"upload_format\":\"wav\",\
+            \"audio\":{{\"sample_rate\":{},\"channels\":{},\"upload_format\":\"{}\",\
             \"supports_flac\":{}}},\
             \"response_formats\":[{formats_json}],\
             \"capabilities\":{{\"supports_verbose_json\":{},\"supports_word_timestamps\":{},\
@@ -667,6 +671,7 @@ pub extern "C" fn nd_stt_resolve(
             transport_name(caps.transport),
             profile.audio.sample_rate,
             profile.audio.channels,
+            upload_format_name(profile.audio.upload_format),
             flag(profile.audio.supports_flac),
             flag(caps.supports_verbose_json),
             flag(caps.supports_word_timestamps),

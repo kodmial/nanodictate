@@ -415,13 +415,25 @@ public enum RustEngine {
       supportsServerChunking: caps["supports_server_chunking"] as? Bool ?? false,
       supportsNoiseReduction: caps["supports_noise_reduction"] as? Bool ?? false
     )
-    let audioProfile = STTAudioProfile(
-      sampleRate: sampleRate,
-      channels: channels,
-      uploadFormat: .wav,
-      supportedUploadFormats: (audio["supports_flac"] as? Bool ?? false)
-        ? [.wav, .flac] : [.wav]
-    )
+    let audioProfile: STTAudioProfile
+    // Realtime transcription streams raw PCM16 (official realtime API:
+    // 24 kHz mono, no container header); batch profiles stay WAV/FLAC.
+    if (audio["upload_format"] as? String) == "pcm16" {
+      audioProfile = STTAudioProfile(
+        sampleRate: sampleRate,
+        channels: channels,
+        uploadFormat: .pcm16,
+        supportedUploadFormats: [.pcm16]
+      )
+    } else {
+      audioProfile = STTAudioProfile(
+        sampleRate: sampleRate,
+        channels: channels,
+        uploadFormat: .wav,
+        supportedUploadFormats: (audio["supports_flac"] as? Bool ?? false)
+          ? [.wav, .flac] : [.wav]
+      )
+    }
     return STTModelProfile(
       adapterID: adapterID,
       model: model,

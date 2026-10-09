@@ -56,10 +56,20 @@ impl AdapterId {
     }
 }
 
-/// Accepted upload audio container. Only WAV is implemented.
+/// Accepted upload audio container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UploadFormat {
     Wav,
+    Pcm16,
+}
+
+impl UploadFormat {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Wav => "wav",
+            Self::Pcm16 => "pcm16",
+        }
+    }
 }
 
 /// Model-specific audio requirements for request preparation.
@@ -89,6 +99,16 @@ impl AudioProfile {
         channels: 1,
         upload_format: UploadFormat::Wav,
         supports_flac: true,
+    };
+
+    /// Realtime transcription profile (OpenAI `gpt-live-transcribe` family):
+    /// 24 kHz mono raw PCM16 streamed over one stateful session (official
+    /// realtime-transcription API: `audio/input/format = audio/pcm @24kHz`).
+    pub const REALTIME_MONO_24K_PCM: Self = Self {
+        sample_rate: 24000,
+        channels: 1,
+        upload_format: UploadFormat::Pcm16,
+        supports_flac: false,
     };
 }
 
@@ -183,6 +203,28 @@ fn openai_profile(model: &str) -> ModelProfile {
         audio,
         transcript_path: None,
     };
+    // Realtime first: `gpt-live-transcribe*` is a stateful streaming session
+    // (24 kHz mono raw PCM16), never the batch `gpt-transcribe` profile.
+    if model == "gpt-live-transcribe"
+        || model.starts_with("gpt-live-transcribe")
+        || model.starts_with("gpt-live-")
+    {
+        return base(
+            Capabilities {
+                transport: TransportKind::StreamingSession,
+                response_formats: vec![ResponseFormat::Json],
+                supports_verbose_json: false,
+                supports_word_timestamps: false,
+                supports_prompt: true,
+                supports_temperature: false,
+                language_hint: LanguageHintMode::Multi,
+                supports_keyword_biasing: true,
+                supports_server_chunking: true,
+                ..Capabilities::openai_compatible_fallback()
+            },
+            AudioProfile::REALTIME_MONO_24K_PCM,
+        );
+    }
     if model == "whisper-1" || model.starts_with("whisper-") {
         return base(
             Capabilities {
@@ -436,7 +478,39 @@ mod tests {
     }
 
     #[test]
-    fn every_builtin_profile_requires_mono_16k_wav_default() {
+    fn realtime_profile_uses_streaming_24k_pcm16() {
+        // Task #25: realtime uses the model-required 24 kHz raw PCM16
+        // profile, not the 16 kHz batch WAV profile.
+        for model in ["gpt-live-transcribe", "gpt-live-transcribe-2026-09-01", "gpt-live-foo"] {
+            let p = resolve("openai", model);
+            assert_eq!(p.capabilities.transport, TransportKind::StreamingSession, "{model}");
+            assert_eq!(p.audio.sample_rate, 24000, "{model}");
+            assert_eq!(p.audio.channels, 1, "{model}");
+            assert_eq!(p.audio.upload_format, UploadFormat::Pcm16, "{model}");
+            assert!(!p.audio.supports_flac, "{model}");
+            assert_eq!(p.capabilities.language_hint, LanguageHintMode::Multi, "{model}");
+            assert!(p.capabilities.supports_prompt, "{model}");
+            assert!(!p.capabilities.supports_temperature, "{model}");
+            assert!(p.capabilities.supports_keyword_biasing, "{model}");
+            assert!(p.capabilities.supports_server_chunking, "{model}");
+            assert!(!p.capabilities.supports_verbose_json, "{model}");
+            assert!(!p.capabilities.supports_word_timestamps, "{model}");
+        }
+        // Batch models are untouched.
+        let batch = resolve("openai", "gpt-transcribe");
+        assert_eq!(batch.capabilities.transport, TransportKind::BatchMultipart);
+        assert_eq!(batch.audio.sample_rate, 16000);
+        // Case-insensitive with whitespace trimmed, like the Swift registry.
+        let upper = resolve("openai", "  GPT-LIVE-TRANSCRIBE ");
+        assert_eq!(upper.capabilities.transport, TransportKind::StreamingSession);
+        assert_eq!(upper.audio.sample_rate, 24000);
+    }
+
+    #[test]
+    fn every_builtin_batch_profile_requires_mono_16k_wav_default() {
+        // Realtime profiles intentionally use 24 kHz raw PCM16 (see
+        // realtime_profile_uses_streaming_24k_pcm16); every batch profile
+        // keeps the 16 kHz mono WAV default.
         for (adapter, model) in [
             ("openai", "whisper-1"),
             ("openai", "gpt-4o-mini-transcribe"),

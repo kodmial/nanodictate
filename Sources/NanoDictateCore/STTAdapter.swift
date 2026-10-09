@@ -287,7 +287,8 @@ public enum ProviderRequestBuilder {
 
   /// Model-specific audio requirements (sample rate / channels / format).
   /// Audio preparation consults this instead of assuming the common batch
-  /// profile; all built-in models currently require 16 kHz mono WAV.
+  /// profile; batch models require 16 kHz mono WAV/FLAC while realtime
+  /// profiles require 24 kHz mono raw PCM16.
   public static func audioProfile(adapterID: String, model: String) -> STTAudioProfile {
     profile(adapterID: adapterID, model: model).audio
   }
