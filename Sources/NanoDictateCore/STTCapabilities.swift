@@ -394,10 +394,11 @@ public enum STTModelRegistry {
   // MARK: - Families
 
   private static func resolveOpenAI(model: String) -> STTModelProfile {
-    // Realtime first: `gpt-live-transcribe*` never matches the batch
-    // `gpt-transcribe` prefix below, but the order documents intent.
+    // Realtime first: `gpt-live-transcribe` family (exact name plus dated
+    // snapshots) never matches the batch `gpt-transcribe` prefix below, but
+    // the order documents intent. Other `gpt-live-*` names (e.g.
+    // voice-conversation models such as `gpt-live-1`) stay on batch.
     if openAIRealtimeModels.contains(model) || model.hasPrefix("gpt-live-transcribe")
-      || model.hasPrefix("gpt-live-")
     {
       // Stateful realtime transcription session: deltas + completion events
       // over one WebSocket; 24 kHz mono raw PCM16; languages[] (multi),

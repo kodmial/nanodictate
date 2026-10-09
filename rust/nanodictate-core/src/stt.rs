@@ -203,11 +203,11 @@ fn openai_profile(model: &str) -> ModelProfile {
         audio,
         transcript_path: None,
     };
-    // Realtime first: `gpt-live-transcribe*` is a stateful streaming session
-    // (24 kHz mono raw PCM16), never the batch `gpt-transcribe` profile.
-    if model == "gpt-live-transcribe"
-        || model.starts_with("gpt-live-transcribe")
-        || model.starts_with("gpt-live-")
+    // Realtime first: `gpt-live-transcribe` family (exact name plus dated
+    // snapshots) is a stateful streaming session (24 kHz mono raw PCM16),
+    // never the batch `gpt-transcribe` profile. Other `gpt-live-*` names
+    // (e.g. voice-conversation models such as `gpt-live-1`) stay on batch.
+    if model == "gpt-live-transcribe" || model.starts_with("gpt-live-transcribe")
     {
         return base(
             Capabilities {
@@ -484,7 +484,7 @@ mod tests {
         for model in [
             "gpt-live-transcribe",
             "gpt-live-transcribe-2026-09-01",
-            "gpt-live-foo",
+            "gpt-live-transcribe-2026-09-01-preview",
         ] {
             let p = resolve("openai", model);
             assert_eq!(
@@ -512,6 +512,17 @@ mod tests {
         let batch = resolve("openai", "gpt-transcribe");
         assert_eq!(batch.capabilities.transport, TransportKind::BatchMultipart);
         assert_eq!(batch.audio.sample_rate, 16000);
+        // Voice-conversation and other non-transcription `gpt-live-*` names
+        // stay on batch (never the streaming transcription protocol).
+        for model in ["gpt-live-1", "gpt-live-foo", "gpt-live"] {
+            let p = resolve("openai", model);
+            assert_eq!(
+                p.capabilities.transport,
+                TransportKind::BatchMultipart,
+                "{model}"
+            );
+            assert_eq!(p.audio.sample_rate, 16000, "{model}");
+        }
         // Case-insensitive with whitespace trimmed, like the Swift registry.
         let upper = resolve("openai", "  GPT-LIVE-TRANSCRIBE ");
         assert_eq!(

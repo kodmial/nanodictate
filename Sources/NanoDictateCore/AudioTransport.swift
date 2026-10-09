@@ -11,16 +11,17 @@ import Foundation
 
 /// Config-level upload preference (TOML `upload_format`).
 ///
-/// - `auto` (default): profile preferred format (WAV everywhere today —
-///   zero/low encoding overhead, no default change without benchmark
-///   evidence).
-/// - `wav`: force WAV.
+/// - `auto` (default): profile preferred format (WAV for batch profiles,
+///   raw PCM16 for the realtime profile — zero/low encoding overhead, no
+///   default change without benchmark evidence).
+/// - `wav`: force WAV where the profile supports it, otherwise the profile
+///   preferred format.
 /// - `flac`: lossless compact batch transport where the profile declares
-///   FLAC support; falls back to WAV otherwise.
+///   FLAC support; falls back to the profile preferred format otherwise.
 /// - `opusExperimental` (`"opus"` / `"opus-experimental"`): experimental
 ///   bandwidth mode. No local encoder ships yet, so it always resolves to
-///   WAV today; kept as an explicit opt-in until benchmark evidence is
-///   documented.
+///   the profile preferred format today; kept as an explicit opt-in until
+///   benchmark evidence is documented.
 public enum STTUploadPreference: String, Equatable, CaseIterable {
   case auto
   case wav
@@ -56,7 +57,9 @@ public enum AudioTransportSelection {
   ///   preferred `profile.uploadFormat` when that list is empty);
   /// - experimental formats are never auto-selected (`.auto` maps to the
   ///   profile preferred format, which is never experimental);
-  /// - an unsupported or un-encodable request falls back to WAV.
+  /// - an unsupported or un-encodable request falls back to the profile
+  ///   preferred format (`profile.uploadFormat`, WAV for batch profiles and
+  ///   raw PCM16 for the realtime profile).
   public static func resolve(
     preference: STTUploadPreference, profile: STTAudioProfile
   ) -> STTUploadFormat {
@@ -66,7 +69,7 @@ public enum AudioTransportSelection {
     case .auto:
       return profile.uploadFormat
     case .wav:
-      return .wav
+      return supported.contains(.wav) ? .wav : profile.uploadFormat
     case .flac:
       // Local FLAC encoding is lossless (bit-exact round-trip verified), so
       // recognition regression is not assumed — it is measured via the
@@ -74,11 +77,12 @@ public enum AudioTransportSelection {
       if supported.contains(.flac), FLACEncoder.canEncode(profile: profile) {
         return .flac
       }
-      return .wav
+      return profile.uploadFormat
     case .opusExperimental:
-      // No local Opus encoder ships: opt-in resolves to WAV until benchmark
-      // evidence justifies stronger support.
-      return .wav
+      // No local Opus encoder ships: opt-in resolves to the profile preferred
+      // format (WAV for batch profiles) until benchmark evidence justifies
+      // stronger support.
+      return profile.uploadFormat
     }
   }
 
