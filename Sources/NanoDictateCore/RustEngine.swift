@@ -355,8 +355,14 @@ public enum RustEngine {
   public static func reviewDecide(line: String?) throws -> Bool {
     try rustReviewDecide(line: line)
   }
+}
 
-  // MARK: - Realtime audio and segmentation (production cutover #133)
+// MARK: - Realtime audio and segmentation (production cutover #133)
+//
+// Housed in an extension so the main `RustEngine` seam stays under the
+// SwiftLint `type_body_length` error threshold; behavior is unchanged.
+
+extension RustEngine {
 
   /// Builds the shipping realtime audio composition (per-block RMS
   /// metrics, adaptive VAD, input gain, silence auto-stop) from the host
