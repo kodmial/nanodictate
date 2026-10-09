@@ -21,6 +21,8 @@ import Foundation
 ///   shipped yet, so capability-gated selection never auto-selects it; an
 ///   explicit request falls back to WAV until benchmark evidence justifies
 ///   stronger support.
+/// - `pcm16`: raw mono signed 16-bit little-endian bytes without a container
+///   header (OpenAI realtime transcription sessions).
 ///
 /// Provider support (verified 2026-09 against current official docs):
 /// OpenAI transcription API (`flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav,
@@ -33,6 +35,7 @@ public enum STTUploadFormat: String, Equatable, CaseIterable {
   case wav
   case flac
   case opus
+  case pcm16
 
   /// File extension used for the multipart `filename` (no dot).
   public var fileExtension: String {
@@ -40,6 +43,7 @@ public enum STTUploadFormat: String, Equatable, CaseIterable {
     case .wav: return "wav"
     case .flac: return "flac"
     case .opus: return "ogg"
+    case .pcm16: return "pcm"
     }
   }
 
@@ -49,6 +53,7 @@ public enum STTUploadFormat: String, Equatable, CaseIterable {
     case .wav: return "audio/wav"
     case .flac: return "audio/flac"
     case .opus: return "audio/ogg"
+    case .pcm16: return "audio/pcm"
     }
   }
 
@@ -60,7 +65,7 @@ public enum STTUploadFormat: String, Equatable, CaseIterable {
   /// True for bit-exact transports (no recognition-quality risk).
   public var isLossless: Bool {
     switch self {
-    case .wav, .flac: return true
+    case .wav, .flac, .pcm16: return true
     case .opus: return false
     }
   }
@@ -75,13 +80,18 @@ public enum STTUploadFormat: String, Equatable, CaseIterable {
 // MARK: - Audio profile
 
 /// Model-specific audio requirements for request preparation.
-/// All built-in profiles require 16 kHz mono PCM16; the upload container
-/// varies per profile (`uploadFormat` is the preferred/default container,
+/// Batch profiles require 16 kHz mono PCM16 (WAV default, FLAC where the
+/// profile declares support); realtime transcription profiles require 24 kHz
+/// mono raw PCM16 (official OpenAI realtime transcription API:
+/// `audio/input/format = {"type": "audio/pcm", "rate": 24000}`, base64 bytes
+/// without a WAV header). The upload container varies per profile
+/// (`uploadFormat` is the preferred/default container,
 /// `supportedUploadFormats` lists every container the provider accepts).
 /// Selection (`AudioTransportSelection`) never picks a format outside
 /// `supportedUploadFormats`, and never upmixes source audio (e.g. no 48 kHz
 /// stereo is sent to 16 kHz mono Whisper-style models merely to preserve a
-/// source format).
+/// source format). Callers request the requirement from the model instead of
+/// hard-coding it.
 public struct STTAudioProfile: Equatable {
   /// Required sample rate in Hz (preferred == required for current models).
   public var sampleRate: Int
@@ -106,8 +116,12 @@ public struct STTAudioProfile: Equatable {
     self.supportedUploadFormats = supportedUploadFormats ?? [uploadFormat]
   }
 
-  /// Shared batch profile used by every built-in model today.
+  /// Shared batch profile used by every batch model today.
   public static let batchMono16k = STTAudioProfile(sampleRate: 16000, channels: 1, uploadFormat: .wav)
+  /// Realtime transcription profile (OpenAI `gpt-live-transcribe` family):
+  /// 24 kHz mono raw PCM16, streamed continuously over one WebSocket session.
+  public static let realtimeMono24kPCM =
+    STTAudioProfile(sampleRate: 24000, channels: 1, uploadFormat: .pcm16)
 
   /// Batch profile for providers verified to accept lossless FLAC
   /// (OpenAI and Groq transcription APIs, 2026-09). Preferred/default
@@ -121,14 +135,15 @@ public struct STTAudioProfile: Equatable {
 // MARK: - Transport
 
 /// Session/transport semantics of a model profile.
-/// Only batch transports are implemented; `.streamingSession` is reserved
-/// for future WebSocket work (explicit non-goal) and used by no profile yet.
+/// Batch transports upload one request per audio; `.streamingSession` keeps
+/// one stateful WebSocket session per dictation (OpenAI realtime
+/// transcription) and streams raw PCM16 continuously.
 public enum STTTransportKind: String, Equatable {
   /// OpenAI-compatible multipart/form-data upload, one request per audio.
   case batchMultipart
   /// Raw audio bytes upload (Cloudflare Workers AI), one request per audio.
   case batchRawAudio
-  /// Reserved: WebSocket/persistent streaming session (not implemented).
+  /// Persistent realtime transcription session (WebSocket).
   case streamingSession
 }
 
@@ -287,6 +302,13 @@ public enum STTModelRegistry {
     "gpt-4o-transcribe",
     "gpt-4o-mini-transcribe",
   ]
+  /// Realtime transcription models (stateful WebSocket sessions, verified
+  /// against the official realtime-transcription guide 2026-10-01):
+  /// `gpt-live-transcribe` family. Transport is `.streamingSession`, audio
+  /// is 24 kHz mono raw PCM16 (NOT the 16 kHz batch WAV profile). Checked
+  /// before the batch `gpt-transcribe` prefix so a future
+  /// `gpt-live-transcribe-*` snapshot keeps the streaming profile.
+  private static let openAIRealtimeModels: Set<String> = ["gpt-live-transcribe"]
   /// Known Groq models (verbose_json without timestamp granularities).
   private static let groqModels: Set<String> = [
     "whisper-large-v3",
@@ -372,6 +394,36 @@ public enum STTModelRegistry {
   // MARK: - Families
 
   private static func resolveOpenAI(model: String) -> STTModelProfile {
+    // Realtime first: `gpt-live-transcribe` family (exact name plus dated
+    // snapshots) never matches the batch `gpt-transcribe` prefix below, but
+    // the order documents intent. Other `gpt-live-*` names (e.g.
+    // voice-conversation models such as `gpt-live-1`) stay on batch.
+    if openAIRealtimeModels.contains(model) || model.hasPrefix("gpt-live-transcribe")
+    {
+      // Stateful realtime transcription session: deltas + completion events
+      // over one WebSocket; 24 kHz mono raw PCM16; languages[] (multi),
+      // prompt/keywords/delay configured in session.update.
+      return STTModelProfile(
+        adapterID: STTAdapterID.openai.rawValue,
+        model: model,
+        capabilities: STTCapabilities(
+          transport: .streamingSession,
+          responseFormats: [.json],
+          supportsVerboseJSON: false,
+          supportsWordTimestamps: false,
+          supportsSegmentTimestamps: false,
+          supportsPrompt: true,
+          supportsTemperature: false,
+          languageHint: .multi,
+          supportsKeywordBiasing: true,
+          supportsServerVAD: false,
+          supportsServerChunking: true,
+          supportsNoiseReduction: false
+        ),
+        audio: .realtimeMono24kPCM,
+        transcriptPath: nil
+      )
+    }
     if openAIWhisperModels.contains(model) || model.hasPrefix("whisper-") {
       return STTModelProfile(
         adapterID: STTAdapterID.openai.rawValue,

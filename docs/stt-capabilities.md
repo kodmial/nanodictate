@@ -33,17 +33,23 @@ segment overlap stitching) and only for profiles that support them.
 | `groq` | unknown (fallback) | batch multipart | no | no | yes | yes | no | single | flat `text` |
 | `cloudflare` | any (model baked into URL) | batch raw WAV (`audio/wav`) | no | no | no | no | no | none | `result.text` |
 | `airubiz` / `gigaam` / `selfhosted` / custom | any | batch multipart (conservative fallback below) | no | no | yes | yes | no | single | flat `text` |
+| `openai` | `gpt-live-transcribe`, `gpt-live-transcribe-*` snapshots (realtime streaming) | streaming WebSocket session | n/a (deltas + completion events) | n/a | yes (`prompt` in session.update) | no | no | multi (`languages`) | realtime events |
 
-Audio requirements for every built-in profile: 16 kHz mono PCM16
-(`STTAudioProfile.batchMono16k`). The profile struct carries
+Audio requirements: batch profiles use 16 kHz mono PCM16
+(`STTAudioProfile.batchMono16k` / `batchMono16kFLACCapable`; see the audio
+transport section below for WAV/FLAC selection). The profile struct carries
 `sampleRate` / `channels` / `uploadFormat` / `supportedUploadFormats` so
-future models with different requirements only change the registry entry;
-`streamingSession` transport,
-keyword biasing, segment timestamps, server-side chunking and noise
-reduction are modeled in `STTCapabilities` as reserved fields (all `false` /
-unused today). The `multi` language-hint mode is used by `gpt-transcribe`:
-the configured single `language` value is forwarded as one `languages[]`
-entry (the API rejects sending both `language` and `languages`).
+future models with different requirements only change the registry entry.
+The realtime `gpt-live-transcribe` family uses 24 kHz mono raw PCM16
+(`STTAudioProfile.realtimeMono24kPCM`, base64 chunks without a WAV header,
+per the official realtime-transcription API). `streamingSession` transport
+is implemented by `RealtimeTranscriptionSession` (see
+`docs/realtime-transcription.md` for the lifecycle and error/reconnect
+policy). Batch `plan` for a streaming profile returns an invalid spec (nil
+URL) instead of a silent multipart fallback. The `multi` language-hint mode
+is used by `gpt-transcribe` (batch) and by the realtime family: the
+configured single `language` value is forwarded as one `languages` entry
+(the API rejects sending both `language` and `languages`).
 
 ## Audio transport formats (WAV/FLAC, optional Opus)
 
@@ -62,22 +68,23 @@ raw-audio upload is only verified for WAV in this repository):
 
 Rules:
 
-- WAV remains supported everywhere and is the default (`auto` resolves to
-  the profile preferred format — WAV for all built-in models today). The
-  default does not change without benchmark evidence (see
+- WAV remains supported for every batch profile and is the batch default
+  (`auto` resolves to the profile preferred format — WAV for all built-in
+  batch models; the realtime `gpt-live-transcribe` family prefers raw PCM16).
+  The default does not change without benchmark evidence (see
   `docs/stt-benchmark.md`).
 - FLAC is a lossless compact batch transport: same 16 kHz mono PCM16 source,
   encoded locally with the pure-Swift `FLACEncoder` (fixed predictors +
   Rice coding, no extra dependency), so recognition quality is preserved by
   construction and verified by round-trip tests. `upload_format = "flac"`
-  selects it where the profile declares support and falls back to WAV
-  elsewhere.
+  selects it where the profile declares support and falls back to the profile
+  preferred format elsewhere.
 - Format selection (`AudioTransportSelection.resolve`) never returns a codec
   outside `supportedUploadFormats`.
 - Opus stays explicitly experimental: no local encoder ships, so it is
   never auto-selected and an explicit `upload_format = "opus"` (alias
-  `"opus-experimental"`) resolves to WAV until benchmark evidence justifies
-  stronger support.
+  `"opus-experimental"`) resolves to the profile preferred format until
+  benchmark evidence justifies stronger support.
 - Source audio is never upmixed to preserve a container: no 48 kHz stereo
   is sent to 16 kHz mono Whisper-style models.
 
@@ -160,11 +167,15 @@ extra_languages = ["en", "ru"]
   (`supportsPrompt == false`) drops it with a warning.
 - Extra languages: normalized codes (lowercased, capped at 4) are sent as
   `languages[]` only where the profile declares multi-hint mode
-  (`gpt-transcribe`); single-hint models keep `language` only, `none`
+  (`gpt-transcribe`); the realtime `gpt-live-transcribe` family merges them
+  with the primary hint into `session.update` `languages[]` (capped at 5
+  total); single-hint models keep `language` only, `none`
   profiles send nothing.
 - Dedicated `keywords[]` multipart serialization exists but no built-in
-  profile emits it today (`supportsKeywordBiasing == false` everywhere) —
-  it is reserved for future models with a native keywords field.
+  batch profile emits it (`supportsKeywordBiasing == false` for batch) —
+  it is reserved for batch models with a native keywords field. The
+  realtime `gpt-live-transcribe` family (`supportsKeywordBiasing == true`)
+  sends the normalized vocabulary as `keywords` in `session.update`.
 - Limits and escaping are covered by request-builder tests; debug logs
   record only `vocabulary_terms=N` counts, never the terms themselves.
 
