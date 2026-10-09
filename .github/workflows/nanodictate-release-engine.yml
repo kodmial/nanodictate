@@ -923,6 +923,19 @@ jobs:
         # succeeded (set -e); any other failure exits non-zero.
         run: |
           set -euo pipefail
+          # Rerun safety: a rerun executes at the run's original SHA. If main
+          # advanced after the recovery recheck (or while the rerun waited to
+          # start), the rerun would otherwise publish a superseded commit.
+          # Fail closed on main-push reruns only; tag pushes and manual
+          # releases keep their separate contracts, and first-attempt main
+          # pushes are unaffected.
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" && "${{ github.run_attempt }}" != "1" ]]; then
+            CURRENT_MAIN_SHA="$(gh api "repos/$GH_REPO/branches/main" --jq '.commit.sha')"
+            if [[ "$SHA" != "$CURRENT_MAIN_SHA" ]]; then
+              echo "::error::Release commit $SHA is stale; main is now $CURRENT_MAIN_SHA. Refusing to publish a superseded commit on a rerun."
+              exit 1
+            fi
+          fi
           # The GitHub Release body must be the already-reviewed canonical
           # `## [<version>]` section, never an independently generated text.
           source scripts/release-notes.sh
@@ -968,6 +981,18 @@ jobs:
             fi
           fi
           release_notes_gate_publish "$RELEASE_VERSION" "$SWIFT_VERSION" "$RELEASABLE" /tmp/canonical-body.md < CHANGELOG.md
+          # Recovered main-push runs keep their original SHA even when main
+          # advances while they wait for Actions capacity. Publishing old
+          # source bytes as the next release is forbidden. Recheck the live
+          # main ref at the final publication boundary. Existing tag reruns
+          # remain available for repairing previously published assets.
+          if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
+            LIVE_MAIN_SHA="$(gh api "repos/$GH_REPO/branches/main" --jq '.commit.sha')"
+            if [[ "$SHA" != "$LIVE_MAIN_SHA" ]]; then
+              echo "::error::Stale Release source $SHA: main is $LIVE_MAIN_SHA. Refusing to publish outdated release artifacts."
+              exit 1
+            fi
+          fi
           if gh release create "$TAG" \
             dist/$CLI_NAME-*.tar.gz \
             dist/$CLI_NAME-*.zip \

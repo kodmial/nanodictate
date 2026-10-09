@@ -77,6 +77,8 @@ extension L10n {
     "error.agentLaunchFailed": "Failed to launch dictation agent",
     "error.unsupportedAudioFormat": "Unsupported audio format",
     "error.audioServiceUnavailable": "Audio service unavailable",
+    "error.realtimeRetryUnsupported":
+      "realtime provider '{provider}' cannot retry a stored recording",
     // status.*
     "status.title": "NanoDictate — status",
     "status.logs": "Logs — agent.log ({n} lines total)",
@@ -275,6 +277,8 @@ extension L10n {
     "cli.routing.listHint": "List: `nanodictate provider list`",
     "progress.avgPerChunk": "%.1fs/chunk",
     "cli.batch.badBaseUrl": "Failed to build request: bad base_url for '%@'",
+    "cli.batch.realtimeUnsupported":
+      "Realtime models are not supported for batch/file transcription: '%@'",
     "cli.batch.parseError": "Failed to parse response: %@",
     "cli.transcribe.writeError": "ERROR: failed to write %@: %@",
     "cli.error.generic": "ERROR: %@",
@@ -337,6 +341,8 @@ extension L10n {
     "error.agentLaunchFailed": "Не удалось запустить агент диктовки",
     "error.unsupportedAudioFormat": "Неподдерживаемый аудиоформат",
     "error.audioServiceUnavailable": "Аудио-сервис недоступен",
+    "error.realtimeRetryUnsupported":
+      "realtime-провайдер '{provider}' не может повторить сохранённую запись",
     // status.*
     "status.title": "NanoDictate — статус",
     "status.logs": "Логи — agent.log (всего {n} строк)",
@@ -539,6 +545,8 @@ extension L10n {
     "cli.routing.listHint": "Список: `nanodictate provider list`",
     "progress.avgPerChunk": "средн. %.1fс/чанк",
     "cli.batch.badBaseUrl": "Не удалось собрать запрос: битый base_url у '%@'",
+    "cli.batch.realtimeUnsupported":
+      "Realtime-модели не поддерживаются для пакетной/файловой транскрибации: '%@'",
     "cli.batch.parseError": "Не удалось разобрать ответ: %@",
     "cli.transcribe.writeError": "ОШИБКА: не удалось записать %@: %@",
     "cli.error.generic": "ОШИБКА: %@",

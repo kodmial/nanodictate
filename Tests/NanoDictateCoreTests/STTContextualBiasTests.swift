@@ -232,6 +232,17 @@ final class STTContextualBiasTests: XCTestCase {
         }
     }
 
+    @objc func testRealtimeProfileExposesKeywordsField() {
+        let caps = STTModelRegistry.resolve(adapterID: "openai", model: "gpt-live-transcribe").capabilities
+        XCTAssertTrue(caps.supportsKeywordBiasing)
+        let applied = STTContextualBiasing.apply(
+            bias: STTContextualBias(vocabulary: ["Kubernetes"], extraLanguages: []),
+            chainPrompt: nil,
+            primaryLanguage: "",
+            capabilities: caps)
+        XCTAssertEqual(applied.keywordsField, ["Kubernetes"])
+    }
+
     // MARK: - Request builder: gating + escaping
 
     @objc func testWhisperPlanFoldsVocabularyIntoPrompt() {

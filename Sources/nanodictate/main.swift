@@ -873,6 +873,12 @@ func cmdTranscribeBatch(_ file: String, options: BatchTranscribeOptions) -> Int3
     return 1
   }
 
+  let resolvedModel = ProviderRequestBuilder.resolveModel(provider.model, for: provider.id)
+  if ProviderRequestBuilder.isRealtime(adapterID: provider.id, model: resolvedModel) {
+    eprint(String(format: L10n.tr("cli.batch.realtimeUnsupported"), provider.id))
+    return 1
+  }
+
   // 2. Convert to 16 kHz mono PCM16 WAV, STREAMING without loading into RAM.
   // Try to open the input directly (on-demand read windows from the file):
   // if not PCM16 WAV or not 16 kHz mono — afconvert to a temp file
