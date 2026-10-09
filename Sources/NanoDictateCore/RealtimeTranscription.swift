@@ -853,11 +853,12 @@ extension RealtimeTranscriptionSession {
         switch item {
         case .text(let message):
           text = message
-        case .failure(let failure):
+        case .failure:
           // Transport noise while waiting for ack: keep waiting until the
-          // ack deadline (same as unknown messages below). Remember the
-          // cause so a final timeout reports it instead of a generic message.
-          lastError = Transcriber.describeRealtime(failure)
+          // ack deadline (same as unknown messages and clean EOF below).
+          // Do not record it as lastError: the ack timeout must stay
+          // deterministic ("no session ack") instead of leaking transient
+          // transport noise into the fail-closed error.
           continue
         }
         guard let text else {
