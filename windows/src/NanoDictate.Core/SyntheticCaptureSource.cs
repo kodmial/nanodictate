@@ -94,6 +94,14 @@ public sealed class SyntheticCaptureSource : IAudioCaptureSource
             {
                 return;
             }
+            if (_worker is not null)
+            {
+                if (_worker.IsAlive)
+                {
+                    throw new NanoException(-1, "capture worker is still stopping");
+                }
+                _worker = null;
+            }
             if (_failNextStart)
             {
                 _failNextStart = false;
@@ -113,9 +121,27 @@ public sealed class SyntheticCaptureSource : IAudioCaptureSource
             _running = false;
             Monitor.PulseAll(_gate);
             worker = _worker;
-            _worker = null;
         }
-        worker?.Join(TimeSpan.FromSeconds(5));
+        if (worker is null)
+        {
+            return;
+        }
+        if (ReferenceEquals(worker, Thread.CurrentThread))
+        {
+            // Reentrant stop from the worker thread (inside BlockAvailable):
+            // the worker is already exiting via _running == false.
+            return;
+        }
+        worker.Join(TimeSpan.FromSeconds(5));
+        lock (_gate)
+        {
+            // Retain the worker reference until termination is confirmed so
+            // Dispose can still wait for a callback that outlasts the timeout.
+            if (ReferenceEquals(_worker, worker) && !worker.IsAlive)
+            {
+                _worker = null;
+            }
+        }
     }
 
     private void Worker()
@@ -163,21 +189,37 @@ public sealed class SyntheticCaptureSource : IAudioCaptureSource
 
     public void Dispose()
     {
-        Thread? worker;
         lock (_gate)
         {
             _disposed = true;
             _running = false;
             Monitor.PulseAll(_gate);
+        }
+        Thread? worker;
+        lock (_gate)
+        {
             worker = _worker;
-            _worker = null;
         }
         // Guarantee no callback is active after disposal returns: the timed
         // join covers the cooperative path, and the blocking fallback covers
-        // a callback that outlasts the timeout.
-        if (worker is not null && !worker.Join(TimeSpan.FromSeconds(5)))
+        // a callback that outlasts the timeout. The reference is retained by
+        // Stop, so a timed-out Stop cannot make disposal lose the worker.
+        if (worker is not null)
         {
-            worker.Join();
+            if (!ReferenceEquals(worker, Thread.CurrentThread))
+            {
+                if (!worker.Join(TimeSpan.FromSeconds(5)))
+                {
+                    worker.Join();
+                }
+            }
+            lock (_gate)
+            {
+                if (ReferenceEquals(_worker, worker) && !worker.IsAlive)
+                {
+                    _worker = null;
+                }
+            }
         }
     }
 }

@@ -107,22 +107,45 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
         {
             _running = false;
             worker = _worker;
-            _worker = null;
+            if (worker is null)
+            {
+                // No worker active: safe to release idempotently. A deferred
+                // release without a worker means the worker already exited,
+                // so complete the pending cleanup here.
+                if (_releaseDeferred)
+                {
+                    _releaseDeferred = false;
+                }
+                ReleaseLocked();
+                return;
+            }
+            // Block Start throughout the join window and retain the worker
+            // reference until the worker stops using the COM objects.
+            _releaseDeferred = true;
         }
-        var joined = worker is null || worker.Join(TimeSpan.FromSeconds(5));
+        if (!ReferenceEquals(worker, Thread.CurrentThread))
+        {
+            worker.Join(TimeSpan.FromSeconds(5));
+        }
         lock (_gate)
         {
-            // Release COM objects only after confirmed worker exit; on a
-            // join timeout the worker still uses them and releases them
-            // itself on exit.
-            if (joined)
+            if (!worker.IsAlive)
             {
+                // Worker terminated: this thread owns the COM cleanup. The
+                // worker's finally block skips cleanup once the flag is
+                // cleared, so repeated stops cannot double-release while the
+                // worker is active.
+                if (ReferenceEquals(_worker, worker))
+                {
+                    _worker = null;
+                }
+                _releaseDeferred = false;
                 ReleaseLocked();
             }
-            else
-            {
-                _releaseDeferred = true;
-            }
+            // Else the join timed out: keep _worker retained and
+            // _releaseDeferred set so the worker releases the COM objects on
+            // exit, repeated stops rejoin the same worker, and Start stays
+            // blocked until cleanup completes.
         }
     }
 
@@ -276,13 +299,25 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
         finally
         {
             // Complete a deferred Stop: release the COM objects the worker
-            // was still using when the join timed out.
+            // was still using when the join timed out. The flag is set before
+            // Stop waits, so a worker exit can never slip between the join
+            // timeout and the deferred mark.
             lock (_gate)
             {
                 if (_releaseDeferred)
                 {
                     _releaseDeferred = false;
+                    if (ReferenceEquals(_worker, Thread.CurrentThread))
+                    {
+                        _worker = null;
+                    }
                     ReleaseLocked();
+                }
+                else if (ReferenceEquals(_worker, Thread.CurrentThread))
+                {
+                    // Worker exited without a stop request: drop the stale
+                    // reference so a later Stop treats the source as stopped.
+                    _worker = null;
                 }
             }
         }
@@ -364,12 +399,47 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
 
     public void Dispose()
     {
+        Thread? worker;
         lock (_gate)
         {
             _disposed = true;
             _running = false;
+            worker = _worker;
+            if (worker is not null && !ReferenceEquals(worker, Thread.CurrentThread))
+            {
+                _releaseDeferred = true;
+            }
         }
-        Stop();
+        if (worker is null)
+        {
+            lock (_gate)
+            {
+                _releaseDeferred = false;
+                ReleaseLocked();
+            }
+            return;
+        }
+        if (ReferenceEquals(worker, Thread.CurrentThread))
+        {
+            // Reentrant dispose from the worker thread: the finally block
+            // owns the deferred cleanup.
+            return;
+        }
+        // Blocking fallback (like SyntheticCaptureSource) guarantees no
+        // callback uses COM after disposal returns.
+        if (!worker.Join(TimeSpan.FromSeconds(5)))
+        {
+            worker.Join();
+        }
+        lock (_gate)
+        {
+            if (ReferenceEquals(_worker, worker))
+            {
+                _worker = null;
+            }
+            _releaseDeferred = false;
+            ReleaseLocked();
+        }
     }
 
     /// <summary>
