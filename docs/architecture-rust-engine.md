@@ -216,27 +216,32 @@ Two tracks, per #123:
 
 - Automated software gate (CI-executable, no hardware prerequisite).
   `Sources/NanoDictateCore/RustParityGate.swift`
-  (`evaluateSoftware`) passes when every automated coverage area is
-  green — C ABI/lifetime and memory ownership, the native Swift bridge,
-  start/stop/cancel/session state, STT retry/failover, realtime
-  audio/VAD, and text insertion state transitions — plus
-  CI-generated performance measurements for supported, measurable cases
-  (block-oriented FFI overhead around the bridge call) show no material
-  regression. Tests use fake audio devices and permissions; physical
-  microphone latency or resource parity is never asserted from mocks.
-  A coding agent completes this gate using existing CI alone: no
-   human-operated hardware run, owner attestation, or out-of-band
-   evidence is required. Passing it unblocks the Windows implementation
-   (#137/#167) and release publication. Release publication enforces this:
-   the release `candidate-gate`
-   (`.github/workflows/nanodictate-release-engine.yml`) requires both the
-   exact-head Packaging smoke run and the exact-head CI run to be green.
-   The CI run executes `scripts/ci-validation.sh` → `NanoDictateCoreTests`,
-   which carries the `evaluateSoftware` unit coverage plus the real
-   block-oriented FFI overhead probes measured against the linked engine;
-   fixed `passingMeasurements()` fixtures in `RustParityGateTests` are
-   unit-test oracles for the gate logic, not release evidence. Packaging
-   success alone never publishes.
+  (`evaluateSoftware`) passes when every automated coverage area proves
+  itself with a real linked-engine check on the CI runner — C ABI/lifetime
+  and memory ownership, the native Swift bridge, start/stop/cancel/session
+  state, STT retry/failover, realtime audio/VAD, and text insertion state
+  transitions — plus CI-generated performance measurements for supported,
+  measurable cases (startup latency and block-oriented FFI overhead around
+  the bridge call) show no material regression. Tests use fake audio
+  devices and permissions; physical microphone latency or resource parity
+  is never asserted from mocks. CPU/memory/audio-copy ratios have no
+  CI-measurable baseline in this repository, so the software verdict
+  records them as explicitly not qualified (`nil` resource ratios with
+  `notes` entries) instead of asserting parity from constants. A coding
+  agent completes this gate using existing CI alone: no human-operated
+  hardware run, owner attestation, or out-of-band evidence is required.
+  Passing it unblocks the Windows implementation (#137/#167) and release
+  publication. Release publication enforces this: the release
+  `candidate-gate`
+  (`.github/workflows/nanodictate-release-engine.yml`) requires both the
+  exact-head Packaging smoke run and the exact-head CI run to be green.
+  The CI run executes `scripts/ci-validation.sh` → `NanoDictateCoreTests`,
+  which carries the `evaluateSoftware` unit coverage plus the real
+  block-oriented FFI overhead probes measured against the linked engine;
+  synthetic fixtures in `RustParityGateTests` are unit-test oracles for
+  the gate logic, not release evidence — only the evidence-to-verdict
+  test (real timings plus per-area proven checks) is. Packaging success
+  alone never publishes.
 - Real-hardware qualification (tracked in #35, never blocking). The
   same gate model keeps the hardware checklist
   (`ChecklistItem` / `evaluate`): repeated start/stop, rapid speech

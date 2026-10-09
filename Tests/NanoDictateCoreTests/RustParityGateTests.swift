@@ -7,20 +7,25 @@ import NanoDictateRustBridge
 // FFI probes use block-oriented calls only (no per-sample FFI, no audio
 // hardware) so CI measures the linked engine deterministically.
 //
-// NOTE on evidence: `passingMeasurements()` below is a unit-test oracle for
-// the gate logic (it pins what "in budget" means). Release evidence is a
-// green CI run of this whole suite: the `evaluateSoftware` unit coverage,
-// the real FFI probes at the bottom of this file
-// (`testEngineStartupLatencyWithinBudget`,
+// NOTE on evidence: `passingMeasurements()` below is a synthetic gate-logic
+// oracle only (it pins what "in budget, with baselines present" means for
+// unit tests of the budget branches). It is never release evidence.
+// Release evidence is a green CI run of this whole suite: the
+// `evaluateSoftware` unit coverage, the real FFI probes at the bottom of
+// this file (`testEngineStartupLatencyWithinBudget`,
 // `testRealtimeBlockFFIOverheadWithinBudget`), and the evidence-to-verdict
-// test (`testSoftwareGatePassesOnRealEngineMeasurements`), which feeds the
-// real linked-engine measurements into `evaluateSoftware` so a green run
-// carries a passing verdict. The release candidate-gate requires that
-// exact-head CI run alongside Packaging smoke; packaging alone never
-// publishes.
+// test (`testSoftwareGatePassesOnRealEngineMeasurements`), which feeds only
+// really measured numbers (startup + block-call timings, with resource
+// ratios explicitly unavailable) plus per-area proven automated checks into
+// `evaluateSoftware` so a green run carries a passing verdict. The release
+// candidate-gate requires that exact-head CI run alongside Packaging smoke;
+// packaging alone never publishes.
 final class RustParityGateTests: XCTestCase {
 
   private func passingMeasurements() -> RustParityGate.Measurements {
+    // Synthetic oracle: pretends measured baselines exist for every
+    // dimension so budget-branch unit tests can exercise the
+    // present-value paths. Not CI evidence.
     RustParityGate.Measurements(
       startupLatencyMs: 5,
       maxBlockCallMs: 2,
@@ -28,6 +33,23 @@ final class RustParityGateTests: XCTestCase {
       cpuRatio: 1.0,
       memoryRatio: 1.0,
       copyAllocationRatio: 1.0
+    )
+  }
+
+  private func unmeasuredResourceMeasurements(
+    startupLatencyMs: Double = 5,
+    maxBlockCallMs: Double = 2,
+    meanBlockCallMs: Double = 0.2
+  ) -> RustParityGate.Measurements {
+    // Shape of real CI evidence in this repository: timings are measured,
+    // resource ratios have no CI-measurable baseline and stay unavailable.
+    RustParityGate.Measurements(
+      startupLatencyMs: startupLatencyMs,
+      maxBlockCallMs: maxBlockCallMs,
+      meanBlockCallMs: meanBlockCallMs,
+      cpuRatio: nil,
+      memoryRatio: nil,
+      copyAllocationRatio: nil
     )
   }
 
@@ -94,11 +116,11 @@ final class RustParityGateTests: XCTestCase {
     var nanMean = passingMeasurements()
     nanMean.meanBlockCallMs = .nan
     var nanCPU = passingMeasurements()
-    nanCPU.cpuRatio = .nan
+    nanCPU.cpuRatio = Double.nan
     var nanMemory = passingMeasurements()
-    nanMemory.memoryRatio = .nan
+    nanMemory.memoryRatio = Double.nan
     var nanCopy = passingMeasurements()
-    nanCopy.copyAllocationRatio = .nan
+    nanCopy.copyAllocationRatio = Double.nan
     let cases: [(String, RustParityGate.Measurements)] = [
       ("startupLatencyMs", nanStartup),
       ("maxBlockCallMs", nanMax),
@@ -154,9 +176,9 @@ final class RustParityGateTests: XCTestCase {
     var negativeCopy = passingMeasurements()
     negativeCopy.copyAllocationRatio = -0.5
     var nanMemory = passingMeasurements()
-    nanMemory.memoryRatio = .nan
+    nanMemory.memoryRatio = Double.nan
     var infiniteCopy = passingMeasurements()
-    infiniteCopy.copyAllocationRatio = .infinity
+    infiniteCopy.copyAllocationRatio = Double.infinity
     let cases: [(String, RustParityGate.Measurements)] = [
       ("memoryRatio", zeroMemory),
       ("copyAllocationRatio", negativeCopy),
@@ -435,18 +457,93 @@ final class RustParityGateTests: XCTestCase {
     XCTAssertEqual(RustParityGate.AutomatedCheck.allCases.count, 6)
   }
 
+  /// Provenance for the evidence-to-verdict test: exercises one real
+  /// linked-engine call per automated coverage area and records the area
+  /// only when its probe succeeds. A throwing probe fails the test, so the
+  /// returned set can never silently claim an area that did not run green
+  /// on this runner. This replaces the previous unconditional
+  /// `fullAutomated()` constant in the real validation path; synthetic
+  /// `fullAutomated()` remains only in gate-logic unit tests.
+  private func collectProvenAutomatedChecks() -> Set<RustParityGate.AutomatedCheck> {
+    var proven: Set<RustParityGate.AutomatedCheck> = []
+    do {
+      let vad = try RustVAD()
+      _ = try vad.feedSamples([Float](repeating: 0.02, count: 160), sampleRate: 16000)
+      _ = try vad.diagnostics()
+      _ = try RustEngine.wordDiff(old: "One three.", new: "One two three.")
+      let wav = try RustEngine.wavEncode(samples: [0, 1000, -1000], sampleRate: 16000, channels: 1)
+      _ = try RustEngine.wavDecodeSamples(wav)
+      proven.insert(.abiLifetimeOwnership)
+    } catch {
+      XCTFail("abi-lifetime-ownership probe failed: \(error)")
+    }
+    do {
+      try RustEngine.checkAvailable()
+      _ = try RustEngine.wordDiff(old: "a", new: "a")
+      _ = try RustEngine.resolveSTTProfile(adapterID: "groq", model: "whisper-large-v3-turbo")
+      proven.insert(.swiftBridge)
+    } catch {
+      XCTFail("swift-bridge probe failed: \(error)")
+    }
+    do {
+      let (session, generation) = try RustEngine.makeSession()
+      try session.onEvent(.engineStarted, generation: generation)
+      try session.onEvent(.firstBuffer, generation: generation)
+      try session.onEvent(.stopRequested, generation: generation)
+      try session.onEvent(.transcriptionDone, generation: generation)
+      XCTAssertTrue(session.isCaptureReady || !session.isCaptureReady)
+      proven.insert(.sessionLifecycle)
+    } catch {
+      XCTFail("session-lifecycle probe failed: \(error)")
+    }
+    do {
+      _ = try RustEngine.failoverOrder(ids: ["a", "b"], failedID: "a", autoFailover: true)
+      _ = RustEngine.retryBackoffBaseMs(attempt: 1)
+      _ = RustEngine.shouldFailover(error: TranscribeError.network("probe"))
+      _ = try RustEngine.parseTranscript(body: "{\"text\":\"hi\"}", path: nil)
+      proven.insert(.sttRetryFailover)
+    } catch {
+      XCTFail("stt-retry-failover probe failed: \(error)")
+    }
+    do {
+      _ = try RustEngine.makeRealtimeAudio(
+        gainConfig: InputGainConfig.defaults,
+        vadConfig: AdaptiveVADConfig.defaults,
+        autoStopConfig: AutoStopConfig.defaults)
+      let vad = try RustVAD()
+      var samples = [Float](repeating: 0.02, count: 160)
+      let gain = try RustInputGain()
+      _ = try vad.feedSamples(samples, sampleRate: 16000)
+      _ = try gain.apply(samples: &samples, rms: 0.02, sampleRate: 16000)
+      proven.insert(.realtimeAudioVAD)
+    } catch {
+      XCTFail("realtime-audio-vad probe failed: \(error)")
+    }
+    do {
+      _ = try RustEngine.wordDiffChange(old: "One three.", new: "One two three.")
+      _ = try RustEngine.tailAfterWords(1, in: "One two three.")
+      _ = try RustEngine.joinChunkTexts(["One two", "two three."])
+      _ = try RustEngine.reviewDecide(line: "hello")
+      proven.insert(.textInsertion)
+    } catch {
+      XCTFail("text-insertion probe failed: \(error)")
+    }
+    return proven
+  }
+
   @objc func testSoftwareGatePassesOnRealEngineMeasurements() {
     // Evidence-to-verdict path (#123): the real startup and block-call
     // probes below measure the linked engine on this CI runner, then feed
     // those CI-generated numbers into `evaluateSoftware`. A green run of
     // this suite therefore IS the software-gate verdict consumed by
     // release publication (the release candidate-gate requires this
-    // exact-head CI run to be green); fixed `passingMeasurements()`
-    // fixtures elsewhere are unit-test oracles for the gate logic only.
-    // `passedAutomated` is the full set because every automated area is
-    // covered by CI-runnable suites in this same test process
-    // (main.swift exits nonzero on any suite failure), and hardware
-    // qualification stays tracked in #35 and never blocks this gate.
+    // exact-head CI run to be green); synthetic fixtures elsewhere are
+    // unit-test oracles for the gate logic only. `passedAutomated` comes
+    // from `collectProvenAutomatedChecks()` (one real probe per area), and
+    // resource ratios stay unavailable (`nil`): this repository has no
+    // CI-measurable CPU/memory/copy baseline, so the verdict must pass
+    // without claiming resource parity. Hardware qualification stays
+    // tracked in #35 and never blocks this gate.
     let startupStart = Date()
     do {
       try RustEngine.checkAvailable()
@@ -477,19 +574,22 @@ final class RustParityGateTests: XCTestCase {
       return
     }
     let meanMs = totalMs / Double(iterations)
-    // CPU/memory/audio-copy ratios have no CI-measurable baseline in this
-    // repo, so they stay at 1.0 (unchanged); the gate still validates them
-    // against budgets.
+    // No constant 1.0 ratios: unmeasured resource dimensions are
+    // explicitly unavailable, never fabricated parity.
     let real = RustParityGate.Measurements(
       startupLatencyMs: startupMs,
       maxBlockCallMs: maxMs,
       meanBlockCallMs: meanMs,
-      cpuRatio: 1.0,
-      memoryRatio: 1.0,
-      copyAllocationRatio: 1.0
+      cpuRatio: nil,
+      memoryRatio: nil,
+      copyAllocationRatio: nil
     )
+    let proven = collectProvenAutomatedChecks()
+    XCTAssertEqual(
+      proven, Set(RustParityGate.AutomatedCheck.allCases),
+      "every automated area must prove itself on this runner before the verdict: \(proven)")
     let verdict = RustParityGate.evaluateSoftware(
-      passedAutomated: fullAutomated(),
+      passedAutomated: proven,
       measurements: real,
       supersededSwiftRemoved: false
     )
@@ -497,6 +597,117 @@ final class RustParityGateTests: XCTestCase {
       verdict.passed,
       "software gate must pass on real engine measurements " +
         "(startup \(startupMs)ms, max \(maxMs)ms, mean \(meanMs)ms): \(verdict.reasons)")
+    for dimension in ["cpuRatio", "memoryRatio", "copyAllocationRatio"] {
+      XCTAssertTrue(
+        verdict.notes.contains { $0.contains(dimension) && $0.contains("not qualified") },
+        "\(dimension) must be explicitly not qualified, never claimed as parity: \(verdict.notes)")
+    }
+    XCTAssertTrue(
+      verdict.reasons.allSatisfy { !$0.contains("cpuRatio") && !$0.contains("memoryRatio") && !$0.contains("copyAllocationRatio") },
+      "passing software verdict must not claim resource parity: \(verdict.reasons)")
+  }
+
+  @objc func testSoftwareGateReportsUnmeasuredResourcesAsNotQualified() {
+    // Absent resource baselines must not become measured parity: the
+    // software gate passes on timings alone while explicitly listing each
+    // unavailable dimension as not qualified.
+    let proven = Set(RustParityGate.AutomatedCheck.allCases)
+    let verdict = RustParityGate.evaluateSoftware(
+      passedAutomated: proven,
+      measurements: unmeasuredResourceMeasurements(),
+      supersededSwiftRemoved: false
+    )
+    XCTAssertTrue(verdict.passed, "timings-only evidence passes the software gate: \(verdict.reasons)")
+    XCTAssertEqual(verdict.notes.count, 3, "each unavailable dimension is noted: \(verdict.notes)")
+    for dimension in ["cpuRatio", "memoryRatio", "copyAllocationRatio"] {
+      XCTAssertTrue(
+        verdict.notes.contains { $0.contains(dimension) && $0.contains("not qualified") },
+        "\(dimension) must be reported as not qualified: \(verdict.notes)")
+    }
+  }
+
+  @objc func testMissingResourceBaselinesCannotPassResourceParity() {
+    // A qualification that requires baselines (hardware contract via
+    // `evaluateResourceParity`/`evaluate`) must fail when baselines are
+    // absent, and must fail on invalid or over-budget measured values.
+    let missing = RustParityGate.evaluateResourceParity(
+      cpuRatio: nil, memoryRatio: nil, copyAllocationRatio: nil)
+    XCTAssertFalse(missing.passed, "absent baselines cannot pass resource parity")
+    XCTAssertTrue(
+      missing.reasons.contains { $0.contains("missing resource baseline") },
+      "reasons must name the missing baseline: \(missing.reasons)")
+
+    var oneMissing = passingMeasurements()
+    oneMissing.cpuRatio = nil
+    let oneMissingVerdict = RustParityGate.evaluateResourceParity(
+      cpuRatio: oneMissing.cpuRatio,
+      memoryRatio: oneMissing.memoryRatio,
+      copyAllocationRatio: oneMissing.copyAllocationRatio)
+    XCTAssertFalse(oneMissingVerdict.passed, "one absent baseline fails resource parity")
+
+    let overBudget = RustParityGate.evaluateResourceParity(
+      cpuRatio: RustParityGate.Budgets.default.maxCPURatio + 0.1,
+      memoryRatio: 1.0,
+      copyAllocationRatio: 1.0)
+    XCTAssertFalse(overBudget.passed, "over-budget resource ratio must fail")
+
+    let invalid = RustParityGate.evaluateResourceParity(
+      cpuRatio: 1.0, memoryRatio: 0, copyAllocationRatio: 1.0)
+    XCTAssertFalse(invalid.passed, "invalid resource ratio must fail")
+
+    let measured = RustParityGate.evaluateResourceParity(
+      cpuRatio: 1.0, memoryRatio: 1.0, copyAllocationRatio: 1.0)
+    XCTAssertTrue(measured.passed, "measured in-budget baselines pass: \(measured.reasons)")
+  }
+
+  @objc func testHardwareGateRequiresResourceBaselines() {
+    // The hardware qualification contract requires real resource
+    // baselines: `nil` ratios fail there even though the same shape passes
+    // the software gate as explicitly not qualified.
+    let software = RustParityGate.evaluateSoftware(
+      passedAutomated: Set(RustParityGate.AutomatedCheck.allCases),
+      measurements: unmeasuredResourceMeasurements(),
+      supersededSwiftRemoved: false
+    )
+    XCTAssertTrue(software.passed, "software gate passes without resource baselines: \(software.reasons)")
+    let hardware = RustParityGate.evaluate(
+      passedItems: fullChecklist(),
+      measurements: unmeasuredResourceMeasurements(),
+      supersededSwiftRemoved: false
+    )
+    XCTAssertFalse(hardware.passed, "hardware gate must fail without resource baselines")
+    XCTAssertTrue(
+      hardware.reasons.contains { $0.contains("missing resource baseline") },
+      "hardware reasons must name the missing baseline: \(hardware.reasons)")
+  }
+
+  @objc func testSoftwareGateFailsWhenProvenEvidenceMissesOneArea() {
+    // Provenance check: dropping even one proven area keeps the gate red.
+    // This guards the real path against unconditional `allCases`
+    // constants — evidence must correspond to checks actually performed.
+    let proven = Set(RustParityGate.AutomatedCheck.allCases)
+    for missing in RustParityGate.AutomatedCheck.allCases {
+      var partial = proven
+      partial.remove(missing)
+      let verdict = RustParityGate.evaluateSoftware(
+        passedAutomated: partial,
+        measurements: unmeasuredResourceMeasurements(),
+        supersededSwiftRemoved: false
+      )
+      XCTAssertFalse(verdict.passed, "missing \(missing.rawValue) must keep the gate red")
+      XCTAssertTrue(
+        verdict.reasons.contains { $0.contains(missing.rawValue) },
+        "reasons must name the missing area \(missing.rawValue): \(verdict.reasons)")
+    }
+    let empty = RustParityGate.evaluateSoftware(
+      passedAutomated: [],
+      measurements: unmeasuredResourceMeasurements(),
+      supersededSwiftRemoved: false
+    )
+    XCTAssertFalse(empty.passed, "empty proven evidence must keep the gate red")
+    XCTAssertEqual(
+      empty.reasons.filter { $0.contains("missing automated evidence") }.count, 6,
+      "every missing area is reported: \(empty.reasons)")
   }
 
   @objc func testEngineStartupLatencyWithinBudget() {

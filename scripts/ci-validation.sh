@@ -5,10 +5,11 @@
 # software-gate evidence consumed by release publication. NanoDictateCoreTests
 # contains the `RustParityGate.evaluateSoftware` unit coverage, the real
 # block-oriented FFI overhead probes, and the evidence-to-verdict test
-# (`testSoftwareGatePassesOnRealEngineMeasurements`) that feeds the real
-# linked-engine measurements into `evaluateSoftware`, measured against the
-# linked engine on this runner (startup latency, mean/max block-call overhead vs
-# `RustParityGate.Budgets`). Fixed `passingMeasurements()` fixtures in
+# (`testSoftwareGatePassesOnRealEngineMeasurements`) that feeds only really
+# measured numbers (startup latency, mean/max block-call overhead vs
+# `RustParityGate.Budgets`, with resource ratios explicitly unavailable) plus
+# per-area proven automated checks into `evaluateSoftware`, measured against
+# the linked engine on this runner. Synthetic fixtures in
 # `RustParityGateTests` are unit-test oracles for the gate logic only and are
 # never release evidence on their own. The release `candidate-gate`
 # (`.github/workflows/nanodictate-release-engine.yml`) requires this exact-head
