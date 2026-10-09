@@ -249,9 +249,10 @@ Two tracks, per #123:
   normal/chunked dictation, silence auto-stop, recording limits,
   routing/failover, review-before-insert, direct/clipboard insertion,
   Escape/Return, undo. Baseline vs post-refactor measurements (start
-  latency, callback time, CPU, memory, copy/allocation counts) must show
-  no material regression before superseded Swift is removed. Missing
-  hardware evidence lives in #35; it never fails the automated gate.
+  latency, callback time, CPU, memory, copy/allocation counts) qualify
+  real-hardware parity when they become available. Missing hardware
+  evidence lives in #35; it never fails the automated gate and is not a
+  prerequisite for Swift removal, Windows work, or release publication.
 
 Same vectors, equivalent output (enforced by `RustParityTests` in CI).
 Only actually superseded duplicate business logic may be removed, after
