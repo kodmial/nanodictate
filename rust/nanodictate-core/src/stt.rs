@@ -207,8 +207,7 @@ fn openai_profile(model: &str) -> ModelProfile {
     // snapshots) is a stateful streaming session (24 kHz mono raw PCM16),
     // never the batch `gpt-transcribe` profile. Other `gpt-live-*` names
     // (e.g. voice-conversation models such as `gpt-live-1`) stay on batch.
-    if model == "gpt-live-transcribe" || model.starts_with("gpt-live-transcribe")
-    {
+    if model == "gpt-live-transcribe" || model.starts_with("gpt-live-transcribe") {
         return base(
             Capabilities {
                 transport: TransportKind::StreamingSession,
