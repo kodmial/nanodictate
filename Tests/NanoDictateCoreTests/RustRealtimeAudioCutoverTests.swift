@@ -346,20 +346,57 @@ final class RustRealtimeAudioCutoverTests: XCTestCase {
     /// Fixed-length batch chunking ships through the engine with the same
     /// bodies and overlap windows as the reference math.
     @objc func testBatchSegmentsThroughEngine() {
-        let samples = [Int16](repeating: 1000, count: 16000 * 12)
+        // Distinct body markers prove the overlap window content, not just
+        // its length: chunk N > 0 must start with the tail of body N - 1.
+        var samples = [Int16](repeating: 1000, count: 16000 * 5)
+        samples += [Int16](repeating: 2000, count: 16000 * 5)
+        samples += [Int16](repeating: 3000, count: 16000 * 2)
         let chunks = BatchSegmenter.segments(
             samples: samples, sampleRate: 16000, maxSegment: 5, overlap: 2.5)
         XCTAssertEqual(chunks.count, 3, "12 s at 5 s bodies needs three chunks")
-        XCTAssertEqual(chunks[0].bodyRange, 0..<(16000 * 5))
-        XCTAssertEqual(chunks[1].bodyRange, (16000 * 5)..<(16000 * 10))
-        XCTAssertEqual(chunks[2].bodyRange, (16000 * 10)..<(16000 * 12))
-        XCTAssertNil(chunks[0].overlapRange, "first chunk carries no overlap")
-        XCTAssertEqual(chunks[1].overlapRange?.count ?? -1, Int(16000 * 2.5))
-        XCTAssertEqual(chunks[2].overlapRange?.count ?? -1, Int(16000 * 2.5))
+        // BatchChunk exposes body boundaries in seconds (BatchBodySpec
+        // carries the sample-window bodyRange/overlapRange); the seconds
+        // below encode exactly 0..<80000, 80000..<160000, 160000..<192000.
+        XCTAssertEqual(chunks[0].bodyStart, 0, accuracy: 0.001)
+        XCTAssertEqual(chunks[0].bodyEnd, 5, accuracy: 0.001)
+        XCTAssertEqual(chunks[1].bodyStart, 5, accuracy: 0.001)
+        XCTAssertEqual(chunks[1].bodyEnd, 10, accuracy: 0.001)
+        XCTAssertEqual(chunks[2].bodyStart, 10, accuracy: 0.001)
+        XCTAssertEqual(chunks[2].bodyEnd, 12, accuracy: 0.001)
+        // First chunk carries no overlap; later chunks carry a full 2.5 s
+        // overlap head plus their body.
+        XCTAssertEqual(chunks[0].samples.count, 16000 * 5)
+        XCTAssertEqual(chunks[1].samples.count, Int(16000 * 2.5) + 16000 * 5)
+        XCTAssertEqual(chunks[2].samples.count, Int(16000 * 2.5) + 16000 * 2)
+        XCTAssertEqual(chunks[0].samples, Array(samples[0..<(16000 * 5)]))
+        XCTAssertEqual(
+            Array(chunks[1].samples.prefix(Int(16000 * 2.5))),
+            Array(samples[(16000 * 5 - Int(16000 * 2.5))..<(16000 * 5)]),
+            "chunk 1 overlap is the tail of body 0")
+        XCTAssertEqual(
+            Array(chunks[2].samples.prefix(Int(16000 * 2.5))),
+            Array(samples[(16000 * 10 - Int(16000 * 2.5))..<(16000 * 10)]),
+            "chunk 2 overlap is the tail of body 1")
         // Bodies stay contiguous with no gaps or overlaps; every sample is
         // a body sample exactly once.
         for index in 1..<chunks.count {
             XCTAssertEqual(chunks[index - 1].bodyEnd, chunks[index].bodyStart)
+        }
+        // The portable boundary decisions come from the shared engine ABI:
+        // the same fixed plan through RustEngine matches the shipped bodies.
+        do {
+            let specs = try RustEngine.batchBodySpecs(
+                sampleCount: samples.count, sampleRate: 16000,
+                maxSegment: 5, overlap: 2.5)
+            XCTAssertEqual(specs.count, 3)
+            XCTAssertEqual(specs[0].bodyRange, 0..<(16000 * 5))
+            XCTAssertEqual(specs[1].bodyRange, (16000 * 5)..<(16000 * 10))
+            XCTAssertEqual(specs[2].bodyRange, (16000 * 10)..<(16000 * 12))
+            XCTAssertNil(specs[0].overlapRange, "first chunk carries no overlap")
+            XCTAssertEqual(specs[1].overlapRange?.count ?? -1, Int(16000 * 2.5))
+            XCTAssertEqual(specs[2].overlapRange?.count ?? -1, Int(16000 * 2.5))
+        } catch {
+            XCTFail("engine batch plan must succeed: \(error)")
         }
         XCTAssertTrue(BatchSegmenter.segments(samples: [], sampleRate: 16000).isEmpty)
     }
