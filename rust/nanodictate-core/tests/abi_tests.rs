@@ -1431,7 +1431,10 @@ fn plan_buffer_contracts_reject_bad_inputs() {
     let diagnostic = unsafe { CStr::from_ptr(nd_last_error_text()) }
         .to_string_lossy()
         .into_owned();
-    assert!(!diagnostic.is_empty());
+    assert!(
+        diagnostic.starts_with("transcript parse failed"),
+        "unexpected diagnostic: {diagnostic}"
+    );
     // Invalid UTF-8 on the transcript path is a clean NULL, not a panic.
     let utf8_bad = [0xffu8, 0xfe];
     let path = to_c("text");
