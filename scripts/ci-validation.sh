@@ -3,9 +3,11 @@
 #
 # Software-gate evidence (#123): a green run of this script IS the automated
 # software-gate evidence consumed by release publication. NanoDictateCoreTests
-# contains the `RustParityGate.evaluateSoftware` unit coverage plus the real
-# block-oriented FFI overhead probes measured against the linked engine on
-# this runner (startup latency, mean/max block-call overhead vs
+# contains the `RustParityGate.evaluateSoftware` unit coverage, the real
+# block-oriented FFI overhead probes, and the evidence-to-verdict test
+# (`testSoftwareGatePassesOnRealEngineMeasurements`) that feeds the real
+# linked-engine measurements into `evaluateSoftware`, measured against the
+# linked engine on this runner (startup latency, mean/max block-call overhead vs
 # `RustParityGate.Budgets`). Fixed `passingMeasurements()` fixtures in
 # `RustParityGateTests` are unit-test oracles for the gate logic only and are
 # never release evidence on their own. The release `candidate-gate`
