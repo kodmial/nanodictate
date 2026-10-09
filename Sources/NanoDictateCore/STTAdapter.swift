@@ -349,6 +349,22 @@ public enum ProviderRequestBuilder {
     )
   }
 
+  /// Resolved capability-gated parameters shared by `plan` and
+  /// `planFileBacked`. A struct (not a tuple) so both backends send
+  /// identical parameters without tripping the tuple-size lint.
+  private struct ResolvedPlanInputs {
+    let resolvedBaseURL: String
+    let resolvedModel: String
+    let caps: STTCapabilities
+    let effectivePrompt: String?
+    let effectiveLanguage: String
+    let effectiveLanguages: [String]
+    let stable: BatchStableMultipartFields?
+    let effectiveFormat: STTUploadFormat
+    let effectiveFilename: String
+    let keywords: [String]
+  }
+
   /// Shared capability-gated parameter resolution for `plan` and
   /// `planFileBacked`: both backends send identical parameters; only the
   /// body container (in-memory `Data` vs temporary file) differs.
@@ -364,12 +380,7 @@ public enum ProviderRequestBuilder {
     batchParams: BatchSTTParams?,
     audioFormat: STTUploadFormat,
     bias: STTContextualBias
-  ) -> (
-    resolvedBaseURL: String, resolvedModel: String, caps: STTCapabilities,
-    effectivePrompt: String?, effectiveLanguage: String, effectiveLanguages: [String],
-    stable: BatchStableMultipartFields?, effectiveFormat: STTUploadFormat,
-    effectiveFilename: String, keywords: [String]
-  ) {
+  ) -> ResolvedPlanInputs {
     // Empty config baseURL/model resolve to adapter defaults; re-resolve of
     // already non-empty values is a no-op — caller may resolve in advance.
     let resolvedBaseURL = resolveBaseURL(baseURL, for: adapterID)
@@ -421,10 +432,17 @@ public enum ProviderRequestBuilder {
       profileAudio.supportedUploadFormats.contains(audioFormat)
       ? audioFormat : profileAudio.uploadFormat
     let effectiveFilename = AudioTransportEncoder.coercedFilename(filename, for: effectiveFormat)
-    return (
-      resolvedBaseURL, resolvedModel, caps, effectivePrompt, effectiveLanguage,
-      effectiveLanguages, stable, effectiveFormat, effectiveFilename,
-      applied.keywordsField ?? []
+    return ResolvedPlanInputs(
+      resolvedBaseURL: resolvedBaseURL,
+      resolvedModel: resolvedModel,
+      caps: caps,
+      effectivePrompt: effectivePrompt,
+      effectiveLanguage: effectiveLanguage,
+      effectiveLanguages: effectiveLanguages,
+      stable: stable,
+      effectiveFormat: effectiveFormat,
+      effectiveFilename: effectiveFilename,
+      keywords: applied.keywordsField ?? []
     )
   }
 

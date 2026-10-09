@@ -599,75 +599,6 @@ public final class Transcriber {
     return try await sendWithRetry(context: context)
   }
 
-  /// Encode WAV bytes to the capability-gated upload container.
-  ///
-  /// - `wav` is always WAV (RIFF PCM16) bytes; the returned `data` carries
-  ///   the `effectiveFormat` container (FLAC bytes when FLAC is requested,
-  ///   supported and encodable, else the original WAV bytes).
-  /// - The capability gate mirrors `ProviderRequestBuilder.plan`: a format
-  ///   outside `supportedUploadFormats` falls back to the profile preferred
-  ///   format, so the plan gate stays a no-op and metadata always matches
-  ///   bytes.
-  /// - FLAC is lossless: WAV is decoded to PCM (`WAVDecoder`) and re-encoded
-  ///   (`FLACEncoder`); any decode/encode failure falls back to WAV so the
-  ///   request path stays total and never mislabels bytes.
-  /// - Already-FLAC input (legacy callers passing encoder output directly) is
-  ///   passed through when FLAC is the effective format, so existing
-  ///   benchmark usage keeps working while new callers pass WAV.
-  static func prepareUpload(
-    wav: Data, filename: String, audioFormat: STTUploadFormat,
-    adapterID: String, model: String
-  ) -> (data: Data, filename: String, effectiveFormat: STTUploadFormat) {
-    let profile = ProviderRequestBuilder.profile(adapterID: adapterID, model: model)
-    let gated: STTUploadFormat =
-      profile.audio.supportedUploadFormats.contains(audioFormat)
-      ? audioFormat : profile.audio.uploadFormat
-    guard gated == .flac else {
-      return (
-        data: wav,
-        filename: AudioTransportEncoder.coercedFilename(filename, for: gated),
-        effectiveFormat: gated
-      )
-    }
-    guard FLACEncoder.canEncode(profile: profile.audio) else {
-      return (
-        data: wav,
-        filename: AudioTransportEncoder.coercedFilename(filename, for: .wav),
-        effectiveFormat: .wav
-      )
-    }
-    if isFLACMagic(wav) {
-      return (
-        data: wav,
-        filename: AudioTransportEncoder.coercedFilename(filename, for: .flac),
-        effectiveFormat: .flac
-      )
-    }
-    // PCM recovery through the shared engine (canonical WAV decode); any
-    // decode/encode failure falls back to WAV so the request path stays
-    // total and never mislabels bytes.
-    guard let pcm = try? RustEngine.wavDecodeSamples(wav), pcm.channels == 1,
-      let flac = FLACEncoder.encode(
-        samples: pcm.samples, sampleRate: pcm.sampleRate, channels: pcm.channels)
-    else {
-      return (
-        data: wav,
-        filename: AudioTransportEncoder.coercedFilename(filename, for: .wav),
-        effectiveFormat: .wav
-      )
-    }
-    return (
-      data: flac,
-      filename: AudioTransportEncoder.coercedFilename(filename, for: .flac),
-      effectiveFormat: .flac
-    )
-  }
-
-  private static func isFLACMagic(_ data: Data) -> Bool {
-    data.count >= 4 && data[0] == 0x66 && data[1] == 0x4C && data[2] == 0x61
-      && data[3] == 0x43
-  }
-
   // MARK: - Send
 
   /// Single send point for all paths (adapter, cloudflare).
@@ -743,6 +674,79 @@ public final class Transcriber {
       }
     }
     return STTHTTPResponse(status: httpResponse.statusCode, body: data, headers: headers)
+  }
+}
+
+extension Transcriber {
+  // MARK: - Upload preparation (extension keeps the main class body small)
+
+  /// Encode WAV bytes to the capability-gated upload container.
+  ///
+  /// - `wav` is always WAV (RIFF PCM16) bytes; the returned `data` carries
+  ///   the `effectiveFormat` container (FLAC bytes when FLAC is requested,
+  ///   supported and encodable, else the original WAV bytes).
+  /// - The capability gate mirrors `ProviderRequestBuilder.plan`: a format
+  ///   outside `supportedUploadFormats` falls back to the profile preferred
+  ///   format, so the plan gate stays a no-op and metadata always matches
+  ///   bytes.
+  /// - FLAC is lossless: WAV is decoded to PCM (`WAVDecoder`) and re-encoded
+  ///   (`FLACEncoder`); any decode/encode failure falls back to WAV so the
+  ///   request path stays total and never mislabels bytes.
+  /// - Already-FLAC input (legacy callers passing encoder output directly) is
+  ///   passed through when FLAC is the effective format, so existing
+  ///   benchmark usage keeps working while new callers pass WAV.
+  static func prepareUpload(
+    wav: Data, filename: String, audioFormat: STTUploadFormat,
+    adapterID: String, model: String
+  ) -> (data: Data, filename: String, effectiveFormat: STTUploadFormat) {
+    let profile = ProviderRequestBuilder.profile(adapterID: adapterID, model: model)
+    let gated: STTUploadFormat =
+      profile.audio.supportedUploadFormats.contains(audioFormat)
+      ? audioFormat : profile.audio.uploadFormat
+    guard gated == .flac else {
+      return (
+        data: wav,
+        filename: AudioTransportEncoder.coercedFilename(filename, for: gated),
+        effectiveFormat: gated
+      )
+    }
+    guard FLACEncoder.canEncode(profile: profile.audio) else {
+      return (
+        data: wav,
+        filename: AudioTransportEncoder.coercedFilename(filename, for: .wav),
+        effectiveFormat: .wav
+      )
+    }
+    if isFLACMagic(wav) {
+      return (
+        data: wav,
+        filename: AudioTransportEncoder.coercedFilename(filename, for: .flac),
+        effectiveFormat: .flac
+      )
+    }
+    // PCM recovery through the shared engine (canonical WAV decode); any
+    // decode/encode failure falls back to WAV so the request path stays
+    // total and never mislabels bytes.
+    guard let pcm = try? RustEngine.wavDecodeSamples(wav), pcm.channels == 1,
+      let flac = FLACEncoder.encode(
+        samples: pcm.samples, sampleRate: pcm.sampleRate, channels: pcm.channels)
+    else {
+      return (
+        data: wav,
+        filename: AudioTransportEncoder.coercedFilename(filename, for: .wav),
+        effectiveFormat: .wav
+      )
+    }
+    return (
+      data: flac,
+      filename: AudioTransportEncoder.coercedFilename(filename, for: .flac),
+      effectiveFormat: .flac
+    )
+  }
+
+  private static func isFLACMagic(_ data: Data) -> Bool {
+    data.count >= 4 && data[0] == 0x66 && data[1] == 0x4C && data[2] == 0x61
+      && data[3] == 0x43
   }
 
   // MARK: - Response parsing
