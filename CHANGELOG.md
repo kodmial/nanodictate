@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.28] - 2026-10-09
+
+
+
+### Fixed
+
+* address CodeRabbit review findings for PR [#107](https://github.com/kodmial/nanodictate/issues/107) ([72e51e6](https://github.com/kodmial/nanodictate/commit/72e51e61a1f2d05859ee6b725695b7436ee0de60))
+* address CodeRabbit review findings for PR [#107](https://github.com/kodmial/nanodictate/issues/107) ([81fb23e](https://github.com/kodmial/nanodictate/commit/81fb23e30e016294cd2de19aa488d83c9b4d16b8))
+* address unresolved CodeRabbit findings ([322db6e](https://github.com/kodmial/nanodictate/commit/322db6e6ee0498f97b1bba088b9a026e677addec))
+* repair blocking workflow for PR [#107](https://github.com/kodmial/nanodictate/issues/107) ([c0eeb87](https://github.com/kodmial/nanodictate/commit/c0eeb8778dbd0bdf809b144889eb2e4670104b34))
+* repair blocking workflow for PR [#107](https://github.com/kodmial/nanodictate/issues/107) ([fb61c1d](https://github.com/kodmial/nanodictate/commit/fb61c1d7adf62764aa0038d401433b46a0c09b9e))
+
 ## [0.1.27] - 2026-10-09
 
 
@@ -501,7 +513,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.27...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.28...HEAD
+[0.1.28]: https://github.com/kodmial/nanodictate/compare/v0.1.27...v0.1.28
 [0.1.27]: https://github.com/kodmial/nanodictate/compare/v0.1.26...v0.1.27
 [0.1.26]: https://github.com/kodmial/nanodictate/compare/v0.1.25...v0.1.26
 [0.1.25]: https://github.com/kodmial/nanodictate/compare/v0.1.24...v0.1.25
