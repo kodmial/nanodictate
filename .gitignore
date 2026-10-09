@@ -50,3 +50,8 @@ rust/target/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# .NET build outputs (Windows host builds from windows/ via scripts/build-windows-host.sh)
+windows/**/bin/
+windows/**/obj/
+windows/artifacts/
