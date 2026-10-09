@@ -819,13 +819,21 @@ fn stable_codes_and_diagnostics_for_all_hosts() {
     // SAFETY: the ABI guarantees a valid NUL-terminated diagnostic string.
     let initial = unsafe { CStr::from_ptr(text) }.to_bytes().to_vec();
 
-    // A failing call records a non-empty diagnostic on this thread.
+    // A failing call records its own diagnostic on this thread.
     assert!(nd_word_diff(std::ptr::null(), 4, std::ptr::null(), 0).is_null());
     // SAFETY: same contract as above.
     let after = unsafe { CStr::from_ptr(nd_last_error_text()) }
         .to_string_lossy()
         .into_owned();
-    assert!(!after.is_empty(), "failing call must record a diagnostic");
+    assert_eq!(
+        after, "null pointer argument",
+        "nd_word_diff(null, 4, ..) must record the null-pointer diagnostic"
+    );
+    assert_ne!(
+        after.as_bytes(),
+        initial.as_slice(),
+        "failing call must update the diagnostic slot"
+    );
     drop(initial);
 
     // Diagnostics are thread-local: a fresh thread starts empty, so one
