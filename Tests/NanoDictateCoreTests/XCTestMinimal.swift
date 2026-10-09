@@ -105,6 +105,22 @@ public func XCTAssertEqual<T: Equatable>(
     }
 }
 
+public func XCTAssertNotEqual<T: Equatable>(
+    _ a: @autoclosure () -> T,
+    _ b: @autoclosure () -> T,
+    _ message: String = "",
+    file: StaticString = #file,
+    line: UInt = #line
+) {
+    let (va, vb) = (a(), b())
+    if va == vb {
+        XCTestCase.recordFailure(
+            "XCTAssertNotEqual failed: both values are \(String(describing: va)) \(message)",
+            file: file, line: line
+        )
+    }
+}
+
 public func XCTAssertEqual<T: FloatingPoint>(
     _ a: @autoclosure () -> T,
     _ b: @autoclosure () -> T,
