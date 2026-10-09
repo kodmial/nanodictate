@@ -1,0 +1,89 @@
+name: Recover release after candidate smoke retry
+
+# A transient GitHub Artifacts failure can make an exact-SHA Packaging smoke
+# run red after successfully building the binaries. Rerunning that same
+# Packaging smoke run can turn it green, but the already-failed Release run
+# otherwise remains red indefinitely. Recover its failed jobs (same commit,
+# same push event) once candidate evidence is green again.
+#
+# Never dispatch a fresh Release workflow_dispatch run here: its candidate
+# contract requires a workflow_dispatch smoke run, whereas the original
+# candidate is a push run.
+on:
+  workflow_run:
+    workflows: ["Packaging smoke"]
+    types: [completed]
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: release-candidate-recovery-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Reconcile failed release candidate at exact main SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ github.event.workflow_run.head_sha }}
+          CANDIDATE_RUN: ${{ github.event.workflow_run.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Do not release obsolete code. The candidate's source must still
+          # be exactly main (and GitHub's successful candidate, not a PR).
+          MAIN_SHA="$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')"
+          if [[ "$CANDIDATE_SHA" != "$MAIN_SHA" ]]; then
+            echo "Candidate $CANDIDATE_RUN targets stale SHA $CANDIDATE_SHA; main is $MAIN_SHA. No recovery."
+            exit 0
+          fi
+
+          # Only touch the latest push-triggered Release run for this exact
+          # immutable commit. No release version bump, no bypass of the
+          # candidate gate, and no retry of unrelated failures.
+          RUNS="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml/runs?event=push&head_sha=$CANDIDATE_SHA&per_page=100")"
+          RELEASE="$(jq -c --arg sha "$CANDIDATE_SHA" '
+            [.workflow_runs[] | select(.head_sha == $sha and .event == "push")]
+            | sort_by(.created_at) | reverse | .[0] // empty
+          ' <<<"$RUNS")"
+          if [[ -z "$RELEASE" ]]; then
+            echo "No push Release run for $CANDIDATE_SHA yet; the regular main-push Release remains authoritative."
+            exit 0
+          fi
+
+          ID="$(jq -r '.id' <<<"$RELEASE")"
+          STATUS="$(jq -r '.status' <<<"$RELEASE")"
+          CONCLUSION="$(jq -r '.conclusion' <<<"$RELEASE")"
+          ATTEMPT="$(jq -r '.run_attempt' <<<"$RELEASE")"
+          if [[ "$STATUS" != completed || "$CONCLUSION" != failure ]]; then
+            echo "Release $ID is $STATUS/$CONCLUSION; no recovery needed."
+            exit 0
+          fi
+          if (( ATTEMPT >= 3 )); then
+            echo "::warning::Release $ID already reached the 3-attempt recovery limit."
+            exit 0
+          fi
+
+          # A failure in the release candidate wait step is eligible for
+          # recovery ONLY after this exact SHA's Packaging smoke is green.
+          # Do not retry publication, signing, or manifests failures here.
+          JOBS="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ID/jobs?per_page=100")"
+          if ! jq -e '
+            [.jobs[] | select((.name | endswith("Require tested release candidate"))
+              and .conclusion == "failure")] | length > 0
+          ' <<<"$JOBS" >/dev/null; then
+            echo "Release $ID did not fail its candidate gate; no automatic rerun."
+            exit 0
+          fi
+
+          echo "::notice::Successful same-SHA Packaging smoke $CANDIDATE_RUN recovered after Release $ID failed its candidate gate. Rerunning failed Release jobs, attempt $((ATTEMPT + 1))/3."
+          gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$ID/rerun-failed-jobs" --silent
