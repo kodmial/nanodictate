@@ -389,7 +389,19 @@ final class STTRequestEfficiencyTests: XCTestCase {
         XCTAssertEqual(inMemory.peakTransientBytes, 250)
         let fileBacked = STTRequestMemoryReport(audioBytes: 100, bodyBytes: 150, strategy: .fileBacked)
         XCTAssertEqual(fileBacked.peakTransientBytes, 100 + 64 * 1_024)
-        XCTAssertTrue(fileBacked.peakTransientBytes < inMemory.peakTransientBytes)
+        // The 64 KiB streaming buffer dominates tiny payloads by design, so
+        // small bodies stay in-memory below the production file-backed
+        // threshold (no temp-file churn). At production scale (at or above
+        // the threshold) the file-backed peak is strictly smaller.
+        let largeAudio = Transcriber.fileBackedUploadThresholdBytes * 4
+        let largeBody = largeAudio + 512
+        let largeInMemory = STTRequestMemoryReport(
+            audioBytes: largeAudio, bodyBytes: largeBody, strategy: .inMemory)
+        let largeFileBacked = STTRequestMemoryReport(
+            audioBytes: largeAudio, bodyBytes: largeBody, strategy: .fileBacked)
+        XCTAssertEqual(largeInMemory.peakTransientBytes, largeAudio + largeBody)
+        XCTAssertEqual(largeFileBacked.peakTransientBytes, largeAudio + 64 * 1_024)
+        XCTAssertTrue(largeFileBacked.peakTransientBytes < largeInMemory.peakTransientBytes)
     }
 
     @objc func testNear60SecondRequestMemory() {
