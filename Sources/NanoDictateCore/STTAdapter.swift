@@ -245,8 +245,8 @@ public enum ProviderRequestBuilder {
       // Return an invalid spec (nil URL) instead of a silent multipart
       // fallback so batch callers cannot turn one failed realtime session
       // into repeated duplicate uploads. Realtime callers use
-      // RealtimeTranscriptionSession; explicit batch fallback, when desired,
-      // is owned by RealtimeFallbackPolicy and never implicit here.
+      // RealtimeTranscriptionSession; .allowBatch is reserved and behaves
+      // like fail-closed today, so no explicit batch fallback is started here.
       return STTRequestSpec(
         url: nil,
         headers: [],

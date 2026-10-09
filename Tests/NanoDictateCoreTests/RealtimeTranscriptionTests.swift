@@ -610,6 +610,40 @@ final class RealtimeTranscriptionTests: XCTestCase {
         }
     }
 
+    @objc func testAllowBatchIsReservedAndStartsNoBatchUpload() {
+        runAsync("realtime allowBatch reserved") {
+            let transport = MockRealtimeTransport(incoming: [
+                self.json(["type": "session.updated"]),
+                self.json(["type": "error", "error": ["message": "invalid api key"]] as [String: Any]),
+            ])
+            let session = RealtimeTranscriptionSession(
+                transport: transport,
+                config: RealtimeSessionConfig(),
+                policy: RealtimeSessionPolicy(connectTimeout: 5, commitTimeout: 5),
+                fallback: .allowBatch)
+            try await session.connect()
+            let fallback = await session.fallbackPolicy
+            XCTAssertEqual(fallback, .allowBatch)
+            try await session.appendAudio([1, 2, 3], sourceSampleRate: 24000)
+            try await session.commit()
+            _ = await session.handleMessage(
+                self.json(["type": "error", "error": ["message": "invalid api key"]] as [String: Any]))
+            let failedState = await session.currentState
+            XCTAssertEqual(failedState, .failed)
+            // Reserved policy must not start a batch upload: the failed
+            // session throws instead of returning transcript text.
+            do {
+                _ = try await session.waitForFinal()
+                XCTFail("reserved .allowBatch must fail closed, not batch-fallback")
+            } catch let error as RealtimeTranscriptionError {
+                XCTAssertTrue(
+                    error == .sessionFailed("invalid api key") || error == .timeout("no completion within commit timeout"),
+                    "unexpected: \(error)")
+            }
+            await session.close()
+        }
+    }
+
     @objc func testReconnectPolicyBackoffIsBounded() {
         let policy = RealtimeSessionPolicy(reconnectBaseDelay: 0.5)
         XCTAssertEqual(policy.reconnectDelay(forAttempt: 0), 0.5, accuracy: 1e-9)

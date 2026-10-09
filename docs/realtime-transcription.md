@@ -93,8 +93,9 @@ is deterministic after stop/session completion.
 - **No silent batch fallback.** `ProviderRequestBuilder.plan` for a streaming
   profile returns an invalid spec (`url == nil`) instead of a multipart body.
   `RealtimeFallbackPolicy` defaults to `.failClosed`: a failed realtime
-  session surfaces an error. Batch transcription of the full audio happens
-  only when the caller explicitly selects `.allowBatch` for that dictation.
+  session surfaces an error. `.allowBatch` is reserved for a future explicit
+  one-shot batch transcription and currently behaves like `.failClosed`:
+  no batch upload is started. Restarting the dictation is the caller responsibility.
 
 ## Implementation map
 

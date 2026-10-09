@@ -31,8 +31,9 @@ import Foundation
 //   `.failed` and never re-uploads already-sent audio silently.
 //   Reconnecting or restarting the dictation is the caller's
 //   responsibility. A failed session never falls back
-//   to repeated batch uploads unless RealtimeFallbackPolicy explicitly allows
-//   it (default: fail-closed).
+//   to batch uploads: the default is fail-closed and `.allowBatch` is
+//   reserved (currently identical to fail-closed; no batch upload is
+//   started).
 
 // MARK: - Errors
 
@@ -194,12 +195,15 @@ public struct RealtimeSessionPolicy: Equatable {
 /// Explicit fallback policy when a realtime session fails.
 /// Default is fail-closed: a failed realtime session surfaces an error and
 /// NEVER silently degrades into repeated batch uploads (which would duplicate
-/// audio and cost). Batch fallback happens only when the caller explicitly
-/// selects `.allowBatch` for that dictation.
+/// audio and cost).
+/// `.allowBatch` is reserved for a future explicit one-shot batch
+/// transcription of the full audio and currently behaves exactly like
+/// `.failClosed`: no code path starts a batch upload. Callers must restart
+/// the dictation explicitly.
 public enum RealtimeFallbackPolicy: String, Equatable {
   /// Surface the realtime error; do not start batch uploads.
   case failClosed
-  /// Caller explicitly opts into one batch transcription of the full audio.
+  /// Reserved: behaves like `.failClosed` today (no batch upload is started).
   case allowBatch
 }
 
@@ -891,8 +895,9 @@ extension RealtimeTranscriptionSession {
   }
 
   /// Deterministic close-out at the commit deadline: prefer completed text,
-  /// else expose the accumulated partial so the caller never hangs. Batch
-  /// fallback is NOT triggered here (see RealtimeFallbackPolicy).
+  /// else expose the accumulated partial so the caller never hangs. No batch
+  /// upload is started here (.allowBatch is reserved and behaves like
+  /// .failClosed; see RealtimeFallbackPolicy).
   /// Returns nil when still before the deadline.
   fileprivate func transcriptIfPastDeadline(_ deadline: Date) throws -> String? {
     guard Date() >= deadline else { return nil }
