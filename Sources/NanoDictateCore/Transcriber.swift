@@ -908,9 +908,15 @@ extension Transcriber {
   /// BACKGROUND, the request goes with the current token. A challenge is
   /// answered by the retry in `sendWithRetry` (refreshBlocking until
   /// result).
+  /// When no token exists yet, no background refresh is started here: the
+  /// imminent STT POST will receive a challenge and trigger a single
+  /// blocking refresh. Starting a background refresh as well would race
+  /// the blocking one (one shared refresh = 2 relay requests vs two
+  /// separate refreshes = 4) and waste proxy traffic.
   private func applyCookieRelayHeaders(to request: inout URLRequest) async {
     guard let relay = cookieRelayProvider else { return }
     request.setValue(CookieRelayProvider.chromeUA, forHTTPHeaderField: "User-Agent")
+    guard relay.currentCookie() != nil else { return }
     if let cookie = await relay.ensureFresh() {
       request.setValue(cookie, forHTTPHeaderField: "Cookie")
     }

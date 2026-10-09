@@ -481,14 +481,26 @@ mod tests {
     fn realtime_profile_uses_streaming_24k_pcm16() {
         // Task #25: realtime uses the model-required 24 kHz raw PCM16
         // profile, not the 16 kHz batch WAV profile.
-        for model in ["gpt-live-transcribe", "gpt-live-transcribe-2026-09-01", "gpt-live-foo"] {
+        for model in [
+            "gpt-live-transcribe",
+            "gpt-live-transcribe-2026-09-01",
+            "gpt-live-foo",
+        ] {
             let p = resolve("openai", model);
-            assert_eq!(p.capabilities.transport, TransportKind::StreamingSession, "{model}");
+            assert_eq!(
+                p.capabilities.transport,
+                TransportKind::StreamingSession,
+                "{model}"
+            );
             assert_eq!(p.audio.sample_rate, 24000, "{model}");
             assert_eq!(p.audio.channels, 1, "{model}");
             assert_eq!(p.audio.upload_format, UploadFormat::Pcm16, "{model}");
             assert!(!p.audio.supports_flac, "{model}");
-            assert_eq!(p.capabilities.language_hint, LanguageHintMode::Multi, "{model}");
+            assert_eq!(
+                p.capabilities.language_hint,
+                LanguageHintMode::Multi,
+                "{model}"
+            );
             assert!(p.capabilities.supports_prompt, "{model}");
             assert!(!p.capabilities.supports_temperature, "{model}");
             assert!(p.capabilities.supports_keyword_biasing, "{model}");
@@ -502,7 +514,10 @@ mod tests {
         assert_eq!(batch.audio.sample_rate, 16000);
         // Case-insensitive with whitespace trimmed, like the Swift registry.
         let upper = resolve("openai", "  GPT-LIVE-TRANSCRIBE ");
-        assert_eq!(upper.capabilities.transport, TransportKind::StreamingSession);
+        assert_eq!(
+            upper.capabilities.transport,
+            TransportKind::StreamingSession
+        );
         assert_eq!(upper.audio.sample_rate, 24000);
     }
 

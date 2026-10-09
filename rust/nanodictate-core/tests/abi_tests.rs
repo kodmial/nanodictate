@@ -187,7 +187,10 @@ fn stt_resolve_realtime_uses_streaming_24k_pcm16() {
         model.as_ptr(),
         model.as_bytes().len(),
     ));
-    assert!(json.contains("\"transport\":\"streaming_session\""), "{json}");
+    assert!(
+        json.contains("\"transport\":\"streaming_session\""),
+        "{json}"
+    );
     assert!(json.contains("\"sample_rate\":24000"), "{json}");
     assert!(json.contains("\"upload_format\":\"pcm16\""), "{json}");
     assert!(json.contains("\"language_hint\":\"multi\""), "{json}");
