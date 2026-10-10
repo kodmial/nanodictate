@@ -222,10 +222,21 @@ public final class Transcriber {
   /// ~4.25 s (base 4 s + jitter), so every pause stays within this cap.
   public static let maxRetryPauseSeconds: TimeInterval = 10
 
+  /// Worst-case extra wall-clock cost of the single cookie-challenge replay
+  /// (s): one extra STT POST (bounded by `networkRequestTimeout`) plus the
+  /// blocking cookie refresh inline in `sendWithRetry` (two bounded GETs).
+  /// The challenge retry does not burn an attempt (`attempt -= 1`), so a
+  /// cookie-relay candidate may send up to `maxAttempts + 1` POSTs.
+  public static var maxCookieChallengeExtraDuration: TimeInterval {
+    CookieRelayProvider.blockingRefreshBudget + networkRequestTimeout
+  }
+
   /// Worst-case wall-clock budget of ONE fallback candidate (s): one
   /// `transcribe` call runs its own retry loop of up to `maxAttempts`
   /// requests, each bounded by `networkRequestTimeout`, with a capped pause
-  /// between attempts. A hanging candidate costs only one request timeout
+  /// between attempts, plus the single cookie-challenge replay (extra POST +
+  /// blocking refresh) when the cookie-relay transport faces a JS challenge.
+  /// A hanging candidate costs only one request timeout
   /// (timeout is terminal, no retry); a retryable HTTP 429/5xx or fast
   /// transport failure re-enters the loop, so a degraded server that answers
   /// slowly with 5xx on every attempt can hold its failover slot for the
@@ -234,6 +245,7 @@ public final class Transcriber {
   public static var maxCandidateDuration: TimeInterval {
     Double(maxAttempts) * networkRequestTimeout
       + Double(maxAttempts - 1) * maxRetryPauseSeconds
+      + maxCookieChallengeExtraDuration
   }
 
   /// Multipart bodies at or above this size use the streaming/file-backed

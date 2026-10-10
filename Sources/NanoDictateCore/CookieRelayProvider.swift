@@ -40,6 +40,13 @@ public final class CookieRelayProvider {
   /// networkRequestTimeout (20 s).
   private static let refreshTimeout: TimeInterval = 8
 
+  /// Worst-case wall-clock budget of one blocking cookie refresh (s): the
+  /// full compute+verify cycle runs two bounded GETs (challenge fetch +
+  /// cookie probe), each capped by `refreshTimeout`. `Transcriber`
+  /// budgets this inside the per-candidate duration because `sendWithRetry`
+  /// performs the blocking refresh inline on a cookie challenge.
+  public static let blockingRefreshBudget: TimeInterval = 2 * refreshTimeout
+
   private struct Token {
     let value: String  // lowerHex cookie value, WITHOUT "__test="
     let createdAt: Date

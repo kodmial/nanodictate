@@ -1298,16 +1298,21 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     processingSession += 1
     let session = processingSession
     // Auto-failover runs the candidates (bounded hedged) AFTER the primary
-    // request timeout: the processing watchdog must cover the hedged
-    // schedule, not just one request. hedgedFailover starts at most
+    // request finishes: the processing watchdog must cover the primary's
+    // FULL retry sequence plus the hedged schedule, not just one request.
+    // The primary uses the same Transcriber retry loop as any fallback (up
+    // to Transcriber.maxCandidateDuration: maxAttempts requests plus capped
+    // backoff pauses plus the single cookie-challenge replay), so budgeting
+    // only processingMaxDuration (one request timeout + 5 s) would cut a
+    // retrying primary — and leave less than a full budget for later
+    // fallbacks — before failover even starts. hedgedFailover starts at most
     // maxConcurrentAttempts candidates at once, so N candidates need
     // ceil(N / maxConcurrentAttempts) rounds; each round holds its slots
-    // until the candidate's FULL retry sequence finishes (up to
-    // Transcriber.maxCandidateDuration: maxAttempts requests plus capped
-    // backoff pauses — a degraded server answering slowly with HTTP 5xx on
-    // every attempt occupies the slot far beyond a single request timeout).
-    // Budgeting one timeout per round would cut a valid later candidate
-    // mid-flight when the first slots retry until their full budget.
+    // until the candidate's FULL retry sequence finishes (a degraded server
+    // answering slowly with HTTP 5xx on every attempt occupies the slot far
+    // beyond a single request timeout). Budgeting one timeout per round
+    // would cut a valid later candidate mid-flight when the first slots
+    // retry until their full budget.
     let hedgePolicy = RetryProvider.HedgedFailoverPolicy.default
     let failoverRounds =
       (failoverCandidates.count + max(1, hedgePolicy.maxConcurrentAttempts) - 1)
@@ -1316,7 +1321,12 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       (autoFailover && failoverRounds > 0)
       ? Double(failoverRounds) * Transcriber.maxCandidateDuration + hedgePolicy.hedgeDelaySeconds
       : 0
-    let watchdogDuration = OverlayController.processingMaxDuration + failoverMargin
+    // Primary runs sequentially before any fallback, so its full budget is
+    // always covered (also when failover is off); the failover margin is
+    // added only when auto-failover has candidates.
+    let primaryBudget = max(
+      OverlayController.processingMaxDuration, Transcriber.maxCandidateDuration)
+    let watchdogDuration = primaryBudget + failoverMargin
     // Realtime sessions need their own budget (connect + audio sends +
     // final wait), not the batch watchdog: connectTimeout (10 s) +
     // duration-derived append budget (floor appendTimeout 15 s for all
