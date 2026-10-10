@@ -41,8 +41,15 @@ reviews:
         Tests are a plain executable Swift package (no .xctest bundle): runner is Tests/NanoDictateCoreTests/main.swift executed via `swift run NanoDictateCoreTests`.
         New behavior must be covered by tests in that suite.
   pre_merge_checks:
+    # Issue-assessment is a probabilistic semantic comparison, not an
+    # executable acceptance test. It can report an opaque CHANGES_REQUESTED
+    # without any actionable inline finding and indefinitely stall the review
+    # queue (see macOS 12 issue #35 / PR #102). Keep its full diagnostic
+    # report, but do not make the model's assessment a merge blocker.
+    # Actionable code-review findings still request changes; exact-head CI,
+    # platform checks, and release gates remain fail-closed.
     issue_assessment:
-      mode: error
+      mode: warning
   tools:
     gitleaks:
       enabled: true
