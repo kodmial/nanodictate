@@ -160,10 +160,8 @@ gh workflow run macos12-runtime-evidence.yml --repo kodmial/nanodictate --ref ma
 
 Only use `manual_checklist=PASS` if **every required** manual check actually
 passed. Review the evidence-intake Actions run and immutable uploaded artifact.
-Then rerun the previously failing PR `macOS 12 compat` check on the **same SHA**
-to let it read the `macos12/runtime-attested` status. Remove the
-`no-auto-merge` safeguard on PR #102 only after reviewing the complete
-evidence and successful checks. Any new PR commit invalidates the attestation
+Then rerun the PR `macOS 12 compat` check on the **same SHA** so it reads
+the `macos12/runtime-attested` status. Any new PR commit invalidates the attestation
 for that PR HEAD and requires a new real-host run.
 
 The Release workflow separately requires a tested candidate, release integrity
