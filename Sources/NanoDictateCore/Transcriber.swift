@@ -647,21 +647,17 @@ public final class Transcriber {
       let proxied = try await transport.send(request: request)
       return STTHTTPResponse(status: proxied.status, body: proxied.body, headers: proxied.headers)
     }
+    let (data, response): (Data, URLResponse)
     if let uploadFileURL {
-      let (data, response) = try await URLSession.shared.upload(
+      (data, response) = try await URLSession.shared.upload(
         for: request, fromFile: uploadFileURL)
-      guard let httpResponse = response as? HTTPURLResponse else {
-        throw URLError(.badServerResponse)
-      }
-      var headers: [String: String] = [:]
-      for (name, value) in httpResponse.allHeaderFields {
-        if let stringValue = value as? String {
-          headers[String(describing: name)] = stringValue
-        }
-      }
-      return STTHTTPResponse(status: httpResponse.statusCode, body: data, headers: headers)
+    } else {
+      (data, response) = try await URLSession.shared.data(for: request)
     }
-    let (data, response) = try await URLSession.shared.data(for: request)
+    return try Self.makeResponse(data: data, response: response)
+  }
+
+  private static func makeResponse(data: Data, response: URLResponse) throws -> STTHTTPResponse {
     guard let httpResponse = response as? HTTPURLResponse else {
       throw URLError(.badServerResponse)
     }

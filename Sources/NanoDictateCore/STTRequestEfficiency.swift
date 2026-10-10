@@ -229,8 +229,13 @@ public enum MultipartFileUpload {
   ) throws -> STTFileBackedUpload {
     let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(
       "nanodictate-stt-\(UUID().uuidString).body")
-    _ = FileManager.default.createFile(atPath: fileURL.path, contents: nil)
-    guard let handle = try? FileHandle(forWritingTo: fileURL) else {
+    guard
+      FileManager.default.createFile(
+        atPath: fileURL.path, contents: nil,
+        attributes: [.posixPermissions: 0o600]),
+      let handle = try? FileHandle(forWritingTo: fileURL)
+    else {
+      try? FileManager.default.removeItem(at: fileURL)
       throw TranscribeError.network("Unable to create upload file")
     }
     defer { try? handle.close() }
@@ -295,16 +300,16 @@ public enum MultipartFileUpload {
         }
       }
       try writeText("--\(boundary)--\r\n")
+      let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+      let byteCount = (attributes[.size] as? NSNumber)?.intValue ?? 0
+      return STTFileBackedUpload(
+        fileURL: fileURL,
+        byteCount: byteCount,
+        contentType: "multipart/form-data; boundary=\(boundary)")
     } catch {
       try? FileManager.default.removeItem(at: fileURL)
       throw error
     }
-    let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
-    let byteCount = (attributes[.size] as? NSNumber)?.intValue ?? 0
-    return STTFileBackedUpload(
-      fileURL: fileURL,
-      byteCount: byteCount,
-      contentType: "multipart/form-data; boundary=\(boundary)")
   }
 
   /// A fresh repeatable stream over the uploaded file: one per attempt, so
