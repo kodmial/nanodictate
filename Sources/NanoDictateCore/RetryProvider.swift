@@ -367,8 +367,11 @@ public final class RetryProvider {
 
       launchNext()
       while let event = await group.next() {
-        // A committed winner or abort returns immediately with cancelAll;
-        // remaining events are discarded by the group cancellation.
+        // A committed winner, abort, or decided all-fail returns immediately
+        // with cancelAll; remaining events are discarded by the group
+        // cancellation. cancelAll on the failure paths only cancels stale
+        // hedge timers so withTaskGroup can exit without waiting out the
+        // full hedge delay.
         switch event {
         case .hedge:
           if nextIndex < candidates.count, inFlight < maxConcurrent {
@@ -379,6 +382,7 @@ public final class RetryProvider {
           // hedges immediately; a success wins). No re-arm here: the
           // completion path arms the next hedge when it launches.
           if inFlight == 0, nextIndex >= candidates.count, let lastFailure {
+            group.cancelAll()
             return .failure(lastFailure)
           }
         case .hedgeCancelled:
@@ -402,6 +406,7 @@ public final class RetryProvider {
             // If everything settled with no winner and no failure, surface
             // cancellation so callers do not see a phantom empty failure.
             if inFlight == 0, nextIndex >= candidates.count {
+              group.cancelAll()
               if let lastFailure {
                 return .failure(lastFailure)
               }
@@ -426,6 +431,7 @@ public final class RetryProvider {
             // ordered candidate without waiting for the hedge delay.
             launchNext()
           } else if inFlight == 0, nextIndex >= candidates.count {
+            group.cancelAll()
             return .failure(transcribeError)
           }
         }
