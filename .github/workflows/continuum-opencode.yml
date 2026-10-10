@@ -159,6 +159,18 @@ jobs:
               }
             };
             const fetchIssue = async (issueOwner, issueRepo, number) => {
+              // Same-repository reads use the installation token first to
+              // preserve the shared user PAT budget; TAP_PAT is reserved for
+              // true cross-repository reads and as a bounded liveness
+              // fallback, matching Continuum's authoritative task reads.
+              const sameRepository =
+                `${issueOwner}/${issueRepo}`.toLowerCase() === `${owner}/${repo}`.toLowerCase();
+              if (!sameRepository && process.env.TAP_PAT) {
+                core.warning('Using TAP_PAT for cross-repository issue lookup');
+                return fallbackOctokit().rest.issues.get({
+                  owner: issueOwner, repo: issueRepo, issue_number: number
+                });
+              }
               try {
                 return await github.rest.issues.get({ owner: issueOwner, repo: issueRepo, issue_number: number });
               } catch (error) {
