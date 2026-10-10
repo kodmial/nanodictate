@@ -121,6 +121,35 @@ jobs:
   # Only the control-plane lookup runs on Linux. Native macOS task coding,
   # review repair and qualification execute on macOS after the platform lookup.
   resolve-platform:
+    # Mirror the reusable workflow authorization so unauthorized events cannot
+    # trigger privileged lookups. The final branch preserves the
+    # pull_request_review dispatch the reusable workflow authorizes for
+    # CodeRabbit reviews; without it `needs` would skip `call` and break that
+    # flow.
+    if: >-
+      (github.event_name == 'workflow_dispatch' &&
+       contains(fromJSON('["coderabbit-fix","resolve-conflict","ci-fix","issue"]'), inputs.mode)) ||
+      ((github.event_name == 'issue_comment' &&
+        !github.event.issue.pull_request) &&
+       github.actor == github.repository_owner &&
+       (contains(github.event.comment.body, '/oc') ||
+        contains(github.event.comment.body, '/opencode'))) ||
+      ((github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request) &&
+       github.actor == github.repository_owner &&
+       github.event.issue.state == 'open' &&
+       (startsWith(github.event.comment.body, '/oc') ||
+        startsWith(github.event.comment.body, '/opencode')) &&
+       !contains(github.event.comment.body, '/oc-cancel')) ||
+      (github.event_name == 'pull_request_review_comment' &&
+       github.actor == github.repository_owner &&
+       (contains(github.event.comment.body, '/oc') ||
+        contains(github.event.comment.body, '/opencode'))) ||
+      (github.event_name == 'pull_request_review' &&
+       github.event.action == 'submitted' &&
+       github.event.review.user.login == 'coderabbitai[bot]' &&
+       github.event.pull_request.state == 'open' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     permissions:
       issues: read
@@ -203,16 +232,16 @@ jobs:
               // (<!-- continuum-task-context repo=owner/repo issue=123 -->),
               // so resolve cross-repository markers in the named repository.
               if (!issueNumber) {
-                const markerIssue = positive(pr.body?.match(/continuum-task-context[^>]*issue=(\d+)/)?.[1]);
-                if (markerIssue) {
-                  issueNumber = markerIssue;
-                  const markerRepo = pr.body?.match(/continuum-task-context[^>]*repo=([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)/i)?.[1];
-                  if (markerRepo) {
-                    const parts = markerRepo.split('/');
-                    if (parts.length === 2 && parts[0] && parts[1]) {
-                      issueOwner = parts[0];
-                      issueRepo = parts[1];
-                    }
+                // Match the complete canonical marker once so repository and
+                // issue captures always come from the same marker, as the
+                // called workflow does.
+                const marker = pr.body?.match(/<!--\s*continuum-task-context\s+repo=([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\s+issue=(\d+)\s*-->/i);
+                if (marker) {
+                  issueNumber = positive(marker[2]);
+                  const parts = marker[1].split('/');
+                  if (parts.length === 2 && parts[0] && parts[1]) {
+                    issueOwner = parts[0];
+                    issueRepo = parts[1];
                   }
                 } else {
                   issueNumber = positive(pr.head.ref.match(/^opencode\/issue(\d+)-/)?.[1]);
@@ -226,7 +255,7 @@ jobs:
             }
             const runner = labels.has('platform:macos') ? 'macos-15' : '';
             core.setOutput('runner_os', runner);
-            core.notice(`Native coding runner: ${runner || 'existing Continuum default'}; issue ${issueNumber ? `${issueOwner}/${issueRepo}#${issueNumber}` : '-'}, PR #${prNumber || '-'}, labels: ${[...labels].join(', ')}`);
+            core.notice(`Native coding runner: ${runner || 'existing Continuum default'}; issue ${issueNumber ? `${issueOwner}/${issueRepo}#${issueNumber}` : '-'}, PR #${prNumber || '-'}`);
 
   call:
     needs: resolve-platform
