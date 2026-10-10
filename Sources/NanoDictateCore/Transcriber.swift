@@ -190,6 +190,13 @@ private struct SendContext {
   let filePartByteCount: Int
   let prompt: String?
   let skipPreflight: Bool
+  /// Temporary file holding the multipart body for large requests on the
+  /// real network path (file-backed upload, issue #32). nil — the body is in
+  /// `request.httpBody` (small requests and every mock-transport request).
+  /// The file persists across retry attempts (each attempt uploads the same
+  /// file, so retries stay repeatable and deterministic) and is removed when
+  /// the request completes.
+  let uploadFileURL: URL?
 }
 
 // MARK: - Transcriber
@@ -209,6 +216,16 @@ public final class Transcriber {
   /// attempts + backoff ≈ 5 s — within the overlay watchdog budget;
   /// timeout (20 s) is terminal and spawns no retries.
   public static let maxAttempts = 4
+
+  /// Multipart bodies at or above this size use the streaming/file-backed
+  /// upload on the real network path (issue #32): the body is streamed to a
+  /// temporary file instead of a second full-size `Data`, so peak transient
+  /// request-body memory drops from `audio + body` to `audio + 64 KiB`.
+  /// Mock-transport requests (tests) and smaller bodies always keep the
+  /// in-memory body, so retry determinism and `httpBody` assertions are
+  /// unaffected. A near-60-second 16 kHz mono WAV (~1.9 MB) exceeds the
+  /// default and uploads file-backed in production.
+  public static var fileBackedUploadThresholdBytes: Int = 256 * 1_024
 
   /// Canonical "no internet" message — overlay `OverlayErrorText` mapping
   /// and tests rely on it. Computed property: resolved on each access so
@@ -474,6 +491,64 @@ public final class Transcriber {
     let prepared = Self.prepareUpload(
       wav: wav, filename: filename, audioFormat: audioFormat,
       adapterID: adapterID, model: model)
+    // Large bodies on the real network path (no injected mock transport)
+    // upload file-backed: the multipart body streams to a temporary file
+    // instead of a second full-size Data (issue #32). Small and
+    // mock-transport requests keep the in-memory body, so existing retry
+    // determinism and httpBody assertions are unaffected. When the
+    // file-backed plan is unavailable (non-multipart profile or unwritable
+    // temp directory), fall back to the in-memory spec so the path stays
+    // total.
+    if transport == nil,
+      prepared.data.count + STTRequestMemoryReport.framingOverheadEstimate
+        >= Self.fileBackedUploadThresholdBytes,
+      let fileBacked = ProviderRequestBuilder.planFileBacked(
+        adapterID: adapterID,
+        baseURL: baseURL,
+        model: model,
+        apiKey: apiKey,
+        language: language,
+        wav: prepared.data,
+        filename: prepared.filename,
+        prompt: prompt,
+        needsWordTimestamps: needsWordTimestamps,
+        audioFormat: prepared.effectiveFormat,
+        bias: contextualBias
+      ),
+      let url = fileBacked.url
+    {
+      // The temporary file is removed when this request completes (success,
+      // failure or cancellation), so no audio stays on disk.
+      defer { MultipartFileUpload.cleanup(fileURL: fileBacked.upload.fileURL) }
+      var request = URLRequest(url: url)
+      request.httpMethod = "POST"
+      request.setValue(fileBacked.contentType, forHTTPHeaderField: "Content-Type")
+      for (name, value) in fileBacked.headers {
+        // An empty key must not produce "Bearer " with no token (same rule as BatchRequestBuilder).
+        if name == "Authorization", apiKey.isEmpty {
+          continue
+        }
+        request.setValue(value, forHTTPHeaderField: name)
+      }
+      if !proxyKey.isEmpty {
+        request.setValue(proxyKey, forHTTPHeaderField: proxyKeyHeader)
+      }
+      await applyCookieRelayHeaders(to: &request)
+      request.timeoutInterval = min(timeout, Self.networkRequestTimeout)
+      let context = SendContext(
+        request: request,
+        transcriptPath: fileBacked.transcriptPath,
+        wav: wav,
+        filename: filename,
+        filePartFilename: fileBacked.filePartFilename,
+        filePartContentType: fileBacked.filePartContentType,
+        filePartByteCount: prepared.data.count,
+        prompt: prompt,
+        skipPreflight: true,
+        uploadFileURL: fileBacked.upload.fileURL
+      )
+      return try await sendWithRetry(context: context)
+    }
     let spec = ProviderRequestBuilder.plan(
       adapterID: adapterID,
       baseURL: baseURL,
@@ -518,10 +593,88 @@ public final class Transcriber {
       filePartContentType: spec.filePartContentType,
       filePartByteCount: prepared.data.count,
       prompt: prompt,
-      skipPreflight: true
+      skipPreflight: true,
+      uploadFileURL: nil
     )
     return try await sendWithRetry(context: context)
   }
+
+  // MARK: - Send
+
+  /// Single send point for all paths (adapter, cloudflare).
+  ///
+  /// File-backed uploads (`uploadFileURL != nil`: large bodies on the real
+  /// network path) go through `URLSession.upload(for:fromFile:)`, which
+  /// re-reads the temporary file per attempt: retries stay repeatable and
+  /// deterministic without holding a second full-size body `Data` in memory.
+  /// Mock-transport requests always carry the in-memory body and go through
+  /// the transport as before.
+  /// HTTP proxy (`http_proxy` in config) — honored ONLY when it has an
+  /// https:// scheme: the request URL is rewritten "URL-as-path" — the
+  /// original URL fully becomes the PATH of the proxying URL:
+  ///   https://<httpProxy>/<full-original-URL>
+  /// E.g. for http_proxy "https://127.0.0.1:8080" and request
+  /// https://api.openai.com/v1/audio/transcriptions:
+  ///   https://127.0.0.1:8080/https://api.openai.com/v1/audio/transcriptions
+  /// Scheme-less or http:// proxies are ignored (a plain-HTTP proxy would
+  /// leak the audio and the STT credentials in clear text — CWE-319) and
+  /// the request goes direct, with a warning. When proxy_user/proxy_password
+  /// are set, adds the header
+  /// `Proxy-Authorization: Basic base64("user:pass")`.
+  private func send(request: URLRequest, uploadFileURL: URL? = nil) async throws
+    -> STTHTTPResponse
+  {
+    var request = request
+    if !httpProxy.isEmpty, !httpProxy.hasPrefix("https://") {
+      Logger.log(
+        "http proxy ignored: only an https:// proxy is used (request goes direct)", level: "warn")
+    } else if !httpProxy.isEmpty, let original = request.url?.absoluteString {
+      var proxyBase = httpProxy
+      while proxyBase.hasSuffix("/") {
+        proxyBase.removeLast()
+      }
+      guard let proxiedURL = URL(string: "\(proxyBase)/\(original)") else {
+        throw URLError(.badURL)
+      }
+      request.url = proxiedURL
+      if !proxyUser.isEmpty {
+        let credentials = "\(proxyUser):\(proxyPassword)"
+        let encoded = Data(credentials.utf8).base64EncodedString()
+        request.setValue("Basic \(encoded)", forHTTPHeaderField: "Proxy-Authorization")
+      }
+    }
+    if let transport {
+      let proxied = try await transport.send(request: request)
+      return STTHTTPResponse(status: proxied.status, body: proxied.body, headers: proxied.headers)
+    }
+    let (data, response): (Data, URLResponse)
+    if let uploadFileURL {
+      (data, response) = try await URLSession.shared.upload(
+        for: request, fromFile: uploadFileURL)
+    } else {
+      (data, response) = try await URLSession.shared.data(for: request)
+    }
+    return try Self.makeResponse(data: data, response: response)
+  }
+
+  private static func makeResponse(data: Data, response: URLResponse) throws -> STTHTTPResponse {
+    guard let httpResponse = response as? HTTPURLResponse else {
+      throw URLError(.badServerResponse)
+    }
+    // Response headers — for Retry-After (HTTP 429). HTTPURLResponse keeps
+    // them with any key casing; our lookup is case-insensitive.
+    var headers: [String: String] = [:]
+    for (name, value) in httpResponse.allHeaderFields {
+      if let stringValue = value as? String {
+        headers[String(describing: name)] = stringValue
+      }
+    }
+    return STTHTTPResponse(status: httpResponse.statusCode, body: data, headers: headers)
+  }
+}
+
+extension Transcriber {
+  // MARK: - Upload preparation (extension keeps the main class body small)
 
   /// Encode WAV bytes to the capability-gated upload container.
   ///
@@ -590,61 +743,6 @@ public final class Transcriber {
   private static func isFLACMagic(_ data: Data) -> Bool {
     data.count >= 4 && data[0] == 0x66 && data[1] == 0x4C && data[2] == 0x61
       && data[3] == 0x43
-  }
-
-  // MARK: - Send
-
-  /// Single send point for all paths (adapter, cloudflare).
-  ///
-  /// HTTP proxy (`http_proxy` in config) — honored ONLY when it has an
-  /// https:// scheme: the request URL is rewritten "URL-as-path" — the
-  /// original URL fully becomes the PATH of the proxying URL:
-  ///   https://<httpProxy>/<full-original-URL>
-  /// E.g. for http_proxy "https://127.0.0.1:8080" and request
-  /// https://api.openai.com/v1/audio/transcriptions:
-  ///   https://127.0.0.1:8080/https://api.openai.com/v1/audio/transcriptions
-  /// Scheme-less or http:// proxies are ignored (a plain-HTTP proxy would
-  /// leak the audio and the STT credentials in clear text — CWE-319) and
-  /// the request goes direct, with a warning. When proxy_user/proxy_password
-  /// are set, adds the header
-  /// `Proxy-Authorization: Basic base64("user:pass")`.
-  private func send(request: URLRequest) async throws -> STTHTTPResponse {
-    var request = request
-    if !httpProxy.isEmpty, !httpProxy.hasPrefix("https://") {
-      Logger.log(
-        "http proxy ignored: only an https:// proxy is used (request goes direct)", level: "warn")
-    } else if !httpProxy.isEmpty, let original = request.url?.absoluteString {
-      var proxyBase = httpProxy
-      while proxyBase.hasSuffix("/") {
-        proxyBase.removeLast()
-      }
-      guard let proxiedURL = URL(string: "\(proxyBase)/\(original)") else {
-        throw URLError(.badURL)
-      }
-      request.url = proxiedURL
-      if !proxyUser.isEmpty {
-        let credentials = "\(proxyUser):\(proxyPassword)"
-        let encoded = Data(credentials.utf8).base64EncodedString()
-        request.setValue("Basic \(encoded)", forHTTPHeaderField: "Proxy-Authorization")
-      }
-    }
-    if let transport {
-      let proxied = try await transport.send(request: request)
-      return STTHTTPResponse(status: proxied.status, body: proxied.body, headers: proxied.headers)
-    }
-    let (data, response) = try await URLSession.shared.data(for: request)
-    guard let httpResponse = response as? HTTPURLResponse else {
-      throw URLError(.badServerResponse)
-    }
-    // Response headers — for Retry-After (HTTP 429). HTTPURLResponse keeps
-    // them with any key casing; our lookup is case-insensitive.
-    var headers: [String: String] = [:]
-    for (name, value) in httpResponse.allHeaderFields {
-      if let stringValue = value as? String {
-        headers[String(describing: name)] = stringValue
-      }
-    }
-    return STTHTTPResponse(status: httpResponse.statusCode, body: data, headers: headers)
   }
 
   // MARK: - Response parsing
@@ -968,7 +1066,8 @@ extension Transcriber {
       retryAfterHeader = nil
       do {
         let started = CFAbsoluteTimeGetCurrent()
-        let response = try await send(request: context.request)
+        let response = try await send(
+          request: context.request, uploadFileURL: context.uploadFileURL)
         let elapsed = CFAbsoluteTimeGetCurrent() - started
         debugDump(context: context, recording: recording, response: response)
         if logLevel.lowercased() == "debug" {
