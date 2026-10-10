@@ -203,8 +203,8 @@ assert_grep 'workflow: checkout does not persist credentials' \
   "$WORKFLOW" 'persist-credentials: false'
 assert_grep 'workflow: runtime records an isolated-host handoff instead of claiming a pass' \
   "$WORKFLOW" 'needs-macos12-host'
-assert_grep 'workflow: current HEAD must have trusted runtime attestation' \
-  "$WORKFLOW" 'macos12/runtime-attested'
+assert_not_ok 'workflow: no unsupported owner-attestation commit-status dependency' \
+  grep -q 'macos12/runtime-attested' "$WORKFLOW"
 assert_grep 'workflow: absent runtime evidence is explicit UNVERIFIED warning, not a false PASS' \
   "$WORKFLOW" 'macOS 12 runtime UNVERIFIED'
 assert_grep 'runtime results include their tested source revision' \
@@ -365,6 +365,15 @@ assert_not_ok 'docs: no self-hosted macOS 12 runner strategy remains' \
   grep -qE 'self-hosted, macos-12' "$COMPAT_DOC"
 assert_grep 'docs: results collected back on a supported machine' \
   "$COMPAT_DOC" 'collect the results back on a supported'
+assert_not_ok 'docs: manual checklist is not misrepresented as release-critical' \
+  grep -qE 'release-critical manual|manual checklist must also be signed off' "$COMPAT_DOC"
+assert_not_ok 'docs: nonexistent runtime evidence workflow is not prescribed' \
+  grep -q 'macos12-runtime-evidence.yml' "$COMPAT_DOC"
+assert_grep 'docs: absent macOS 12 runtime proof remains unverified' \
+  "$COMPAT_DOC" 'UNVERIFIED'
+assert_grep 'docs: optional manual runtime proof cannot block a release' \
+  "$COMPAT_DOC" 'not prerequisites for normal releases'
+
 
 # --- 8. --full on a non-12 host refuses (never a silent pass) -----------------
 # Only meaningful on macOS; on Linux the script exits 2 (macOS-only), which
