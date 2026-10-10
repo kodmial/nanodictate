@@ -2417,23 +2417,23 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         level: "info"
       )
       retryProvider.lastFailedProviderID = activeProviderID
-      // The parallel failover is moved to NanoDictateCore (a testable
-      // function): RetryProvider.parallelFailover — all candidates run in
-      // one withTaskGroup (independent STT requests), the first success
-      // wins and cancels the rest (cancelAll); TranscribeErrors accumulate —
-      // the last one that finished wins; a non-TranscribeError breaks the
-      // chain like the sequential loop (microphone etc.).
+      // Bounded hedged failover (NanoDictateCore): the first ordered fallback
+      // starts alone; extra fallbacks launch only on fast failure or after
+      // the hedge delay, at most HedgedFailoverPolicy.default
+      // .maxConcurrentAttempts in flight. First success wins and cancels the
+      // rest (cancelAll); TranscribeErrors accumulate (last wins); a
+      // non-TranscribeError aborts like the sequential loop (mic etc.).
       // lastFailedProviderID is set BEFORE the group and reset on a success
       // in retranscribe.
       // Defense in depth alongside init-time filtering: realtime candidates
-      // never join the parallel chain — they need the realtime watchdog and
+      // never join the hedged chain — they need the realtime watchdog and
       // task retention, not the batch budget. No batch candidates left —
       // rethrow the primary error instead of failing over nowhere.
       let batchCandidates = failoverCandidates.filter { !Self.isRealtimeProvider($0) }
       guard !batchCandidates.isEmpty else {
         throw error
       }
-      return try await RetryProvider.parallelFailover(
+      return try await RetryProvider.hedgedFailover(
         candidates: batchCandidates
       ) { provider in
         guard let retryResult = try await self.retryProvider.retranscribe(with: provider) else {
