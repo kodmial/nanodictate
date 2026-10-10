@@ -926,7 +926,10 @@ extension Transcriber {
 
   /// With `log_level == "debug"`, saves the WAV to `recordingsDirectory` and
   /// returns the file info (path + size) for the dump; else `nil`.
-  /// Empty data not saved. Write errors never thrown outward.
+  /// Empty data not saved. Write errors never thrown outward. Runs on the
+  /// async send path (never the realtime audio callback); retention pruning
+  /// is scheduled by `DebugDump.saveRecording` on a background queue and its
+  /// failures are logged without failing transcription.
   private func saveRecordingIfDebug(wav: Data) -> DebugDump.RecordingInfo? {
     guard logLevel.lowercased() == "debug", !wav.isEmpty else { return nil }
     let path = DebugDump.recordingPath(for: Date())
