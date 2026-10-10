@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.30] - 2026-10-10
+
+
+
+### Fixed
+
+* P1: Finalize the production shared Rust core and macOS parity before Windows ([9ecee2f](https://github.com/kodmial/nanodictate/commit/9ecee2f9f0d6156c39c49d2073d6ffa850bec683))
+
 ## [0.1.29] - 2026-10-09
 
 
@@ -521,7 +529,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.29...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.30...HEAD
+[0.1.30]: https://github.com/kodmial/nanodictate/compare/v0.1.29...v0.1.30
 [0.1.29]: https://github.com/kodmial/nanodictate/compare/v0.1.28...v0.1.29
 [0.1.28]: https://github.com/kodmial/nanodictate/compare/v0.1.27...v0.1.28
 [0.1.27]: https://github.com/kodmial/nanodictate/compare/v0.1.26...v0.1.27
