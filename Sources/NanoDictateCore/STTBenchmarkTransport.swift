@@ -281,10 +281,14 @@ public struct BenchmarkTransportComparison: Codable, Equatable {
 // MARK: - Request-body memory comparison (issue #32)
 //
 // Near-60-second benchmark for transient request-body memory: audio bytes,
-// full body bytes, multipart overhead, the upload strategy production would
-// use (file-backed at or above `Transcriber.fileBackedUploadThresholdBytes`
-// on the real network path, in-memory below it) and peak-transient estimates
-// for both strategies (see `STTRequestMemoryReport`).
+// full body bytes, multipart overhead, the expected upload strategy
+// production would use when file-backed planning succeeds (`fileBacked` at
+// or above `Transcriber.fileBackedUploadThresholdBytes` on the real network
+// path, in-memory below it) and peak-transient estimates for both
+// strategies (see `STTRequestMemoryReport`). Production falls back to the
+// in-memory spec when `ProviderRequestBuilder.planFileBacked` returns nil
+// (invalid URL or unwritable temp directory); the benchmark reports the
+// intended strategy without probing the filesystem.
 
 /// Per-fixture request-body memory accounting (Codable for machine output
 /// alongside `BenchmarkReport`).
@@ -296,6 +300,9 @@ public struct STTRequestMemoryRow: Codable, Equatable {
   public var bodyBytes: Int
   public var overheadBytes: Int
   public var duplicationRatio: Double
+  /// Expected production upload strategy when file-backed planning
+  /// succeeds; production falls back to `inMemory` when
+  /// `planFileBacked` returns nil (invalid URL or unwritable temp file).
   public var strategy: String
   public var peakInMemoryBytes: Int
   public var peakFileBackedBytes: Int
@@ -348,10 +355,14 @@ extension BenchmarkRunner {
   /// come from the request the adapter would send (multipart framing
   /// included). The payload is prepared exactly as production prepares it
   /// (`Transcriber.prepareUpload`: capability-gated FLAC encoding with WAV
-  /// fallback), and the strategy mirrors production (`fileBacked` at or
-  /// above the threshold on the real network path for batch-multipart
-  /// profiles, else `inMemory`); both peak estimates are reported so the
-  /// before/after is visible in one row.
+  /// fallback), and the strategy is the expected production strategy when
+  /// file-backed planning succeeds (`fileBacked` at or above the threshold
+  /// on the real network path for batch-multipart profiles, else
+  /// `inMemory`); both peak estimates are reported so the before/after is
+  /// visible in one row. Production falls back to the in-memory spec when
+  /// `ProviderRequestBuilder.planFileBacked` returns nil (invalid URL or
+  /// unwritable temp directory); the benchmark intentionally does not probe
+  /// the filesystem and reports the intended strategy.
   public static func requestMemoryRows(
     fixtures: [BenchmarkFixture],
     config: BenchmarkSTTConfig,
@@ -376,7 +387,10 @@ extension BenchmarkRunner {
       // plus framing estimate against the threshold). Only batch-multipart
       // profiles have a file-backed representation: raw-audio and realtime
       // profiles fall back to the in-memory spec in production, so the label
-      // stays `inMemory` for them regardless of size.
+      // stays `inMemory` for them regardless of size. This is the expected
+      // strategy when `planFileBacked` succeeds; production additionally
+      // falls back to in-memory when that plan returns nil (invalid URL or
+      // unwritable temp directory), which the benchmark does not probe.
       let supportsFileBacked = ProviderRequestBuilder.profile(
         adapterID: config.adapterID, model: config.model
       ).capabilities.transport == .batchMultipart
