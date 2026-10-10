@@ -422,7 +422,7 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
             _disposed = true;
             _running = false;
             worker = _worker;
-            if (worker is not null && !ReferenceEquals(worker, Thread.CurrentThread))
+            if (worker is not null)
             {
                 _releaseDeferred = true;
             }
