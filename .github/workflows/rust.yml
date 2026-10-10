@@ -83,7 +83,7 @@ jobs:
         shell: pwsh
         run: |
           systeminfo | Select-String 'OS Name','OS Version'
-          uname -a
+          try { uname -a } catch { Write-Host "uname unavailable" }
 
       - name: Check formatting
         working-directory: rust
