@@ -355,9 +355,18 @@ jobs:
 
   # Publication gate: a release may only publish artifacts that were already
   # exercised by the Packaging smoke candidate jobs for this exact immutable
+  # commit AND by the exact-head CI software-gate evidence for the same
   # commit. Packaging smoke is triggered by the same main/tag push; this job
   # waits for that run, requires it to be green, verifies that all four release
   # artifacts exist, and exposes the run id used by the release job below.
+  # Packaging alone never satisfies the gate: the automated software gate
+  # (`RustParityGate.evaluateSoftware`) is evidenced by the exact-head CI run
+  # (`ci.yml` -> `scripts/ci-validation.sh` -> `NanoDictateCoreTests`, which
+  # includes the `evaluateSoftware` unit coverage plus the real block-oriented
+  # FFI overhead probes measured against the linked engine). This job waits
+  # for that CI run on the same exact head, requires it to be green, and
+  # exposes its run id alongside the packaging run id. A packaging-successful
+  # release without green software-gate evidence stays blocked.
   candidate-gate:
     name: Require tested release candidate
     needs: preflight
@@ -369,6 +378,7 @@ jobs:
       contents: read
     outputs:
       run_id: ${{ steps.gate.outputs.run_id }}
+      ci_run_id: ${{ steps.software-gate.outputs.ci_run_id }}
     steps:
       - name: Wait for exact-head Packaging smoke
         id: gate
@@ -438,6 +448,90 @@ jobs:
 
           echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
           echo "::notice::Release publication is bound to tested Packaging smoke run $RUN_ID for $SHA."
+
+      - name: Wait for exact-head CI software gate
+        id: software-gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          # The automated software-gate evidence for this exact commit is the
+          # CI caller run (`ci.yml`), which executes
+          # `scripts/ci-validation.sh` -> `NanoDictateCoreTests`. That suite
+          # contains the `RustParityGate.evaluateSoftware` unit coverage plus
+          # the real block-oriented FFI overhead probes measured against the
+          # linked engine on the CI runner; fixed `passingMeasurements()`
+          # fixtures elsewhere are unit-test oracles for the gate logic, not
+          # release evidence. Query by head SHA without an event filter so a
+          # tag-push or manual-dispatch release finds the push CI run for the
+          # same immutable commit (CI itself triggers on push/PR, never on
+          # tags or manual dispatch).
+          CI_RUN_ID=""
+          for _ in {1..40}; do
+            while read -r CANDIDATE_ID; do
+              [[ -n "$CANDIDATE_ID" ]] || continue
+              # A SHA can have several ci.yml runs (retries, re-runs): the
+              # first returned run may have failed or skipped the macOS job
+              # while a later run for the same SHA is green. Inspect every
+              # exact-SHA candidate and bind to one whose macOS
+              # build-and-test job already succeeded, instead of taking the
+              # first run unconditionally.
+              RUN_CONCLUSION="$(gh api "repos/$REPO/actions/runs/$CANDIDATE_ID" --jq '.conclusion // ""')"
+              if [[ -n "$RUN_CONCLUSION" && "$RUN_CONCLUSION" != "success" ]]; then
+                continue
+              fi
+              if gh api "repos/$REPO/actions/runs/$CANDIDATE_ID/jobs?per_page=100" \
+                --jq -e '[.jobs[] | select(.name | split(" / ") | last == "Build & Test (macOS)") | .conclusion] | any(. == "success")' \
+                >/dev/null; then
+                CI_RUN_ID="$CANDIDATE_ID"
+                break
+              fi
+            done < <(
+              gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&per_page=100" \
+                --jq '.workflow_runs[].id'
+            )
+            if [[ -n "$CI_RUN_ID" ]]; then
+              break
+            fi
+            sleep 15
+          done
+
+          if [[ -z "$CI_RUN_ID" ]]; then
+            echo "::error::No eligible CI run with a successful Build & Test (macOS) job exists for release commit $SHA. The software gate (NanoDictateCoreTests via scripts/ci-validation.sh) has no exact-head evidence. Publication is blocked."
+            exit 1
+          fi
+
+          echo "Waiting for CI software-gate run $CI_RUN_ID on exact head $SHA."
+          gh run watch "$CI_RUN_ID" --repo "$REPO" --exit-status
+
+          CONCLUSION="$(gh api "repos/$REPO/actions/runs/$CI_RUN_ID" --jq '.conclusion')"
+          if [[ "$CONCLUSION" != "success" ]]; then
+            echo "::error::CI software-gate run $CI_RUN_ID for $SHA concluded with '$CONCLUSION', not 'success'. Publication is blocked."
+            exit 1
+          fi
+
+          # A run-level `success` is not sufficient: the macOS build-and-test
+          # job is skipped for documentation-only or trusted generated PRs
+          # (`classify-changes` -> `build_required == 'false'`), and a skipped
+          # job still yields a successful run. A tag release pointing at such
+          # a commit must not publish without `NanoDictateCoreTests` evidence,
+          # so require the macOS job itself to have run green. Jobs from the
+          # reusable engine workflow surface as "<caller job id> / <called job
+          # name>" (here: "call / Build & Test (macOS)"), so normalize to the
+          # called job name — the same convention as the Packaging smoke gate
+          # above.
+          TEST_CONCLUSIONS="$(gh api "repos/$REPO/actions/runs/$CI_RUN_ID/jobs?per_page=100" \
+            --jq '.jobs[] | select(.name | split(" / ") | last == "Build & Test (macOS)") | .conclusion')"
+          if [[ -z "$TEST_CONCLUSIONS" ]] || grep -qvx 'success' <<<"$TEST_CONCLUSIONS"; then
+            echo "::error::CI run $CI_RUN_ID did not execute a successful Build & Test (macOS) job. Publication is blocked."
+            exit 1
+          fi
+
+          echo "ci_run_id=$CI_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "::notice::Release publication is bound to green CI software-gate run $CI_RUN_ID for $SHA."
 
   # Build the two macOS binaries (Intel + Apple Silicon), code-sign them with
   # the NanoDictate CI Signing identity and pack the release tarball. The
@@ -819,7 +913,9 @@ jobs:
     name: Create GitHub Release
     needs: [candidate-gate, preflight]
     # No-op pushes skip the candidate gate. A real publication is reachable
-    # only after the exact-head Packaging smoke run completed successfully.
+    # only after the exact-head Packaging smoke run AND the exact-head CI
+    # software-gate run (NanoDictateCoreTests via scripts/ci-validation.sh)
+    # both completed successfully; packaging success alone never suffices.
     if: ${{ always() && needs.preflight.result == 'success' && (needs.candidate-gate.result == 'success' || needs.candidate-gate.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
