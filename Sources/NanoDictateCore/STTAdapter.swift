@@ -100,6 +100,58 @@ public struct STTRequestSpec {
       return data
     }
   }
+
+  /// Request-body memory accounting for the built spec: audio bytes are the
+  /// uploaded payload alone, body bytes the full framing. Multipart holds the
+  /// audio plus one body copy in memory; raw audio holds the payload once.
+  public func memoryReport(audioBytes: Int) -> STTRequestMemoryReport {
+    STTRequestMemoryReport(
+      audioBytes: audioBytes, bodyBytes: bodyData.count, strategy: .inMemory)
+  }
+}
+
+// MARK: - File-backed STT request
+
+/// File-backed STT request: same headers/URL/metadata as `STTRequestSpec`,
+/// but the multipart body lives in a temporary file instead of a second
+/// full-size `Data` (see `MultipartFileUpload`).
+///
+/// - The file content is byte-identical to the `.multipart` body `plan`
+///   would build for the same parameters (same boundary parameter is
+///   generated per call in both paths; byte-identity is verified with a
+///   shared boundary in tests).
+/// - Retries re-open a fresh `InputStream` per attempt
+///   (`MultipartFileUpload.makeBodyStream`), so retry behavior is as
+///   repeatable and deterministic as the in-memory body.
+/// - Only `.batchMultipart` profiles use this path: `.batchRawAudio` bodies
+///   already hold the payload once (no duplication to remove), and
+///   `.streamingSession` profiles have no batch representation.
+public struct STTFileBackedRequest {
+  /// Final URL. nil = not built ("Invalid base URL"), same as `STTRequestSpec`.
+  public var url: URL?
+  public var headers: [(String, String)]
+  public var upload: STTFileBackedUpload
+  /// JSON path to transcript text; nil = flat "text" (OpenAI-compatible).
+  public var transcriptPath: [String]?
+  /// Effective multipart file-part filename (after capability gating and
+  /// extension coercion), same contract as `STTRequestSpec.filePartFilename`.
+  public var filePartFilename: String
+  /// Effective multipart file-part MIME type, same contract as
+  /// `STTRequestSpec.filePartContentType`.
+  public var filePartContentType: String
+  /// Byte count of the uploaded audio payload (after FLAC encoding when
+  /// selected), same contract as the Transcriber debug-dump accounting.
+  public var filePartByteCount: Int
+
+  /// Content-Type for URLRequest ("multipart/form-data; boundary=…").
+  public var contentType: String { upload.contentType }
+
+  /// Request-body memory accounting: the file-backed strategy only holds the
+  /// source audio plus small streaming buffers in memory.
+  public func memoryReport(audioBytes: Int) -> STTRequestMemoryReport {
+    STTRequestMemoryReport(
+      audioBytes: audioBytes, bodyBytes: upload.byteCount, strategy: .fileBacked)
+  }
 }
 
 // MARK: - ProviderRequestBuilder
@@ -167,6 +219,168 @@ public enum ProviderRequestBuilder {
     audioFormat: STTUploadFormat = .wav,
     bias: STTContextualBias = .none
   ) -> STTRequestSpec {
+    let inputs = resolvePlanInputs(
+      adapterID: adapterID,
+      baseURL: baseURL,
+      model: model,
+      language: language,
+      wav: wav,
+      filename: filename,
+      prompt: prompt,
+      batchParams: batchParams,
+      audioFormat: audioFormat,
+      bias: bias
+    )
+    switch inputs.caps.transport {
+    case .batchRawAudio:
+      return planCloudflare(
+        baseURL: inputs.resolvedBaseURL, apiKey: apiKey, wav: wav,
+        audioFormat: inputs.effectiveFormat)
+    case .batchMultipart:
+      return planOpenAICompatible(
+        adapterID: adapterID,
+        baseURL: inputs.resolvedBaseURL,
+        model: inputs.resolvedModel,
+        apiKey: apiKey,
+        language: inputs.effectiveLanguage,
+        languages: inputs.effectiveLanguages,
+        wav: wav,
+        filename: inputs.effectiveFilename,
+        prompt: inputs.effectivePrompt,
+        needsWordTimestamps: needsWordTimestamps,
+        stable: inputs.stable,
+        capabilities: inputs.caps,
+        audioFormat: inputs.effectiveFormat,
+        keywords: inputs.keywords
+      )
+    case .streamingSession:
+      // Realtime profiles have no batch representation (24 kHz raw PCM16
+      // streamed over a stateful WebSocket, not a 16 kHz WAV upload).
+      // Return an invalid spec (nil URL) instead of a silent multipart
+      // fallback so batch callers cannot turn one failed realtime session
+      // into repeated duplicate uploads. Realtime callers use
+      // RealtimeTranscriptionSession; .allowBatch is reserved and behaves
+      // like fail-closed today, so no explicit batch fallback is started here.
+      return STTRequestSpec(
+        url: nil,
+        headers: [],
+        body: .multipart(
+          data: Data(),
+          contentType: "multipart/form-data; boundary=invalid-realtime-profile"),
+        transcriptPath: nil
+      )
+    }
+  }
+
+  /// File-backed variant of `plan`: the multipart body is streamed to a
+  /// temporary file instead of a second full-size `Data` (see
+  /// `MultipartFileUpload`). Returns nil when the profile has no batch
+  /// multipart representation (raw-audio bodies already hold the payload
+  /// once; realtime profiles have no batch upload at all): callers fall back
+  /// to `plan`. All parameter decisions (capability gating, biasing, stable
+  /// fields, timestamp gating) are shared with `plan` through
+  /// `resolvePlanInputs`, so both backends send identical parameters.
+  ///
+  /// The caller owns the temporary file (`request.upload.fileURL`) and must
+  /// remove it after the request completes (see
+  /// `MultipartFileUpload.cleanup`).
+  // swiftlint:disable:next function_parameter_count
+  public static func planFileBacked(
+    adapterID: String,
+    baseURL: String,
+    model: String,
+    apiKey: String,
+    language: String,
+    wav: Data,
+    filename: String = "audio.wav",
+    prompt: String? = nil,
+    needsWordTimestamps: Bool = false,
+    batchParams: BatchSTTParams? = nil,
+    audioFormat: STTUploadFormat = .wav,
+    bias: STTContextualBias = .none
+  ) -> STTFileBackedRequest? {
+    let inputs = resolvePlanInputs(
+      adapterID: adapterID,
+      baseURL: baseURL,
+      model: model,
+      language: language,
+      wav: wav,
+      filename: filename,
+      prompt: prompt,
+      batchParams: batchParams,
+      audioFormat: audioFormat,
+      bias: bias
+    )
+    guard inputs.caps.transport == .batchMultipart else { return nil }
+    // Validate the URL before touching the filesystem: no temp file is
+    // created for an unbuildable request (callers fall back to `plan`, which
+    // reports the invalid URL the same way).
+    guard let url = URL(string: inputs.resolvedBaseURL) else { return nil }
+    let timestampDecision = STTTimestampRequest.resolve(
+      needsWordTimestamps: needsWordTimestamps, capabilities: inputs.caps)
+    let effectiveKeywords =
+      inputs.caps.supportsKeywordBiasing ? inputs.keywords : []
+    let boundary = "Boundary-\(UUID().uuidString)"
+    guard
+      let upload = try? MultipartFileUpload.write(
+        audio: wav,
+        filename: inputs.effectiveFilename,
+        model: inputs.resolvedModel,
+        language: inputs.effectiveLanguage,
+        prompt: inputs.effectivePrompt,
+        boundary: boundary,
+        languages: inputs.effectiveLanguages,
+        keywords: effectiveKeywords,
+        responseFormat: timestampDecision.responseFormat,
+        timestampGranularities: timestampDecision.granularities,
+        stable: inputs.stable,
+        audioContentType: inputs.effectiveFormat.contentType)
+    else {
+      return nil
+    }
+    return STTFileBackedRequest(
+      url: url,
+      headers: [("Authorization", "Bearer \(apiKey)")],
+      upload: upload,
+      transcriptPath: nil,
+      filePartFilename: inputs.effectiveFilename,
+      filePartContentType: inputs.effectiveFormat.contentType,
+      filePartByteCount: wav.count
+    )
+  }
+
+  /// Resolved capability-gated parameters shared by `plan` and
+  /// `planFileBacked`. A struct (not a tuple) so both backends send
+  /// identical parameters without tripping the tuple-size lint.
+  private struct ResolvedPlanInputs {
+    let resolvedBaseURL: String
+    let resolvedModel: String
+    let caps: STTCapabilities
+    let effectivePrompt: String?
+    let effectiveLanguage: String
+    let effectiveLanguages: [String]
+    let stable: BatchStableMultipartFields?
+    let effectiveFormat: STTUploadFormat
+    let effectiveFilename: String
+    let keywords: [String]
+  }
+
+  /// Shared capability-gated parameter resolution for `plan` and
+  /// `planFileBacked`: both backends send identical parameters; only the
+  /// body container (in-memory `Data` vs temporary file) differs.
+  // swiftlint:disable:next function_parameter_count
+  private static func resolvePlanInputs(
+    adapterID: String,
+    baseURL: String,
+    model: String,
+    language: String,
+    wav _: Data,
+    filename: String,
+    prompt: String?,
+    batchParams: BatchSTTParams?,
+    audioFormat: STTUploadFormat,
+    bias: STTContextualBias
+  ) -> ResolvedPlanInputs {
     // Empty config baseURL/model resolve to adapter defaults; re-resolve of
     // already non-empty values is a no-op — caller may resolve in advance.
     let resolvedBaseURL = resolveBaseURL(baseURL, for: adapterID)
@@ -218,44 +432,18 @@ public enum ProviderRequestBuilder {
       profileAudio.supportedUploadFormats.contains(audioFormat)
       ? audioFormat : profileAudio.uploadFormat
     let effectiveFilename = AudioTransportEncoder.coercedFilename(filename, for: effectiveFormat)
-    switch caps.transport {
-    case .batchRawAudio:
-      return planCloudflare(
-        baseURL: resolvedBaseURL, apiKey: apiKey, wav: wav, audioFormat: effectiveFormat)
-    case .batchMultipart:
-      return planOpenAICompatible(
-        adapterID: adapterID,
-        baseURL: resolvedBaseURL,
-        model: resolvedModel,
-        apiKey: apiKey,
-        language: effectiveLanguage,
-        languages: effectiveLanguages,
-        wav: wav,
-        filename: effectiveFilename,
-        prompt: effectivePrompt,
-        needsWordTimestamps: needsWordTimestamps,
-        stable: stable,
-        capabilities: caps,
-        audioFormat: effectiveFormat,
-        keywords: applied.keywordsField ?? []
-      )
-    case .streamingSession:
-      // Realtime profiles have no batch representation (24 kHz raw PCM16
-      // streamed over a stateful WebSocket, not a 16 kHz WAV upload).
-      // Return an invalid spec (nil URL) instead of a silent multipart
-      // fallback so batch callers cannot turn one failed realtime session
-      // into repeated duplicate uploads. Realtime callers use
-      // RealtimeTranscriptionSession; .allowBatch is reserved and behaves
-      // like fail-closed today, so no explicit batch fallback is started here.
-      return STTRequestSpec(
-        url: nil,
-        headers: [],
-        body: .multipart(
-          data: Data(),
-          contentType: "multipart/form-data; boundary=invalid-realtime-profile"),
-        transcriptPath: nil
-      )
-    }
+    return ResolvedPlanInputs(
+      resolvedBaseURL: resolvedBaseURL,
+      resolvedModel: resolvedModel,
+      caps: caps,
+      effectivePrompt: effectivePrompt,
+      effectiveLanguage: effectiveLanguage,
+      effectiveLanguages: effectiveLanguages,
+      stable: stable,
+      effectiveFormat: effectiveFormat,
+      effectiveFilename: effectiveFilename,
+      keywords: applied.keywordsField ?? []
+    )
   }
 
   public static func resolveBaseURL(_ baseURL: String, for adapterID: String) -> String {
@@ -295,89 +483,25 @@ public enum ProviderRequestBuilder {
 
   /// Transcript text from response body. path == nil → flat {"text": "…"}
   /// (OpenAI-compatible); ["result","text"] → cloudflare JSON path.
+  /// Single JSON deserialization per call (see `STTResponseDecoder`); callers
+  /// needing both text and words must use `STTResponseDecoder.decode` once
+  /// instead of calling `extractText` + `extractWords`.
   public static func extractText(from body: Data, path: [String]?) throws -> String {
-    guard !body.isEmpty,
-      let json = try? JSONSerialization.jsonObject(with: body)
-    else {
-      throw TranscribeError.invalidResponse("Response is not a JSON object")
-    }
-    guard let path else {
-      guard let dict = json as? [String: Any],
-        let text = dict["text"] as? String
-      else {
-        throw TranscribeError.invalidResponse("Missing 'text' field")
-      }
-      return text
-    }
-    var current: Any = json
-    for segment in path {
-      if let dict = current as? [String: Any] {
-        guard let next = dict[segment] else {
-          throw TranscribeError.invalidResponse("Missing '\(path.joined(separator: "."))' field")
-        }
-        current = next
-      } else if let array = current as? [Any], let index = Int(segment),
-        array.indices.contains(index)
-      {  // swiftlint:disable:this opening_brace
-        current = array[index]
-      } else {
-        throw TranscribeError.invalidResponse("Missing '\(path.joined(separator: "."))' field")
-      }
-    }
-    guard let text = current as? String else {
-      throw TranscribeError.invalidResponse("Missing '\(path.joined(separator: "."))' field")
-    }
-    return text
+    try STTResponseDecoder.text(from: STTResponseDecoder.parseJSON(body), path: path)
   }
 
   /// Word timestamps from response body. Empty — provider returned none,
   /// NOT an error: stitching degrades to word diff. path == nil → top-level
   /// `words` array (OpenAI-compatible verbose_json). Broken entries skipped;
-  /// broken JSON yields empty result.
+  /// broken JSON yields empty result. Single JSON deserialization per call
+  /// (see `STTResponseDecoder`); callers needing both text and words must use
+  /// `STTResponseDecoder.decode` once instead of calling `extractText` +
+  /// `extractWords`.
   public static func extractWords(from body: Data, path: [String]?) -> [TimedWord] {
-    guard !body.isEmpty,
-      let json = try? JSONSerialization.jsonObject(with: body)
-    else {
+    guard let json = try? STTResponseDecoder.parseJSON(body) else {
       return []
     }
-    var wordsValue: Any?
-    if let path {
-      // Same path as for text, but the last segment is "words".
-      guard path.count > 1 else { return [] }
-      var current: Any = json
-      var pathValid = true
-      for segment in path.dropLast() {
-        if let dict = current as? [String: Any] {
-          guard let next = dict[segment] else {
-            pathValid = false
-            break
-          }
-          current = next
-        } else if let array = current as? [Any], let index = Int(segment),
-          array.indices.contains(index)
-        {  // swiftlint:disable:this opening_brace
-          current = array[index]
-        } else {
-          pathValid = false
-          break
-        }
-      }
-      wordsValue = pathValid ? (current as? [String: Any])?["words"] : nil
-    } else {
-      wordsValue = (json as? [String: Any])?["words"]
-    }
-    guard let items = wordsValue as? [[String: Any]] else { return [] }
-    var words: [TimedWord] = []
-    for item in items {
-      guard let word = (item["word"] as? String) ?? (item["punctuated_word"] as? String),
-        let start = (item["start"] as? NSNumber)?.doubleValue,
-        let end = (item["end"] as? NSNumber)?.doubleValue
-      else {
-        continue
-      }
-      words.append(TimedWord(word: word, start: start, end: end))
-    }
-    return words
+    return STTResponseDecoder.words(from: json, path: path)
   }
 }
 
@@ -410,10 +534,15 @@ extension ProviderRequestBuilder {
     stable: BatchStableMultipartFields? = nil,
     audioContentType: String = STTUploadFormat.wav.contentType
   ) -> Data {
+    // Copy-minimized build (issue #32): one reserved buffer holds the whole
+    // body; text parts append their UTF-8 bytes directly with no per-field
+    // temporary `Data` allocation, and the audio payload is appended once.
+    // Output stays byte-identical to the historic builder.
     var body = Data()
+    body.reserveCapacity(wav.count + STTRequestMemoryReport.framingOverheadEstimate)
 
     func append(_ string: String) {
-      body.append(Data(string.utf8))
+      body.append(contentsOf: string.utf8)
     }
 
     func appendField(_ name: String, value: String) {
@@ -526,11 +655,13 @@ extension ProviderRequestBuilder {
     // guarantees support AND the processing mode requires them (chunked/live
     // segment overlap stitching). Normal single-request push-to-talk sends
     // plain transcription. Keywords — only where supportsKeywordBiasing.
-    // Capabilities come from the shared engine (canonical policy).
+    // Capabilities come from the shared engine (canonical policy). The
+    // timestamp/response-format choice itself is centralized in
+    // `STTTimestampRequest.resolve` so every request path gates identically.
     let caps =
       capabilities ?? RustEngine.requireSTTProfile(adapterID: adapterID, model: model).capabilities
-    let timestamps = needsWordTimestamps && caps.supportsWordTimestamps
-    let verbose = needsWordTimestamps && caps.supportsVerboseJSON
+    let timestampDecision = STTTimestampRequest.resolve(
+      needsWordTimestamps: needsWordTimestamps, capabilities: caps)
     let effectiveKeywords = caps.supportsKeywordBiasing ? keywords : []
     let multipart = multipartBody(
       wav: wav,
@@ -541,8 +672,8 @@ extension ProviderRequestBuilder {
       boundary: boundary,
       languages: languages,
       keywords: effectiveKeywords,
-      responseFormat: verbose ? "verbose_json" : nil,
-      timestampGranularities: timestamps ? ["word"] : [],
+      responseFormat: timestampDecision.responseFormat,
+      timestampGranularities: timestampDecision.granularities,
       stable: stable,
       audioContentType: audioFormat.contentType
     )
