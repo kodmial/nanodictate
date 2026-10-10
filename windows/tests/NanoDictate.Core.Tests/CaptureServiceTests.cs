@@ -195,19 +195,27 @@ public sealed class WasapiSourceTests
         return condition();
     }
 
-    private static bool TryEnsureCaptureEndpoint(WasapiCaptureSource source)
+    private static void EnsureCaptureEndpointOrSkip(WasapiCaptureSource source)
     {
         try
         {
             source.ProbeDefaultFormat();
-            return true;
         }
-        catch (Exception)
+        catch (NanoException ex) when (IsMissingCaptureEndpoint(ex))
         {
             // No usable capture endpoint on this runner (for example,
-            // headless CI without a microphone): skip the native test.
-            return false;
+            // headless CI without a microphone): report an explicit skip
+            // instead of passing vacuously. Any other probe failure is
+            // a real regression and must fail the test.
+            Skip.If(true, $"No Windows capture endpoint available: {ex.Message}");
         }
+    }
+
+    private static bool IsMissingCaptureEndpoint(NanoException ex)
+    {
+        return ex.Message.Contains(
+            "get default capture endpoint",
+            StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -258,35 +266,23 @@ public sealed class WasapiSourceTests
         Assert.False(service.IsCaptureReady);
     }
 
-    [Fact]
+    [SkippableFact]
     public void WindowsStopBeforeStartIsIdempotent()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
+        Skip.If(!OperatingSystem.IsWindows(), "Requires Windows WASAPI capture.");
         using var source = new WasapiCaptureSource();
-        if (!TryEnsureCaptureEndpoint(source))
-        {
-            return;
-        }
+        EnsureCaptureEndpointOrSkip(source);
         source.Stop();
         source.Stop();
         Assert.False(source.IsRunning);
     }
 
-    [Fact]
+    [SkippableFact]
     public void WindowsStartStopStartDeliversAtLeastOneBlock()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
+        Skip.If(!OperatingSystem.IsWindows(), "Requires Windows WASAPI capture.");
         using var source = new WasapiCaptureSource();
-        if (!TryEnsureCaptureEndpoint(source))
-        {
-            return;
-        }
+        EnsureCaptureEndpointOrSkip(source);
         var blocks = 0;
         void OnBlock(CapturedBlock _) => Interlocked.Increment(ref blocks);
         source.BlockAvailable += OnBlock;
@@ -316,19 +312,12 @@ public sealed class WasapiSourceTests
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public void WindowsDisposeWhileRunningStopsCapture()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-        var source = new WasapiCaptureSource();
-        if (!TryEnsureCaptureEndpoint(source))
-        {
-            source.Dispose();
-            return;
-        }
+        Skip.If(!OperatingSystem.IsWindows(), "Requires Windows WASAPI capture.");
+        using var source = new WasapiCaptureSource();
+        EnsureCaptureEndpointOrSkip(source);
         source.Start();
         Assert.True(source.IsRunning);
         source.Dispose();
