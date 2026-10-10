@@ -484,7 +484,7 @@ jobs:
                 continue
               fi
               # Jobs in reusable workflows are nested, e.g. `call / Build & Test (macOS) / Validate`.
-              # gh api only supports --jq EXPRESSION, not --jq -e (which errors on every iteration).
+              # gh api accepts a single jq expression; jq's separate exit-status flag caused the failed release.
               if gh api "repos/$REPO/actions/runs/$CANDIDATE_ID/jobs?per_page=100" \
                 --jq '[.jobs[] | select((.name | split(" / ") | index("Build & Test (macOS)")) != null) | .conclusion] | any(. == "success")' \
                 | grep -qx 'true'; then
