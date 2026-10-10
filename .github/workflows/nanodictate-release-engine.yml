@@ -479,6 +479,10 @@ jobs:
               # exact-SHA candidate and bind to one whose macOS
               # build-and-test job already succeeded, instead of taking the
               # first run unconditionally.
+              RUN_CONCLUSION="$(gh api "repos/$REPO/actions/runs/$CANDIDATE_ID" --jq '.conclusion // ""')"
+              if [[ -n "$RUN_CONCLUSION" && "$RUN_CONCLUSION" != "success" ]]; then
+                continue
+              fi
               if gh api "repos/$REPO/actions/runs/$CANDIDATE_ID/jobs?per_page=100" \
                 --jq -e '[.jobs[] | select(.name | split(" / ") | last == "Build & Test (macOS)") | .conclusion] | any(. == "success")' \
                 >/dev/null; then
