@@ -144,13 +144,16 @@ jobs:
               return Number.isSafeInteger(n) && n > 0 ? n : 0;
             };
             const requestStatus = error => error?.status ?? error?.response?.status;
+            const fallbackOctokit = () => new github.constructor({
+              auth: `token ${process.env.TAP_PAT}`
+            });
             const fetchPullRequest = async () => {
               try {
                 return await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
               } catch (error) {
                 if (![403, 429].includes(requestStatus(error)) || !process.env.TAP_PAT) throw error;
                 core.warning('Retrying pull request lookup with TAP_PAT');
-                return getOctokit(process.env.TAP_PAT).rest.pulls.get({
+                return fallbackOctokit().rest.pulls.get({
                   owner, repo, pull_number: prNumber
                 });
               }
@@ -161,7 +164,7 @@ jobs:
               } catch (error) {
                 if (![403, 429].includes(requestStatus(error)) || !process.env.TAP_PAT) throw error;
                 core.warning('Retrying issue lookup with TAP_PAT');
-                return getOctokit(process.env.TAP_PAT).rest.issues.get({
+                return fallbackOctokit().rest.issues.get({
                   owner: issueOwner, repo: issueRepo, issue_number: number
                 });
               }
