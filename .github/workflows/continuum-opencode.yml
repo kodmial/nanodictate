@@ -135,12 +135,36 @@ jobs:
           TASK_ISSUE_NUMBER: ${{ inputs.issue_number }}
           TASK_PR_NUMBER: ${{ inputs.pr_number }}
           TASK_HEAD_REF: ${{ inputs.head_ref }}
+          TAP_PAT: ${{ secrets.TAP_PAT }}
         with:
           script: |
             const { owner, repo } = context.repo;
             const positive = raw => {
               const n = Number(raw || 0);
               return Number.isSafeInteger(n) && n > 0 ? n : 0;
+            };
+            const requestStatus = error => error?.status ?? error?.response?.status;
+            const fetchPullRequest = async () => {
+              try {
+                return await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+              } catch (error) {
+                if (![403, 429].includes(requestStatus(error)) || !process.env.TAP_PAT) throw error;
+                core.warning('Retrying pull request lookup with TAP_PAT');
+                return getOctokit(process.env.TAP_PAT).rest.pulls.get({
+                  owner, repo, pull_number: prNumber
+                });
+              }
+            };
+            const fetchIssue = async (issueOwner, issueRepo, number) => {
+              try {
+                return await github.rest.issues.get({ owner: issueOwner, repo: issueRepo, issue_number: number });
+              } catch (error) {
+                if (![403, 429].includes(requestStatus(error)) || !process.env.TAP_PAT) throw error;
+                core.warning('Retrying issue lookup with TAP_PAT');
+                return getOctokit(process.env.TAP_PAT).rest.issues.get({
+                  owner: issueOwner, repo: issueRepo, issue_number: number
+                });
+              }
             };
             const eventPR = positive(context.payload.pull_request?.number) ||
               (context.payload.issue?.pull_request ? positive(context.payload.issue.number) : 0);
@@ -152,22 +176,42 @@ jobs:
               label => labels.add(typeof label === 'string' ? label : label.name)
             );
 
+            let issueOwner = owner;
+            let issueRepo = repo;
+
             if (prNumber) {
-              const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+              const { data: pr } = await fetchPullRequest();
               collect(pr);
               // Follow the immutable implementation issue identity rather
               // than guessing platform from a PR title or a model prompt.
-              issueNumber ||= positive(pr.body?.match(/continuum-task-context[^>]*issue=(\d+)/)?.[1]) ||
-                positive(pr.head.ref.match(/^opencode\/issue(\d+)-/)?.[1]);
+              // The canonical marker names both the repository and the issue
+              // (<!-- continuum-task-context repo=owner/repo issue=123 -->),
+              // so resolve cross-repository markers in the named repository.
+              if (!issueNumber) {
+                const markerIssue = positive(pr.body?.match(/continuum-task-context[^>]*issue=(\d+)/)?.[1]);
+                if (markerIssue) {
+                  issueNumber = markerIssue;
+                  const markerRepo = pr.body?.match(/continuum-task-context[^>]*repo=([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)/i)?.[1];
+                  if (markerRepo) {
+                    const parts = markerRepo.split('/');
+                    if (parts.length === 2 && parts[0] && parts[1]) {
+                      issueOwner = parts[0];
+                      issueRepo = parts[1];
+                    }
+                  }
+                } else {
+                  issueNumber = positive(pr.head.ref.match(/^opencode\/issue(\d+)-/)?.[1]);
+                }
+              }
             }
             issueNumber ||= positive((process.env.TASK_HEAD_REF || '').match(/^opencode\/issue(\d+)-/)?.[1]);
             if (issueNumber) {
-              const { data: issue } = await github.rest.issues.get({ owner, repo, issue_number: issueNumber });
+              const { data: issue } = await fetchIssue(issueOwner, issueRepo, issueNumber);
               collect(issue);
             }
             const runner = labels.has('platform:macos') ? 'macos-15' : '';
             core.setOutput('runner_os', runner);
-            core.notice(`Native coding runner: ${runner || 'existing Continuum default'}; issue #${issueNumber || '-'}, PR #${prNumber || '-'}, labels: ${[...labels].join(', ')}`);
+            core.notice(`Native coding runner: ${runner || 'existing Continuum default'}; issue ${issueNumber ? `${issueOwner}/${issueRepo}#${issueNumber}` : '-'}, PR #${prNumber || '-'}, labels: ${[...labels].join(', ')}`);
 
   call:
     needs: resolve-platform
