@@ -1297,12 +1297,22 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     // watchdog a no-op after any terminal event.
     processingSession += 1
     let session = processingSession
-    // Auto-failover runs the candidates (parallel) AFTER the primary request
-    // timeout: the processing watchdog needs one more networkRequestTimeout
-    // as margin, else it would cut a valid failover mid-flight.
-    let watchdogDuration =
-      OverlayController.processingMaxDuration
-      + (autoFailover && !failoverCandidates.isEmpty ? Transcriber.networkRequestTimeout : 0)
+    // Auto-failover runs the candidates (bounded hedged) AFTER the primary
+    // request timeout: the processing watchdog must cover the hedged
+    // schedule, not just one request. hedgedFailover starts at most
+    // maxConcurrentAttempts candidates at once, so N candidates need
+    // ceil(N / maxConcurrentAttempts) rounds of networkRequestTimeout plus
+    // the hedge delay; else the watchdog would cut a valid later candidate
+    // mid-flight when the first slots hang until timeout.
+    let hedgePolicy = RetryProvider.HedgedFailoverPolicy.default
+    let failoverRounds =
+      (failoverCandidates.count + max(1, hedgePolicy.maxConcurrentAttempts) - 1)
+      / max(1, hedgePolicy.maxConcurrentAttempts)
+    let failoverMargin =
+      (autoFailover && failoverRounds > 0)
+      ? Double(failoverRounds) * Transcriber.networkRequestTimeout + hedgePolicy.hedgeDelaySeconds
+      : 0
+    let watchdogDuration = OverlayController.processingMaxDuration + failoverMargin
     // Realtime sessions need their own budget (connect + audio sends +
     // final wait), not the batch watchdog: connectTimeout (10 s) +
     // duration-derived append budget (floor appendTimeout 15 s for all
