@@ -62,6 +62,7 @@ let suites: [XCTestCase.Type] = [
     TranscriberHTTPProxyJoinTests.self,
     TranscriberRealtimeTests.self,
     STTAdapterTests.self,
+    STTRequestEfficiencyTests.self,
     STTCapabilitiesTests.self,
     RealtimeTranscriptionTests.self,
     AudioTransportTests.self,

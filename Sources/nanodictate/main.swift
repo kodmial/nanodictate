@@ -1468,6 +1468,13 @@ func cmdBenchmarkLocal(jsonPath: String?, markdownPath: String?) -> Int32 {
       config: transportConfig,
       provider: transportProvider)
     let transportMarkdown = BenchmarkTransportComparison.markdown(transport)
+    // Request-body memory (issue #32): audio vs body bytes, multipart
+    // overhead and peak-transient estimates for the same fixtures, so the
+    // near-60-second request reports before (in-memory) and after
+    // (file-backed) in one table.
+    let requestMemory = BenchmarkRunner.requestMemoryRows(
+      fixtures: fixtures, config: transportConfig)
+    let requestMemoryMarkdown = STTRequestMemoryRow.markdown(requestMemory)
     // Chunked final-pass accounting (always vs default on-uncertainty): the
     // long fixture is segmented for real and upload bytes use the exact
     // multipart bodies. Scripted segment hypotheses are confident slices of
@@ -1494,11 +1501,13 @@ func cmdBenchmarkLocal(jsonPath: String?, markdownPath: String?) -> Int32 {
       print("")
     }
     print(transportMarkdown)
+    print("")
+    print(requestMemoryMarkdown)
     var fullMarkdown = report.markdown() + "\n"
     if !chunkedMarkdown.isEmpty {
       fullMarkdown += chunkedMarkdown + "\n"
     }
-    fullMarkdown += transportMarkdown
+    fullMarkdown += transportMarkdown + "\n" + requestMemoryMarkdown
     if let jsonPath {
       // JSON keeps the machine-readable STT report; chunked and transport
       // rows are human-evidence in markdown (scripted, deterministic).
