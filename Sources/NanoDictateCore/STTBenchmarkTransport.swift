@@ -278,3 +278,138 @@ public struct BenchmarkTransportComparison: Codable, Equatable {
   }
 }
 
+// MARK: - Request-body memory comparison (issue #32)
+//
+// Near-60-second benchmark for transient request-body memory: audio bytes,
+// full body bytes, multipart overhead, the expected upload strategy
+// production would use when file-backed planning succeeds (`fileBacked` at
+// or above `Transcriber.fileBackedUploadThresholdBytes` on the real network
+// path, in-memory below it) and peak-transient estimates for both
+// strategies (see `STTRequestMemoryReport`). Production falls back to the
+// in-memory spec when `ProviderRequestBuilder.planFileBacked` returns nil
+// (invalid URL or unwritable temp directory); the benchmark reports the
+// intended strategy without probing the filesystem.
+
+/// Per-fixture request-body memory accounting (Codable for machine output
+/// alongside `BenchmarkReport`).
+public struct STTRequestMemoryRow: Codable, Equatable {
+  public var fixtureID: String
+  public var durationBucket: String
+  public var durationSeconds: Double
+  public var audioBytes: Int
+  public var bodyBytes: Int
+  public var overheadBytes: Int
+  public var duplicationRatio: Double
+  /// Expected production upload strategy when file-backed planning
+  /// succeeds; production falls back to `inMemory` when
+  /// `planFileBacked` returns nil (invalid URL or unwritable temp file).
+  public var strategy: String
+  public var peakInMemoryBytes: Int
+  public var peakFileBackedBytes: Int
+
+  public init(
+    fixtureID: String,
+    durationBucket: String,
+    durationSeconds: Double,
+    audioBytes: Int,
+    bodyBytes: Int,
+    overheadBytes: Int,
+    duplicationRatio: Double,
+    strategy: String,
+    peakInMemoryBytes: Int,
+    peakFileBackedBytes: Int
+  ) {
+    self.fixtureID = fixtureID
+    self.durationBucket = durationBucket
+    self.durationSeconds = durationSeconds
+    self.audioBytes = audioBytes
+    self.bodyBytes = bodyBytes
+    self.overheadBytes = overheadBytes
+    self.duplicationRatio = duplicationRatio
+    self.strategy = strategy
+    self.peakInMemoryBytes = peakInMemoryBytes
+    self.peakFileBackedBytes = peakFileBackedBytes
+  }
+
+  public static func markdown(_ rows: [STTRequestMemoryRow]) -> String {
+    var lines: [String] = []
+    lines.append("## Request memory (audio vs body, in-memory vs file-backed)")
+    lines.append("")
+    lines.append(
+      "| fixture | audio | body | overhead | dup | strategy | peak in-mem | peak file |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+    for row in rows {
+      lines.append(
+        "| \(row.fixtureID) | \(row.audioBytes)B | \(row.bodyBytes)B"
+          + " | \(row.overheadBytes)B"
+          + " | \(String(format: "%.3f", row.duplicationRatio))"
+          + " | \(row.strategy)"
+          + " | \(row.peakInMemoryBytes)B | \(row.peakFileBackedBytes)B |")
+    }
+    return lines.joined(separator: "\n") + "\n"
+  }
+}
+
+extension BenchmarkRunner {
+  /// Request-body memory accounting for one fixture set: exact body bytes
+  /// come from the request the adapter would send (multipart framing
+  /// included). The payload is prepared exactly as production prepares it
+  /// (`Transcriber.prepareUpload`: capability-gated FLAC encoding with WAV
+  /// fallback), and the strategy is the expected production strategy when
+  /// file-backed planning succeeds (`fileBacked` at or above the threshold
+  /// on the real network path for batch-multipart profiles, else
+  /// `inMemory`); both peak estimates are reported so the before/after is
+  /// visible in one row. Production falls back to the in-memory spec when
+  /// `ProviderRequestBuilder.planFileBacked` returns nil (invalid URL or
+  /// unwritable temp directory); the benchmark intentionally does not probe
+  /// the filesystem and reports the intended strategy.
+  public static func requestMemoryRows(
+    fixtures: [BenchmarkFixture],
+    config: BenchmarkSTTConfig,
+    audioFormat: STTUploadFormat = .wav
+  ) -> [STTRequestMemoryRow] {
+    fixtures.map { fixture in
+      let wav = WAVEncoder.encode(samples: fixture.samples, sampleRate: fixture.sampleRate)
+      // Encode the requested upload container before measuring it, exactly
+      // as production does: the byte counts below describe the payload that
+      // is actually uploaded (FLAC bytes for FLAC profiles, WAV otherwise),
+      // never WAV bytes mislabelled as FLAC.
+      let prepared = Transcriber.prepareUpload(
+        wav: wav, filename: "audio.wav", audioFormat: audioFormat,
+        adapterID: config.adapterID, model: config.model)
+      let bodyBytes = uploadBytes(
+        config: config, wav: prepared.data, audioFormat: prepared.effectiveFormat)
+      let inMemory = STTRequestMemoryReport(
+        audioBytes: prepared.data.count, bodyBytes: bodyBytes, strategy: .inMemory)
+      let fileBacked = STTRequestMemoryReport(
+        audioBytes: prepared.data.count, bodyBytes: bodyBytes, strategy: .fileBacked)
+      // Mirror the production file-backed condition (prepared audio bytes
+      // plus framing estimate against the threshold). Only batch-multipart
+      // profiles have a file-backed representation: raw-audio and realtime
+      // profiles fall back to the in-memory spec in production, so the label
+      // stays `inMemory` for them regardless of size. This is the expected
+      // strategy when `planFileBacked` succeeds; production additionally
+      // falls back to in-memory when that plan returns nil (invalid URL or
+      // unwritable temp directory), which the benchmark does not probe.
+      let supportsFileBacked = ProviderRequestBuilder.profile(
+        adapterID: config.adapterID, model: config.model
+      ).capabilities.transport == .batchMultipart
+      let strategy: STTUploadStrategy =
+        supportsFileBacked
+        && prepared.data.count + STTRequestMemoryReport.framingOverheadEstimate
+          >= Transcriber.fileBackedUploadThresholdBytes ? .fileBacked : .inMemory
+      return STTRequestMemoryRow(
+        fixtureID: fixture.id,
+        durationBucket: fixture.durationBucket.rawValue,
+        durationSeconds: fixture.durationSeconds,
+        audioBytes: prepared.data.count,
+        bodyBytes: bodyBytes,
+        overheadBytes: inMemory.overheadBytes,
+        duplicationRatio: inMemory.duplicationRatio,
+        strategy: strategy.rawValue,
+        peakInMemoryBytes: inMemory.peakTransientBytes,
+        peakFileBackedBytes: fileBacked.peakTransientBytes)
+    }
+  }
+}
+
