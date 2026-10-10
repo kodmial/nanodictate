@@ -470,6 +470,27 @@ git -C "$FIXTURE" commit -q -m 'installer mode change only'
 assert_eq 'fixture: a mode-only installer change is releasable' \
   'releasable' "$(fixture_decide "$EMPTY")"
 
+# --- release CI evidence selector regression -----------------------------------
+
+# Reusable-workflow jobs include their nested Validate component.
+# An unrelated passing job or skipped macOS test must never qualify a release.
+GATE_WORKFLOW="${REPO_ROOT}/.github/workflows/nanodictate-release-engine.yml"
+CI_JOB_FILTER='[.jobs[] | select((.name | split(" / ") | index("Build & Test (macOS)")) != null) | .conclusion] | any(. == "success")'
+
+if grep -Fq -- "--jq '$CI_JOB_FILTER'" "$GATE_WORKFLOW" && \
+   ! grep -Fq -- '--jq -e' "$GATE_WORKFLOW"; then
+  pass 'release software gate uses valid gh jq and nested macOS job matching'
+else
+  fail 'release software gate uses valid gh jq and nested macOS job matching'
+fi
+
+assert_eq 'release software gate accepts successful nested macOS job' \
+  'true' "$(printf '%s' '{"jobs":[{"name":"call / Build & Test (macOS) / Validate","conclusion":"success"}]}' | jq -r "$CI_JOB_FILTER")"
+assert_eq 'release software gate rejects skipped nested macOS job' \
+  'false' "$(printf '%s' '{"jobs":[{"name":"call / Build & Test (macOS) / Validate","conclusion":"skipped"}]}' | jq -r "$CI_JOB_FILTER")"
+assert_eq 'release software gate rejects unrelated green jobs' \
+  'false' "$(printf '%s' '{"jobs":[{"name":"call / Release policy","conclusion":"success"}]}' | jq -r "$CI_JOB_FILTER")"
+
 # --- summary -----------------------------------------------------------------
 
 printf '\n%s passed, %s failed\n' "$PASSED" "$FAILED"
