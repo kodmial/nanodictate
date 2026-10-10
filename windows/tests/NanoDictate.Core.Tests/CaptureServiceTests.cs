@@ -211,11 +211,17 @@ public sealed class WasapiSourceTests
         }
     }
 
+    private const int MissingCaptureEndpointHResult = unchecked((int)0x80070490);
+
     private static bool IsMissingCaptureEndpoint(NanoException ex)
     {
-        return ex.Message.Contains(
-            "get default capture endpoint",
-            StringComparison.OrdinalIgnoreCase);
+        // GetDefaultAudioEndpoint reports E_NOTFOUND when no capture
+        // endpoint exists. Any other HRESULT (or any other probe step)
+        // is a real regression and must fail the test, not skip it.
+        return ex.Code == MissingCaptureEndpointHResult
+            && ex.Message.Contains(
+                "get default capture endpoint",
+                StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
