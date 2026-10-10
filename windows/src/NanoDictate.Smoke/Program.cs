@@ -137,8 +137,77 @@ internal static class Program
             var twice = latch.Consume();
             Console.WriteLine($"smoke: latch-once={once} twice={twice}");
         }
+
+        // 6. Windows capture pipeline through the shared Rust core:
+        // synthetic device blocks (48 kHz stereo) feed the same session
+        // state machine, VAD/gain/auto-stop, and live segmentation as
+        // the WASAPI path. No algorithm is forked in C#.
+        RunCapturePipeline();
     }
 
+    private static void RunCapturePipeline()
+    {
+        var device = new AudioFormat(48000, 2, 32, true);
+        using var pipeline = new RealtimeAudioPipeline(device);
+        CaptureMetrics? ready = null;
+        pipeline.CaptureReady += m => ready = m;
+        pipeline.Start();
+        if (pipeline.IsCaptureReady)
+        {
+            throw new InvalidOperationException("start alone must never report readiness");
+        }
+        // Immediate speech: first device packet is loud.
+        FeedConstant(pipeline, device, 0.02f, deviceBlocks: 50);
+        if (!pipeline.IsCaptureReady || ready is null)
+        {
+            throw new InvalidOperationException("first-buffer readiness never fired");
+        }
+        // Sustained silence long enough for the shared auto-stop detector.
+        FeedConstant(pipeline, device, 0.0005f, deviceBlocks: 600);
+        if (!pipeline.AutoStopFired)
+        {
+            throw new InvalidOperationException("shared auto-stop detector never fired");
+        }
+        var result = pipeline.Stop();
+        var metrics = result.Metrics;
+        Console.WriteLine(
+            $"smoke: capture-blocks={metrics.BlocksIngested} errors={metrics.EngineErrors} " +
+            $"mean-block-ms={metrics.MeanBlockMs:F3} max-block-ms={metrics.MaxBlockMs:F3} " +
+            $"first-buffer-ms={metrics.RequestToFirstBufferMs:F1} " +
+            $"samples={result.Samples.Count} segments={result.Segments.Count} " +
+            $"copies-per-block={metrics.CopiesPerBlock} autostop={metrics.AutoStopFired}");
+        if (result.Samples.Count == 0 || Math.Abs(result.Samples[0]) <= 100)
+        {
+            throw new InvalidOperationException("initial speech samples were dropped");
+        }
+        if (metrics.EngineErrors != 0)
+        {
+            throw new InvalidOperationException("engine errors on the smoke path");
+        }
+        pipeline.FinishTranscription();
+
+        // Repeated session on the same pipeline (fresh detectors, new generation).
+        var secondGen = pipeline.Generation;
+        pipeline.Start();
+        FeedConstant(pipeline, device, 0.02f, deviceBlocks: 10);
+        if (!pipeline.IsCaptureReady || pipeline.Generation == secondGen)
+        {
+            throw new InvalidOperationException("repeated session did not reach readiness");
+        }
+        pipeline.Cancel();
+        Console.WriteLine($"smoke: capture-repeat-gen={pipeline.Generation} ok=true");
+    }
+
+    private static void FeedConstant(
+        RealtimeAudioPipeline pipeline, AudioFormat device, float value, int deviceBlocks)
+    {
+        for (var i = 0; i < deviceBlocks; i++)
+        {
+            var frames = new float[480 * device.Channels];
+            Array.Fill(frames, value);
+            pipeline.IngestDeviceBlock(new CapturedBlock(frames, 480, device));
+        }
+    }
     private static string? FindExampleConfig()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);

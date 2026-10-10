@@ -334,4 +334,132 @@ public static class NanoEngine
         ThrowOnNegative(code);
         return code != 0;
     }
+
+    // -- Segmentation planning (owned by Rust) -------------------------------
+
+    /// <summary>Portable live-segmentation configuration (see SegmenterConfig in Rust).</summary>
+    public readonly record struct SegmenterConfig(
+        double PauseDuration,
+        double MinSegment,
+        double MaxSegment,
+        double Overlap,
+        float SilenceRms,
+        bool UseAdaptiveVad,
+        float EnterMarginDb,
+        float HysteresisDb,
+        float MinEnterDb,
+        float MaxEnterDb)
+    {
+        public static SegmenterConfig Defaults => new(
+            1.0, 3.0, 45.0, 1.0, 0.00126f, true, 8.0f, 4.0f, -60.0f, -25.0f);
+    }
+
+    /// <summary>One live segment plan entry (sample ranges into the source buffer).</summary>
+    public readonly record struct LiveSegment(
+        int Index, double StartSeconds, double EndSeconds,
+        int BodyStart, int BodyEnd, bool HasOverlap,
+        int OverlapStart, int OverlapEnd, double OverlapSeconds);
+
+    /// <summary>One batch chunk plan entry (sample ranges into the source buffer).</summary>
+    public readonly record struct BatchChunk(
+        int Index, double BodyStartSeconds, double BodyEndSeconds,
+        int BodyStart, int BodyEnd, bool HasOverlap,
+        int OverlapStart, int OverlapEnd);
+
+    private static unsafe NdSegmenterConfig ToNative(SegmenterConfig config) => new()
+    {
+        PauseDuration = config.PauseDuration,
+        MinSegment = config.MinSegment,
+        MaxSegment = config.MaxSegment,
+        Overlap = config.Overlap,
+        SilenceRms = config.SilenceRms,
+        UseAdaptiveVad = config.UseAdaptiveVad,
+        EnterMarginDb = config.EnterMarginDb,
+        HysteresisDb = config.HysteresisDb,
+        MinEnterDb = config.MinEnterDb,
+        MaxEnterDb = config.MaxEnterDb,
+    };
+
+    /// <summary>
+    /// Splits Int16 PCM samples into live segments with overlap through the
+    /// shared engine. Offline call, never for the realtime callback.
+    /// </summary>
+    public static unsafe LiveSegment[] LivePlan(
+        ReadOnlySpan<short> samples, uint sampleRate, SegmenterConfig? config = null)
+    {
+        var native = ToNative(config ?? SegmenterConfig.Defaults);
+        UIntPtr written = UIntPtr.Zero;
+        int code;
+        fixed (short* p = samples)
+        {
+            code = NativeMethods.nd_live_plan(
+                p, (UIntPtr)samples.Length, sampleRate, &native, null, UIntPtr.Zero, &written);
+        }
+        ThrowOnCode(code);
+        var count = (int)(uint)written;
+        if (count == 0)
+        {
+            return Array.Empty<LiveSegment>();
+        }
+        var specs = new NdLiveSegment[count];
+        fixed (short* p = samples)
+        fixed (NdLiveSegment* o = specs)
+        {
+            UIntPtr written2 = UIntPtr.Zero;
+            code = NativeMethods.nd_live_plan(
+                p, (UIntPtr)samples.Length, sampleRate, &native, o, (UIntPtr)count, &written2);
+        }
+        ThrowOnCode(code);
+        var result = new LiveSegment[count];
+        for (var i = 0; i < count; i++)
+        {
+            result[i] = new LiveSegment(
+                (int)(uint)specs[i].Index,
+                specs[i].StartSeconds, specs[i].EndSeconds,
+                (int)(uint)specs[i].BodyStart, (int)(uint)specs[i].BodyEnd,
+                specs[i].HasOverlap,
+                (int)(uint)specs[i].OverlapStart, (int)(uint)specs[i].OverlapEnd,
+                specs[i].OverlapSeconds);
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Fixed-length batch chunk boundaries through the shared engine.
+    /// No audio content crosses the boundary, only counts.
+    /// </summary>
+    public static unsafe BatchChunk[] BatchPlan(
+        int sampleCount, uint sampleRate, double maxSegment, double overlap)
+    {
+        UIntPtr written = UIntPtr.Zero;
+        var code = NativeMethods.nd_batch_plan(
+            (UIntPtr)sampleCount, sampleRate, maxSegment, overlap,
+            null, UIntPtr.Zero, &written);
+        ThrowOnCode(code);
+        var count = (int)(uint)written;
+        if (count == 0)
+        {
+            return Array.Empty<BatchChunk>();
+        }
+        var specs = new NdBatchChunk[count];
+        fixed (NdBatchChunk* o = specs)
+        {
+            UIntPtr written2 = UIntPtr.Zero;
+            code = NativeMethods.nd_batch_plan(
+                (UIntPtr)sampleCount, sampleRate, maxSegment, overlap,
+                o, (UIntPtr)count, &written2);
+        }
+        ThrowOnCode(code);
+        var result = new BatchChunk[count];
+        for (var i = 0; i < count; i++)
+        {
+            result[i] = new BatchChunk(
+                (int)(uint)specs[i].Index,
+                specs[i].BodyStartSeconds, specs[i].BodyEndSeconds,
+                (int)(uint)specs[i].BodyStart, (int)(uint)specs[i].BodyEnd,
+                specs[i].HasOverlap,
+                (int)(uint)specs[i].OverlapStart, (int)(uint)specs[i].OverlapEnd);
+        }
+        return result;
+    }
 }

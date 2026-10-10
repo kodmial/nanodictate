@@ -74,12 +74,32 @@ public sealed class VadHandle : NanoHandle
         }
     }
 
+    /// <summary>
+    /// Reads live VAD diagnostics without disturbing detector state.
+    /// Observability for the level meter and debug logs only.
+    /// </summary>
+    public unsafe VadDiagnostics Diagnostics()
+    {
+        ThrowIfInvalid();
+        float floor = 0, enter = 0, exit = 0;
+        int isSpeech = 0;
+        var code = NativeMethods.nd_vad_diagnostics(handle, &floor, &enter, &exit, &isSpeech);
+        if (code != NanoErrorCodes.Ok)
+        {
+            throw new NanoException(code, NanoEngine.LastError());
+        }
+        return new VadDiagnostics(floor, enter, exit, isSpeech != 0);
+    }
+
     protected override bool ReleaseHandle()
     {
         NativeMethods.nd_vad_free(handle);
         return true;
     }
 }
+
+/// <summary>Live VAD diagnostics snapshot (meter/debug only).</summary>
+public readonly record struct VadDiagnostics(float NoiseFloor, float EnterThreshold, float ExitThreshold, bool IsSpeech);
 
 /// <summary>Input-gain (AGC) handle. Applies gain to blocks in place.</summary>
 public sealed class GainHandle : NanoHandle
@@ -107,6 +127,30 @@ public sealed class GainHandle : NanoHandle
             throw new NanoException(-1, NanoEngine.LastError());
         }
         return result;
+    }
+
+    public void Reset()
+    {
+        ThrowIfInvalid();
+        var code = NativeMethods.nd_gain_reset(handle);
+        if (code != NanoErrorCodes.Ok)
+        {
+            throw new NanoException(code, NanoEngine.LastError());
+        }
+    }
+
+    public float CurrentGainDb
+    {
+        get
+        {
+            ThrowIfInvalid();
+            var value = NativeMethods.nd_gain_current_db(handle);
+            if (value < 0.0f)
+            {
+                throw new NanoException(-1, NanoEngine.LastError());
+            }
+            return value;
+        }
     }
 
     protected override bool ReleaseHandle()
@@ -139,6 +183,16 @@ public sealed class AutoStopHandle : NanoHandle
             throw new NanoException(code, NanoEngine.LastError());
         }
         return code != 0;
+    }
+
+    public void Reset()
+    {
+        ThrowIfInvalid();
+        var code = NativeMethods.nd_autostop_reset(handle);
+        if (code != NanoErrorCodes.Ok)
+        {
+            throw new NanoException(code, NanoEngine.LastError());
+        }
     }
 
     protected override bool ReleaseHandle()
