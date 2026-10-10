@@ -181,6 +181,35 @@ public sealed class SyntheticLifecycleTests
 /// <summary>Platform gate for the Windows-native WASAPI source.</summary>
 public sealed class WasapiSourceTests
 {
+    private static bool WaitForCondition(Func<bool> condition, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (condition())
+            {
+                return true;
+            }
+            Thread.Sleep(10);
+        }
+        return condition();
+    }
+
+    private static bool TryEnsureCaptureEndpoint(WasapiCaptureSource source)
+    {
+        try
+        {
+            source.ProbeDefaultFormat();
+            return true;
+        }
+        catch (Exception)
+        {
+            // No usable capture endpoint on this runner (for example,
+            // headless CI without a microphone): skip the native test.
+            return false;
+        }
+    }
+
     [Fact]
     public void NonWindowsStartFailsLoudly()
     {
@@ -227,5 +256,84 @@ public sealed class WasapiSourceTests
         Assert.Throws<PlatformNotSupportedException>(() => service.Start());
         Assert.Equal(DictationState.Idle, service.State);
         Assert.False(service.IsCaptureReady);
+    }
+
+    [Fact]
+    public void WindowsStopBeforeStartIsIdempotent()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using var source = new WasapiCaptureSource();
+        if (!TryEnsureCaptureEndpoint(source))
+        {
+            return;
+        }
+        source.Stop();
+        source.Stop();
+        Assert.False(source.IsRunning);
+    }
+
+    [Fact]
+    public void WindowsStartStopStartDeliversAtLeastOneBlock()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using var source = new WasapiCaptureSource();
+        if (!TryEnsureCaptureEndpoint(source))
+        {
+            return;
+        }
+        var blocks = 0;
+        void OnBlock(CapturedBlock _) => Interlocked.Increment(ref blocks);
+        source.BlockAvailable += OnBlock;
+        try
+        {
+            source.Start();
+            Assert.True(
+                WaitForCondition(() => Volatile.Read(ref blocks) >= 1, TimeSpan.FromSeconds(10)),
+                "WASAPI capture delivered no blocks");
+            source.Stop();
+            Assert.False(source.IsRunning);
+            var blocksAfterFirstSession = Volatile.Read(ref blocks);
+
+            source.Start();
+            Assert.True(
+                WaitForCondition(
+                    () => Volatile.Read(ref blocks) > blocksAfterFirstSession,
+                    TimeSpan.FromSeconds(10)),
+                "WASAPI capture delivered no blocks after restart");
+            source.Stop();
+            Assert.False(source.IsRunning);
+        }
+        finally
+        {
+            source.BlockAvailable -= OnBlock;
+            source.Stop();
+        }
+    }
+
+    [Fact]
+    public void WindowsDisposeWhileRunningStopsCapture()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        var source = new WasapiCaptureSource();
+        if (!TryEnsureCaptureEndpoint(source))
+        {
+            source.Dispose();
+            return;
+        }
+        source.Start();
+        Assert.True(source.IsRunning);
+        source.Dispose();
+        Assert.False(source.IsRunning);
+        // Second dispose is harmless.
+        source.Dispose();
     }
 }
