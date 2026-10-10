@@ -2,7 +2,7 @@
 
 ## Status
 
-The shared Rust engine, C ABI, Swift bridge, build integration, and cross-platform Rust CI are now merged into `main` as the foundation from PR #67. Production call-site activation and the real-macOS hardware parity/performance gate remain mandatory follow-up work tracked in #123 before the overall migration in #50 can be considered complete.
+The shared Rust engine, C ABI, Swift bridge, build integration, and cross-platform Rust CI are now merged into `main` as the foundation from PR #67. Production call-site activation is complete (#131, #132, #133 are closed and merged: the shipping macOS app drives the production Rust session, deterministic STT/retry/text, and realtime audio algorithms through `Sources/NanoDictateCore/RustEngine.swift`). The remaining #123 work is the automated software-gate qualification in CI; real-hardware and manual validation is tracked separately in #35 and blocks neither Windows work nor release publication, and the Windows native layer follows in #137/#167.
 
 Migration Step 2 is complete and Step 3 is implemented at the parity-test/foundation level:
 
@@ -28,9 +28,12 @@ Migration Step 2 is complete and Step 3 is implemented at the parity-test/founda
   RustDeterministicCutoverTests.swift` proves the shipping call sites
   exercise the engine; the Swift references stay until the final parity
   gate below removes them.
-- Not yet done: removing the superseded Swift implementations, the
-  realtime-algorithm activation (#133), and the Windows native layer
-  (blocked on this refactor by design).
+- Not yet done: the Windows native layer (blocked on this refactor by
+  design; it reuses the engine through the same C ABI). Superseded
+  Swift is removed only when the automated software gate passes and the
+  audit confirms the logic is actually superseded with a safe fallback:
+  the reference implementations stay on as parity oracles and the
+  OS-native adapters stay native (see the parity gate below).
 
 ## Non-negotiable principle
 
@@ -209,11 +212,58 @@ capabilities; the architecture allows that without touching the engine.
 
 ## Parity gate (before removing any Swift implementation)
 
-Same vectors, equivalent output (enforced by `RustParityTests` in CI),
-plus real-hardware macOS validation: repeated start/stop, rapid speech
-after activation, permission states, device changes, wedge recovery,
-normal/chunked dictation, silence auto-stop, recording limits,
-routing/failover, review-before-insert, direct/clipboard insertion,
-Escape/Return, undo. Baseline vs post-refactor measurements (start
-latency, callback time, CPU, memory, copy/allocation counts) must show
-no material regression before the old path is removed.
+Two tracks, per #123:
+
+- Automated software gate (CI-executable, no hardware prerequisite).
+  `Sources/NanoDictateCore/RustParityGate.swift`
+  (`evaluateSoftware`) passes when every automated coverage area proves
+  itself with a real linked-engine check on the CI runner — C ABI/lifetime
+  and memory ownership, the native Swift bridge, start/stop/cancel/session
+  state, STT retry/failover, realtime audio/VAD, and text insertion state
+  transitions — plus CI-generated performance measurements for supported,
+  measurable cases (startup latency and block-oriented FFI overhead around
+  the bridge call) show no material regression. Tests use fake audio
+  devices and permissions; physical microphone latency or resource parity
+  is never asserted from mocks. CPU/memory/audio-copy ratios have no
+  CI-measurable baseline in this repository, so the software verdict
+  records them as explicitly not qualified (`nil` resource ratios with
+  `notes` entries) instead of asserting parity from constants. A coding
+  agent completes this gate using existing CI alone: no human-operated
+  hardware run, owner attestation, or out-of-band evidence is required.
+  Passing it unblocks the Windows implementation (#137/#167) and release
+  publication. Release publication enforces this: the release
+  `candidate-gate`
+  (`.github/workflows/nanodictate-release-engine.yml`) requires both the
+  exact-head Packaging smoke run and the exact-head CI run to be green.
+  The CI run executes `scripts/ci-validation.sh` → `NanoDictateCoreTests`,
+  which carries the `evaluateSoftware` unit coverage plus the real
+  block-oriented FFI overhead probes measured against the linked engine;
+  synthetic fixtures in `RustParityGateTests` are unit-test oracles for
+  the gate logic, not release evidence — only the evidence-to-verdict
+  test (real timings plus per-area proven checks) is. Packaging success
+  alone never publishes.
+- Real-hardware qualification (tracked in #35, never blocking). The
+  same gate model keeps the hardware checklist
+  (`ChecklistItem` / `evaluate`): repeated start/stop, rapid speech
+  after activation, permission states, device changes, wedge recovery,
+  normal/chunked dictation, silence auto-stop, recording limits,
+  routing/failover, review-before-insert, direct/clipboard insertion,
+  Escape/Return, undo. Baseline vs post-refactor measurements (start
+  latency, callback time, CPU, memory, copy/allocation counts) qualify
+  real-hardware parity when they become available. Missing hardware
+  evidence lives in #35; it never fails the automated gate and is not a
+  prerequisite for Swift removal, Windows work, or release publication.
+
+Same vectors, equivalent output (enforced by `RustParityTests` in CI).
+Only actually superseded duplicate business logic may be removed, after
+ensuring a safe fallback where required: the Swift reference
+implementations stay on as parity oracles, and OS-native
+capture/TCC/Accessibility adapters stay in their respective hosts. The
+Windows host reuses this engine through the same C ABI (or a thin
+projection of it) instead of reimplementing product logic.
+
+No macOS 12 runtime compatibility is claimed by CI here: automated
+runs execute on newer macOS runners (the actual runner OS version is
+reported in each workflow log) against the 12.0 deployment target.
+Optional target-runtime verification on real macOS 12 remains the
+separate #35 workstream.
