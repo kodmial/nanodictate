@@ -59,7 +59,7 @@ incompatibility. The repeatable gate is therefore split:
   maintainer capacity), the minimum supported OS is **bumped** (e.g. to
   macOS 13) instead of being left unverified. The trigger rule: no green
   macOS 12 runtime run for 30 days → file a `priority:p1` issue titled
-  `macOS 12 validation lapsed` and either restore the runner or raise the
+  `macOS 12 validation lapsed` and either restore isolated-host validation or raise the
   floor in `Package.swift`, plists, and packaging metadata together.
 
 ### Security model for the isolated machine
