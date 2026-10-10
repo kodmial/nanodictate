@@ -3,6 +3,7 @@
 #
 # Usage:
 #   scripts/build-rust-core.sh [--release|--debug] [--skip-header-check]
+#       [--archive-path-file PATH]
 #
 # - Builds nanodictate-core (staticlib for the macOS app, cdylib for the
 #   Windows portability check) into <target-dir>/<profile>/, where
@@ -26,12 +27,18 @@ set -euo pipefail
 
 PROFILE="release"
 CHECK_HEADER=1
-for arg in "$@"; do
-  case "$arg" in
-    --debug) PROFILE="debug" ;;
-    --release) PROFILE="release" ;;
-    --skip-header-check) CHECK_HEADER=0 ;;
-    *) echo "unknown argument: $arg" >&2; exit 2 ;;
+ARCHIVE_PATH_FILE=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --debug) PROFILE="debug"; shift ;;
+    --release) PROFILE="release"; shift ;;
+    --skip-header-check) CHECK_HEADER=0; shift ;;
+    --archive-path-file)
+      [[ $# -ge 2 ]] || { echo "missing value for --archive-path-file" >&2; exit 2; }
+      ARCHIVE_PATH_FILE="$2"
+      shift 2
+      ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 
@@ -126,6 +133,13 @@ fi
 if [[ ! -f "$ARCHIVE" ]]; then
   echo "error: reported Rust archive does not exist: $ARCHIVE (TARGET_DIR=$TARGET_DIR PROFILE=$PROFILE)" >&2
   exit 1
+fi
+
+if [[ -n "$ARCHIVE_PATH_FILE" ]]; then
+  printf '%s\n' "$ARCHIVE" > "$ARCHIVE_PATH_FILE" || {
+    echo "error: could not write Rust archive path to $ARCHIVE_PATH_FILE" >&2
+    exit 1
+  }
 fi
 
 echo "Rust engine built: $ARCHIVE"
