@@ -346,9 +346,12 @@ public struct STTRequestMemoryRow: Codable, Equatable {
 extension BenchmarkRunner {
   /// Request-body memory accounting for one fixture set: exact body bytes
   /// come from the request the adapter would send (multipart framing
-  /// included). The strategy mirrors production (`fileBacked` at or above
-  /// the threshold on the real network path, else `inMemory`); both peak
-  /// estimates are reported so the before/after is visible in one row.
+  /// included). The payload is prepared exactly as production prepares it
+  /// (`Transcriber.prepareUpload`: capability-gated FLAC encoding with WAV
+  /// fallback), and the strategy mirrors production (`fileBacked` at or
+  /// above the threshold on the real network path for batch-multipart
+  /// profiles, else `inMemory`); both peak estimates are reported so the
+  /// before/after is visible in one row.
   public static func requestMemoryRows(
     fixtures: [BenchmarkFixture],
     config: BenchmarkSTTConfig,
@@ -356,18 +359,36 @@ extension BenchmarkRunner {
   ) -> [STTRequestMemoryRow] {
     fixtures.map { fixture in
       let wav = WAVEncoder.encode(samples: fixture.samples, sampleRate: fixture.sampleRate)
-      let bodyBytes = uploadBytes(config: config, wav: wav, audioFormat: audioFormat)
+      // Encode the requested upload container before measuring it, exactly
+      // as production does: the byte counts below describe the payload that
+      // is actually uploaded (FLAC bytes for FLAC profiles, WAV otherwise),
+      // never WAV bytes mislabelled as FLAC.
+      let prepared = Transcriber.prepareUpload(
+        wav: wav, filename: "audio.wav", audioFormat: audioFormat,
+        adapterID: config.adapterID, model: config.model)
+      let bodyBytes = uploadBytes(
+        config: config, wav: prepared.data, audioFormat: prepared.effectiveFormat)
       let inMemory = STTRequestMemoryReport(
-        audioBytes: wav.count, bodyBytes: bodyBytes, strategy: .inMemory)
+        audioBytes: prepared.data.count, bodyBytes: bodyBytes, strategy: .inMemory)
       let fileBacked = STTRequestMemoryReport(
-        audioBytes: wav.count, bodyBytes: bodyBytes, strategy: .fileBacked)
+        audioBytes: prepared.data.count, bodyBytes: bodyBytes, strategy: .fileBacked)
+      // Mirror the production file-backed condition (prepared audio bytes
+      // plus framing estimate against the threshold). Only batch-multipart
+      // profiles have a file-backed representation: raw-audio and realtime
+      // profiles fall back to the in-memory spec in production, so the label
+      // stays `inMemory` for them regardless of size.
+      let supportsFileBacked = ProviderRequestBuilder.profile(
+        adapterID: config.adapterID, model: config.model
+      ).capabilities.transport == .batchMultipart
       let strategy: STTUploadStrategy =
-        bodyBytes >= Transcriber.fileBackedUploadThresholdBytes ? .fileBacked : .inMemory
+        supportsFileBacked
+        && prepared.data.count + STTRequestMemoryReport.framingOverheadEstimate
+          >= Transcriber.fileBackedUploadThresholdBytes ? .fileBacked : .inMemory
       return STTRequestMemoryRow(
         fixtureID: fixture.id,
         durationBucket: fixture.durationBucket.rawValue,
         durationSeconds: fixture.durationSeconds,
-        audioBytes: wav.count,
+        audioBytes: prepared.data.count,
         bodyBytes: bodyBytes,
         overheadBytes: inMemory.overheadBytes,
         duplicationRatio: inMemory.duplicationRatio,
