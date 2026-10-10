@@ -126,6 +126,27 @@ final class HedgedFailoverTests: XCTestCase {
         XCTAssertEqual(Transcriber.maxAttempts, 4)
     }
 
+    @objc func testCandidateDurationCoversFullRetryBudget() {
+        // One candidate may run up to maxAttempts requests (each bounded by
+        // networkRequestTimeout) with a capped pause between attempts
+        // (Retry-After cap 10 s; backoff stays below it), so the watchdog
+        // margin must budget the whole sequence per hedged round — not a
+        // single request timeout — or a retrying slot blocks later
+        // candidates past the watchdog.
+        XCTAssertEqual(Transcriber.maxRetryPauseSeconds, 10, accuracy: 1e-9)
+        XCTAssertEqual(
+            Transcriber.maxCandidateDuration,
+            Double(Transcriber.maxAttempts) * Transcriber.networkRequestTimeout
+                + Double(Transcriber.maxAttempts - 1) * Transcriber.maxRetryPauseSeconds,
+            accuracy: 1e-9
+        )
+        XCTAssertGreaterThanOrEqual(
+            Transcriber.maxCandidateDuration,
+            Double(Transcriber.maxAttempts) * Transcriber.networkRequestTimeout,
+            "бюджет кандидата обязан покрывать все попытки, а не один таймаут"
+        )
+    }
+
     @objc func testRetryClassificationPreserved() {
         XCTAssertTrue(Transcriber.isRetryable(.http(429, "busy")))
         XCTAssertTrue(Transcriber.isRetryable(.http(500, "boom")))

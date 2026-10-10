@@ -1301,16 +1301,20 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     // request timeout: the processing watchdog must cover the hedged
     // schedule, not just one request. hedgedFailover starts at most
     // maxConcurrentAttempts candidates at once, so N candidates need
-    // ceil(N / maxConcurrentAttempts) rounds of networkRequestTimeout plus
-    // the hedge delay; else the watchdog would cut a valid later candidate
-    // mid-flight when the first slots hang until timeout.
+    // ceil(N / maxConcurrentAttempts) rounds; each round holds its slots
+    // until the candidate's FULL retry sequence finishes (up to
+    // Transcriber.maxCandidateDuration: maxAttempts requests plus capped
+    // backoff pauses — a degraded server answering slowly with HTTP 5xx on
+    // every attempt occupies the slot far beyond a single request timeout).
+    // Budgeting one timeout per round would cut a valid later candidate
+    // mid-flight when the first slots retry until their full budget.
     let hedgePolicy = RetryProvider.HedgedFailoverPolicy.default
     let failoverRounds =
       (failoverCandidates.count + max(1, hedgePolicy.maxConcurrentAttempts) - 1)
       / max(1, hedgePolicy.maxConcurrentAttempts)
     let failoverMargin =
       (autoFailover && failoverRounds > 0)
-      ? Double(failoverRounds) * Transcriber.networkRequestTimeout + hedgePolicy.hedgeDelaySeconds
+      ? Double(failoverRounds) * Transcriber.maxCandidateDuration + hedgePolicy.hedgeDelaySeconds
       : 0
     let watchdogDuration = OverlayController.processingMaxDuration + failoverMargin
     // Realtime sessions need their own budget (connect + audio sends +

@@ -217,6 +217,25 @@ public final class Transcriber {
   /// timeout (20 s) is terminal and spawns no retries.
   public static let maxAttempts = 4
 
+  /// Upper bound of a single inter-retry pause (s): HTTP 429 honors
+  /// `Retry-After` capped at 10 s, otherwise exponential backoff peaks at
+  /// ~4.25 s (base 4 s + jitter), so every pause stays within this cap.
+  public static let maxRetryPauseSeconds: TimeInterval = 10
+
+  /// Worst-case wall-clock budget of ONE fallback candidate (s): one
+  /// `transcribe` call runs its own retry loop of up to `maxAttempts`
+  /// requests, each bounded by `networkRequestTimeout`, with a capped pause
+  /// between attempts. A hanging candidate costs only one request timeout
+  /// (timeout is terminal, no retry); a retryable HTTP 429/5xx or fast
+  /// transport failure re-enters the loop, so a degraded server that answers
+  /// slowly with 5xx on every attempt can hold its failover slot for the
+  /// full sequence. Watchdogs covering hedged failover must budget this per
+  /// candidate, not a single request timeout.
+  public static var maxCandidateDuration: TimeInterval {
+    Double(maxAttempts) * networkRequestTimeout
+      + Double(maxAttempts - 1) * maxRetryPauseSeconds
+  }
+
   /// Multipart bodies at or above this size use the streaming/file-backed
   /// upload on the real network path (issue #32): the body is streamed to a
   /// temporary file instead of a second full-size `Data`, so peak transient

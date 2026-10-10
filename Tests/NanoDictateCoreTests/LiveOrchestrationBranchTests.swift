@@ -401,8 +401,11 @@ final class LiveOrchestrationBranchTests: XCTestCase {
     /// auto-failover has candidates — failover runs AFTER the primary timeout,
     /// so cutting it mid-flight would kill a valid failover. The margin covers
     /// the bounded hedged schedule: ceil(N / maxConcurrentAttempts) rounds of
-    /// networkRequestTimeout plus the hedge delay (later candidates start only
-    /// after a slot frees or the hedge fires).
+    /// the FULL per-candidate retry budget (maxCandidateDuration: up to
+    /// maxAttempts requests plus capped backoff pauses — a retrying candidate
+    /// holds its concurrency slot until the whole sequence finishes) plus the
+    /// hedge delay (later candidates start only after a slot frees or the
+    /// hedge fires).
     @objc func testSingleRequestWatchdogBudget_IncludesFailoverMargin() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -425,9 +428,9 @@ final class LiveOrchestrationBranchTests: XCTestCase {
         let normalized = body.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         XCTAssertTrue(
             normalized.contains(
-                "Double(failoverRounds) * Transcriber.networkRequestTimeout + hedgePolicy.hedgeDelaySeconds"
+                "Double(failoverRounds) * Transcriber.maxCandidateDuration + hedgePolicy.hedgeDelaySeconds"
             ),
-            "маржа failover = раунды × networkRequestTimeout + hedgeDelay"
+            "маржа failover = раунды × полный бюджет кандидата (maxCandidateDuration) + hedgeDelay"
         )
         XCTAssertTrue(
             normalized.contains(
