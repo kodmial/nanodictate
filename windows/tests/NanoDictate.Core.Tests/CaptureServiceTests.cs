@@ -206,4 +206,26 @@ public sealed class WasapiSourceTests
         source.Stop();
         source.Dispose();
     }
+
+    [Fact]
+    public void WasapiSourceComposesWithDictationService()
+    {
+        // Production composition used by the Windows host entrypoint:
+        // WasapiCaptureSource bound to DictationCaptureService.
+        using var source = new WasapiCaptureSource();
+        using var service = new DictationCaptureService(source);
+        Assert.False(service.IsRunning);
+        Assert.False(service.IsCaptureReady);
+        Assert.Equal(DictationState.Idle, service.State);
+        Assert.Null(service.DeviceError);
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        // Off Windows the service start must fail loudly through the
+        // source and leave the session idle for a later retry.
+        Assert.Throws<PlatformNotSupportedException>(() => service.Start());
+        Assert.Equal(DictationState.Idle, service.State);
+        Assert.False(service.IsCaptureReady);
+    }
 }

@@ -281,6 +281,7 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
                     out var data, out var frames, out var flags,
                     out _, out _);
                 ThrowOnHResult(hr, "get capture buffer");
+                Exception? packetError = null;
                 try
                 {
                     var count = (int)frames;
@@ -292,9 +293,28 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
                     // First packet included: synchronous delivery, no warm-up drop.
                     BlockAvailable?.Invoke(new CapturedBlock(interleaved, count, format));
                 }
+                catch (Exception ex)
+                {
+                    packetError = ex;
+                }
                 finally
                 {
-                    capture.ReleaseBuffer(frames);
+                    var releaseHr = capture.ReleaseBuffer(frames);
+                    if (releaseHr < 0)
+                    {
+                        var releaseError = new NanoException(
+                            releaseHr,
+                            $"WASAPI release capture buffer failed (HRESULT 0x{releaseHr:X8})");
+                        packetError = packetError is null
+                            ? releaseError
+                            : new AggregateException(packetError, releaseError);
+                    }
+                }
+                if (packetError is not null)
+                {
+                    System.Runtime.ExceptionServices.ExceptionDispatchInfo
+                        .Capture(packetError)
+                        .Throw();
                 }
             }
         }
