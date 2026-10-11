@@ -59,14 +59,15 @@ try {
   } elseif ($auth.Status -ne 'Valid') { throw "Invalid candidate installer signature: $($auth.Status)" }
   Invoke-Silent (Resolve-Path $setup).Path @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$dir`"")
   $installed = $true
-  foreach ($name in @('NanoDictate.App.exe','NanoDictate.App.dll',
-     'NanoDictate.App.runtimeconfig.json','nanodictate_core.dll',
-     'coreclr.dll','hostfxr.dll','config.example.toml')) {
-    $target = Join-Path $dir $name
-    if (!(Test-Path -LiteralPath $target -PathType Leaf)) { throw "Installer missing $name" }
+  $zipFiles = @(Get-ChildItem -LiteralPath $unpacked -Recurse -File)
+  if ($zipFiles.Count -eq 0) { throw 'Candidate ZIP is empty' }
+  foreach ($file in $zipFiles) {
+    $relative = [IO.Path]::GetRelativePath($unpacked, $file.FullName)
+    $target = Join-Path $dir $relative
+    if (!(Test-Path -LiteralPath $target -PathType Leaf)) { throw "Installer missing $relative" }
     if ((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -cne
-        (Get-FileHash -LiteralPath (Join-Path $unpacked $name) -Algorithm SHA256).Hash) {
-      throw "Installed $name differs from exact candidate ZIP bytes"
+        (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash) {
+      throw "Installed $relative differs from exact candidate ZIP bytes"
     }
   }
   $wanted = '"' + (Join-Path $dir 'NanoDictate.App.exe') + '" --background'
