@@ -241,6 +241,24 @@ public static class NanoEngine
         }
     }
 
+    public static unsafe string SttDefaultBaseUrl(string adapterId)
+    {
+        var adapter = Encoding.UTF8.GetBytes(adapterId);
+        fixed (byte* a = adapter)
+        {
+            return TakeString(NativeMethods.nd_stt_default_base_url(a, (UIntPtr)adapter.Length));
+        }
+    }
+
+    public static unsafe string SttDefaultModel(string adapterId)
+    {
+        var adapter = Encoding.UTF8.GetBytes(adapterId);
+        fixed (byte* a = adapter)
+        {
+            return TakeString(NativeMethods.nd_stt_default_model(a, (UIntPtr)adapter.Length));
+        }
+    }
+
     public static unsafe string TranscriptParse(string body, string? path = null)
     {
         var bodyBytes = Encoding.UTF8.GetBytes(body);

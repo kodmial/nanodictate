@@ -191,6 +191,9 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
     private readonly Func<DateTime> _clock;
     private bool _disposed;
     private bool _cancelled;
+    private ulong _recordingSeq;
+    private ulong _pendingTranscriptionSeq;
+    private CancellationTokenSource? _transcriptionCts;
     private string _lastInserted = string.Empty;
     private DateTime? _lastInsertedAt;
 
@@ -218,6 +221,18 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
     public event Action<MicStartOutcome>? MicStartAttempted;
 
     public event Action<string>? Inserted;
+
+    /// <summary>
+    /// Capture-stop callback: receives the stopped recording for
+    /// transcription. Set by the host to forward
+    /// <see cref="PipelineStopResult.Samples"/> to transcription and
+    /// delivery via <see cref="CompleteWithTranscript"/>. Runs off the
+    /// hotkey thread (fire-and-forget); null means stop-only (tests).
+    /// The session identifier rejects stale results from a previous
+    /// recording; the token is cancelled on Escape or when a new recording
+    /// starts.
+    /// </summary>
+    public Func<IReadOnlyList<short>, CancellationToken, ulong, Task>? StopTranscriptionHandler { get; set; }
 
     public DictationState State => _capture.State;
 
@@ -305,6 +320,13 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
         {
             _cancelled = false;
             _pendingEnter = false;
+            _recordingSeq++;
+            // A new recording supersedes any still-running transcription
+            // from the previous recording: cancel it so its late result
+            // cannot insert after this recording stops.
+            _transcriptionCts?.Cancel();
+            _transcriptionCts?.Dispose();
+            _transcriptionCts = null;
         }
         _enterLatch.Cancel();
         _enterPoster.Cancel();
@@ -338,14 +360,38 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
 
     private void StopAndAwaitTranscript()
     {
+        PipelineStopResult result;
         try
         {
-            _capture.Stop();
+            result = _capture.Stop();
         }
         catch
         {
             _capture.Cancel();
             throw;
+        }
+        var handler = StopTranscriptionHandler;
+        if (handler is not null)
+        {
+            CancellationToken token;
+            ulong sessionId;
+            lock (_gate)
+            {
+                _transcriptionCts?.Dispose();
+                _transcriptionCts = new CancellationTokenSource();
+                token = _transcriptionCts.Token;
+                if (_recordingSeq == 0)
+                {
+                    // The capture was started outside the controller
+                    // (tests/direct driver use): assign the first session so
+                    // the stop callback still carries a non-zero identifier.
+                    _recordingSeq = 1;
+                }
+                _pendingTranscriptionSeq = _recordingSeq;
+                sessionId = _pendingTranscriptionSeq;
+            }
+            var samples = result.Samples;
+            _ = Task.Run(() => handler(samples, token, sessionId));
         }
     }
 
@@ -353,10 +399,19 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
     /// Delivers an STT transcript after <see cref="StopAndAwaitTranscript"/>.
     /// Applies the Rust retry gate, empty guard, review gate, insertion, undo
     /// window, Enter latch, and overlay-hide rule. Returns true when text was
-    /// inserted.
+    /// inserted. When <paramref name="recordingId"/> is non-zero, results
+    /// from a previous recording are rejected so a late transcription cannot
+    /// insert after a newer recording started.
     /// </summary>
-    public bool CompleteWithTranscript(string transcript, ulong processingSession = 0, ulong session = 0)
+    public bool CompleteWithTranscript(string transcript, ulong processingSession = 0, ulong session = 0, ulong recordingId = 0)
     {
+        lock (_gate)
+        {
+            if (recordingId != 0 && recordingId != _recordingSeq)
+            {
+                return false;
+            }
+        }
         var state = _capture.State;
         if (!DictationTextPolicy.ShouldDeliverResult(IsCancelled(), state == DictationState.Transcribing || state == DictationState.Idle))
         {
@@ -368,12 +423,20 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
         }
         if (DictationTextPolicy.IsEmptyResult(transcript))
         {
-            _capture.FinishTranscription();
+            FinishTranscriptionIfCurrent(recordingId);
             return false;
         }
         if (ReviewBeforeInsert)
         {
             var line = ReviewPrompt?.Ask(transcript) ?? "y";
+            // The prompt can block while Escape cancels recording A or a new
+            // recording B starts. Re-validate under _gate before touching
+            // insertion or capture state so a stale approval cannot insert
+            // A's text or finish B's capture.
+            if (IsDeliverySuperseded(recordingId))
+            {
+                return false;
+            }
             bool insert;
             try
             {
@@ -381,20 +444,42 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
             }
             catch (NanoException)
             {
-                _capture.FinishTranscription();
+                if (IsDeliverySuperseded(recordingId))
+                {
+                    return false;
+                }
+                FinishTranscriptionIfCurrent(recordingId);
                 return false;
             }
             if (!insert)
             {
-                _capture.FinishTranscription();
-                _enterLatch.Cancel();
+                if (IsDeliverySuperseded(recordingId))
+                {
+                    return false;
+                }
+                // Atomically claim the decline under _gate so a newer
+                // recording B starting concurrently keeps its own pending
+                // Enter and capture session.
                 lock (_gate)
                 {
+                    if (IsDeliverySupersededLocked(recordingId))
+                    {
+                        return false;
+                    }
                     _pendingEnter = false;
+                    _capture.FinishTranscription();
                 }
+                _enterLatch.Cancel();
                 _enterPoster.Cancel();
                 return false;
             }
+        }
+        // Final delivery decision, synchronized with CancelCurrent and
+        // StartCapture (both hold _gate). A check before the review prompt
+        // is not sufficient because the prompt can wait.
+        if (IsDeliverySuperseded(recordingId))
+        {
+            return false;
         }
         try
         {
@@ -402,27 +487,66 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
         }
         catch
         {
+            // Only the current recording may clear shared delivery state
+            // and complete the capture session; a stale failure must not
+            // clear B's pending Enter or finish B's session.
+            bool current;
             lock (_gate)
             {
-                _pendingEnter = false;
+                if (IsDeliverySupersededLocked(recordingId))
+                {
+                    current = false;
+                }
+                else
+                {
+                    _pendingEnter = false;
+                    _capture.FinishTranscription();
+                    current = true;
+                }
             }
-            _enterLatch.Cancel();
-            _capture.FinishTranscription();
+            if (current)
+            {
+                _enterLatch.Cancel();
+            }
             throw;
         }
-        lock (_gate)
-        {
-            _lastInserted = transcript;
-            _lastInsertedAt = _clock();
-        }
-        Inserted?.Invoke(transcript);
-        _capture.FinishTranscription();
+        // Commit insertion and capture completion atomically with the
+        // cancellation/recording gate: the recording-identity check and
+        // FinishTranscription run in one _gate critical section so Escape
+        // or a newer recording B cannot interleave between the decision
+        // and the side effect. A stale result rolls back its own insert
+        // (best effort) without touching B's capture session or undo state.
+        bool staleAfterInsert;
         bool postEnter;
         lock (_gate)
         {
-            postEnter = _pendingEnter;
-            _pendingEnter = false;
+            if (IsDeliverySupersededLocked(recordingId))
+            {
+                staleAfterInsert = true;
+                postEnter = false;
+            }
+            else
+            {
+                staleAfterInsert = false;
+                _lastInserted = transcript;
+                _lastInsertedAt = _clock();
+                _capture.FinishTranscription();
+                postEnter = _pendingEnter;
+                _pendingEnter = false;
+            }
         }
+        if (staleAfterInsert)
+        {
+            try
+            {
+                _insertions.DeleteText(transcript);
+            }
+            catch
+            {
+            }
+            return false;
+        }
+        Inserted?.Invoke(transcript);
         if (postEnter && _enterLatch.Consume())
         {
             _enterPoster.Schedule();
@@ -441,6 +565,9 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
         {
             _cancelled = true;
             _pendingEnter = false;
+            // Cancel any pending transcription so its late result cannot
+            // insert; the cancelled flag remains authoritative for late STT.
+            _transcriptionCts?.Cancel();
         }
         _enterLatch.Cancel();
         _enterPoster.Cancel();
@@ -459,6 +586,63 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
         lock (_gate)
         {
             return _cancelled;
+        }
+    }
+
+    /// <summary>
+    /// Final delivery gate, synchronized with <see cref="CancelCurrent"/>
+    /// and <see cref="StartCapture"/> (both hold <c>_gate</c>). Returns true
+    /// when the transcript must be dropped without touching insertion or
+    /// capture state: the recording is stale, was cancelled, or its
+    /// transcription was superseded.
+    /// </summary>
+    private bool IsDeliverySuperseded(ulong recordingId)
+    {
+        lock (_gate)
+        {
+            return IsDeliverySupersededLocked(recordingId);
+        }
+    }
+
+    /// <summary>
+    /// Caller holds <c>_gate</c>. Same gate as <see cref="IsDeliverySuperseded"/>
+    /// without re-locking, for use inside atomic commit sections.
+    /// </summary>
+    private bool IsDeliverySupersededLocked(ulong recordingId)
+    {
+        if (recordingId != 0 && recordingId != _recordingSeq)
+        {
+            return true;
+        }
+        if (_cancelled)
+        {
+            return true;
+        }
+        if (recordingId != 0 && _transcriptionCts?.IsCancellationRequested == true)
+        {
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Completes the capture session only when <paramref name="recordingId"/>
+    /// is still current. The identity check and <c>FinishTranscription</c>
+    /// run in one <c>_gate</c> critical section (controller lock before the
+    /// pipeline lock, matching <see cref="CancelCurrent"/>) so Escape or a
+    /// newer recording cannot interleave between the decision and the side
+    /// effect. Returns true when the session was finished.
+    /// </summary>
+    private bool FinishTranscriptionIfCurrent(ulong recordingId)
+    {
+        lock (_gate)
+        {
+            if (IsDeliverySupersededLocked(recordingId))
+            {
+                return false;
+            }
+            _capture.FinishTranscription();
+            return true;
         }
     }
 
@@ -481,6 +665,7 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
 
     public void Dispose()
     {
+        CancellationTokenSource? cts;
         lock (_gate)
         {
             if (_disposed)
@@ -488,7 +673,17 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
                 return;
             }
             _disposed = true;
+            cts = _transcriptionCts;
+            _transcriptionCts = null;
         }
+        try
+        {
+            cts?.Cancel();
+        }
+        catch
+        {
+        }
+        cts?.Dispose();
         _enterPoster.Cancel();
         _enterLatch.Dispose();
         _micCooldown.Dispose();

@@ -159,6 +159,12 @@ internal static class Program
         // the WASAPI path. No algorithm is forked in C#.
         RunCapturePipeline();
 
+        // 8. Product transcription wiring through the shared Rust core:
+        // profiles, request planning, transport modes, chunked stitching,
+        // realtime framing, and offline diagnostics. No network, no policy
+        // duplication.
+        RunProductWiring();
+
         // 8. Opt-in Windows-native microphone capture: the production
         // composition of WasapiCaptureSource with DictationCaptureService
         // behind `--live-capture` (optionally `--live-seconds=N`).
@@ -373,8 +379,48 @@ internal static class Program
         Console.WriteLine($"smoke: capture-repeat-gen={pipeline.Generation} ok=true");
     }
 
-    private static void FeedConstant(
-        RealtimeAudioPipeline pipeline, AudioFormat device, float value, int deviceBlocks)
+    private static void RunProductWiring()
+    {
+        var batch = SttProfile.Resolve("openai", string.Empty);
+        var realtime = SttProfile.Resolve("openai", "gpt-live-transcribe");
+        if (batch.IsStreaming || !realtime.IsStreaming)
+        {
+            throw new InvalidOperationException("STT profile transport vector failed");
+        }
+        var provider = new ProviderEntry("openai", "OpenAI", "https://api.test/v1/audio/transcriptions", string.Empty);
+        var plan = SttRequestBuilder.Plan(provider, batch, new byte[] { 1, 2 }, "en", null, false, TransportConfig.Direct, string.Empty, string.Empty);
+        if (!plan.ContentType.StartsWith("multipart/form-data", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("STT request plan vector failed");
+        }
+        var proxy = new TransportConfig(SttTransportMode.HttpProxy, "https://proxy.test", string.Empty, string.Empty, string.Empty, "X-Proxy-Key");
+        if (proxy.RewriteUrl("https://x.test/y") != "https://proxy.test/https://x.test/y")
+        {
+            throw new InvalidOperationException("proxy rewrite vector failed");
+        }
+        var stitched = ChunkedTranscriber.Stitch(new[] { "hello brave world", "brave world again" });
+        if (string.IsNullOrEmpty(stitched))
+        {
+            throw new InvalidOperationException("chunked stitch vector failed");
+        }
+        if (ChunkedTranscriber.NeedsFinalPass(ChunkedFinalPass.Never, new[] { "a" }, false))
+        {
+            throw new InvalidOperationException("final-pass policy vector failed");
+        }
+        var framed = RealtimeSession.Resample16kTo24k(new short[1600], 16000);
+        if (framed.Length != 2400)
+        {
+            throw new InvalidOperationException("realtime resample vector failed");
+        }
+        var checks = WindowsDiagnostics.Run(FindExampleConfig());
+        if (!checks.Any(c => c.Name == "engine-abi" && c.Passed))
+        {
+            throw new InvalidOperationException("diagnostics vector failed");
+        }
+        Console.WriteLine($"smoke: product batch={batch.Transport} realtime={realtime.Transport} stitched-bytes={stitched.Length} framed={framed.Length}");
+    }
+
+    private static void FeedConstant(        RealtimeAudioPipeline pipeline, AudioFormat device, float value, int deviceBlocks)
     {
         for (var i = 0; i < deviceBlocks; i++)
         {

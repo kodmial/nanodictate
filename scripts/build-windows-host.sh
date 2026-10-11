@@ -37,12 +37,15 @@ dotnet build windows/NanoDictate.sln -c "$CONFIG"
 if [[ -n "$DLL_SRC" ]]; then
   for dir in \
     "windows/src/NanoDictate.Core/bin/$CONFIG/net8.0" \
+    "windows/src/NanoDictate.Host/bin/$CONFIG/net8.0" \
     "windows/src/NanoDictate.Smoke/bin/$CONFIG/net8.0" \
     "windows/tests/NanoDictate.Core.Tests/bin/$CONFIG/net8.0"; do
     if [[ -d "$dir" ]]; then
       cp "$DLL_SRC" "$dir/"
     fi
   done
+  mkdir -p windows/artifacts
+  cp "$DLL_SRC" windows/artifacts/
 fi
 
 echo "Windows host built ($CONFIG). Engine: ${DLL_SRC:-(resolved at runtime)}"
