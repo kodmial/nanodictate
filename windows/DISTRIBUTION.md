@@ -32,7 +32,10 @@ falls back to `0.0.0`, and any `-suffix` is stripped).
 
 ## Clean install / first launch
 
-1. Install the unsigned MSIX staging layout (or unzip the portable ZIP for evaluation).
+1. Unzip the portable ZIP for evaluation (`nanodictate-windows-x64-<version>.zip`).
+   `msix-stage/` is an unsigned staging layout for validation only: MSIX
+   installation requires separate package creation (`MakeAppx`) and signing
+   steps that this change does not implement.
 2. Launch NanoDictate; on first launch the WinUI app copies its bundled
    `config.example.toml` (beside the executable, also staged at the
    package root) to `%APPDATA%\NanoDictate\config.toml` when no

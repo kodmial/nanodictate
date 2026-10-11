@@ -429,6 +429,14 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
         if (ReviewBeforeInsert)
         {
             var line = ReviewPrompt?.Ask(transcript) ?? "y";
+            // The prompt can block while Escape cancels recording A or a new
+            // recording B starts. Re-validate under _gate before touching
+            // insertion or capture state so a stale approval cannot insert
+            // A's text or finish B's capture.
+            if (IsDeliverySuperseded(recordingId))
+            {
+                return false;
+            }
             bool insert;
             try
             {
@@ -436,11 +444,19 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
             }
             catch (NanoException)
             {
+                if (IsDeliverySuperseded(recordingId))
+                {
+                    return false;
+                }
                 _capture.FinishTranscription();
                 return false;
             }
             if (!insert)
             {
+                if (IsDeliverySuperseded(recordingId))
+                {
+                    return false;
+                }
                 _capture.FinishTranscription();
                 _enterLatch.Cancel();
                 lock (_gate)
@@ -450,6 +466,13 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
                 _enterPoster.Cancel();
                 return false;
             }
+        }
+        // Final delivery decision, synchronized with CancelCurrent and
+        // StartCapture (both hold _gate). A check before the review prompt
+        // is not sufficient because the prompt can wait.
+        if (IsDeliverySuperseded(recordingId))
+        {
+            return false;
         }
         try
         {
@@ -469,6 +492,27 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
         {
             _lastInserted = transcript;
             _lastInsertedAt = _clock();
+        }
+        // Re-validate before mutating capture state: if Escape or a newer
+        // recording superseded this delivery while insertion ran, roll back
+        // the stale insert (best effort) and leave the current capture
+        // state untouched instead of finishing B's session.
+        bool supersededAfterInsert = IsDeliverySuperseded(recordingId);
+        if (supersededAfterInsert)
+        {
+            try
+            {
+                _insertions.DeleteText(transcript);
+            }
+            catch
+            {
+            }
+            lock (_gate)
+            {
+                _lastInserted = string.Empty;
+                _lastInsertedAt = null;
+            }
+            return false;
         }
         Inserted?.Invoke(transcript);
         _capture.FinishTranscription();
@@ -517,6 +561,33 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
         lock (_gate)
         {
             return _cancelled;
+        }
+    }
+
+    /// <summary>
+    /// Final delivery gate, synchronized with <see cref="CancelCurrent"/>
+    /// and <see cref="StartCapture"/> (both hold <c>_gate</c>). Returns true
+    /// when the transcript must be dropped without touching insertion or
+    /// capture state: the recording is stale, was cancelled, or its
+    /// transcription was superseded.
+    /// </summary>
+    private bool IsDeliverySuperseded(ulong recordingId)
+    {
+        lock (_gate)
+        {
+            if (recordingId != 0 && recordingId != _recordingSeq)
+            {
+                return true;
+            }
+            if (_cancelled)
+            {
+                return true;
+            }
+            if (recordingId != 0 && _transcriptionCts?.IsCancellationRequested == true)
+            {
+                return true;
+            }
+            return false;
         }
     }
 
