@@ -1,11 +1,11 @@
 {
-  "version": "0.1.34",
+  "version": "0.1.35",
   "description": "Native voice dictation powered by a shared Rust engine",
   "homepage": "https://github.com/kodmial/nanodictate",
   "architecture": {
     "64bit": {
-      "url": "https://github.com/kodmial/nanodictate/releases/download/v0.1.34/nanodictate-0.1.34-windows-x64.zip",
-      "hash": "d7ee46a4a22306d073c1dcafa9a50ed4e6094270d6592a444a0c84d135b552d8"
+      "url": "https://github.com/kodmial/nanodictate/releases/download/v0.1.35/nanodictate-0.1.35-windows-x64.zip",
+      "hash": "a97448af56a3c931d08a7390e5bdd94b2d8978ef1c82d46d8852093b4cdfe7f9"
     }
   },
   "shortcuts": [
