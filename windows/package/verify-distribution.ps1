@@ -35,7 +35,7 @@ function ReleaseHash([string]$Text, [string]$Filename) {
 }
 function VerifyHash([string]$File, [string]$Expected) {
   $actual = (Get-FileHash -LiteralPath $File -Algorithm SHA256).Hash.ToLowerInvariant()
-  Require ($actual -eq $Expected) "SHA256 mismatch for $File: expected $Expected, got $actual"
+  Require ($actual -eq $Expected) "SHA256 mismatch for ${File}: expected $Expected, got $actual"
 }
 function VerifyPayload([string]$Dir) {
   foreach ($name in @('NanoDictate.App.exe','NanoDictate.App.dll','nanodictate_core.dll',
@@ -56,16 +56,21 @@ function CheckSignature([string]$Path) {
     if ($env:GITHUB_STEP_SUMMARY) { "Windows signing: **VALID** — $($signature.SignerCertificate.Subject)" | Add-Content $env:GITHUB_STEP_SUMMARY }
   }
 }
-function VerifyAutoStart([string]$Exe) {
+function GetAutoStart {
   $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-  $actual = (Get-ItemProperty -Path $key -Name NanoDictate -ErrorAction SilentlyContinue).NanoDictate
+  $props = Get-ItemProperty -Path $key -ErrorAction SilentlyContinue
+  if ($null -eq $props) { return $null }
+  $entry = $props.PSObject.Properties['NanoDictate']
+  if ($null -eq $entry) { return $null }
+  return [string]$entry.Value
+}
+function VerifyAutoStart([string]$Exe) {
+  $actual = GetAutoStart
   $expected = '"' + $Exe + '" --background'
   Require ($actual -eq $expected) "Persistent logon startup mismatch: expected $expected, got $actual"
 }
 function VerifyClearedAutoStart {
-  $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-  $value = (Get-ItemProperty -Path $key -Name NanoDictate -ErrorAction SilentlyContinue).NanoDictate
-  Require (-not $value) "Uninstall left NanoDictate logon startup registered"
+  Require (-not (GetAutoStart)) "Uninstall left NanoDictate logon startup registered"
 }
 Require ($env:OS -eq 'Windows_NT') 'Windows production smoke requires a real Windows runner.'
 $headers = @{ 'User-Agent'='NanoDictate-windows-distribution-smoke'; 'Accept'='application/vnd.github+json' }
@@ -130,7 +135,7 @@ try {
       # Publishing the release and syncing the Scoop bucket are separate
       # operations. Give the bounded first-party sync a chance to finish.
       for ($attempt = 0; $attempt -lt 20; $attempt++) {
-        $manifest = Invoke-RestMethod -Uri "$manifestUrl?nocache=$([guid]::NewGuid().ToString('N'))"
+        $manifest = Invoke-RestMethod -Uri "${manifestUrl}?nocache=$([guid]::NewGuid().ToString('N'))"
         if ($manifest.version -eq $version) { break }
         Write-Host "Waiting for public Scoop manifest v$version (found $($manifest.version)); attempt $($attempt + 1)/20"
         Start-Sleep -Seconds 20
