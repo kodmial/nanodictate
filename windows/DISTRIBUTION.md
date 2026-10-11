@@ -13,6 +13,36 @@ ARM64 builds and physical hardware parity checks are not yet demonstrated.
 The Windows executable uses the shared production Rust core, WinUI 3 and
 Windows App SDK, published as an **unpackaged self-contained x64 app**.
 
+## One-command install and update (no Scoop prerequisite)
+
+In a **regular non-admin PowerShell window**, run:
+
+```powershell
+irm https://raw.githubusercontent.com/kodmial/nanodictate/main/scripts/install-windows.ps1 | iex
+```
+
+The first-party bootstrap downloads the newest manifest-pinned Windows EXE
+from our published GitHub Release, validates the EXE against the published
+SHA256SUMS.txt, silently installs it per user, repairs the persistent
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` entry and launches the
+application. The same command upgrades it in place; the installer keeps its
+stable `%LOCALAPPDATA%\Programs\NanoDictate` location and does not overwrite
+the user's config or microphone settings.
+
+NanoDictate starts with Windows at **interactive user logon** (not before the
+user signs in). Normal logon starts the UI hidden, retaining the WinUI message
+loop, global Double-Alt hook and STT engine. Launching the shortcut a second
+time shows the existing window. Closing that window hides the app without
+stopping dictation; use its Exit button to quit intentionally.
+
+For ordinary unpackaged desktop applications Windows manages microphone
+access via the OS-wide desktop-app microphone toggle; there is no dedicated
+per-app dialog that NanoDictate may reliably force. If microphone access is
+disabled in Windows privacy settings or by an organization, the user must
+permit it in Windows. Install/upgrade logic does not modify those settings.
+Windows App SDK self-contained deployment and persistent config do not imply
+or simulate a remembered permission grant.
+
 ## Installation (Windows)
 
 With Scoop already installed, two commands:
