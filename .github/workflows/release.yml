@@ -52,7 +52,10 @@ permissions:
 # consumer's product name; the repository part keeps it unambiguous in the
 # Actions UI.
 concurrency:
-  group: continuum-swift-release-${{ github.repository }}-${{ github.ref }}
+  # Independent source commits must not block each other for up to 90 minutes;
+  # the release engine rechecks the live main HEAD at publication.
+  # Repeated attempts for the SAME SHA stay serialized.
+  group: continuum-swift-release-${{ github.repository }}-${{ github.ref }}-${{ github.sha }}
 
 # macOS 12 real-hardware compatibility is qualified independently (issue #35).
 # Release publication retains exact-source candidate/packaging and release
