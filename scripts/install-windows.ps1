@@ -25,6 +25,7 @@ try {
     if ($actualHash -ne $expectedHash) { throw 'Download SHA-256 verification failed; refusing to install.' }
     $target = Join-Path $env:LOCALAPPDATA 'Programs\NanoDictate'
     $exe = Join-Path $target 'NanoDictate.App.exe'
+    $previousInstall = Test-Path $exe
     # Inno updates the same install path and AppId; stop the previous version
     # before replacing binaries to avoid dialogs/reboots/file-in-use failures.
     $targetPrefix = $target.TrimEnd('\') + '\'
@@ -46,14 +47,11 @@ try {
         Set-ItemProperty -Path $key -Name 'NanoDictate' -Value ('"' + $exe + '" --background')
     }
     # First use displays the main window; subsequent upgrades resume silently.
-    $previousInstall = Test-Path (Join-Path $target 'nanodictate-prior-install-marker')
     if (-not $previousInstall) {
         Start-Process -FilePath $exe
     } else {
         Start-Process -FilePath $exe -ArgumentList '--background'
     }
-    # Only a benign marker; do not touch persistent user config or mic settings.
-    New-Item -ItemType File -Path (Join-Path $target 'nanodictate-prior-install-marker') -Force | Out-Null
     Write-Host "NanoDictate $version installed and running. It will start automatically when you sign into Windows."
 } finally {
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
