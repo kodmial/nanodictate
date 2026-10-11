@@ -936,7 +936,18 @@ jobs:
       - name: Build C# solution and run Windows unit tests
         shell: pwsh
         run: |
-          dotnet test windows/NanoDictate.sln -c Release
+          cargo build --release -p nanodictate-core --manifest-path rust/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw "Rust DLL build failed" }
+          dotnet build windows/NanoDictate.sln -c Release
+          if ($LASTEXITCODE -ne 0) { throw "Windows solution build failed" }
+          $dll = "rust/target/release/nanodictate_core.dll"
+          foreach ($dir in @("windows/src/NanoDictate.Core/bin/Release/net8.0",
+              "windows/src/NanoDictate.Smoke/bin/Release/net8.0",
+              "windows/src/NanoDictate.Host/bin/Release/net8.0",
+              "windows/tests/NanoDictate.Core.Tests/bin/Release/net8.0")) {
+            if (Test-Path $dir) { Copy-Item $dll $dir -Force }
+          }
+          dotnet test windows/NanoDictate.sln -c Release --no-build
           if ($LASTEXITCODE -ne 0) { throw "Windows unit tests failed" }
       - name: Package user-ready Windows distribution
         shell: pwsh
