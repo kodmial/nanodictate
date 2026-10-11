@@ -128,16 +128,16 @@ jobs:
           $userConfig = Join-Path $env:APPDATA "NanoDictate/ci-preservation-marker.txt"
           New-Item -Force -ItemType Directory (Split-Path $userConfig) | Out-Null
           Set-Content -Path $userConfig -Value "preserve" -NoNewline
-          & $setup /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- "/DIR=$installed"
-          if ($LASTEXITCODE -ne 0) { throw "Silent install failed: $LASTEXITCODE" }
+          $installProcess = Start-Process -FilePath (Resolve-Path $setup) -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/DIR=$installed") -Wait -PassThru
+          if ($installProcess.ExitCode -ne 0) { throw "Silent install failed: $($installProcess.ExitCode)" }
           if (-not (Test-Path (Join-Path $installed "NanoDictate.App.exe"))) { throw "Installer did not deploy app" }
           # Same-version reinstall must not fail or overwrite user data.
-          & $setup /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- "/DIR=$installed"
-          if ($LASTEXITCODE -ne 0) { throw "Silent reinstall failed: $LASTEXITCODE" }
+          $reinstallProcess = Start-Process -FilePath (Resolve-Path $setup) -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/DIR=$installed") -Wait -PassThru
+          if ($reinstallProcess.ExitCode -ne 0) { throw "Silent reinstall failed: $($reinstallProcess.ExitCode)" }
           $uninstall = Join-Path $installed "unins000.exe"
           if (-not (Test-Path $uninstall)) { throw "Uninstaller missing" }
-          & $uninstall /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
-          if ($LASTEXITCODE -ne 0) { throw "Silent uninstall failed: $LASTEXITCODE" }
+          $uninstallProcess = Start-Process -FilePath $uninstall -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") -Wait -PassThru
+          if ($uninstallProcess.ExitCode -ne 0) { throw "Silent uninstall failed: $($uninstallProcess.ExitCode)" }
           if (Test-Path (Join-Path $installed "NanoDictate.App.exe")) { throw "Uninstall left deployed executable" }
           if ((Get-Content $userConfig -Raw) -ne "preserve") { throw "Uninstall deleted user data" }
 
