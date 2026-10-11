@@ -26,8 +26,10 @@ if (-not (Test-Path $Dll)) { throw "Missing $Dll" }
 dotnet build windows/NanoDictate.sln -c $Configuration
 if ($LASTEXITCODE -ne 0) { throw "dotnet build (portable solution) failed" }
 
-dotnet build windows/src/NanoDictate.App/NanoDictate.App.csproj -c $Configuration
-if ($LASTEXITCODE -ne 0) { throw "dotnet build (WinUI app) failed" }
+# Windows App SDK 1.5 needs the MRT/PRI tasks shipped with Visual Studio
+# MSBuild. Use the same build path as windows.yml rather than dotnet build.
+& pwsh windows/package/build-winui.ps1 -Configuration $Configuration
+if ($LASTEXITCODE -ne 0) { throw "Visual Studio MSBuild (WinUI app) failed" }
 
 dotnet build windows/src/NanoDictate.Host/NanoDictate.Host.csproj -c $Configuration
 if ($LASTEXITCODE -ne 0) { throw "dotnet build (host) failed" }
