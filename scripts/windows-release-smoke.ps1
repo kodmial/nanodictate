@@ -97,7 +97,7 @@ function Assert-Installed {
     }
   }
   $expectedRun = '"' + (Join-Path $installDir 'NanoDictate.App.exe') + '" --background'
-  $actualRun = (Get-ItemProperty -Path $runKey -Name NanoDictate -ErrorAction SilentlyContinue).NanoDictate
+  $actualRun = Get-ItemPropertyValue -Path $runKey -Name NanoDictate -ErrorAction SilentlyContinue
   if ($actualRun -cne $expectedRun) { throw "Run-key registration mismatch: $actualRun" }
 }
 function Uninstall {
@@ -106,7 +106,7 @@ function Uninstall {
   $proc = Start-Process -FilePath $uninstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART') -Wait -PassThru
   if ($proc.ExitCode -ne 0) { throw "Uninstaller exited $($proc.ExitCode)" }
   if (Test-Path -LiteralPath (Join-Path $installDir 'NanoDictate.App.exe')) { throw 'Uninstall left the application executable' }
-  $run = (Get-ItemProperty -Path $runKey -Name NanoDictate -ErrorAction SilentlyContinue).NanoDictate
+  $run = Get-ItemPropertyValue -Path $runKey -Name NanoDictate -ErrorAction SilentlyContinue
   if ($run) { throw 'Uninstall left the application auto-start registry entry' }
 }
 
@@ -116,7 +116,7 @@ try {
   if ($release.draft -or $release.prerelease -or $release.tag_name -notmatch '^v(\d+\.\d+\.\d+)$') {
     throw "Not a stable semantic-version GitHub Release: $($release.tag_name)"
   }
-  $versionText = $Matches[1]
+  $versionText = $release.tag_name.Substring(1)
   $report.version = $versionText
   $report.release = $release.html_url
   $zipName = "nanodictate-$versionText-windows-x64.zip"
