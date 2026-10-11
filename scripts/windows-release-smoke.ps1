@@ -234,16 +234,19 @@ try {
   Write-Host "::notice::Published Windows $($release.tag_name) passed checksum, portable, install, upgrade/reinstall, uninstall and data-retention smoke."
 } finally {
   $report | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $reportFile -Encoding utf8
-  if ($hadPriorConfig) {
-    if (Test-Path -LiteralPath $configBackup -PathType Leaf) {
-      Copy-Item -LiteralPath $configBackup -Destination $configFile -Force
+  try {
+    if ((Test-Path -LiteralPath (Join-Path $installDir 'unins000.exe'))) {
+      Write-Warning 'Cleaning up installed application after an incomplete smoke'
+      try { Uninstall } catch { Write-Warning "Cleanup failed: $_" }
     }
-  } elseif (Test-Path -LiteralPath $configFile -PathType Leaf) {
-    $current = Get-Content -LiteralPath $configFile -Raw -ErrorAction SilentlyContinue
-    if ($current -ceq $configSentinel) { Remove-Item -LiteralPath $configFile -Force }
-  }
-  if ((Test-Path -LiteralPath (Join-Path $installDir 'unins000.exe'))) {
-    Write-Warning 'Cleaning up installed application after an incomplete smoke'
-    try { Uninstall } catch { Write-Warning "Cleanup failed: $_" }
+  } finally {
+    if ($hadPriorConfig) {
+      if (Test-Path -LiteralPath $configBackup -PathType Leaf) {
+        Copy-Item -LiteralPath $configBackup -Destination $configFile -Force
+      }
+    } elseif (Test-Path -LiteralPath $configFile -PathType Leaf) {
+      $current = Get-Content -LiteralPath $configFile -Raw -ErrorAction SilentlyContinue
+      if ($current -ceq $configSentinel) { Remove-Item -LiteralPath $configFile -Force }
+    }
   }
 }
