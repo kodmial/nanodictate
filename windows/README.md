@@ -18,6 +18,23 @@ wiring (normal/chunked/realtime), provider/model selection and routing,
 retry/failover, review-before-insert, diagnostics, proxy/transport modes,
 WinUI 3 entrypoint, reproducible packaging, and release CI.
 
+
+## Install and update without developer tools
+
+See [Windows distribution](DISTRIBUTION.md). With Scoop installed:
+
+```powershell
+scoop bucket add nanodictate https://github.com/kodmial/nanodictate
+scoop install nanodictate
+scoop update nanodictate
+```
+
+Windows binary releases share the macOS version and GitHub Release.
+The release workflow refuses to publish a new version without both
+platforms' artifacts and their checksums. A direct EXE installer is
+also published for users without Scoop, once the combined release
+pipeline completes successfully.
+
 ## Layout
 
 ```text
@@ -45,7 +62,7 @@ Portable configuration (`PortableConfig`) only carries data parsed from
 the shared TOML shape (`config.example.toml`); all policy decisions go
 through `NanoEngine` into Rust.
 
-## Prerequisites
+## Developer build prerequisites
 
 - Windows 10 22H2 or Windows 11, x64.
 - .NET 8 SDK or later.
