@@ -1,77 +1,92 @@
-# Windows distribution (installer, update, uninstall, supported versions)
+# Windows distribution and synchronized multi-platform releases
 
-Supported release vehicle for NanoDictate on Windows.
+## Decision
 
-## Supported versions
+NanoDictate uses GitHub Releases as the authoritative binary archive and release
+version source for **both macOS and Windows**. Homebrew is served from the
+first-party `kodmial/homebrew-nanodictate` tap; Windows is served from the
+first-party Scoop bucket in `bucket/nanodictate.json` of this same repository.
+No WinGet, Microsoft Store, public Scoop registry or Chocolatey submission.
 
-- Windows 10 22H2 (build 19045) x64 or Windows 11 x64.
-- .NET 8 runtime (self-contained in the MSIX; the portable ZIP needs the
-  .NET 8 desktop runtime).
-- Microphone: any WASAPI shared-mode capture endpoint (Float32 mix format).
-- ARM64 is not packaged; x64 emulation is unsupported.
+**Windows target:** Windows 10 22H2 (build 19045), Windows 11, x64. Native
+ARM64 builds and physical hardware parity checks are not yet demonstrated.
+The Windows executable uses the shared production Rust core, WinUI 3 and
+Windows App SDK, published as an **unpackaged self-contained x64 app**.
 
-## Artifacts
+## Installation (Windows)
 
-`windows/package/make-msix.ps1` produces, reproducibly from a clean
-checkout plus tag version:
+With Scoop already installed, two commands:
 
-- `nanodictate-windows-x64-<version>.zip` — portable layout (WinUI app +
-  `nanodictate_core.dll` + `config.example.toml`).
-- `msix-stage/` — MSIX file layout with `AppxManifest.xml` stamped with
-  the release version (`<major>.<minor>.<patch>.0`).
+```powershell
+scoop bucket add nanodictate https://github.com/kodmial/nanodictate
+scoop install nanodictate
+```
 
-Release CI (the `windows.yml` packaging job) uploads the portable ZIP
-and the unsigned MSIX staging layout as a GitHub Actions artifact for
-validation only. This change does not implement store signing, MSIX
-signing in `release.yml`, or tag-triggered releases: the manifest
-version is stamped from the `-Version` passed to `make-msix.ps1`. In CI
-the version comes from `github.ref_name` with no tag trigger, so branch
-and pull-request refs fall back to `0.0.0`; only refs starting with
-`<major>.<minor>.<patch>` produce a stamped version (a leading `v`
-falls back to `0.0.0`, and any `-suffix` is stripped).
+To update or uninstall:
 
-## Clean install / first launch
+```powershell
+scoop update nanodictate
+scoop uninstall nanodictate
+```
 
-1. Unzip the portable ZIP for evaluation (`nanodictate-windows-x64-<version>.zip`).
-   `msix-stage/` is an unsigned staging layout for validation only: MSIX
-   installation requires separate package creation (`MakeAppx`) and signing
-   steps that this change does not implement.
-2. Launch NanoDictate; on first launch the WinUI app copies its bundled
-   `config.example.toml` (beside the executable, also staged at the
-   package root) to `%APPDATA%\NanoDictate\config.toml` when no
-   config exists (never overwrites an existing user config). The console
-   host (`run`, `doctor`, `providers`, `transcribe-file`) does not copy:
-   it uses `--config PATH` when given, otherwise
-   `%APPDATA%\NanoDictate\config.toml` when present, otherwise
-   `config.example.toml` from the working directory.
-3. Grant microphone access when Windows prompts; if access was denied,
-   the host shows the `ms-settings:privacy-microphone` guidance and
-   throttles repeat prompts through the Rust cooldown.
-4. Double-Alt starts dictation; the start cue fires on the first valid
-   engine block, never on start alone.
+Alternatively, download the versioned
+`nanodictate-X.Y.Z-windows-x64-setup.exe` from the GitHub Release and run it.
+The Inno Setup installer installs per-user (no administrator privileges or
+.NET SDK required). To update a direct installation, run a newer EXE installer.
+Inno supports quiet `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-` install
+and uninstall operations. Keep one installation channel per user instead
+of mixing Scoop and the classic EXE installer.
 
-## Update
+Windows application configuration is under
+`%APPDATA%\NanoDictate\config.toml`; logs are under
+`%LOCALAPPDATA%\NanoDictate\Logs`. Updates and uninstall deliberately
+do not remove personal configuration or logs.
 
-- MSIX installs update in place through the platform installer (version
-  check only; user config under `%APPDATA%\NanoDictate` and logs under
-  `%LOCALAPPDATA%\NanoDictate\Logs` are preserved).
-- Portable ZIP updates: stop the running instance, replace the folder,
-  restart. Config and logs live outside the folder and survive.
+**Code signing:** a generated EXE is not automatically Authenticode-signed.
+Without an organization certificate and trusted signing configuration Windows
+SmartScreen can warn about the installer/app. CI must never call an unsigned
+installer signed. Hardware microphone privacy, Double-Alt global hooks, text
+insertion and startup on real Windows 10 and 11 still require explicit manual
+functional qualification in addition to headless Actions runners.
 
-## Uninstall
+## Combined release contract
 
-1. Remove the package via Settings → Apps (MSIX) or delete the portable
-   folder (ZIP).
-2. Optionally disable startup first (`nanodictate run` tray menu or
-   `StartupManager.Disable`, which removes the HKCU Run value).
-3. Optionally delete `%APPDATA%\NanoDictate` (config, mic-request state)
-   and `%LOCALAPPDATA%\NanoDictate\Logs`. Uninstall never deletes them
-   silently.
+The main `Release` pipeline computes a single version and waits for:
 
-## Reproducibility
+1. Existing exact-source macOS candidate tests and packaging smoke for
+   arm64 and Intel.
+2. A successful Windows x64 native build and actual self-contained publish.
+3. A ZIP and real EXE setup generated from the same Windows publish directory.
 
-- The Rust engine is pinned by `rust/Cargo.lock`; the .NET graph is
-  pinned by the committed package versions.
-- The script fails loudly when `nanodictate_core.dll` is missing or any
-  `dotnet build` fails; the manifest version is stamped deterministically
-  from the release tag.
+It then publishes one GitHub Release with the macOS tarballs and ZIPs,
+Windows ZIP and EXE, and one SHA256SUMS.txt listing **all binaries**. The
+release cannot publish if Windows package creation fails or Windows
+assets are missing. The Windows artifact is not `msix-stage` and no
+unsigned directory is described as an MSIX installer.
+
+After publication the Scoop manifest generator **downloads the published
+Windows ZIP and EXE**, verifies them against the release SHA256SUMS.txt,
+generates a hash-pinned Scoop manifest and writes it to `main`, without
+creating a PR. The existing macOS tap sync continues separately.
+A Scoop manifest must never reference a missing or unfinished release.
+
+## Windows CI coverage
+
+`.github/workflows/windows.yml` runs Rust core tests, C# unit and ABI
+tests, WinUI compilation, diagnostics, and tests of the actual release
+packaging plus silent EXE installation/reinstallation/uninstallation and
+config preservation on a Windows runner. A hosted Windows runner does
+**not** prove microphone and keyboard-hook operation on physical Windows
+10/11 hardware, interactive UI or compatibility with every STT provider.
+Do not mark these unobserved hardware tests as passed.
+
+Build a Windows package locally on a developer machine with Rust MSVC,
+.NET 8 SDK, Visual Studio Build Tools with WinUI support, PowerShell 7,
+and Inno Setup 6:
+
+```powershell
+pwsh windows/package/make-release.ps1 -Version 0.1.33 -OutDir windows/artifacts
+```
+
+The version above illustrates the command syntax; it is not a claim that
+v0.1.33 has been published.
