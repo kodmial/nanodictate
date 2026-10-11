@@ -20,12 +20,8 @@ done
 SHA="$(sha256sum "$WORK/$ZIP" | awk '{print $1}')"
 URL="https://github.com/$REPO/releases/download/$TAG/$ZIP"
 jq -n --arg version "$VERSION" --arg url "$URL" --arg hash "$SHA" \
-  '{version:$version,
-    description:"Native voice dictation powered by a shared Rust engine",
-    homepage:"https://github.com/kodmial/nanodictate",
-    architecture:{"64bit":{url:$url,hash:$hash}},
-    shortcuts:[["NanoDictate.App.exe","NanoDictate"]]}' > "$WORK/nanodictate.json"
-jq -e '.version and .architecture["64bit"].hash and .shortcuts' "$WORK/nanodictate.json" >/dev/null
+  -f scripts/scoop-manifest.jq > "$WORK/nanodictate.json"
+jq -e '.version and .architecture["64bit"].hash and .shortcuts and (.post_install | length >= 2) and (.pre_uninstall | length > 0)' "$WORK/nanodictate.json" >/dev/null
 CONTENTS="repos/$REPO/contents/bucket/nanodictate.json"
 CURRENT_SHA="$(gh api "$CONTENTS" --jq '.sha' 2>/dev/null || true)"
 ENCODED="$(base64 -w0 "$WORK/nanodictate.json")"
