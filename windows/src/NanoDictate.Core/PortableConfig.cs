@@ -15,6 +15,14 @@ public sealed class PortableConfig
     public IReadOnlyList<ProviderEntry> Providers { get; init; } = Array.Empty<ProviderEntry>();
     public string SegmentProvider { get; init; } = string.Empty;
     public string FinalProvider { get; init; } = string.Empty;
+    /// <summary>Insertion method (default Direct for insert_method=cgevent).</summary>
+    public InsertMethod InsertMethod { get; init; } = InsertMethod.Direct;
+    /// <summary>Double-Alt window in seconds (default 0.4).</summary>
+    public double DoubleAltMaxInterval { get; init; } = 0.4;
+    /// <summary>Undo window in seconds (default 2.0).</summary>
+    public double UndoMaxInterval { get; init; } = 2.0;
+    /// <summary>Review-before-insert gate (default false).</summary>
+    public bool ReviewBeforeInsert { get; init; }
 
     /// <summary>
     /// Loads the portable subset of a NanoDictate TOML config. Unknown keys
@@ -27,6 +35,10 @@ public sealed class PortableConfig
         var language = string.Empty;
         var segment = string.Empty;
         var final = string.Empty;
+        var insertMethod = InsertMethod.Direct;
+        var doubleAltMaxInterval = 0.4;
+        var undoMaxInterval = 2.0;
+        var reviewBeforeInsert = false;
         var providers = new List<ProviderEntry>();
         string? currentProvider = null;
         string name = string.Empty, baseUrl = string.Empty, model = string.Empty;
@@ -89,6 +101,25 @@ public sealed class PortableConfig
                 {
                     case "active_provider": active = value; break;
                     case "language": language = value; break;
+                    case "insert_method":
+                        try { insertMethod = InsertMethodParser.Parse(value); }
+                        catch (NanoException) { insertMethod = InsertMethod.Direct; }
+                        break;
+                    case "double_alt_max_interval":
+                        if (double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var d) && d > 0 && d <= 5)
+                        {
+                            doubleAltMaxInterval = d;
+                        }
+                        break;
+                    case "undo_max_interval":
+                        if (double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var u) && u >= 0 && u <= 60)
+                        {
+                            undoMaxInterval = u;
+                        }
+                        break;
+                    case "review_before_insert":
+                        reviewBeforeInsert = value.Equals("true", StringComparison.OrdinalIgnoreCase) || value == "1";
+                        break;
                 }
             }
         }
@@ -101,6 +132,10 @@ public sealed class PortableConfig
             Providers = providers,
             SegmentProvider = segment,
             FinalProvider = final,
+            InsertMethod = insertMethod,
+            DoubleAltMaxInterval = doubleAltMaxInterval,
+            UndoMaxInterval = undoMaxInterval,
+            ReviewBeforeInsert = reviewBeforeInsert,
         };
     }
 
