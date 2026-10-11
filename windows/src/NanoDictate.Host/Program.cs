@@ -21,8 +21,9 @@ internal static class Program
                 "doctor" => Doctor(args.Skip(1).ToArray()),
                 "transcribe-file" => TranscribeFile(args.Skip(1).ToArray()).GetAwaiter().GetResult(),
                 "providers" => Providers(args.Skip(1).ToArray()),
+                "version" or "--version" or "-V" => Version(),
                 "--help" or "-h" or "help" => Usage(),
-                _ => Fail($"unknown verb '{verb}'. Expected run, doctor, transcribe-file, or providers."),
+                _ => Fail($"unknown verb '{verb}'. Expected run, doctor, transcribe-file, providers, or version."),
             };
         }
         catch (Exception ex)
@@ -34,11 +35,27 @@ internal static class Program
 
     private static int Usage()
     {
-        Console.WriteLine("usage: nanodictate <run|doctor|transcribe-file|providers> [options]");
+        Console.WriteLine("usage: nanodictate <run|doctor|transcribe-file|providers|version> [options]");
         Console.WriteLine("  run [--config PATH] [--background]");
         Console.WriteLine("  doctor [--config PATH]");
         Console.WriteLine("  transcribe-file --config PATH --wav PATH [--out PATH]");
         Console.WriteLine("  providers [--config PATH]");
+        Console.WriteLine("  version");
+        return 0;
+    }
+
+    private static int Version()
+    {
+        var product = HostApp.ProductVersion();
+        try
+        {
+            var abi = NanoEngine.AbiVersion();
+            Console.WriteLine($"nanodictate {product} (engine abi {abi})");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"nanodictate {product} (engine unavailable: {ex.Message})");
+        }
         return 0;
     }
 

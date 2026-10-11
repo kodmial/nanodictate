@@ -2,25 +2,44 @@ name: Windows host
 
 # Complete-product CI for the supported Windows NanoDictate release.
 # Builds the Rust cdylib/DLL with the MSVC target, the portable C# product
-# (Core + Host + Smoke + tests), the Windows-only WinUI 3 entrypoint, and
-# stages the MSIX layout plus portable ZIP as the release artifact.
+# (Core + Host + Smoke + tests), the Windows-only WinUI 3 entrypoint, the
+# real per-user Inno Setup installer, and stages the MSIX layout plus
+# portable ZIP as validation-only artifacts (see windows/DISTRIBUTION.md:
+# msix-stage/ is NOT an installer).
+#
+# Pull-request runs build an UNSIGNED installer and exercise the full
+# install -> versioned upgrade -> uninstall cycle in isolation. Stable
+# release signing uses configured credentials only (WINDOWS_SIGN_PFX_B64 +
+# WINDOWS_SIGN_PASSWORD); this workflow never mints a pretend
+# trusted/self-signed production certificate.
 
 on:
   push:
     branches: [main]
+    tags: ['v*']
     paths:
       - 'rust/**'
       - 'windows/**'
       - 'scripts/build-windows-host.sh'
+      - 'scripts/make_winget_manifests.py'
+      - 'scripts/test-windows-distribution.sh'
       - 'config.example.toml'
+      - 'Sources/NanoDictateCore/Version.swift'
       - '.github/workflows/windows.yml'
+      - '.github/workflows/windows-release.yml'
+      - '.github/workflows/winget-submit.yml'
   pull_request:
     paths:
       - 'rust/**'
       - 'windows/**'
       - 'scripts/build-windows-host.sh'
+      - 'scripts/make_winget_manifests.py'
+      - 'scripts/test-windows-distribution.sh'
       - 'config.example.toml'
+      - 'Sources/NanoDictateCore/Version.swift'
       - '.github/workflows/windows.yml'
+      - '.github/workflows/windows-release.yml'
+      - '.github/workflows/winget-submit.yml'
 
 permissions:
   contents: read
@@ -37,7 +56,7 @@ jobs:
       matrix:
         os: [windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -51,6 +70,11 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+
+      - name: Set up Python (WinGet manifest tooling)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
       - name: Rust tests (shared core)
         run: cargo test -p nanodictate-core
@@ -104,7 +128,14 @@ jobs:
       - name: List providers and routing
         run: dotnet run --project windows/src/NanoDictate.Host -c Release --no-build -- providers --config config.example.toml
 
-      - name: Stage MSIX layout and portable ZIP
+      - name: Read installed product version
+        run: dotnet run --project windows/src/NanoDictate.Host -c Release --no-build -- version
+
+      - name: Validate Windows distribution policy (Linux-runnable)
+        shell: bash
+        run: bash scripts/test-windows-distribution.sh
+
+      - name: Stage MSIX layout and portable ZIP (validation only, NOT an installer)
         shell: pwsh
         env:
           REF_NAME: ${{ github.ref_name }}
@@ -112,6 +143,81 @@ jobs:
           $version = $env:REF_NAME
           if ($version -notmatch '^\d+\.\d+\.\d+') { $version = "0.0.0" } else { $version = $version -replace '^v', '' -replace '-.*$', '' }
           pwsh windows/package/make-msix.ps1 -Version $version -OutDir windows/artifacts
+
+      - name: Install Inno Setup 6
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe still missing after choco install" }
+          & $iscc /? | Select-Object -First 3
+
+      - name: Build per-user installer (unsigned PR smoke; signed on tags when credentials exist)
+        shell: pwsh
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          WINDOWS_SIGN_PFX_B64: ${{ secrets.WINDOWS_SIGN_PFX_B64 }}
+          WINDOWS_SIGN_PASSWORD: ${{ secrets.WINDOWS_SIGN_PASSWORD }}
+          WINDOWS_SIGN_TIMESTAMP_URL: ${{ secrets.WINDOWS_SIGN_TIMESTAMP_URL }}
+        run: |
+          $version = $env:REF_NAME
+          if ($version -match '^v?\d+\.\d+\.\d+') {
+            $version = $version -replace '^v', '' -replace '-.*$', ''
+          } else {
+            $version = (Select-String -Path Sources/NanoDictateCore/Version.swift -Pattern '\d+\.\d+\.\d+' | Select-Object -First 1).Matches.Value
+          }
+          if ("${{ github.ref }}" -like "refs/tags/v*") {
+            # Tag builds are release candidates: fail closed without signing credentials.
+            pwsh windows/package/build-installer.ps1 -Version $version -OutDir windows/artifacts -RequireSigned
+          } else {
+            pwsh windows/package/build-installer.ps1 -Version $version -OutDir windows/artifacts
+          }
+          $exe = Get-ChildItem windows/artifacts/installer-out/NanoDictate-Setup-*-x64.exe | Select-Object -First 1
+          if (-not $exe) { throw "Installer EXE missing after build-installer.ps1" }
+          if (-not (Test-Path "$($exe.FullName).sha256")) { throw "Installer SHA-256 sidecar missing" }
+          Get-Item $exe.FullName | Format-Table Name, Length
+          Get-Content "$($exe.FullName).sha256"
+
+      - name: Install, upgrade, and uninstall smoke (clean Windows)
+        shell: pwsh
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          $version = $env:REF_NAME
+          if ($version -match '^v?\d+\.\d+\.\d+') {
+            $version = $version -replace '^v', '' -replace '-.*$', ''
+          } else {
+            $version = (Select-String -Path Sources/NanoDictateCore/Version.swift -Pattern '\d+\.\d+\.\d+' | Select-Object -First 1).Matches.Value
+          }
+          $exe = (Get-ChildItem windows/artifacts/installer-out/NanoDictate-Setup-*-x64.exe | Select-Object -First 1).FullName
+          pwsh windows/package/test-installer.ps1 -Installer $exe -Version $version -LogDir windows/artifacts/install-test-logs
+
+      - name: Generate WinGet manifests (validation only; submission is separate)
+        shell: pwsh
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          $version = $env:REF_NAME
+          if ($version -match '^v?\d+\.\d+\.\d+') {
+            $version = $version -replace '^v', '' -replace '-.*$', ''
+          } else {
+            $version = (Select-String -Path Sources/NanoDictateCore/Version.swift -Pattern '\d+\.\d+\.\d+' | Select-Object -First 1).Matches.Value
+          }
+          $exe = (Get-ChildItem windows/artifacts/installer-out/NanoDictate-Setup-*-x64.exe | Select-Object -First 1).FullName
+          $sha = ((Get-Content "$exe.sha256" -Raw).Split()[0]).Trim().ToLowerInvariant()
+          $url = "https://github.com/kodmial/nanodictate/releases/download/v$version/$(Split-Path $exe -Leaf)"
+          python scripts/make_winget_manifests.py --version $version --url $url --sha256 $sha --out windows/artifacts/winget-manifests
+          Get-ChildItem windows/artifacts/winget-manifests -Recurse | Format-Table FullName
+
+      - name: Upload installer test logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nanodictate-windows-install-test-logs
+          path: windows/artifacts/install-test-logs/
+          if-no-files-found: warn
 
       - name: Upload Windows release artifact
         uses: actions/upload-artifact@v4

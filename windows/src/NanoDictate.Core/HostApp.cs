@@ -1,3 +1,5 @@
+using System.Reflection;
+
 namespace NanoDictate.Core;
 
 /// <summary>
@@ -178,6 +180,52 @@ public sealed class HostApp : IDisposable
             {
             }
         }
+    }
+
+    /// <summary>
+    /// Installed product version for diagnostics and installer smoke tests.
+    /// Prefers the VERSION file stamped beside the executable by the
+    /// installer (single source: Sources/NanoDictateCore/Version.swift at
+    /// build time), then the assembly informational version, else 0.0.0.
+    /// Never throws: installer verification must read a version even from
+    /// a partially staged tree.
+    /// </summary>
+    public static string ProductVersion(string? baseDirectory = null)
+    {
+        try
+        {
+            var dir = baseDirectory ?? AppContext.BaseDirectory;
+            var candidate = Path.Combine(dir, "VERSION");
+            if (File.Exists(candidate))
+            {
+                var text = File.ReadAllText(candidate).Trim();
+                var match = System.Text.RegularExpressions.Regex.Match(text, @"\d+\.\d+\.\d+");
+                if (match.Success)
+                {
+                    return match.Value;
+                }
+            }
+        }
+        catch
+        {
+            // Fall through to the assembly fallback below.
+        }
+        try
+        {
+            var info = Assembly.GetExecutingAssembly()
+                .GetCustomAttribute<AssemblyInformationalVersionAttribute>();
+            var raw = info?.InformationalVersion ?? string.Empty;
+            var match = System.Text.RegularExpressions.Regex.Match(raw, @"\d+\.\d+\.\d+");
+            if (match.Success)
+            {
+                return match.Value;
+            }
+        }
+        catch
+        {
+            // Fall through to the default below.
+        }
+        return "0.0.0";
     }
 
     private static string? NullIfEmpty(string value) =>

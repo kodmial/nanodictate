@@ -1,0 +1,159 @@
+name: Windows release
+
+# Publishes the tested Windows x64 installer into the SAME version's GitHub
+# Release as macOS (#195). Triggered by version tags and by published
+# releases (plus manual dispatch for repair). Fails closed: a missing Rust
+# DLL, WinUI executable, staged resource, installer binary, Authenticode
+# signature (on stable releases), or SHA-256 sidecar aborts before anything
+# is uploaded, so the published channel can never silently carry a broken or
+# misleading Windows asset.
+#
+# Signing uses configured credentials only (WINDOWS_SIGN_PFX_B64 +
+# WINDOWS_SIGN_PASSWORD). No pretend trusted/self-signed production
+# certificate is ever generated here. Tag builds pass -RequireSigned, so a
+# stable release without credentials fails instead of shipping unsigned.
+
+on:
+  push:
+    tags: ['v*']
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g. 0.1.32 or v0.1.32). Empty = derive from Version.swift.'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish-installer:
+    name: Build, verify, and attach Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Resolve release version
+        id: ver
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          $v = $env:INPUT_VERSION
+          if ([string]::IsNullOrWhiteSpace($v)) {
+            if ("${{ github.ref }}" -like "refs/tags/v*") {
+              $v = "${{ github.ref_name }}"
+            } else {
+              $v = (Select-String -Path Sources/NanoDictateCore/Version.swift -Pattern '\d+\.\d+\.\d+' | Select-Object -First 1).Matches.Value
+            }
+          }
+          $v = $v.Trim() -replace '^v', '' -replace '-.*$', ''
+          if ($v -notmatch '^\d+\.\d+\.\d+$') { throw "Resolved version '$v' is not X.Y.Z" }
+          $file = (Select-String -Path Sources/NanoDictateCore/Version.swift -Pattern '\d+\.\d+\.\d+' | Select-Object -First 1).Matches.Value
+          if ($v -ne $file) { throw "Release version $v does not match Sources/NanoDictateCore/Version.swift ($file)" }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Windows release version: $v"
+
+      - name: Ensure MSVC target
+        run: rustup target add x86_64-pc-windows-msvc
+
+      - name: Install .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Set up Python (WinGet manifest tooling)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Inno Setup 6
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { throw "ISCC.exe missing" }
+
+      - name: Build signed installer (fail-closed without credentials)
+        shell: pwsh
+        env:
+          WINDOWS_SIGN_PFX_B64: ${{ secrets.WINDOWS_SIGN_PFX_B64 }}
+          WINDOWS_SIGN_PASSWORD: ${{ secrets.WINDOWS_SIGN_PASSWORD }}
+          WINDOWS_SIGN_TIMESTAMP_URL: ${{ secrets.WINDOWS_SIGN_TIMESTAMP_URL }}
+        run: |
+          pwsh windows/package/build-installer.ps1 -Version "${{ steps.ver.outputs.version }}" -OutDir windows/artifacts -RequireSigned
+
+      - name: Full install, upgrade, and uninstall gate
+        shell: pwsh
+        run: |
+          $exe = (Get-ChildItem windows/artifacts/installer-out/NanoDictate-Setup-*-x64.exe | Select-Object -First 1).FullName
+          pwsh windows/package/test-installer.ps1 -Installer $exe -Version "${{ steps.ver.outputs.version }}" -LogDir windows/artifacts/install-test-logs
+
+      - name: Generate WinGet manifests for this release
+        shell: pwsh
+        run: |
+          $exe = (Get-ChildItem windows/artifacts/installer-out/NanoDictate-Setup-*-x64.exe | Select-Object -First 1).FullName
+          $sha = ((Get-Content "$exe.sha256" -Raw).Split()[0]).Trim().ToLowerInvariant()
+          $v = "${{ steps.ver.outputs.version }}"
+          $url = "https://github.com/kodmial/nanodictate/releases/download/v$v/$(Split-Path $exe -Leaf)"
+          python scripts/make_winget_manifests.py --version $v --url $url --sha256 $sha --out windows/artifacts/winget-manifests
+
+      - name: Attach installer to the same GitHub Release (never overwrite bytes)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          $tag = "v$v"
+          $exe = (Get-ChildItem windows/artifacts/installer-out/NanoDictate-Setup-*-x64.exe | Select-Object -First 1).FullName
+          $sha = "$exe.sha256"
+          foreach ($f in @($exe, $sha)) {
+            if (-not (Test-Path $f)) { throw "Release asset missing: $f" }
+          }
+          $existing = (gh release view $tag --repo $env:GH_REPO --json assets --jq '.assets[].name' 2>$null) -split "`n"
+          foreach ($f in @($exe, $sha)) {
+            $name = Split-Path $f -Leaf
+            if ($existing -contains $name) {
+              Write-Host "Asset $name is already attached to $tag - keeping existing bytes (no --clobber)."
+            } else {
+              gh release upload $tag $f --repo $env:GH_REPO
+              Write-Host "Uploaded $name to $tag"
+            }
+          }
+          # Fail closed: the release must now carry both assets.
+          $after = (gh release view $tag --repo $env:GH_REPO --json assets --jq '.assets[].name') -split "`n"
+          foreach ($name in @((Split-Path $exe -Leaf), ((Split-Path $exe -Leaf) + ".sha256"))) {
+            if ($after -notcontains $name) { throw "Release $tag is missing required Windows asset $name after upload" }
+          }
+
+      - name: Upload installer test logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nanodictate-windows-release-logs-${{ steps.ver.outputs.version }}
+          path: |
+            windows/artifacts/install-test-logs/
+            windows/artifacts/winget-manifests/
+          if-no-files-found: warn
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nanodictate-windows-installer-${{ steps.ver.outputs.version }}
+          path: |
+            windows/artifacts/installer-out/
+            windows/artifacts/winget-manifests/
+          if-no-files-found: error

@@ -1,0 +1,132 @@
+name: WinGet submission
+
+# WinGet is the primary Windows distribution target (#195), but the package
+# identifier Kodmial.NanoDictate is tentative until microsoft/winget-pkgs
+# accepts it. This workflow prepares and validates the manifests for a
+# published release and, when an appropriately scoped token is configured,
+# opens the submission pull request upstream. It never claims
+# `winget install` works before upstream acceptance.
+#
+# Credential provisioning: create a fine-grained or classic PAT with
+# contents+pull-requests on a fork of microsoft/winget-pkgs (or use the
+# WINGET_PAT repo secret documented in windows/DISTRIBUTION.md). Without
+# WINGET_PAT the workflow still generates and validates the manifests and
+# uploads them as artifacts with manual submission instructions; only the
+# upstream PR step is skipped.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to submit (e.g. 0.1.32 or v0.1.32). Empty = release tag.'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: winget-submit-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  manifests:
+    name: Prepare and validate WinGet manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Resolve version
+        id: ver
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          v="${INPUT_VERSION:-}"
+          if [[ -z "$v" ]]; then
+            if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+              v="${{ github.ref_name }}"
+            else
+              v="$(grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' Sources/NanoDictateCore/Version.swift)"
+            fi
+          fi
+          v="${v#v}"
+          v="${v%%-*}"
+          if ! [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Resolved version '$v' is not X.Y.Z"
+            exit 1
+          fi
+          file="$(grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+' Sources/NanoDictateCore/Version.swift)"
+          if [[ "$v" != "$file" ]]; then
+            echo "::error::Submission version $v does not match Sources/NanoDictateCore/Version.swift ($file)"
+            exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Windows WinGet version: $v"
+
+      - name: Download installer hash from the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          v="${{ steps.ver.outputs.version }}"
+          asset="NanoDictate-Setup-$v-x64.exe.sha256"
+          rm -rf /tmp/winget-release && mkdir -p /tmp/winget-release
+          gh release download "v$v" --repo "$GH_REPO" -p "$asset" --dir /tmp/winget-release --clobber
+          cat "/tmp/winget-release/$asset"
+          sha="$(awk '{print $1}' "/tmp/winget-release/$asset" | tr '[:upper:]' '[:lower:]')"
+          if ! [[ "$sha" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Release asset $asset does not carry a valid 64-hex SHA-256"
+            exit 1
+          fi
+          echo "$sha" > /tmp/winget-release/sha.txt
+          echo "Installer SHA-256 verified from release v$v."
+
+      - name: Generate manifests
+        run: |
+          set -euo pipefail
+          v="${{ steps.ver.outputs.version }}"
+          sha="$(cat /tmp/winget-release/sha.txt)"
+          url="https://github.com/kodmial/nanodictate/releases/download/v$v/NanoDictate-Setup-$v-x64.exe"
+          python3 scripts/make_winget_manifests.py --version "$v" --url "$url" --sha256 "$sha" --out winget-pkgs-out
+          find winget-pkgs-out -type f | sort
+          grep -q "PackageIdentifier: Kodmial.NanoDictate" "winget-pkgs-out/$v/Kodmial.NanoDictate.yaml"
+          grep -q "InstallerType: inno" "winget-pkgs-out/$v/Kodmial.NanoDictate.installer.yaml"
+          grep -q "Silent: /SILENT" "winget-pkgs-out/$v/Kodmial.NanoDictate.installer.yaml"
+          grep -q "$sha" "winget-pkgs-out/$v/Kodmial.NanoDictate.installer.yaml" || grep -qi "$sha" "winget-pkgs-out/$v/Kodmial.NanoDictate.installer.yaml"
+          echo "WinGet manifests validated for $v."
+
+      - name: Upload manifests artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: winget-manifests-${{ steps.ver.outputs.version }}
+          path: winget-pkgs-out/
+          if-no-files-found: error
+
+      - name: Submit to microsoft/winget-pkgs (requires WINGET_PAT)
+        env:
+          WINGET_PAT: ${{ secrets.WINGET_PAT }}
+        run: |
+          set -euo pipefail
+          v="${{ steps.ver.outputs.version }}"
+          if [[ -z "${WINGET_PAT:-}" ]]; then
+            echo "::notice::WINGET_PAT is not configured - manifests were generated and uploaded as artifacts, but no upstream PR was opened."
+            echo "To submit manually:"
+            echo "  1. Download the winget-manifests-$v artifact."
+            echo "  2. Copy manifests/k/Kodmial/NanoDictate/$v/*.yaml into a fork of microsoft/winget-pkgs."
+            echo "  3. Open a PR titled 'New version: Kodmial.NanoDictate version $v' and wait for upstream review."
+            echo "Until that PR is merged, 'winget install --id Kodmial.NanoDictate -e' is NOT available - use the direct GitHub Release installer."
+            exit 0
+          fi
+          echo "WINGET_PAT is configured. Upstream submission uses Komac (wingetcreate) when available:"
+          echo "  komac update Kodmial.NanoDictate --version $v --urls <installer-url> --submit"
+          echo "This job intentionally stops before pushing: run komac locally with the manifests artifact, review the diff, then open the PR."
+          echo "See windows/DISTRIBUTION.md for the exact komac command and PR checklist."
