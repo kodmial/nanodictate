@@ -15,6 +15,8 @@
     <LangVersion>latest</LangVersion>
     <UseWinUI>true</UseWinUI>
     <Platforms>x64</Platforms>
+    <!-- Windows App SDK self-contained build rejects AnyCPU; enforce x64 even for plain dotnet build. -->
+    <Platform>x64</Platform>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
     <UseRidGraph>true</UseRidGraph>
