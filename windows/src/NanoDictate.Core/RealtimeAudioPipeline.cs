@@ -43,6 +43,7 @@ public sealed class RealtimeAudioPipeline : IDisposable
     private AudioFormatConverter _converter;
     private bool _formatBound;
     private readonly float[] _staging;
+    private float[] _convertScratch = new float[EngineBlockSamples * 2];
     private int _staged;
 
     private VadHandle? _vad;
@@ -191,11 +192,15 @@ public sealed class RealtimeAudioPipeline : IDisposable
         var capacity = Math.Max(
             EngineBlockSamples * 2,
             (int)((long)block.FrameCount * EngineSampleRate / Math.Max(1, block.Format.SampleRate)) + 16);
-        var outBuffer = new float[capacity];
         CaptureMetrics? readyToFire = null;
         IReadOnlyList<short>? stopToFire = null;
         lock (_gate)
         {
+            if (_convertScratch.Length < capacity)
+            {
+                _convertScratch = new float[capacity];
+            }
+            var outBuffer = _convertScratch;
             // Bind to the resolved capture format on the first block: the
             // constructor format may be the unresolved device placeholder.
             // A format change mid-session invalidates resample state, so the

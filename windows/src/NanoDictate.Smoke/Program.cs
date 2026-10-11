@@ -32,7 +32,10 @@ internal static class Program
 
         // 2. Portable configuration through the Rust contracts.
         // Flag-style arguments (live-capture options below) are not paths.
-        var positional = args.Where(a => !a.StartsWith('-')).ToArray();
+        var positional = args
+            .Where((a, i) => !a.StartsWith('-') &&
+                !(i > 0 && string.Equals(args[i - 1], "--live-seconds", StringComparison.OrdinalIgnoreCase)))
+            .ToArray();
         var configPath = positional.Length > 0 ? positional[0] : FindExampleConfig();
         if (positional.Length > 0 && (configPath is null || !File.Exists(configPath)))
         {

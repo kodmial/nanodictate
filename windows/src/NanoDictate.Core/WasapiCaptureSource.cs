@@ -502,8 +502,12 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
             {
                 return;
             }
-            _owner.DeviceChanged?.Invoke(
-                new NanoException(-1, "Windows default capture device changed"));
+            if (!_owner._running)
+            {
+                return;
+            }
+            var error = new NanoException(-1, "Windows default capture device changed");
+            ThreadPool.QueueUserWorkItem(_ => _owner.DeviceChanged?.Invoke(error));
         }
 
         public void OnPropertyValueChanged(string deviceId, Guid key) { }
