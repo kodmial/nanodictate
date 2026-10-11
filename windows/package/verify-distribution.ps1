@@ -35,7 +35,7 @@ function ReleaseHash([string]$Text, [string]$Filename) {
 }
 function VerifyHash([string]$File, [string]$Expected) {
   $actual = (Get-FileHash -LiteralPath $File -Algorithm SHA256).Hash.ToLowerInvariant()
-  Require ($actual -eq $Expected) "SHA256 mismatch for $File: expected $Expected, got $actual"
+  Require ($actual -eq $Expected) "SHA256 mismatch for ${File}: expected $Expected, got $actual"
 }
 function VerifyPayload([string]$Dir) {
   foreach ($name in @('NanoDictate.App.exe','NanoDictate.App.dll','nanodictate_core.dll',
