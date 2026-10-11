@@ -103,8 +103,10 @@ jobs:
 
       - name: Stage MSIX layout and portable ZIP
         shell: pwsh
+        env:
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          $version = "${{ github.ref_name }}"
+          $version = $env:REF_NAME
           if ($version -notmatch '^\d+\.\d+\.\d+') { $version = "0.0.0" } else { $version = $version -replace '^v', '' -replace '-.*$', '' }
           pwsh windows/package/make-msix.ps1 -Version $version -OutDir windows/artifacts
 

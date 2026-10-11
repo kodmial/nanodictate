@@ -192,11 +192,29 @@ public sealed class SttProductTests
     [Fact]
     public void DiagnosticsRunOffline()
     {
-        var checks = WindowsDiagnostics.Run("config.example.toml");
+        var checks = WindowsDiagnostics.Run(FindConfigExample());
         var names = checks.Select(c => c.Name).ToList();
         Assert.Contains("engine-abi", names);
         Assert.Contains("rust-policy", names);
         Assert.Contains("audio-pipeline", names);
         Assert.Contains("stt-profiles", names);
+        var config = checks.FirstOrDefault(c => c.Name == "config");
+        Assert.NotNull(config);
+        Assert.True(config!.Passed, $"config check failed: {config.Detail}");
+    }
+
+    private static string FindConfigExample()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null)
+        {
+            var candidate = Path.Combine(dir.FullName, "config.example.toml");
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+            dir = dir.Parent;
+        }
+        throw new FileNotFoundException("config.example.toml not found from repo root");
     }
 }

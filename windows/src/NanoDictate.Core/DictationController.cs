@@ -219,6 +219,15 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
 
     public event Action<string>? Inserted;
 
+    /// <summary>
+    /// Capture-stop callback: receives the stopped recording for
+    /// transcription. Set by the host to forward
+    /// <see cref="PipelineStopResult.Samples"/> to transcription and
+    /// delivery via <see cref="CompleteWithTranscript"/>. Runs off the
+    /// hotkey thread (fire-and-forget); null means stop-only (tests).
+    /// </summary>
+    public Func<IReadOnlyList<short>, CancellationToken, Task>? StopTranscriptionHandler { get; set; }
+
     public DictationState State => _capture.State;
 
     public bool HasPendingEnter
@@ -338,14 +347,20 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
 
     private void StopAndAwaitTranscript()
     {
+        PipelineStopResult result;
         try
         {
-            _capture.Stop();
+            result = _capture.Stop();
         }
         catch
         {
             _capture.Cancel();
             throw;
+        }
+        var handler = StopTranscriptionHandler;
+        if (handler is not null)
+        {
+            _ = Task.Run(() => handler(result.Samples, CancellationToken.None));
         }
     }
 

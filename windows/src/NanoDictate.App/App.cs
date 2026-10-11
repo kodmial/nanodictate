@@ -59,7 +59,32 @@ public sealed partial class MainWindow : Window
     private static string ResolveConfig()
     {
         var windowsPath = WindowsPaths.ConfigPath();
-        return File.Exists(windowsPath) ? windowsPath : "config.example.toml";
+        if (File.Exists(windowsPath))
+        {
+            return windowsPath;
+        }
+        var bundled = Path.Combine(AppContext.BaseDirectory, "config.example.toml");
+        if (!File.Exists(bundled))
+        {
+            return bundled;
+        }
+        try
+        {
+            var dir = Path.GetDirectoryName(windowsPath);
+            if (!string.IsNullOrEmpty(dir))
+            {
+                Directory.CreateDirectory(dir);
+            }
+            if (!File.Exists(windowsPath))
+            {
+                File.Copy(bundled, windowsPath);
+            }
+            return windowsPath;
+        }
+        catch
+        {
+            return bundled;
+        }
     }
 }
 

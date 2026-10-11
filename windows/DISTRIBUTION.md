@@ -20,10 +20,13 @@ checkout plus tag version:
 - `msix-stage/` — MSIX file layout with `AppxManifest.xml` stamped with
   the release version (`<major>.<minor>.<patch>.0`).
 
-Release CI (`windows.yml` packaging job, then `release.yml`) uploads the
-ZIP as the Windows release asset and prepares the signed MSIX with the
-configured certificate. Signing itself runs only in release CI, never on
-developer machines.
+Release CI (the `windows.yml` packaging job) uploads the ZIP as the
+Windows release artifact and stages the unsigned MSIX layout with the
+configured certificate subject. Signing runs separately with the
+configured certificate, never on developer machines. The manifest
+version is stamped from the tag only when the tag is a plain
+`<major>.<minor>.<patch>` version (no leading `v`); any other ref
+(including `v`-prefixed tags) falls back to `0.0.0`.
 
 ## Clean install / first launch
 

@@ -79,7 +79,9 @@ public sealed class ChunkedTranscriber
         var failed = false;
         foreach (var chunk in chunks)
         {
-            var slice = samples.Skip(chunk.BodyStart).Take(chunk.BodyEnd - chunk.BodyStart).ToArray();
+            var start = chunk.HasOverlap ? chunk.OverlapStart : chunk.BodyStart;
+            var end = chunk.HasOverlap ? chunk.OverlapEnd : chunk.BodyEnd;
+            var slice = samples.AsSpan(start, end - start).ToArray();
             try
             {
                 var result = await _client.TranscribeAsync(slice, sampleRate, language, prompt, false, transport, proxyKey, diagnostics, cancellationToken).ConfigureAwait(false);

@@ -100,6 +100,28 @@ public sealed class DictationControllerTests
     }
 
     [Fact]
+    public async Task StopForwardsSamplesToTranscriptionHandler()
+    {
+        var capture = new FakeCaptureDriver();
+        var sink = new FakeInsertionSink();
+        using var controller = new DictationController(capture, sink);
+        IReadOnlyList<short>? forwarded = null;
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        controller.StopTranscriptionHandler = (samples, _) =>
+        {
+            forwarded = samples;
+            done.SetResult();
+            return Task.CompletedTask;
+        };
+        capture.Start();
+        capture.MakeReady();
+        controller.AltDoubleTapped();
+        await done.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.NotNull(forwarded);
+        Assert.Equal(new short[] { 1, 2, 3 }, forwarded!);
+    }
+
+    [Fact]
     public void EscapeCancelsAndDropsLateTranscript()
     {
         var capture = new FakeCaptureDriver();

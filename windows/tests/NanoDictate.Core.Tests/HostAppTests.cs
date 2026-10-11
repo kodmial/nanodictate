@@ -70,6 +70,40 @@ public sealed class HostAppTests
     }
 
     [Fact]
+    public void SelectProviderPersistsActiveSelection()
+    {
+        var config = new PortableConfig
+        {
+            ActiveProvider = "a",
+            Providers = new[]
+            {
+                new ProviderEntry("a", "A", string.Empty, string.Empty),
+                new ProviderEntry("b", "B", string.Empty, string.Empty),
+            },
+        };
+        using var app = new HostApp(config, new FakeSource(), new FakeInsertions(), new FakeTransport(), _ => string.Empty);
+        app.SelectProvider("b");
+        Assert.Equal("b", app.ActiveProviderId);
+        Assert.Equal("b", app.Catalog.Active().Id);
+        var list = app.ListProviders();
+        Assert.True(list.First(p => p.Id == "b").IsActive);
+        Assert.False(list.First(p => p.Id == "a").IsActive);
+        Assert.Throws<NanoException>(() => app.SelectProvider("missing"));
+    }
+
+    [Fact]
+    public void HostAppWiresStopTranscriptionHandler()
+    {
+        var config = new PortableConfig
+        {
+            ActiveProvider = "a",
+            Providers = new[] { new ProviderEntry("a", "A", "https://a.test/v1/audio/transcriptions", string.Empty) },
+        };
+        using var app = new HostApp(config, new FakeSource(), new FakeInsertions(), new FakeTransport(), _ => "k");
+        Assert.NotNull(app.Controller.StopTranscriptionHandler);
+    }
+
+    [Fact]
     public void ExtendedConfigParsesTransportAndModes()
     {
         var toml = """

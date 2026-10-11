@@ -259,9 +259,19 @@ public sealed class SttClient
         {
             var providerId = order[Math.Min(attempt, order.Count - 1)];
             var provider = _catalog.Providers.First(p => p.Id == providerId);
-            var profile = SttProfile.Resolve(provider.Id, provider.Model);
-            var needWords = false;
-            var plan = SttRequestBuilder.Plan(provider, profile, wavBytes, language, prompt, needWords, transport, _apiKeyFor(provider.Id), proxyKey);
+            SttProfile profile;
+            SttRequestPlan plan;
+            try
+            {
+                profile = SttProfile.Resolve(provider.Id, provider.Model);
+                var needPlanWords = false;
+                plan = SttRequestBuilder.Plan(provider, profile, wavBytes, language, prompt, needPlanWords, transport, _apiKeyFor(provider.Id), proxyKey);
+            }
+            catch (NanoException ex) when (attempt > 0)
+            {
+                diagnostics?.Add(new SttAttemptLog(providerId, provider.Model, string.Empty, wavBytes.Length, 0, false, ex.Message));
+                continue;
+            }
             var started = DateTime.UtcNow;
             try
             {

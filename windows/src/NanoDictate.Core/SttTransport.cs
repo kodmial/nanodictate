@@ -177,11 +177,28 @@ public sealed class HttpSttTransport : ISttTransport, IDisposable
         {
             response = await _client.SendAsync(request, linked.Token).ConfigureAwait(false);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (Exception ex) when (ex is not TranscribeError)
         {
             throw new TranscribeError(TranscribeError.ErrorKind.Network, $"STT transport failed: {ex.Message}");
         }
-        var responseBody = await response.Content.ReadAsByteArrayAsync(linked.Token).ConfigureAwait(false);
+        using var _ = response;
+        byte[] responseBody;
+        try
+        {
+            responseBody = await response.Content.ReadAsByteArrayAsync(linked.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is not TranscribeError)
+        {
+            throw new TranscribeError(TranscribeError.ErrorKind.Network, $"STT transport failed: {ex.Message}");
+        }
         var responseHeaders = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var h in response.Headers)
         {

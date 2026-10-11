@@ -39,6 +39,14 @@ New-Item -ItemType Directory -Force -Path "$Stage/NanoDictate.App" | Out-Null
 
 Copy-Item "windows/src/NanoDictate.App/bin/$Configuration/net8.0-windows10.0.19041.0/win-x64/*" "$Stage/NanoDictate.App/" -Recurse -Force
 Copy-Item $Dll "$Stage/NanoDictate.App/nanodictate_core.dll" -Force
+New-Item -ItemType Directory -Force -Path "$Stage/Assets" | Out-Null
+$AssetSource = "windows/package/Assets"
+if (-not (Test-Path $AssetSource)) { throw "Missing $AssetSource (StoreLogo.png, Square150x150Logo.png, Square44x44Logo.png)" }
+foreach ($asset in @("StoreLogo.png", "Square150x150Logo.png", "Square44x44Logo.png")) {
+  $src = Join-Path $AssetSource $asset
+  if (-not (Test-Path $src)) { throw "Missing $src referenced by Package.appxmanifest" }
+  Copy-Item $src "$Stage/Assets/$asset" -Force
+}
 Copy-Item "windows/package/Package.appxmanifest" "$Stage/AppxManifest.xml" -Force
 Copy-Item "config.example.toml" "$Stage/config.example.toml" -Force
 
