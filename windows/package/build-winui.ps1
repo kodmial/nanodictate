@@ -39,7 +39,16 @@ if ($PublishDir) {
   $Properties += "/p:SelfContained=true"
 }
 if ($Version) {
-  if ($Version -notmatch '^\\d+\\.\\d+\\.\\d+
+  if ($Version -notmatch '^\d+\.\d+\.\d+
+) { throw "Invalid version: $Version" }
+  $Properties += "/p:Version=$Version"
+}
+& $MSBuild $Project /restore $Target @Properties /verbosity:minimal
+if ($LASTEXITCODE -ne 0) { throw "Visual Studio MSBuild failed ($LASTEXITCODE)" }
+if ($PublishDir -and -not (Test-Path (Join-Path $FullPublishDir "NanoDictate.App.exe"))) {
+  throw "Publish succeeded without NanoDictate.App.exe in $FullPublishDir"
+}
+) { throw "Invalid version: $Version" }
 ) { throw "Invalid version: $Version" }
   $Properties += "/p:Version=$Version"
 }
