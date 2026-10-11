@@ -88,7 +88,14 @@ function Invoke-Setup([string]$path) {
   $proc = Start-Process -FilePath $path -ArgumentList $arguments -Wait -PassThru
   if ($proc.ExitCode -ne 0) { throw "Installer $path exited $($proc.ExitCode)" }
 }
-function Assert-Installed {
+function Get-RunValue {
+  $properties = Get-ItemProperty -Path $runKey -ErrorAction SilentlyContinue
+  if ($null -eq $properties) { return '' }
+  $entry = $properties.PSObject.Properties['NanoDictate']
+  if ($null -eq $entry) { return '' }
+  return [string]$entry.Value
+}
+function Assert-Installed([bool]$RequireStartup = $true) {
   foreach ($name in @('NanoDictate.App.exe','NanoDictate.App.dll',
       'NanoDictate.App.runtimeconfig.json','nanodictate_core.dll',
       'coreclr.dll','hostfxr.dll','config.example.toml')) {
@@ -96,9 +103,11 @@ function Assert-Installed {
       throw "Installed app lacks $name"
     }
   }
-  $expectedRun = '"' + (Join-Path $installDir 'NanoDictate.App.exe') + '" --background'
-  $actualRun = Get-ItemPropertyValue -Path $runKey -Name NanoDictate -ErrorAction SilentlyContinue
-  if ($actualRun -cne $expectedRun) { throw "Run-key registration mismatch: $actualRun" }
+  if ($RequireStartup) {
+    $expectedRun = '"' + (Join-Path $installDir 'NanoDictate.App.exe') + '" --background'
+    $actualRun = Get-RunValue
+    if ($actualRun -cne $expectedRun) { throw "Run-key registration mismatch: $actualRun" }
+  }
 }
 function Uninstall {
   $uninstaller = Join-Path $installDir 'unins000.exe'
@@ -106,7 +115,7 @@ function Uninstall {
   $proc = Start-Process -FilePath $uninstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART') -Wait -PassThru
   if ($proc.ExitCode -ne 0) { throw "Uninstaller exited $($proc.ExitCode)" }
   if (Test-Path -LiteralPath (Join-Path $installDir 'NanoDictate.App.exe')) { throw 'Uninstall left the application executable' }
-  $run = Get-ItemPropertyValue -Path $runKey -Name NanoDictate -ErrorAction SilentlyContinue
+  $run = Get-RunValue
   if ($run) { throw 'Uninstall left the application auto-start registry entry' }
 }
 
@@ -171,7 +180,10 @@ try {
     Write-Warning 'No previous Windows installer found: exercising same-version reinstall rather than versioned upgrade'
   }
   $installedOnce = $true
-  Assert-Installed
+  # v0.1.33 predates the persistent Run-key registration. Assert the
+  # installed file layout for the old version; require startup only after
+  # upgrading to the current release.
+  Assert-Installed (-not [bool]$previous)
   $report.install = $true
   New-Item -ItemType Directory -Path (Split-Path $marker) -Force | Out-Null
   Set-Content -LiteralPath $marker -Value 'keep-config' -NoNewline
