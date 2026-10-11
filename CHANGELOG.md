@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.35] - 2026-10-11
+
+
+
+### Fixed
+
+* **windows:** correct PowerShell interpolation in distribution smoke diagnostics ([c15fd0d](https://github.com/kodmial/nanodictate/commit/c15fd0d3f30642c5c4eb8b16aa69d5156c9e2f56))
+* **windows:** delimit Scoop manifest URL variable under strict PowerShell mode ([d0649ff](https://github.com/kodmial/nanodictate/commit/d0649ff57438898aee5cb2c9ab5e97442f204f61))
+* **windows:** treat removed logon startup value as expected after uninstall ([29d0525](https://github.com/kodmial/nanodictate/commit/29d0525eb991c2ebfbdbaa749f4f3b4be8f819f8))
+
 ## [0.1.34] - 2026-10-11
 
 
@@ -562,7 +572,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.34...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.35...HEAD
+[0.1.35]: https://github.com/kodmial/nanodictate/compare/v0.1.34...v0.1.35
 [0.1.34]: https://github.com/kodmial/nanodictate/compare/v0.1.33...v0.1.34
 [0.1.33]: https://github.com/kodmial/nanodictate/compare/v0.1.32...v0.1.33
 [0.1.32]: https://github.com/kodmial/nanodictate/compare/v0.1.31...v0.1.32
