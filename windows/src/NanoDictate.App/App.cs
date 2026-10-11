@@ -15,7 +15,7 @@ public sealed partial class MainWindow : Window
     private readonly PortableConfig _config;
     private readonly HostApp _app;
     private readonly GlobalHotkeyService _hotkeys;
-    private readonly SingleInstance _instance;
+    private bool _exiting;
     private readonly TextBlock _status;
     private readonly ComboBox _providers;
     private readonly CheckBox _review;
@@ -23,8 +23,6 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         Title = "NanoDictate";
-        _instance = new SingleInstance();
-        if (!_instance.IsFirst) { _instance.Dispose(); throw new InvalidOperationException("NanoDictate is already running"); }
         _config = PortableConfig.Load(ResolveConfig());
         var insertions = new InsertionSinkAdapter(
             new TextInserter(new WindowsInputSender()),
@@ -57,13 +55,25 @@ public sealed partial class MainWindow : Window
         panel.Children.Add(_providers);
         panel.Children.Add(_review);
         panel.Children.Add(doctor);
+        var exit = new Button { Content = "Exit NanoDictate" };
+        exit.Click += (_, _) => { _exiting = true; Close(); };
+        panel.Children.Add(exit);
         Content = panel;
         _app.Controller.ReviewPrompt = new WindowReviewPrompt(DispatcherQueue, panel);
         _app.Controller.MicStartAttempted += outcome => DispatcherQueue.TryEnqueue(() =>
             _status.Text = outcome.Started ? "recording" : $"microphone: {outcome.Guidance ?? "unavailable"}");
         _app.Controller.Inserted += _ => DispatcherQueue.TryEnqueue(() => _status.Text = "inserted");
         _hotkeys = new GlobalHotkeyService(_config.DoubleAltMaxInterval) { Delegate = _app.Controller };
-        Closed += (_, _) => { _hotkeys.Dispose(); _app.Dispose(); _instance.Dispose(); };
+        // Closing the window hides it; dictation remains active until Exit is selected.
+        AppWindow.Closing += (_, args) =>
+        {
+            if (!_exiting)
+            {
+                args.Cancel = true;
+                AppWindow.Hide();
+            }
+        };
+        Closed += (_, _) => { _hotkeys.Dispose(); _app.Dispose(); };
         _hotkeys.Start();
     }
 
@@ -165,7 +175,11 @@ internal sealed class WindowReviewPrompt : IReviewPrompt
 
 public sealed partial class App : Application
 {
+    private const string ShowWindowEvent = @"Local\NanoDictateShowWindow";
     private MainWindow? _window;
+    private SingleInstance? _instance;
+    private EventWaitHandle? _showWindowSignal;
+    private CancellationTokenSource? _showWindowCancellation;
 
     public App()
     {
@@ -174,11 +188,78 @@ public sealed partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
-        NanoEngine.CheckAvailable();
-        _window = new MainWindow();
-        _window.Activate();
+        _instance = new SingleInstance();
+        if (!_instance.IsFirst)
+        {
+            // A second launch (Start menu / Scoop shortcut) opens the existing
+            // background instance rather than failing or installing two hooks.
+            try
+            {
+                using var signal = EventWaitHandle.OpenExisting(ShowWindowEvent);
+                signal.Set();
+            }
+            catch (WaitHandleCannotBeOpenedException) { }
+            _instance.Dispose();
+            _instance = null;
+            Exit();
+            return;
+        }
+
+        try
+        {
+            NanoEngine.CheckAvailable();
+            _window = new MainWindow();
+            _showWindowSignal = new EventWaitHandle(false, EventResetMode.AutoReset, ShowWindowEvent);
+            _showWindowCancellation = new CancellationTokenSource();
+            var signal = _showWindowSignal;
+            var cancellation = _showWindowCancellation.Token;
+            var dispatcher = _window.DispatcherQueue;
+            var main = _window;
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    while (!cancellation.IsCancellationRequested)
+                    {
+                        if (signal.WaitOne(500))
+                        {
+                            dispatcher.TryEnqueue(() =>
+                            {
+                                main.AppWindow.Show();
+                                main.Activate();
+                            });
+                        }
+                    }
+                }
+                catch (ObjectDisposedException) { }
+            });
+            _window.Closed += (_, _) =>
+            {
+                _showWindowCancellation?.Cancel();
+                _showWindowSignal?.Dispose();
+                _instance?.Dispose();
+                _instance = null;
+            };
+            _window.Activate();
+            // Registry/Scoop starts at each user logon with --background.
+            // WinUI's dispatcher/hotkey hook keeps running while hidden.
+            if (Environment.GetCommandLineArgs().Skip(1).Any(a =>
+                string.Equals(a, "--background", StringComparison.OrdinalIgnoreCase)))
+            {
+                _window.AppWindow.Hide();
+            }
+        }
+        catch
+        {
+            _showWindowCancellation?.Cancel();
+            _showWindowSignal?.Dispose();
+            _instance?.Dispose();
+            _instance = null;
+            throw;
+        }
     }
 
+    [STAThread]
     public static void Main(string[] args)
     {
         WinRT.ComWrappersSupport.InitializeComWrappers();
