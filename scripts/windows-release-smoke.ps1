@@ -149,10 +149,67 @@ try {
   # Exercise a real published previous-version upgrade when available.
   $releases = @(Invoke-GhJson "repos/$Repository/releases?per_page=50")
   $previous = $releases | Where-Object {
-    (-not $_.draft) -and (-not $_.prerelease) -and
-    $_.tag_name -match '^v\d+\.\d+\.\d+$' -and
-    ([version]$_.tag_name.Substring(1) -lt [version]$versionText) -and
-    @($_.assets | Where-Object { $_.name -ceq "nanodictate-$($_.tag_name.Substring(1))-windows-x64-setup.exe" }).Count
+    $candidate = $_
+    $oldAsset = "nanodictate-$($candidate.tag_name.Substring(1))-windows-x64-setup.exe"
+    (-not $candidate.draft) -and (-not $candidate.prerelease) -and
+    $candidate.tag_name -match '^v\d+\.\d+\.\d+
+
+  if ($previous) {
+    $oldVersion = $previous.tag_name.Substring(1)
+    $oldName = "nanodictate-$oldVersion-windows-x64-setup.exe"
+    $oldDir = Join-Path $work 'previous'
+    [void](Get-VerifiedAssets $previous $oldDir @($oldName))
+    Invoke-Setup (Join-Path $oldDir $oldName)
+    Write-Host "Installed actual previous Windows release $oldVersion"
+  } else {
+    Invoke-Setup $setup
+    Write-Warning 'No previous Windows installer found: exercising same-version reinstall rather than versioned upgrade'
+  }
+  $installedOnce = $true
+  Assert-Installed
+  $report.install = $true
+  New-Item -ItemType Directory -Path (Split-Path $marker) -Force | Out-Null
+  Set-Content -LiteralPath $marker -Value 'keep-config' -NoNewline
+
+  Invoke-Setup $setup
+  Assert-Installed
+  if ((Get-Content -LiteralPath $marker -Raw) -cne 'keep-config') { throw 'Upgrade destroyed user configuration' }
+  $report.upgrade_or_reinstall = $true
+
+  # Installing published binaries on a hosted service account does not prove
+  # a WinUI desktop launches, captures microphone input or handles Alt keys.
+  Uninstall
+  $report.uninstall = $true
+  if ((Get-Content -LiteralPath $marker -Raw) -cne 'keep-config') { throw 'Uninstall deleted user configuration' }
+  $report.user_data_preserved = $true
+
+  $bucketPath = 'bucket/nanodictate.json'
+  if (Test-Path -LiteralPath $bucketPath) {
+    $bucket = Get-Content -LiteralPath $bucketPath -Raw | ConvertFrom-Json
+    if ($bucket.version -eq $versionText) {
+      if ($bucket.architecture.'64bit'.hash -cne $sums[$zipName]) {
+        throw "Scoop manifest hash differs from published ZIP SHA256"
+      }
+      $expectedUrl = "https://github.com/$Repository/releases/download/v$versionText/$zipName"
+      if ($bucket.architecture.'64bit'.url -cne $expectedUrl) {
+        throw 'Scoop manifest URL does not identify the published ZIP'
+      }
+    } else {
+      Write-Warning "Scoop manifest version $($bucket.version) differs from tested $versionText (manifest sync may be pending)"
+    }
+  }
+  Write-Host "::notice::Published Windows $($release.tag_name) passed checksum, portable, install, upgrade/reinstall, uninstall and data-retention smoke."
+} finally {
+  $report | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $reportFile -Encoding utf8
+  if (Test-Path -LiteralPath $marker) { Remove-Item -LiteralPath $marker -Force }
+  if ($installedOnce -and (Test-Path -LiteralPath (Join-Path $installDir 'unins000.exe'))) {
+    Write-Warning 'Cleaning up installed application after an incomplete smoke'
+    try { Uninstall } catch { Write-Warning "Cleanup failed: $_" }
+  }
+}
+ -and
+    ([version]$candidate.tag_name.Substring(1) -lt [version]$versionText) -and
+    (@($candidate.assets | Where-Object { $_.name -ceq $oldAsset }).Count -gt 0)
   } | Sort-Object { [version]$_.tag_name.Substring(1) } -Descending | Select-Object -First 1
 
   if ($previous) {
