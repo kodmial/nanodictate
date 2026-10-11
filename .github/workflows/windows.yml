@@ -134,6 +134,26 @@ jobs:
           # Same-version reinstall must not fail or overwrite user data.
           $reinstallProcess = Start-Process -FilePath (Resolve-Path $setup) -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/DIR=$installed") -Wait -PassThru
           if ($reinstallProcess.ExitCode -ne 0) { throw "Silent reinstall failed: $($reinstallProcess.ExitCode)" }
+          # A different installer version must upgrade this installation in place.
+          # Repackage the already-published bits to exercise setup version
+          # migration without pretending to test two distinct application builds.
+          $env:ND_RELEASE_VERSION = "0.0.1"
+          $env:ND_PUBLISH_DIR = (Resolve-Path "windows/artifacts/published-win-x64").Path
+          $env:ND_OUTPUT_DIR = (Resolve-Path "windows/artifacts").Path
+          $isccPaths = @(
+            (Join-Path $env:ProgramFiles "Inno Setup 6/ISCC.exe"),
+            (Join-Path ([Environment]::GetFolderPath("ProgramFilesX86")) "Inno Setup 6/ISCC.exe")
+          )
+          $iscc = $isccPaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw "Inno Setup compiler missing for upgrade test" }
+          & $iscc "windows/package/NanoDictate.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Upgrade installer compilation failed" }
+          $upgrade = "windows/artifacts/nanodictate-0.0.1-windows-x64-setup.exe"
+          if (-not (Test-Path $upgrade)) { throw "Upgrade installer missing" }
+          $upgradeProcess = Start-Process -FilePath (Resolve-Path $upgrade) -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/DIR=$installed") -Wait -PassThru
+          if ($upgradeProcess.ExitCode -ne 0) { throw "Silent upgrade failed: $($upgradeProcess.ExitCode)" }
+          if (-not (Test-Path (Join-Path $installed "NanoDictate.App.exe"))) { throw "Upgrade removed installed executable" }
+          if ((Get-Content $userConfig -Raw) -ne "preserve") { throw "Upgrade destroyed user data" }
           $uninstall = Join-Path $installed "unins000.exe"
           if (-not (Test-Path $uninstall)) { throw "Uninstaller missing" }
           $uninstallProcess = Start-Process -FilePath $uninstall -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") -Wait -PassThru
