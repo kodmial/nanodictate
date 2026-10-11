@@ -1154,10 +1154,10 @@ extension Transcriber {
         if attempt >= Self.maxAttempts {
           break
         }
-        // Pause: Retry-After on 429 (cap 10 s), else backoff.
+        // Pause: Retry-After on 429 (capped at maxRetryPauseSeconds), else backoff.
         var delay = Self.backoffDelay(beforeRetry: attempt)
         if case .http(429, _) = error, let retryAfter = retryAfterHeader {
-          delay = min(retryAfter, 10)
+          delay = min(retryAfter, Self.maxRetryPauseSeconds)
         }
         await retrySleep(delay)
       } catch is CancellationError {

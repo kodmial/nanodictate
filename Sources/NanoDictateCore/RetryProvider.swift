@@ -271,7 +271,7 @@ public final class RetryProvider {
   /// Hedged failover event inside the group (transcribe completion vs hedge tick).
   private enum HedgedEvent {
     case done(Int, Result<(TranscriptionResult, String), Error>)
-    case hedge
+    case hedge(Int)
     case hedgeCancelled
   }
 
@@ -334,6 +334,7 @@ public final class RetryProvider {
       var nextIndex = 0
       var inFlight = 0
       var lastFailure: TranscribeError?
+      var hedgeGeneration = 0
 
       func launchNext() {
         let index = nextIndex
@@ -352,12 +353,17 @@ public final class RetryProvider {
           }
         }
         // Arm the next hedge tick while candidates remain. The tick itself
-        // re-checks the concurrency bound before launching.
+        // re-checks the concurrency bound before launching. Each tick carries
+        // the current generation so a stale timer (armed before a fast-fail
+        // relaunch) is ignored and every hedge waits the full delay after
+        // the latest launch.
         if nextIndex < candidates.count {
+          hedgeGeneration += 1
+          let generation = hedgeGeneration
           group.addTask {
             do {
               try await sleep(hedgeDelay)
-              return .hedge
+              return .hedge(generation)
             } catch {
               return .hedgeCancelled
             }
@@ -373,8 +379,9 @@ public final class RetryProvider {
         // hedge timers so withTaskGroup can exit without waiting out the
         // full hedge delay.
         switch event {
-        case .hedge:
-          if nextIndex < candidates.count, inFlight < maxConcurrent {
+        case .hedge(let generation):
+          if generation == hedgeGeneration, nextIndex < candidates.count,
+            inFlight < maxConcurrent {
             // Slow first fallback: hedge with the next ordered candidate.
             launchNext()
           }
