@@ -148,12 +148,17 @@ try {
 
   # Exercise a real published previous-version upgrade when available.
   $releases = @(Invoke-GhJson "repos/$Repository/releases?per_page=50")
-  $previous = $releases | Where-Object {
-    $candidate = $_
-    $oldAsset = "nanodictate-$($candidate.tag_name.Substring(1))-windows-x64-setup.exe"
-    (-not $candidate.draft) -and (-not $candidate.prerelease) -and
-    $candidate.tag_name -match '^v\d+\.\d+\.\d+
-
+  $candidates = @()
+  foreach ($candidate in $releases) {
+    if ($candidate.draft -or $candidate.prerelease) { continue }
+    if (-not $candidate.tag_name.StartsWith('v')) { continue }
+    $parsed = $null
+    if (-not [version]::TryParse($candidate.tag_name.Substring(1), [ref]$parsed)) { continue }
+    if ($parsed -ge [version]$versionText) { continue }
+    $assetName = 'nanodictate-' + $candidate.tag_name.Substring(1) + '-windows-x64-setup.exe'
+    if (@($candidate.assets | Where-Object { $_.name -ceq $assetName }).Count -gt 0) { $candidates += $candidate }
+  }
+  $previous = $candidates | Sort-Object { [version]$_.tag_name.Substring(1) } -Descending | Select-Object -First 1
   if ($previous) {
     $oldVersion = $previous.tag_name.Substring(1)
     $oldName = "nanodictate-$oldVersion-windows-x64-setup.exe"
