@@ -57,9 +57,11 @@ try {
   if ($auth.Status -eq 'NotSigned') {
     Write-Warning 'Candidate installer is unsigned: trusted code signing is a separate publisher prerequisite'
   } elseif ($auth.Status -ne 'Valid') { throw "Invalid candidate installer signature: $($auth.Status)" }
-  Invoke-Silent (Resolve-Path $setup).Path @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=$dir")
+  Invoke-Silent (Resolve-Path $setup).Path @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$dir`"")
   $installed = $true
-  foreach ($name in @('NanoDictate.App.exe','nanodictate_core.dll','coreclr.dll','hostfxr.dll')) {
+  foreach ($name in @('NanoDictate.App.exe','NanoDictate.App.dll',
+     'NanoDictate.App.runtimeconfig.json','nanodictate_core.dll',
+     'coreclr.dll','hostfxr.dll','config.example.toml')) {
     $target = Join-Path $dir $name
     if (!(Test-Path -LiteralPath $target -PathType Leaf)) { throw "Installer missing $name" }
     if ((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -cne

@@ -28,7 +28,10 @@ $installDir = Join-Path $work 'installed'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $reportFile = Join-Path $repoRoot 'windows/artifacts/windows-published-smoke.json'
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-$marker = Join-Path $env:APPDATA ("NanoDictate\release-smoke-" + [guid]::NewGuid().ToString('N') + '.txt')
+$configFile = Join-Path $env:APPDATA 'NanoDictate\config.toml'
+$configSentinel = 'keep-config-' + [guid]::NewGuid().ToString('N')
+$configBackup = Join-Path $work 'config.toml.backup'
+$hadPriorConfig = $false
 $installedOnce = $false
 $report = [ordered]@{
   repository = $Repository
@@ -186,20 +189,34 @@ try {
   # upgrading to the current release.
   Assert-Installed (-not [bool]$previous)
   $report.install = $true
-  New-Item -ItemType Directory -Path (Split-Path $marker) -Force | Out-Null
-  Set-Content -LiteralPath $marker -Value 'keep-config' -NoNewline
+  New-Item -ItemType Directory -Path (Split-Path $configFile) -Force | Out-Null
+  if (Test-Path -LiteralPath $configFile -PathType Leaf) {
+    $hadPriorConfig = $true
+    Copy-Item -LiteralPath $configFile -Destination $configBackup -Force
+  }
+  Set-Content -LiteralPath $configFile -Value $configSentinel -NoNewline
 
   Invoke-Setup $setup
   Assert-Installed
-  if ((Get-Content -LiteralPath $marker -Raw) -cne 'keep-config') { throw 'Upgrade destroyed user configuration' }
+  if ((Get-Content -LiteralPath $configFile -Raw) -cne $configSentinel) { throw 'Upgrade destroyed user configuration' }
   $report.upgrade_or_reinstall = $true
 
   # Installing published binaries on a hosted service account does not prove
   # a WinUI desktop launches, captures microphone input or handles Alt keys.
   Uninstall
   $report.uninstall = $true
-  if ((Get-Content -LiteralPath $marker -Raw) -cne 'keep-config') { throw 'Uninstall deleted user configuration' }
+  if ((Get-Content -LiteralPath $configFile -Raw) -cne $configSentinel) { throw 'Uninstall deleted user configuration' }
   $report.user_data_preserved = $true
+
+  # Prove the tested installer registers startup on a clean machine. A Run
+  # value left by the previous release can survive the upgrade, so the
+  # upgrade-time Assert-Installed above cannot prove the new EXE creates it.
+  # Uninstall removes the value marked uninsdeletevalue, so reinstalling now
+  # verifies first-time registration before leaving the runner clean again.
+  Invoke-Setup $setup
+  Assert-Installed
+  Uninstall
+  if ((Get-Content -LiteralPath $configFile -Raw) -cne $configSentinel) { throw 'Uninstall deleted user configuration' }
 
   $bucketPath = Join-Path $repoRoot 'bucket/nanodictate.json'
   if (Test-Path -LiteralPath $bucketPath) {
@@ -219,7 +236,14 @@ try {
   Write-Host "::notice::Published Windows $($release.tag_name) passed checksum, portable, install, upgrade/reinstall, uninstall and data-retention smoke."
 } finally {
   $report | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $reportFile -Encoding utf8
-  if (Test-Path -LiteralPath $marker) { Remove-Item -LiteralPath $marker -Force }
+  if ($hadPriorConfig) {
+    if (Test-Path -LiteralPath $configBackup -PathType Leaf) {
+      Copy-Item -LiteralPath $configBackup -Destination $configFile -Force
+    }
+  } elseif (Test-Path -LiteralPath $configFile -PathType Leaf) {
+    $current = Get-Content -LiteralPath $configFile -Raw -ErrorAction SilentlyContinue
+    if ($current -ceq $configSentinel) { Remove-Item -LiteralPath $configFile -Force }
+  }
   if ($installedOnce -and (Test-Path -LiteralPath (Join-Path $installDir 'unins000.exe'))) {
     Write-Warning 'Cleaning up installed application after an incomplete smoke'
     try { Uninstall } catch { Write-Warning "Cleanup failed: $_" }
