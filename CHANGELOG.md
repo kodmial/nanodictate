@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.34] - 2026-10-11
+
+
+
+### Fixed
+
+* **windows:** register persistent per-user startup in installer and remove on uninstall ([acbf87c](https://github.com/kodmial/nanodictate/commit/acbf87c6219d79e641e10a6444fc4281ddfaa9bf))
+
 ## [0.1.33] - 2026-10-11
 
 
@@ -554,7 +562,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.33...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.34...HEAD
+[0.1.34]: https://github.com/kodmial/nanodictate/compare/v0.1.33...v0.1.34
 [0.1.33]: https://github.com/kodmial/nanodictate/compare/v0.1.32...v0.1.33
 [0.1.32]: https://github.com/kodmial/nanodictate/compare/v0.1.31...v0.1.32
 [0.1.31]: https://github.com/kodmial/nanodictate/compare/v0.1.30...v0.1.31
