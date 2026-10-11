@@ -120,3 +120,27 @@ pwsh windows/package/make-release.ps1 -Version 0.1.33 -OutDir windows/artifacts
 
 The version above illustrates the command syntax; it is not a claim that
 v0.1.33 has been published.
+
+
+## Post-publication Windows distribution smoke
+
+The separate **Windows distribution smoke** workflow runs on two fresh
+`windows-latest` runners after every successful Release, nightly, and when
+its scripts change. The Inno Setup leg downloads the *public* Windows EXE and
+ZIP, compares both to the release SHA256SUMS.txt, inspects the self-contained
+payload, silently installs/reinstalls/uninstalls the EXE, verifies per-user
+logon startup and config preservation. The Scoop leg verifies the manifest's
+version, pinned SHA256 and public URL, then uses **real Scoop** to add the
+first-party bucket, install and uninstall the published ZIP, checking the same
+product layout and registry ownership. A bounded 20x20s poll handles the
+publisher-to-bucket sync race and fails if it never converges.
+
+The canary does **not** make microphone, interactive GUI, dictation, hotkey,
+SmartScreen reputation, or real Windows 10/11 hardware claims. Authenticode
+is checked on downloaded installer and application EXE, with an explicit
+**UNVERIFIED** report when absent; a passed installation smoke never claims
+signing. Enable trusted publisher signing (Microsoft Store MSIX re-signing or
+Azure Artifact Signing / a publicly trusted code-signing certificate)
+separately and require signature-valid artifacts before claiming a signed
+Windows release. SHA256SUMS alone proves file consistency with the GitHub
+release, **not** publisher authenticity.
