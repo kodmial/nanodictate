@@ -131,6 +131,11 @@ jobs:
           $installProcess = Start-Process -FilePath (Resolve-Path $setup) -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/DIR=$installed") -Wait -PassThru
           if ($installProcess.ExitCode -ne 0) { throw "Silent install failed: $($installProcess.ExitCode)" }
           if (-not (Test-Path (Join-Path $installed "NanoDictate.App.exe"))) { throw "Installer did not deploy app" }
+          $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+          $expectedRun = '"' + (Join-Path $installed "NanoDictate.App.exe") + '" --background'
+          if ((Get-ItemProperty -Path $runKey -Name NanoDictate -ErrorAction SilentlyContinue).NanoDictate -ne $expectedRun) {
+            throw "Silent installer did not register persistent NanoDictate startup"
+          }
           # Same-version reinstall must not fail or overwrite user data.
           $reinstallProcess = Start-Process -FilePath (Resolve-Path $setup) -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/DIR=$installed") -Wait -PassThru
           if ($reinstallProcess.ExitCode -ne 0) { throw "Silent reinstall failed: $($reinstallProcess.ExitCode)" }
@@ -154,12 +159,45 @@ jobs:
           if ($upgradeProcess.ExitCode -ne 0) { throw "Silent upgrade failed: $($upgradeProcess.ExitCode)" }
           if (-not (Test-Path (Join-Path $installed "NanoDictate.App.exe"))) { throw "Upgrade removed installed executable" }
           if ((Get-Content $userConfig -Raw) -ne "preserve") { throw "Upgrade destroyed user data" }
+          if ((Get-ItemProperty -Path $runKey -Name NanoDictate -ErrorAction SilentlyContinue).NanoDictate -ne $expectedRun) {
+            throw "Installer upgrade changed the stable logon executable path"
+          }
           $uninstall = Join-Path $installed "unins000.exe"
           if (-not (Test-Path $uninstall)) { throw "Uninstaller missing" }
           $uninstallProcess = Start-Process -FilePath $uninstall -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") -Wait -PassThru
           if ($uninstallProcess.ExitCode -ne 0) { throw "Silent uninstall failed: $($uninstallProcess.ExitCode)" }
           if (Test-Path (Join-Path $installed "NanoDictate.App.exe")) { throw "Uninstall left deployed executable" }
+          if ((Get-ItemProperty -Path $runKey -Name NanoDictate -ErrorAction SilentlyContinue).NanoDictate) {
+            throw "Uninstall left orphaned auto-start registry entry"
+          }
           if ((Get-Content $userConfig -Raw) -ne "preserve") { throw "Uninstall deleted user data" }
+
+      - name: Verify Scoop bucket lifecycle hooks without user interaction
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $manifest = Get-Content "bucket/nanodictate.json" -Raw | ConvertFrom-Json
+          if (!$manifest.post_install -or !$manifest.pre_uninstall) { throw "Missing first-party Scoop lifecycle hooks" }
+          $scoopdir = Join-Path $env:RUNNER_TEMP "scoop-nanodictate-test"
+          $dir = Join-Path $scoopdir "apps/nanodictate/current"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Copy-Item "windows/artifacts/published-win-x64/NanoDictate.App.exe" (Join-Path $dir "NanoDictate.App.exe")
+          $cmd = "install"
+          $global = $false
+          # Do not launch a real WinUI window in a noninteractive hosted runner.
+          function Start-Process { param($FilePath, $ArgumentList) if (!(Test-Path $FilePath)) { throw "Missing launched app: $FilePath" } }
+          foreach ($line in $manifest.pre_install) { Invoke-Expression $line }
+          foreach ($line in $manifest.post_install) { Invoke-Expression $line }
+          $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+          $wanted = '"' + (Join-Path $dir "NanoDictate.App.exe") + '" --background'
+          if ((Get-ItemProperty -Path $runKey -Name NanoDictate).NanoDictate -ne $wanted) { throw "Scoop autostart not stable" }
+          $cmd = "update"
+          foreach ($line in $manifest.pre_install) { Invoke-Expression $line }
+          foreach ($line in $manifest.post_install) { Invoke-Expression $line }
+          if ((Get-ItemProperty -Path $runKey -Name NanoDictate).NanoDictate -ne $wanted) { throw "Scoop update changed startup path" }
+          $cmd = "uninstall"
+          foreach ($line in $manifest.pre_uninstall) { Invoke-Expression $line }
+          if ((Get-ItemProperty -Path $runKey -Name NanoDictate -ErrorAction SilentlyContinue).NanoDictate) { throw "Scoop uninstall did not remove startup entry" }
 
       - name: Upload Windows distribution smoke artifacts
         uses: actions/upload-artifact@v4
