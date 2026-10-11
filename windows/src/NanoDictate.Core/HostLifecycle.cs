@@ -25,16 +25,18 @@ public sealed class RecordingTrayIcon : ITrayIcon
 }
 
 /// <summary>
-/// Single-instance guard via a global mutex. The second process observes
+/// Single-instance guard via a session-local mutex. The second process observes
 /// <see cref="IsFirst"/> == false and exits instead of double-hooking the
-/// keyboard or double-capturing the microphone.
+/// keyboard or double-capturing the microphone. Session-local (Local\) so
+/// separate Windows login sessions each get their own instance; configuration
+/// and startup registration are per-user.
 /// </summary>
 public sealed class SingleInstance : IDisposable
 {
     private readonly Mutex _mutex;
     private bool _disposed;
 
-    public SingleInstance(string name = "Global\\NanoDictate")
+    public SingleInstance(string name = "Local\\NanoDictate")
     {
         _mutex = new Mutex(initiallyOwned: true, name, out var createdNew);
         IsFirst = createdNew;

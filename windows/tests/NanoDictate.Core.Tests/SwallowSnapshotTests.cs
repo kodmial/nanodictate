@@ -11,7 +11,16 @@ internal sealed class SnapshotCaptureDriver : ICaptureDriver
 {
     public DictationState Snapshot { get; set; } = DictationState.Idle;
 
-    public DictationState State => throw new InvalidOperationException("Hook path must not read State");
+    public int StateReads { get; private set; }
+
+    public DictationState State
+    {
+        get
+        {
+            StateReads++;
+            return Snapshot;
+        }
+    }
 
     public DictationState CachedState => Snapshot;
 
@@ -21,7 +30,8 @@ internal sealed class SnapshotCaptureDriver : ICaptureDriver
 
     public void Start(ulong? triggerNanos = null) => throw new NotSupportedException();
 
-    public PipelineStopResult Stop() => throw new NotSupportedException();
+    public PipelineStopResult Stop() => new(
+        Array.Empty<short>(), Array.Empty<NanoEngine.LiveSegment>(), CaptureMetrics.Empty);
 
     public void Cancel() { }
 
@@ -50,6 +60,8 @@ public sealed class SwallowSnapshotTests
 
         capture.Snapshot = DictationState.Transcribing;
         Assert.True(controller.ShouldSwallowReturnKeyEvent());
+
+        Assert.Equal(0, capture.StateReads);
     }
 
     [Fact]
