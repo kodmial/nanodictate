@@ -40,7 +40,10 @@ try {
     $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
     $autostart = (Get-ItemProperty -Path $key -Name 'NanoDictate' -ErrorAction SilentlyContinue).NanoDictate
     if ($autostart -ne ('"' + $exe + '" --background')) {
-        throw 'Startup registration is missing or points at a different path.'
+        # Also repairs the previously published v0.1.33 installer, which did
+        # not yet register logon startup. Does not require administrator rights.
+        New-Item -Path $key -Force | Out-Null
+        Set-ItemProperty -Path $key -Name 'NanoDictate' -Value ('"' + $exe + '" --background')
     }
     # First use displays the main window; subsequent upgrades resume silently.
     $previousInstall = Test-Path (Join-Path $target 'nanodictate-prior-install-marker')
