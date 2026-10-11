@@ -181,7 +181,11 @@ internal static class NativeMethods
     internal static extern unsafe int nd_vad_feed_samples(IntPtr handle, float* samples, UIntPtr count, uint sampleRate);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int nd_vad_reset(IntPtr handle);
+    internal static extern unsafe int nd_vad_reset(IntPtr handle);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern unsafe int nd_vad_diagnostics(
+        IntPtr handle, float* outFloor, float* outEnter, float* outExit, int* outIsSpeech);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr nd_gain_new();
@@ -193,6 +197,12 @@ internal static class NativeMethods
     internal static extern unsafe float nd_gain_apply(IntPtr handle, float* samples, UIntPtr count, float rms, uint sampleRate);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int nd_gain_reset(IntPtr handle);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern float nd_gain_current_db(IntPtr handle);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr nd_autostop_new();
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
@@ -200,6 +210,19 @@ internal static class NativeMethods
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int nd_autostop_feed(IntPtr handle, float rms, double duration, int isSpeech);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int nd_autostop_reset(IntPtr handle);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern unsafe int nd_live_plan(
+        short* samples, UIntPtr count, uint sampleRate, NdSegmenterConfig* config,
+        NdLiveSegment* outSpecs, UIntPtr capacity, UIntPtr* outWritten);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern unsafe int nd_batch_plan(
+        UIntPtr sampleCount, uint sampleRate, double maxSegment, double overlap,
+        NdBatchChunk* outSpecs, UIntPtr capacity, UIntPtr* outWritten);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr nd_session_new();
@@ -245,4 +268,55 @@ internal static class NativeMethods
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern int nd_latch_cancel(IntPtr handle);
+}
+
+/// <summary>
+/// Portable live-segmentation configuration for <c>nd_live_plan</c>.
+/// Field order matches the Rust <c>NdSegmenterConfig</c> repr(C) layout.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct NdSegmenterConfig
+{
+    public double PauseDuration;
+    public double MinSegment;
+    public double MaxSegment;
+    public double Overlap;
+    public float SilenceRms;
+    [MarshalAs(UnmanagedType.I1)]
+    public bool UseAdaptiveVad;
+    public float EnterMarginDb;
+    public float HysteresisDb;
+    public float MinEnterDb;
+    public float MaxEnterDb;
+}
+
+/// <summary>One live segment plan entry from <c>nd_live_plan</c>.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct NdLiveSegment
+{
+    public UIntPtr Index;
+    public double StartSeconds;
+    public double EndSeconds;
+    public UIntPtr BodyStart;
+    public UIntPtr BodyEnd;
+    [MarshalAs(UnmanagedType.I1)]
+    public bool HasOverlap;
+    public UIntPtr OverlapStart;
+    public UIntPtr OverlapEnd;
+    public double OverlapSeconds;
+}
+
+/// <summary>One batch chunk plan entry from <c>nd_batch_plan</c>.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct NdBatchChunk
+{
+    public UIntPtr Index;
+    public double BodyStartSeconds;
+    public double BodyEndSeconds;
+    public UIntPtr BodyStart;
+    public UIntPtr BodyEnd;
+    [MarshalAs(UnmanagedType.I1)]
+    public bool HasOverlap;
+    public UIntPtr OverlapStart;
+    public UIntPtr OverlapEnd;
 }
