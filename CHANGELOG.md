@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.32] - 2026-10-11
+
+
+
+### Fixed
+
+* P0: Implement Windows activation, cancellation, text delivery and host capabilities ([2e874dd](https://github.com/kodmial/nanodictate/commit/2e874ddf9f8ea14fb4e704e8143b28f23dc47b03))
+
 ## [0.1.31] - 2026-10-11
 
 
@@ -538,7 +546,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.31...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.32...HEAD
+[0.1.32]: https://github.com/kodmial/nanodictate/compare/v0.1.31...v0.1.32
 [0.1.31]: https://github.com/kodmial/nanodictate/compare/v0.1.30...v0.1.31
 [0.1.30]: https://github.com/kodmial/nanodictate/compare/v0.1.29...v0.1.30
 [0.1.29]: https://github.com/kodmial/nanodictate/compare/v0.1.28...v0.1.29
