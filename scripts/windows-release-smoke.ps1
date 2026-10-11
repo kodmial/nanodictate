@@ -25,7 +25,8 @@ if (-not $env:GH_TOKEN) { throw "GH_TOKEN is required to query and download rele
 $root = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [IO.Path]::GetTempPath() }
 $work = Join-Path $root ("nanodictate-release-smoke-" + [guid]::NewGuid().ToString('N'))
 $installDir = Join-Path $work 'installed'
-$reportFile = Join-Path 'windows/artifacts' 'windows-published-smoke.json'
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$reportFile = Join-Path $repoRoot 'windows/artifacts/windows-published-smoke.json'
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $marker = Join-Path $env:APPDATA ("NanoDictate\release-smoke-" + [guid]::NewGuid().ToString('N') + '.txt')
 $installedOnce = $false
@@ -62,9 +63,9 @@ function Assert-Asset([object]$release, [string]$name) {
 function Get-VerifiedAssets([object]$release, [string]$folder, [string[]]$names) {
   New-Item -ItemType Directory -Path $folder -Force | Out-Null
   foreach ($name in @('SHA256SUMS.txt') + $names) { Assert-Asset $release $name }
-  $args = @('release','download',$release.tag_name,'--repo',$Repository,'--dir',$folder,'--clobber')
-  foreach ($name in @('SHA256SUMS.txt') + $names) { $args += @('--pattern',$name) }
-  & gh @args
+  $ghArgs = @('release','download',$release.tag_name,'--repo',$Repository,'--dir',$folder,'--clobber')
+  foreach ($name in @('SHA256SUMS.txt') + $names) { $ghArgs += @('--pattern',$name) }
+  & gh @ghArgs
   if ($LASTEXITCODE -ne 0) { throw "Failed to download $($release.tag_name) from GitHub Releases" }
   $sumFile = Join-Path $folder 'SHA256SUMS.txt'
   $expected = @{}
@@ -160,7 +161,7 @@ try {
   $candidates = @()
   foreach ($candidate in $releases) {
     if ($candidate.draft -or $candidate.prerelease) { continue }
-    if (-not $candidate.tag_name.StartsWith('v')) { continue }
+    if ($candidate.tag_name -notmatch '^v\d+\.\d+\.\d+$') { continue }
     $parsed = $null
     if (-not [version]::TryParse($candidate.tag_name.Substring(1), [ref]$parsed)) { continue }
     if ($parsed -ge [version]$versionText) { continue }
@@ -200,7 +201,7 @@ try {
   if ((Get-Content -LiteralPath $marker -Raw) -cne 'keep-config') { throw 'Uninstall deleted user configuration' }
   $report.user_data_preserved = $true
 
-  $bucketPath = 'bucket/nanodictate.json'
+  $bucketPath = Join-Path $repoRoot 'bucket/nanodictate.json'
   if (Test-Path -LiteralPath $bucketPath) {
     $bucket = Get-Content -LiteralPath $bucketPath -Raw | ConvertFrom-Json
     if ($bucket.version -eq $versionText) {
