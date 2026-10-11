@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!-- Windows-only WinUI 3 entrypoint. Built only on Windows
-       (dotnet build windows/src/NanoDictate.App on windows-latest);
-       the cross-platform solution stays on net8.0 so Linux/macOS
+  <!-- Windows-only WinUI 3 entrypoint. Build with
+       windows/package/build-winui.ps1 (Visual Studio MSBuild for MRT/PRI).
+       The cross-platform solution stays on net8.0 so Linux/macOS
        verification never needs the Windows App SDK. -->
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
