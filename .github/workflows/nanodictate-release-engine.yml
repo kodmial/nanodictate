@@ -389,6 +389,19 @@ jobs:
         run: |
           set -euo pipefail
 
+          # A main push superseded by a newer main commit is no longer a
+          # release candidate. Fail immediately instead of polling for 90m.
+          require_live_source() {
+            if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
+              local live_sha
+              live_sha="$(gh api "repos/$REPO/branches/main" --jq '.commit.sha')"
+              if [[ "$live_sha" != "$SHA" ]]; then
+                echo "::notice::Release source $SHA was superseded by main $live_sha. Stop without publishing."
+                exit 1
+              fi
+            fi
+          }
+          require_live_source
           RUN_ID=""
           EVENT="push"
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
@@ -399,6 +412,7 @@ jobs:
           # seconds after Release, so allow a bounded discovery window
           # before declaring the gate missing.
           for _ in {1..40}; do
+            require_live_source
             while read -r CANDIDATE_ID; do
               [[ -n "$CANDIDATE_ID" ]] || continue
               # Jobs from a reusable workflow are exposed by GitHub as
