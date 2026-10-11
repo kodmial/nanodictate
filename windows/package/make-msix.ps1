@@ -39,7 +39,16 @@ $Stage = Join-Path $OutDir "msix-stage"
 if (Test-Path $Stage) { Remove-Item $Stage -Recurse -Force }
 New-Item -ItemType Directory -Force -Path "$Stage/NanoDictate.App" | Out-Null
 
-Copy-Item "windows/src/NanoDictate.App/bin/$Configuration/net8.0-windows10.0.19041.0/win-x64/*" "$Stage/NanoDictate.App/" -Recurse -Force
+# Visual Studio MSBuild may insert the x64 platform directory into OutputPath.
+# Require the actual app executable; never create a seemingly valid ZIP from
+# an empty, stale or architecture-mismatched output directory.
+$AppOutputCandidates = @(
+  "windows/src/NanoDictate.App/bin/x64/$Configuration/net8.0-windows10.0.19041.0/win-x64",
+  "windows/src/NanoDictate.App/bin/$Configuration/net8.0-windows10.0.19041.0/win-x64"
+)
+$AppOutput = $AppOutputCandidates | Where-Object { Test-Path (Join-Path $_ "NanoDictate.App.exe") } | Select-Object -First 1
+if (-not $AppOutput) { throw "Missing published WinUI x64 executable in expected output locations: $($AppOutputCandidates -join ', ')" }
+Copy-Item "$AppOutput/*" "$Stage/NanoDictate.App/" -Recurse -Force
 Copy-Item $Dll "$Stage/NanoDictate.App/nanodictate_core.dll" -Force
 New-Item -ItemType Directory -Force -Path "$Stage/Assets" | Out-Null
 $AssetSource = "windows/package/Assets"
