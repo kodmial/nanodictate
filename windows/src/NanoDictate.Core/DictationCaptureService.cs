@@ -54,6 +54,13 @@ public sealed class DictationCaptureService : IDisposable
 
     public DictationState State => _pipeline.State;
 
+    /// <summary>
+    /// Lock-free session-state snapshot for the keyboard hook. Mirrors
+    /// <see cref="RealtimeAudioPipeline.CachedState"/> so the swallow decision
+    /// never blocks on audio work holding the pipeline lock.
+    /// </summary>
+    public DictationState CachedState => _pipeline.CachedState;
+
     public CaptureMetrics Snapshot() => _pipeline.Snapshot();
 
     /// <summary>
