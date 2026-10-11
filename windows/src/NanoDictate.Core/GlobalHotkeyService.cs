@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Threading.Channels;
 
 namespace NanoDictate.Core;
 
@@ -70,6 +71,19 @@ public sealed class GlobalHotkeyService : IDisposable
     private LowLevelKeyboardProc? _proc;
     private int _hookFailures;
 
+    // Per-key down-state for autorepeat detection: KBDLLHOOKSTRUCT.flags has
+    // no repeat bit (0x4000 belongs to WM_KEYDOWN lParam, which a low-level
+    // hook never receives), so a held key is a repeat when already present.
+    private readonly HashSet<uint> _downKeys = new();
+
+    // Dedicated worker for delegate actions (capture start/stop, SendInput):
+    // the hook thread only computes the swallow decision synchronously and
+    // queues the actions, so slow I/O never trips LowLevelHooksTimeout.
+    private readonly Channel<Action> _dispatchQueue;
+    private readonly CancellationTokenSource _dispatchCts = new();
+    private readonly Task _dispatchTask;
+    private int _dispatchFailures;
+
     public GlobalHotkeyService(double doubleTapMaxInterval = 0.4)
     {
         if (doubleTapMaxInterval <= 0)
@@ -78,6 +92,8 @@ public sealed class GlobalHotkeyService : IDisposable
         }
         _maxInterval = doubleTapMaxInterval;
         _detector = new DoubleAltDetector(doubleTapMaxInterval);
+        _dispatchQueue = Channel.CreateUnbounded<Action>(new UnboundedChannelOptions { SingleReader = true });
+        _dispatchTask = Task.Run(() => PumpDispatchQueueAsync(_dispatchCts.Token));
     }
 
     public IGlobalHotkeyDelegate? Delegate { get; set; }
@@ -93,11 +109,27 @@ public sealed class GlobalHotkeyService : IDisposable
     /// <summary>Consecutive hook-install failures (observability for recovery).</summary>
     public int HookFailures => Volatile.Read(ref _hookFailures);
 
+    /// <summary>Delegate-action failures on the dispatch worker (never counted as hook failures).</summary>
+    public int DispatchFailures => Volatile.Read(ref _dispatchFailures);
+
     /// <summary>
     /// Pure routing core. Returns true when the caller must swallow the event
     /// (physical Return outside idle). Safe to call from tests on any OS.
+    /// Delegate callbacks run synchronously here; the Win32 hook path instead
+    /// queues them on the dispatch worker (see <see cref="HookCallback"/>).
     /// </summary>
     public bool HandleKeyEvent(HotkeyEvent evt)
+    {
+        var (swallow, dispatch) = Decide(evt);
+        dispatch?.Invoke();
+        return swallow;
+    }
+
+    /// <summary>
+    /// Computes the swallow decision and captures the delegate actions without
+    /// running them, so the hook thread can defer slow work to the worker.
+    /// </summary>
+    private (bool Swallow, Action? Dispatch) Decide(HotkeyEvent evt)
     {
         IGlobalHotkeyDelegate? sink;
         bool fireDouble = false;
@@ -167,27 +199,34 @@ public sealed class GlobalHotkeyService : IDisposable
         }
         // Delegate callbacks run outside the lock: a delegate may call back
         // into ExpirePendingForTests/Stop without deadlocking.
-        if (firePendingCancelled)
+        Action? dispatch = null;
+        if (firePendingCancelled || fireDouble || fireFirst || fireCancel || fireEnter)
         {
-            sink?.AltPendingCancelled();
+            dispatch = () =>
+            {
+                if (firePendingCancelled)
+                {
+                    sink?.AltPendingCancelled();
+                }
+                if (fireDouble)
+                {
+                    sink?.AltDoubleTapped();
+                }
+                else if (fireFirst)
+                {
+                    sink?.AltFirstTapDetected();
+                }
+                if (fireCancel)
+                {
+                    sink?.CancelKeyPressed();
+                }
+                if (fireEnter)
+                {
+                    sink?.EnterKeyPressed();
+                }
+            };
         }
-        if (fireDouble)
-        {
-            sink?.AltDoubleTapped();
-        }
-        else if (fireFirst)
-        {
-            sink?.AltFirstTapDetected();
-        }
-        if (fireCancel)
-        {
-            sink?.CancelKeyPressed();
-        }
-        if (fireEnter)
-        {
-            sink?.EnterKeyPressed();
-        }
-        return swallow;
+        return (swallow, dispatch);
     }
 
     /// <summary>Deterministic pending-expiry for tests (no wall-clock wait).</summary>
@@ -334,16 +373,34 @@ public sealed class GlobalHotkeyService : IDisposable
             if (isDown || isUp)
             {
                 var data = Marshal.PtrToStructure<KbdLlHookStruct>(lParam);
+                bool isRepeat;
+                lock (_downKeys)
+                {
+                    if (isDown)
+                    {
+                        isRepeat = !_downKeys.Add(data.VkCode);
+                    }
+                    else
+                    {
+                        _downKeys.Remove(data.VkCode);
+                        isRepeat = false;
+                    }
+                }
                 var evt = new HotkeyEvent(
                     (int)data.VkCode,
                     isDown,
-                    (data.Flags & 0x4000) != 0,
+                    isRepeat,
                     new IntPtr(unchecked((nint)data.DwExtraInfo)),
                     CurrentMonotonicSecs());
                 bool swallow = false;
                 try
                 {
-                    swallow = HandleKeyEvent(evt);
+                    var (decision, dispatch) = Decide(evt);
+                    swallow = decision;
+                    if (dispatch is not null)
+                    {
+                        _dispatchQueue.Writer.TryWrite(dispatch);
+                    }
                 }
                 catch
                 {
@@ -373,6 +430,33 @@ public sealed class GlobalHotkeyService : IDisposable
         }
     }
 
+    /// <summary>
+    /// Dedicated worker: runs queued delegate actions off the hook thread.
+    /// Action failures are counted as <see cref="DispatchFailures"/>, never
+    /// as <see cref="HookFailures"/>.
+    /// </summary>
+    private async Task PumpDispatchQueueAsync(CancellationToken token)
+    {
+        try
+        {
+            await foreach (var action in _dispatchQueue.Reader.ReadAllAsync(token).ConfigureAwait(false))
+            {
+                try
+                {
+                    action();
+                }
+                catch
+                {
+                    Interlocked.Increment(ref _dispatchFailures);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Shutdown: remaining queued actions are dropped with the host.
+        }
+    }
+
     public void Dispose()
     {
         lock (_gate)
@@ -388,6 +472,20 @@ public sealed class GlobalHotkeyService : IDisposable
                 UnhookWindowsHookEx(_hookId);
             }
             _hookId = IntPtr.Zero;
+        }
+        try
+        {
+            _dispatchCts.Cancel();
+            _dispatchQueue.Writer.Complete();
+            _dispatchTask.Wait(TimeSpan.FromSeconds(5));
+        }
+        catch
+        {
+            // Best effort: the host is tearing down.
+        }
+        finally
+        {
+            _dispatchCts.Dispose();
         }
     }
 

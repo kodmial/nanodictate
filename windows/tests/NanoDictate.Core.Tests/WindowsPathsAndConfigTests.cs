@@ -69,6 +69,22 @@ public sealed class WindowsPathsAndConfigTests
     }
 
     [Fact]
+    public void PortableConfigRejectsUnknownInsertMethod()
+    {
+        var toml = "insert_method = \"clipbord\"\n";
+        var path = Path.Combine(Path.GetTempPath(), $"nanodictate-host-{Guid.NewGuid():N}.toml");
+        File.WriteAllText(path, toml);
+        try
+        {
+            Assert.Throws<NanoException>(() => PortableConfig.Load(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
     public void PortableConfigDefaultsMatchExample()
     {
         var config = PortableConfig.Load(FindExampleConfig());

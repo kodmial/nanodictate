@@ -83,8 +83,8 @@ public static class StartupManager
             throw new NanoException(-1, "executable path must not be empty");
         }
 #pragma warning disable CA1416
-        using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
-            @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", writable: true)
+        using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(
+            @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run")
             ?? throw new NanoException(-1, "cannot open the Run registry key");
         key.SetValue(RunValueName, $"\"{executablePath}\" --background");
 #pragma warning restore CA1416

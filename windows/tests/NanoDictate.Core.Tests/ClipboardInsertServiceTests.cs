@@ -60,6 +60,25 @@ public sealed class ClipboardInsertServiceTests
         Assert.Equal("original", bridge.Stored);
     }
 
+    [Fact]
+    public void TimerSchedulerFiresRestore()
+    {
+        using var fired = new ManualResetEventSlim();
+        var scheduler = new TimerRestoreScheduler();
+        scheduler.Schedule(() => fired.Set(), TimeSpan.FromMilliseconds(10));
+        Assert.True(fired.Wait(TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
+    public void TimerSchedulerSwallowsRestoreErrors()
+    {
+        var scheduler = new TimerRestoreScheduler();
+        // Must not throw synchronously, and the failing callback must not
+        // take down the host (the wait lets the timer fire first).
+        scheduler.Schedule(() => throw new InvalidOperationException("clipboard busy"), TimeSpan.FromMilliseconds(10));
+        Thread.Sleep(500);
+    }
+
     private sealed class ManualScheduler : IRestoreScheduler
     {
         private readonly List<Action> _list;

@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using NanoDictate.Core;
 using Xunit;
 
@@ -55,6 +56,26 @@ internal sealed class FakeInsertionSink : IInsertionSink
     public void DeleteText(string insertedText) => DeletedGraphemes += TextChunker.CountTextElements(insertedText);
     public void DeleteGraphemes(int count) => DeletedGraphemes += count;
     public void PostEnter() => Enters++;
+}
+
+internal sealed class ThrowingInsertionSink : IInsertionSink
+{
+    public void Insert(string text, InsertMethod method) => throw new NanoException(-1, "SendInput failed to deliver events");
+    public void DeleteText(string insertedText) { }
+    public void DeleteGraphemes(int count) { }
+    public void PostEnter() { }
+}
+
+internal sealed class ComFailingCaptureDriver : ICaptureDriver
+{
+    public DictationState State => DictationState.Idle;
+    public bool IsRunning => false;
+    public bool IsCaptureReady => false;
+    public void Start(ulong? triggerNanos = null) =>
+        throw new COMException("COM activation failed", unchecked((int)0x80070005));
+    public PipelineStopResult Stop() => throw new NotSupportedException();
+    public void Cancel() { }
+    public void FinishTranscription() { }
 }
 
 /// <summary>
@@ -147,6 +168,37 @@ public sealed class DictationControllerTests
         controller.AltDoubleTapped();
         Assert.False(controller.CompleteWithTranscript("needs review"));
         Assert.Empty(sink.Inserts);
+    }
+
+    [Fact]
+    public void InsertionFailureFinishesTranscriptionAndClearsEnter()
+    {
+        var capture = new FakeCaptureDriver();
+        var sink = new ThrowingInsertionSink();
+        using var controller = new DictationController(capture, sink);
+        capture.Start();
+        controller.EnterKeyPressed();
+        Assert.Equal(DictationState.Transcribing, capture.State);
+        Assert.True(controller.HasPendingEnter);
+        Assert.Throws<NanoException>(() => controller.CompleteWithTranscript("hello"));
+        Assert.Equal(DictationState.Idle, capture.State);
+        Assert.False(controller.HasPendingEnter);
+        Assert.False(controller.ShouldSwallowReturnKeyEvent());
+    }
+
+    [Fact]
+    public void ComActivationFailureMapsHResultToDeniedGuidance()
+    {
+        var capture = new ComFailingCaptureDriver();
+        var sink = new FakeInsertionSink();
+        using var controller = new DictationController(capture, sink);
+        MicStartOutcome? outcome = null;
+        controller.MicStartAttempted += o => outcome = o;
+        Assert.Throws<COMException>(() => controller.AltDoubleTapped());
+        Assert.NotNull(outcome);
+        Assert.False(outcome!.Started);
+        Assert.Equal(MicFailureKind.Denied, outcome.Failure);
+        Assert.Contains("microphone", outcome.Guidance, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

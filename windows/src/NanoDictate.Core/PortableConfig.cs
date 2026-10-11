@@ -102,8 +102,7 @@ public sealed class PortableConfig
                     case "active_provider": active = value; break;
                     case "language": language = value; break;
                     case "insert_method":
-                        try { insertMethod = InsertMethodParser.Parse(value); }
-                        catch (NanoException) { insertMethod = InsertMethod.Direct; }
+                        insertMethod = InsertMethodParser.Parse(value);
                         break;
                     case "double_alt_max_interval":
                         if (double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var d) && d > 0 && d <= 5)

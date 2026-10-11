@@ -1,3 +1,5 @@
+using System.Reflection;
+using System.Runtime.InteropServices;
 using NanoDictate.Core;
 using Xunit;
 
@@ -114,6 +116,22 @@ public sealed class TextInsertionTests
         var inserter = new TextInserter(sender, new CountingSleeper());
         inserter.PostReturn();
         Assert.Equal(1, sender.Enters);
+    }
+
+    [Fact]
+    public void SendInputStructsMatchNativeInputSize()
+    {
+        // SendInput rejects cbSize != sizeof(INPUT) (40 bytes on x64).
+        if (IntPtr.Size != 8)
+        {
+            return;
+        }
+        var direct = typeof(WindowsInputSender).GetNestedType("Input", BindingFlags.NonPublic);
+        Assert.NotNull(direct);
+        Assert.Equal(40, Marshal.SizeOf(direct!));
+        var paste = typeof(WindowsClipboardBridge).GetNestedType("CtrlVInput", BindingFlags.NonPublic);
+        Assert.NotNull(paste);
+        Assert.Equal(40, Marshal.SizeOf(paste!));
     }
 
     [Fact]

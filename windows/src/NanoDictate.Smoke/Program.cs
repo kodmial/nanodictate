@@ -311,6 +311,7 @@ internal static class Program
         var poster = new CancellableEnterPoster();
         var fired = 0;
         poster.Action = () => fired++;
+        poster.Delay = Timeout.InfiniteTimeSpan;
         poster.Schedule();
         if (!poster.FireForTests() || fired != 1)
         {

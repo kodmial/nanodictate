@@ -58,7 +58,7 @@ public static class MicPrivacyGuide
     public static string MessageFor(MicFailureKind kind) => kind switch
     {
         MicFailureKind.Denied =>
-            "Microphone access is blocked. Allow NanoDictate in Settings > Privacy & security > Microphone, then try again.",
+            "Microphone access is blocked. Enable Microphone access and Let desktop apps access your microphone in Settings > Privacy & security > Microphone, then try again.",
         MicFailureKind.NotFound =>
             "No microphone was found. Connect an input device and check Settings > System > Sound > Input.",
         MicFailureKind.Disconnected =>

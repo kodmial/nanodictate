@@ -228,7 +228,7 @@ public sealed class WindowsInputSender : IInputSender
             {
                 VirtualKey = vk,
                 ScanCode = 0,
-                Flags = (keyUp ? KeyeventfKeyup : 0) | KeyeventfScancode,
+                Flags = keyUp ? KeyeventfKeyup : 0,
                 Time = 0,
                 ExtraInfo = new IntPtr(unchecked((nint)extraInfo)),
             },
@@ -246,7 +246,20 @@ public sealed class WindowsInputSender : IInputSender
     private struct InputData
     {
         [FieldOffset(0)]
+        public MouseInput Mouse;
+        [FieldOffset(0)]
         public KeyboardInput Keyboard;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MouseInput
+    {
+        public int Dx;
+        public int Dy;
+        public uint MouseData;
+        public uint Flags;
+        public uint Time;
+        public IntPtr ExtraInfo;
     }
 
     [StructLayout(LayoutKind.Sequential)]

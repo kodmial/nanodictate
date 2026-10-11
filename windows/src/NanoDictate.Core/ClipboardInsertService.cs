@@ -25,10 +25,42 @@ public sealed class ImmediateRestoreScheduler : IRestoreScheduler
 
 public sealed class TimerRestoreScheduler : IRestoreScheduler
 {
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Timer, byte> _live = new();
+
     public void Schedule(Action restore, TimeSpan delay)
     {
-        var timer = new Timer(_ => restore(), null, delay, Timeout.InfiniteTimeSpan);
-        _ = timer;
+        Timer? timer = null;
+        timer = new Timer(state =>
+        {
+            try
+            {
+                restore();
+            }
+            catch (Exception)
+            {
+                // Clipboard busy or unavailable: never crash the host from a timer callback.
+            }
+            finally
+            {
+                if (timer is not null && _live.TryRemove(timer, out _))
+                {
+                    timer.Dispose();
+                }
+            }
+        }, null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        _live[timer] = 0;
+        try
+        {
+            timer.Change(delay, Timeout.InfiniteTimeSpan);
+        }
+        catch
+        {
+            if (_live.TryRemove(timer, out _))
+            {
+                timer.Dispose();
+            }
+            throw;
+        }
     }
 }
 
@@ -267,16 +299,21 @@ public sealed class WindowsClipboardBridge : IClipboardBridge
         ExtraInfo = IntPtr.Zero,
     };
 
-    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit, Size = 40)]
     private struct CtrlVInput
     {
+        [System.Runtime.InteropServices.FieldOffset(0)]
         public uint Type;
+        [System.Runtime.InteropServices.FieldOffset(8)]
         public ushort VirtualKey;
+        [System.Runtime.InteropServices.FieldOffset(10)]
         public ushort ScanCode;
+        [System.Runtime.InteropServices.FieldOffset(12)]
         public uint Flags;
+        [System.Runtime.InteropServices.FieldOffset(16)]
         public uint Time;
+        [System.Runtime.InteropServices.FieldOffset(24)]
         public IntPtr ExtraInfo;
-        private readonly ulong _pad;
     }
 
     [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]

@@ -25,6 +25,14 @@ public sealed class MicPrivacyTests
     }
 
     [Fact]
+    public void DeniedGuidanceNamesDesktopAppToggle()
+    {
+        var message = MicPrivacyGuide.MessageFor(MicFailureKind.Denied);
+        Assert.Contains("Microphone", message);
+        Assert.Contains("Let desktop apps access your microphone", message);
+    }
+
+    [Fact]
     public void RequestPolicyAllowsThenBlocksAfterThreeTimeouts()
     {
         var policy = new MicRequestPolicy(statePath: null);

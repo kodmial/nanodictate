@@ -1,5 +1,7 @@
 namespace NanoDictate.Core;
 
+using System.Runtime.InteropServices;
+
 /// <summary>Capture driver seam (production: <see cref="DictationCaptureService"/>).</summary>
 public interface ICaptureDriver
 {
@@ -302,7 +304,9 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
         {
             var kind = ex is NanoException nano
                 ? MicFailureClassifier.Classify(nano)
-                : MicFailureKind.Other;
+                : ex is COMException com
+                    ? MicFailureClassifier.Classify(com.HResult, ex.Message)
+                    : MicFailureKind.Other;
             var nowSecs = (DateTime.UtcNow - DateTime.UnixEpoch).TotalSeconds;
             bool allow = true;
             try
@@ -379,7 +383,20 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
                 return false;
             }
         }
-        _insertions.Insert(transcript, InsertMethod);
+        try
+        {
+            _insertions.Insert(transcript, InsertMethod);
+        }
+        catch
+        {
+            lock (_gate)
+            {
+                _pendingEnter = false;
+            }
+            _enterLatch.Cancel();
+            _capture.FinishTranscription();
+            throw;
+        }
         lock (_gate)
         {
             _lastInserted = transcript;
