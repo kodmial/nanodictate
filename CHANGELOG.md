@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.31] - 2026-10-11
+
+
+
+### Fixed
+
+* P0: Implement Windows-native audio capture and shared Rust session pipeline ([2c730f0](https://github.com/kodmial/nanodictate/commit/2c730f0003289c0c1f39ef8ad87b4a1337ef9da2))
+* **review:** keep heuristic issue assessment advisory to prevent no-progress review loops ([6e9b39b](https://github.com/kodmial/nanodictate/commit/6e9b39b34dd683cdfc9bf44215f1a457aeaf6d7b))
+
 ## [0.1.30] - 2026-10-10
 
 
@@ -529,7 +538,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.30...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.31...HEAD
+[0.1.31]: https://github.com/kodmial/nanodictate/compare/v0.1.30...v0.1.31
 [0.1.30]: https://github.com/kodmial/nanodictate/compare/v0.1.29...v0.1.30
 [0.1.29]: https://github.com/kodmial/nanodictate/compare/v0.1.28...v0.1.29
 [0.1.28]: https://github.com/kodmial/nanodictate/compare/v0.1.27...v0.1.28
