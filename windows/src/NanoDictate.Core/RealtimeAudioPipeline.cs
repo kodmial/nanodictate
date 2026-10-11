@@ -196,6 +196,10 @@ public sealed class RealtimeAudioPipeline : IDisposable
         IReadOnlyList<short>? stopToFire = null;
         lock (_gate)
         {
+            if (!_sessionLive)
+            {
+                return;
+            }
             if (_convertScratch.Length < capacity)
             {
                 _convertScratch = new float[capacity];
