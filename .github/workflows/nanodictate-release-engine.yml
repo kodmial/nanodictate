@@ -1261,6 +1261,26 @@ jobs:
             gh pr edit "$PR" --repo "$GH_REPO" --remove-label "autorelease: pending" --add-label "autorelease: tagged"
           done
 
+  # Equivalent of our Homebrew tap, but hosted in this repository. Update only
+  # after the single macOS+Windows GitHub Release has been fully published.
+  scoop-manifest:
+    name: Publish first-party Scoop bucket
+    needs: [release, preflight]
+    if: ${{ needs.release.result == 'success' && needs.preflight.outputs.skip_release != 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout exact release revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Verify Windows release bytes and update bucket in main
+        env:
+          GH_TOKEN: ${{ secrets.TAP_PAT || github.token }}
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+        run: bash scripts/update-scoop-manifest.sh "$RELEASE_VERSION"
+
   # Post-release: regenerate the Homebrew formula + MacPorts Portfile from the
   # .tpl sources (real sha256 of the published tarballs), open a
   # `chore/release-manifests-v<version>` PR into main with them (plus the
