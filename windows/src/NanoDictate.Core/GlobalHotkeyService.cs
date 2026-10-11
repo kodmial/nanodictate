@@ -137,6 +137,7 @@ public sealed class GlobalHotkeyService : IDisposable
         bool firePendingCancelled = false;
         bool fireCancel = false;
         bool fireEnter = false;
+        bool needSwallowDecision = false;
         bool swallow = false;
         lock (_gate)
         {
@@ -186,7 +187,7 @@ public sealed class GlobalHotkeyService : IDisposable
                     firePendingCancelled = true;
                 }
                 fireEnter = true;
-                swallow = sink?.ShouldSwallowReturnKeyEvent() ?? false;
+                needSwallowDecision = true;
             }
             else if (_detector.IsPending)
             {
@@ -196,6 +197,12 @@ public sealed class GlobalHotkeyService : IDisposable
                 CancelExpiryLocked();
                 firePendingCancelled = true;
             }
+        }
+        // The swallow decision runs outside the lock on the lock-free session
+        // snapshot, so the hook thread never waits on detector or audio work.
+        if (needSwallowDecision)
+        {
+            swallow = sink?.ShouldSwallowReturnKeyEvent() ?? false;
         }
         // Delegate callbacks run outside the lock: a delegate may call back
         // into ExpirePendingForTests/Stop without deadlocking.

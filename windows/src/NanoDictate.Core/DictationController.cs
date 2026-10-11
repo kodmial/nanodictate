@@ -6,6 +6,13 @@ using System.Runtime.InteropServices;
 public interface ICaptureDriver
 {
     DictationState State { get; }
+
+    /// <summary>
+    /// Lock-free session-state snapshot for the keyboard hook. Defaults to
+    /// <see cref="State"/>; production drivers override with a volatile read
+    /// that never blocks on audio work.
+    /// </summary>
+    DictationState CachedState => State;
     bool IsRunning { get; }
     bool IsCaptureReady { get; }
     void Start(ulong? triggerNanos = null);
@@ -19,6 +26,7 @@ public sealed class CaptureDriverAdapter : ICaptureDriver
     private readonly DictationCaptureService _inner;
     public CaptureDriverAdapter(DictationCaptureService inner) => _inner = inner;
     public DictationState State => _inner.State;
+    public DictationState CachedState => _inner.CachedState;
     public bool IsRunning => _inner.IsRunning;
     public bool IsCaptureReady => _inner.IsCaptureReady;
     public void Start(ulong? triggerNanos = null) => _inner.Start(triggerNanos);
@@ -282,7 +290,12 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
         // Transcribing: no-op. Idle never reaches here per contract.
     }
 
-    public bool ShouldSwallowReturnKeyEvent() => _capture.State != DictationState.Idle;
+    /// <summary>
+    /// Hook-thread swallow decision. Uses the lock-free <see
+    /// cref="ICaptureDriver.CachedState"/> snapshot so the low-level hook never
+    /// blocks on audio conversion or VAD work holding the pipeline lock.
+    /// </summary>
+    public bool ShouldSwallowReturnKeyEvent() => _capture.CachedState != DictationState.Idle;
 
     // -- Capture ----------------------------------------------------------
 

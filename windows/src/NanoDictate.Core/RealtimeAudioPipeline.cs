@@ -51,6 +51,7 @@ public sealed class RealtimeAudioPipeline : IDisposable
     private AutoStopHandle? _stop;
 
     private bool _sessionLive;
+    private int _cachedState = (int)DictationState.Idle;
     private ulong _generation;
     private bool _harvestable;
     private bool _captureReadyFired;
@@ -109,6 +110,26 @@ public sealed class RealtimeAudioPipeline : IDisposable
         get { lock (_gate) { return _session.State; } }
     }
 
+    /// <summary>
+    /// Lock-free snapshot of the Rust session state for the low-level
+    /// keyboard hook. Updated under <c>_gate</c> whenever the session state
+    /// changes; read with a volatile load so the hook thread never blocks on
+    /// audio conversion or VAD work holding <c>_gate</c>.
+    /// </summary>
+    public DictationState CachedState => (DictationState)Volatile.Read(ref _cachedState);
+
+    private void RefreshStateSnapshotLocked()
+    {
+        try
+        {
+            Volatile.Write(ref _cachedState, (int)_session.State);
+        }
+        catch
+        {
+            // Best effort: the authoritative State property still surfaces errors.
+        }
+    }
+
     public int BlocksIngested
     {
         get { lock (_gate) { return _blocksIngested; } }
@@ -162,6 +183,7 @@ public sealed class RealtimeAudioPipeline : IDisposable
             _engineStartedNanos = CaptureClock.Nanos;
             _firstBufferNanos = 0;
             _sessionLive = true;
+            RefreshStateSnapshotLocked();
             _started = true;
             try
             {
@@ -316,6 +338,7 @@ public sealed class RealtimeAudioPipeline : IDisposable
         if (!_captureReadyFired)
         {
             _session.OnEvent(SessionEvent.FirstBuffer, _generation);
+            RefreshStateSnapshotLocked();
             _firstBufferNanos = CaptureClock.Nanos;
             _captureReadyFired = true;
             firedReady = true;
@@ -351,6 +374,7 @@ public sealed class RealtimeAudioPipeline : IDisposable
             HarvestTailLocked();
             _session.OnEvent(SessionEvent.StopRequested, _generation);
             _sessionLive = false;
+            RefreshStateSnapshotLocked();
             _harvestable = false;
             samples = new List<short>(_collected);
             metrics = SnapshotLocked();
@@ -399,6 +423,7 @@ public sealed class RealtimeAudioPipeline : IDisposable
         lock (_gate)
         {
             _session.OnEvent(SessionEvent.TranscriptionDone, _generation);
+            RefreshStateSnapshotLocked();
         }
     }
 
@@ -416,6 +441,7 @@ public sealed class RealtimeAudioPipeline : IDisposable
             }
             _session.OnEvent(SessionEvent.Cancelled, _generation);
             _sessionLive = false;
+            RefreshStateSnapshotLocked();
         }
     }
 
@@ -435,6 +461,7 @@ public sealed class RealtimeAudioPipeline : IDisposable
             }
             _session.OnEvent(SessionEvent.Cancelled, _generation);
             _sessionLive = false;
+            RefreshStateSnapshotLocked();
             _harvestable = true;
         }
     }
@@ -512,6 +539,7 @@ public sealed class RealtimeAudioPipeline : IDisposable
             }
             _session.OnEvent(SessionEvent.EngineFailed, _generation);
             _sessionLive = false;
+            RefreshStateSnapshotLocked();
         }
     }
 
