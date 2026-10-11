@@ -16,6 +16,7 @@ public sealed partial class MainWindow : Window
     private readonly HostApp _app;
     private readonly GlobalHotkeyService _hotkeys;
     private bool _exiting;
+    private bool _micPrivacyOpened;
     private readonly TextBlock _status;
     private readonly ComboBox _providers;
     private readonly CheckBox _review;
@@ -61,7 +62,19 @@ public sealed partial class MainWindow : Window
         Content = panel;
         _app.Controller.ReviewPrompt = new WindowReviewPrompt(DispatcherQueue, panel);
         _app.Controller.MicStartAttempted += outcome => DispatcherQueue.TryEnqueue(() =>
-            _status.Text = outcome.Started ? "recording" : $"microphone: {outcome.Guidance ?? "unavailable"}");
+        {
+            _status.Text = outcome.Started ? "recording" : $"microphone: {outcome.Guidance ?? "unavailable"}";
+            if (!outcome.Started && outcome.Failure == MicFailureKind.Denied && !_micPrivacyOpened)
+            {
+                // Unpackaged Windows desktop apps use the OS-wide desktop-app
+                // microphone privacy switch, not a per-app consent broker.
+                // Open the exact privacy page once so consent is the only
+                // action requested of a user who has disabled microphone access.
+                _micPrivacyOpened = true;
+                try { MicPrivacyGuide.OpenSettings(); }
+                catch (Exception ex) { _status.Text = $"Enable microphone access in Windows Settings: {ex.Message}"; }
+            }
+        });
         _app.Controller.Inserted += _ => DispatcherQueue.TryEnqueue(() => _status.Text = "inserted");
         _hotkeys = new GlobalHotkeyService(_config.DoubleAltMaxInterval) { Delegate = _app.Controller };
         // Closing the window hides it; dictation remains active until Exit is selected.
