@@ -39,6 +39,11 @@ Source: "{#PublishDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 Name: "{group}\NanoDictate"; Filename: "{app}\NanoDictate.App.exe"
 Name: "{autoprograms}\NanoDictate"; Filename: "{app}\NanoDictate.App.exe"
 
+[Registry]
+; Same per-user Run value and stable installation path across upgrades.
+; Never remove other startup entries and never require admin rights.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "NanoDictate"; ValueData: """{app}\NanoDictate.App.exe"" --background"; Flags: uninsdeletevalue
+
 [Run]
 Filename: "{app}\NanoDictate.App.exe"; Description: "Launch NanoDictate"; Flags: nowait postinstall skipifsilent
 
