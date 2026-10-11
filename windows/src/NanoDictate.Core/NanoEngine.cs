@@ -387,13 +387,14 @@ public static class NanoEngine
     public static unsafe LiveSegment[] LivePlan(
         ReadOnlySpan<short> samples, uint sampleRate, SegmenterConfig? config = null)
     {
-        var native = ToNative(config ?? SegmenterConfig.Defaults);
+        var native = config.HasValue ? ToNative(config.Value) : default;
+        NdSegmenterConfig* nativePtr = config.HasValue ? &native : null;
         UIntPtr written = UIntPtr.Zero;
         int code;
         fixed (short* p = samples)
         {
             code = NativeMethods.nd_live_plan(
-                p, (UIntPtr)samples.Length, sampleRate, &native, null, UIntPtr.Zero, &written);
+                p, (UIntPtr)samples.Length, sampleRate, nativePtr, null, UIntPtr.Zero, &written);
         }
         ThrowOnCode(code);
         var count = (int)(uint)written;
@@ -407,7 +408,7 @@ public static class NanoEngine
         {
             UIntPtr written2 = UIntPtr.Zero;
             code = NativeMethods.nd_live_plan(
-                p, (UIntPtr)samples.Length, sampleRate, &native, o, (UIntPtr)count, &written2);
+                p, (UIntPtr)samples.Length, sampleRate, nativePtr, o, (UIntPtr)count, &written2);
         }
         ThrowOnCode(code);
         var result = new LiveSegment[count];

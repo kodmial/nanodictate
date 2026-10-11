@@ -38,6 +38,7 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
     private Thread? _worker;
     private volatile bool _running;
     private bool _disposed;
+    private long _discontinuityCount;
 
     // COM objects owned by the capture thread; released on stop.
     private object? _enumerator;
@@ -59,6 +60,15 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
     }
 
     public bool IsRunning => _running;
+
+    /// <summary>
+    /// Number of capture packets flagged with
+    /// <c>AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY</c> in the current session.
+    /// The WASAPI engine sets the flag when capture data was dropped before
+    /// the packet; the counter makes the glitch visible for dropped-audio
+    /// measurement. Reset on every <see cref="Start"/>.
+    /// </summary>
+    public long DiscontinuityCount => Interlocked.Read(ref _discontinuityCount);
 
     public event Action<CapturedBlock>? BlockAvailable;
 
@@ -211,6 +221,7 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
 
     private void OpenClientLocked()
     {
+        Interlocked.Exchange(ref _discontinuityCount, 0);
         var clsid = ClsidMmDeviceEnumerator;
         var iid = IidIMMDeviceEnumerator;
         CoCreateInstance(ref clsid, null, ClsctxAll, ref iid, out _enumerator);
@@ -234,9 +245,11 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
         {
             _format = ReadMixFormat(fmtPtr);
             _formatResolved = true;
-            // 100 ms shared buffer; periodicity 0 lets the engine choose.
+            // 100 ms shared buffer (REFERENCE_TIME is 100 ns units);
+            // periodicity 0 lets the engine choose.
+            const long BufferDurationHns = 100 * 10_000;
             ThrowOnHResult(
-                _client.Initialize(ShareModeShared, 0, 100_000 * 100, 0, fmtPtr, IntPtr.Zero),
+                _client.Initialize(ShareModeShared, 0, BufferDurationHns, 0, fmtPtr, IntPtr.Zero),
                 "initialize audio client");
         }
         finally
@@ -268,6 +281,7 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
         }
         try
         {
+            var interleavedScratch = new float[4800 * Math.Max(1, format.Channels)];
             while (_running)
             {
                 int hr = capture.GetNextPacketSize(out var packetFrames);
@@ -284,11 +298,24 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
                 Exception? packetError = null;
                 try
                 {
-                    var count = (int)frames;
-                    var interleaved = new float[count * format.Channels];
-                    if ((flags & BufferFlagSilent) == 0 && data != IntPtr.Zero && count > 0)
+                    if ((flags & BufferFlagDataDiscontinuity) != 0)
                     {
-                        Marshal.Copy(data, interleaved, 0, interleaved.Length);
+                        Interlocked.Increment(ref _discontinuityCount);
+                    }
+                    var count = (int)frames;
+                    var needed = count * format.Channels;
+                    if (interleavedScratch.Length < needed)
+                    {
+                        interleavedScratch = new float[needed];
+                    }
+                    var interleaved = interleavedScratch;
+                    if ((flags & BufferFlagSilent) != 0 || data == IntPtr.Zero)
+                    {
+                        Array.Clear(interleaved, 0, needed);
+                    }
+                    else if (count > 0)
+                    {
+                        Marshal.Copy(data, interleaved, 0, needed);
                     }
                     // First packet included: synchronous delivery, no warm-up drop.
                     BlockAvailable?.Invoke(new CapturedBlock(interleaved, count, format));

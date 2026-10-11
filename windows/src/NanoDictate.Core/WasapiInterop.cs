@@ -20,6 +20,7 @@ internal static class WasapiInterop
     internal const int ClsctxAll = 0x17;
     internal const ushort WaveFormatIeeeFloat = 3;
     internal const ushort WaveFormatExtensible = 0xFFFE;
+    internal const uint BufferFlagDataDiscontinuity = 0x1;
     internal const uint BufferFlagSilent = 0x2;
 
     internal enum DataFlow : uint
