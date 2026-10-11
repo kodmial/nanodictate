@@ -48,6 +48,10 @@ internal static class Program
             Console.WriteLine($"smoke: active-provider={config.ActiveProvider} profile-bytes={profile.Length}");
             var order = config.ResolveFailoverOrder(null, false);
             Console.WriteLine($"smoke: failover-order={order}");
+            Console.WriteLine(
+                $"smoke: host insert-method={InsertMethodParser.ToConfigString(config.InsertMethod)} " +
+                $"double-alt={config.DoubleAltMaxInterval} undo={config.UndoMaxInterval} " +
+                $"review={config.ReviewBeforeInsert}");
         }
         else
         {
@@ -143,13 +147,19 @@ internal static class Program
             Console.WriteLine($"smoke: latch-once={once} twice={twice}");
         }
 
-        // 6. Windows capture pipeline through the shared Rust core:
+        // 6. Windows host capabilities around the shared Rust core:
+        // activation routing, Unicode chunking, Rust-backed text policy,
+        // mic/privacy classification, and Windows paths. Deterministic and
+        // hardware-free; Windows-only senders are not touched here.
+        RunHostCapabilities();
+
+        // 7. Windows capture pipeline through the shared Rust core:
         // synthetic device blocks (48 kHz stereo) feed the same session
         // state machine, VAD/gain/auto-stop, and live segmentation as
         // the WASAPI path. No algorithm is forked in C#.
         RunCapturePipeline();
 
-        // 7. Opt-in Windows-native microphone capture: the production
+        // 8. Opt-in Windows-native microphone capture: the production
         // composition of WasapiCaptureSource with DictationCaptureService
         // behind `--live-capture` (optionally `--live-seconds=N`).
         // The deterministic synthetic path above always runs; this path
@@ -266,6 +276,48 @@ internal static class Program
             }
         }
         return fallback;
+    }
+
+    private static void RunHostCapabilities()
+    {
+        var detector = new DoubleAltDetector(0.4);
+        if (detector.RegisterTap(100.0) || !detector.RegisterTap(100.3))
+        {
+            throw new InvalidOperationException("double-Alt detector vector failed");
+        }
+        const string sample = "Привет мир 🎉 done";
+        var chunks = TextChunker.Chunk(sample);
+        if (string.Concat(chunks) != sample)
+        {
+            throw new InvalidOperationException("Unicode chunk roundtrip failed");
+        }
+        Console.WriteLine($"smoke: host chunks={chunks.Count} elements={TextChunker.CountTextElements(sample)}");
+        if (DictationTextPolicy.IsEmptyResult("   ...   "))
+        {
+            Console.WriteLine("smoke: host empty-guard=true");
+        }
+        var diff = RustTextPolicy.WordDiff("One three.", "One two three.");
+        if (!diff.HasChange || string.IsNullOrEmpty(diff.SpanNew))
+        {
+            throw new InvalidOperationException("Rust word-diff vector failed");
+        }
+        var kind = MicFailureClassifier.Classify(unchecked((int)0x80070005), "start");
+        if (kind != MicFailureKind.Denied)
+        {
+            throw new InvalidOperationException("mic classifier vector failed");
+        }
+        Console.WriteLine($"smoke: host mic-guide={MicPrivacyGuide.SettingsUri}");
+        Console.WriteLine($"smoke: host config-path={WindowsPaths.ConfigPath()}");
+        var poster = new CancellableEnterPoster();
+        var fired = 0;
+        poster.Action = () => fired++;
+        poster.Delay = Timeout.InfiniteTimeSpan;
+        poster.Schedule();
+        if (!poster.FireForTests() || fired != 1)
+        {
+            throw new InvalidOperationException("enter poster vector failed");
+        }
+        Console.WriteLine("smoke: host-capabilities ok=true");
     }
 
     private static void RunCapturePipeline()

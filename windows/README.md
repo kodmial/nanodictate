@@ -1,23 +1,28 @@
-# Windows host (capture stage)
+# Windows host (activation + insertion stage)
 
 Native Windows host for NanoDictate on the **same production Rust
 core used by macOS** (`rust/nanodictate-core` through its stable C ABI).
 
-This stage adds real microphone capture: WASAPI shared-mode capture
-feeds the block-oriented shared-engine ingress (per-block RMS, adaptive
-VAD, AGC input gain, silence auto-stop) and drives the same Rust session
-state machine as macOS, including the capture-readiness latch and
-first-buffer semantics. Still out of scope: global hotkeys, text
-insertion, UI polish, installer, and packaging.
+This stage adds the core interaction model around the capture pipeline
+from the previous stage: global double-Alt activation with false-trigger
+protection and hook recovery, Escape cancellation and Return/Enter
+workflow, microphone/privacy failure handling with settings guidance,
+direct Unicode insertion (SendInput KEYEVENTF_UNICODE) plus clipboard
+mode with restore, chunked insertion, undo, synthetic Enter, and
+startup/background/tray/process lifecycle with Windows config/log
+locations. All policy decisions (session readiness, VAD/gain/auto-stop,
+failover/backoff, word diff, text join, review, retry/overlay/mic-request
+gates) stay in Rust; C# provides Windows-native I/O and capabilities.
+Packaging/installer polish remains out of scope.
 
 ## Layout
 
 ```text
 windows/
   NanoDictate.sln
-  src/NanoDictate.Core/    # thin P/Invoke adapter, no product logic
+  src/NanoDictate.Core/    # thin P/Invoke adapter + Windows-native I/O, no product logic
   src/NanoDictate.Smoke/   # minimal executable smoke path
-  tests/NanoDictate.Core.Tests/  # xUnit ABI/ownership/error/session/capture tests
+  tests/NanoDictate.Core.Tests/  # xUnit ABI/ownership/error/session/capture/host tests
 ```
 
 `NanoDictate.Core` owns no behavior. Every wrapper marshals arguments,
@@ -102,6 +107,51 @@ no Rust algorithm is forked in C#.
   device-format blocks with capture-thread semantics, so the xUnit
   suite proves repeated sessions, first-buffer preservation,
   start-failure recovery, and device-change abort on any OS.
+
+## Host capabilities (this stage)
+
+- **Activation** (`GlobalHotkeyService` + `DoubleAltDetector`): WH_KEYBOARD_LL
+  hook; only Alt key codes count as taps; any other key/modifier cancels the
+  pending first tap; held-key repeat never counts; pending expiry fires
+  `AltPendingCancelled`; hook install/reinstall failures throw loudly and
+  `Recover()` reinstalls after silent removal. Off Windows, `Start`
+  throws `PlatformNotSupportedException` (never a silent no-op).
+- **Cancel/Enter** (`DictationController` as `IGlobalHotkeyDelegate`):
+  Escape cancels capture, the Enter latch, and any scheduled Enter; Return
+  arms the Rust latch (`LatchHandle`) in Recording and stops, no-ops in
+  Transcribing, and is swallowed outside Idle. Own synthetic Enter (extra-info
+  token `SyntheticEnterMarker`) is excluded from routing entirely.
+- **Microphone/privacy** (`MicPrivacy.cs`): WASAPI HRESULT classification
+  (E_ACCESSDENIED = privacy-blocked with `ms-settings:privacy-microphone`
+  guidance, E_NOTFOUND = no device, device-invalidated = disconnected);
+  error UI throttled through the Rust cooldown (`CooldownHandle`); request
+  storm guard through Rust `nd_mic_request_allowed` with JSON persistence at
+  `%APPDATA%\NanoDictate\mic-request-state.json`.
+- **Direct insertion** (`TextInserter` + `TextChunker` + `WindowsInputSender`):
+  SendInput KEYEVENTF_UNICODE per UTF-16 unit (Cyrillic/emoji-safe),
+  16-grapheme / 20-unit chunks with 5 ms pauses between chunks, Backspace
+  undo in matching chunks, VK_RETURN down/up tagged for the hook.
+  Platform difference (explicit): macOS chunks around a CGEvent truncation
+  limit; Windows keeps the same ceilings for responsiveness and parity.
+- **Clipboard mode** (`ClipboardInsertService` + Win32 bridge): save text,
+  Ctrl+V, restore after 0.5 s; overlapping inserts reuse the original
+  snapshot and only the latest restore runs. The bridge preserves the
+  Unicode text slot via raw clipboard APIs (no WinForms); non-text formats
+  are an explicit documented limitation, mirroring the macOS full-snapshot
+  difference rather than silently claiming parity.
+- **Undo + Enter** (`DictationController` + `CancellableEnterPoster`):
+  double-Alt in Idle inside the undo window erases the last insertion;
+  Enter-stop posts exactly one synthetic Enter 0.25 s after insertion;
+  Escape cancels the scheduled post. Word-diff/text-join/review/retry/
+  overlay choices all come from Rust (`RustTextPolicy`/`NanoEngine`).
+- **Lifecycle + paths** (`HostLifecycle`, `StartupManager`, `WindowsPaths`):
+  global-mutex single instance, Run-key startup registration, tray status
+  behind `ITrayIcon`, Ctrl+C shutdown; `%APPDATA%\NanoDictate\config.toml`
+  and `%LOCALAPPDATA%\NanoDictate\Logs` (macOS uses
+  `~/Library/Application Support` + `~/.config`; never mixed silently).
+- **Config** (`PortableConfig`): carries `insert_method` (`cgevent` maps to
+  Direct on Windows), `double_alt_max_interval`, `undo_max_interval`, and
+  `review_before_insert`; every policy still resolves through Rust.
 
 ## Realtime bounds and measurements
 
