@@ -1,10 +1,9 @@
 name: Windows host
 
-# Bootstrap CI for the native Windows host on the production Rust core.
-# Builds the Rust cdylib/DLL with the MSVC target, builds the C# host,
-# runs the C# ABI/ownership/error/session tests, and runs the minimal
-# executable smoke path. This is the application CI for #137; the
-# portability-only DLL artifact in rust.yml remains the shared-engine gate.
+# Complete-product CI for the supported Windows NanoDictate release.
+# Builds the Rust cdylib/DLL with the MSVC target, the portable C# product
+# (Core + Host + Smoke + tests), the Windows-only WinUI 3 entrypoint, and
+# stages the MSIX layout plus portable ZIP as the release artifact.
 
 on:
   push:
@@ -32,13 +31,13 @@ concurrency:
 
 jobs:
   build-test:
-    name: Rust DLL + C# host (${{ matrix.os }})
+    name: Rust DLL + C# product (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -68,8 +67,11 @@ jobs:
           if (-not (Test-Path $dll)) { throw "Missing $dll" }
           Get-Item $dll | Format-Table Name, Length
 
-      - name: Build C# host
+      - name: Build portable C# product
         run: dotnet build windows/NanoDictate.sln -c Release
+
+      - name: Build WinUI 3 entrypoint (Windows-only)
+        run: dotnet build windows/src/NanoDictate.App/NanoDictate.App.csproj -c Release
 
       - name: Stage DLL next to managed binaries
         shell: pwsh
@@ -77,15 +79,38 @@ jobs:
           $dll = "rust/target/release/nanodictate_core.dll"
           $targets = @(
             "windows/src/NanoDictate.Core/bin/Release/net8.0",
+            "windows/src/NanoDictate.Host/bin/Release/net8.0",
             "windows/src/NanoDictate.Smoke/bin/Release/net8.0",
             "windows/tests/NanoDictate.Core.Tests/bin/Release/net8.0"
           )
           foreach ($dir in $targets) {
             if (Test-Path $dir) { Copy-Item $dll $dir -Force }
           }
+          New-Item -ItemType Directory -Force -Path windows/artifacts | Out-Null
+          Copy-Item $dll windows/artifacts/ -Force
 
-      - name: Run C# ABI tests
+      - name: Run C# product tests
         run: dotnet test windows/NanoDictate.sln -c Release --no-build
 
       - name: Run smoke executable
         run: dotnet run --project windows/src/NanoDictate.Smoke -c Release --no-build -- config.example.toml
+
+      - name: Run product diagnostics
+        run: dotnet run --project windows/src/NanoDictate.Host -c Release --no-build -- doctor --config config.example.toml
+
+      - name: List providers and routing
+        run: dotnet run --project windows/src/NanoDictate.Host -c Release --no-build -- providers --config config.example.toml
+
+      - name: Stage MSIX layout and portable ZIP
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}"
+          if ($version -notmatch '^\d+\.\d+\.\d+') { $version = "0.0.0" } else { $version = $version -replace '^v', '' -replace '-.*$', '' }
+          pwsh windows/package/make-msix.ps1 -Version $version -OutDir windows/artifacts
+
+      - name: Upload Windows release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nanodictate-windows-x64
+          path: windows/artifacts/
+          if-no-files-found: error

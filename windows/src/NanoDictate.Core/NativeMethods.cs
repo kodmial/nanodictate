@@ -141,6 +141,12 @@ internal static class NativeMethods
     internal static extern unsafe IntPtr nd_stt_resolve(byte* adapterPtr, UIntPtr adapterLen, byte* modelPtr, UIntPtr modelLen);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern unsafe IntPtr nd_stt_default_base_url(byte* adapterPtr, UIntPtr adapterLen);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern unsafe IntPtr nd_stt_default_model(byte* adapterPtr, UIntPtr adapterLen);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern unsafe IntPtr nd_transcript_parse(byte* bodyPtr, UIntPtr bodyLen, byte* pathPtr, UIntPtr pathLen);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
