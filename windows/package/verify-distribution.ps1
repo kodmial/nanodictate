@@ -130,7 +130,7 @@ try {
       # Publishing the release and syncing the Scoop bucket are separate
       # operations. Give the bounded first-party sync a chance to finish.
       for ($attempt = 0; $attempt -lt 20; $attempt++) {
-        $manifest = Invoke-RestMethod -Uri "$manifestUrl?nocache=$([guid]::NewGuid().ToString('N'))"
+        $manifest = Invoke-RestMethod -Uri "${manifestUrl}?nocache=$([guid]::NewGuid().ToString('N'))"
         if ($manifest.version -eq $version) { break }
         Write-Host "Waiting for public Scoop manifest v$version (found $($manifest.version)); attempt $($attempt + 1)/20"
         Start-Sleep -Seconds 20
