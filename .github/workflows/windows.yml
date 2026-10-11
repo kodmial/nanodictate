@@ -71,7 +71,10 @@ jobs:
         run: dotnet build windows/NanoDictate.sln -c Release
 
       - name: Build WinUI 3 entrypoint (Windows-only)
-        run: dotnet build windows/src/NanoDictate.App/NanoDictate.App.csproj -c Release
+        # Windows App SDK 1.5 PRI/MRT tasks are supplied by Visual Studio MSBuild,
+        # not the dotnet SDK's bundled MSBuild.
+        shell: pwsh
+        run: pwsh windows/package/build-winui.ps1 -Configuration Release
 
       - name: Stage DLL next to managed binaries
         shell: pwsh
