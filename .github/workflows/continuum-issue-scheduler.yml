@@ -170,6 +170,9 @@ jobs:
       post_pause_comment: "${{ inputs.post_pause_comment }}"
       reset_markers: "${{ inputs.reset_markers }}"
       require_priority_label: "${{ inputs.require_priority_label }}"
+      # Temporary Windows-only focus: no other task enters automatic implementation
+      # unless explicitly admitted with automation:ready.
+      ready_label: "automation:ready"
       command_grace_minutes: "${{ inputs.command_grace_minutes }}"
       child_owned_marker: "${{ inputs.child_owned_marker }}"
       legacy_child_owned_marker: "${{ inputs.legacy_child_owned_marker }}"
@@ -179,7 +182,8 @@ jobs:
       opencode_dispatch: "${{ inputs.opencode_dispatch }}"
       execution_label_routes: "${{ inputs.execution_label_routes }}"
       child_dispatch_workflow: "${{ inputs.child_dispatch_workflow }}"
-      count_open_prs_as_wip: "${{ inputs.count_open_prs_as_wip }}"
+      # Draft/non-Windows PRs must not block Windows implementation slots.
+      count_open_prs_as_wip: "${{ inputs.count_open_prs_as_wip || 'false' }}"
       pause_on_failure: "${{ inputs.pause_on_failure }}"
       # Event plumbing for the child wake-up gate. A called workflow always
       # sees github.event_name as workflow_call with an empty github.event,
