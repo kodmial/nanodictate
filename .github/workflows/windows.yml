@@ -172,6 +172,10 @@ jobs:
           }
           if ((Get-Content $userConfig -Raw) -ne "preserve") { throw "Uninstall deleted user data" }
 
+      - name: Assert exact candidate ZIP/EXE identity and installation lifecycle
+        shell: pwsh
+        run: pwsh -NoProfile -File windows/package/test-release-candidate.ps1 -Version 0.0.0
+
       - name: Verify Scoop bucket lifecycle hooks without user interaction
         shell: pwsh
         run: |
