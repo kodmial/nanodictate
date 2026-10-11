@@ -20,7 +20,11 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
     <UseRidGraph>true</UseRidGraph>
+    <!-- Unpackaged, self-contained deployment is suitable for a direct installer and Scoop. -->
+    <WindowsPackageType>None</WindowsPackageType>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+    <PublishReadyToRun>false</PublishReadyToRun>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <Description>Windows App SDK / WinUI 3 entrypoint for NanoDictate on the shared Rust engine.</Description>
   </PropertyGroup>
