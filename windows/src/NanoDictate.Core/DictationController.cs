@@ -423,7 +423,7 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
         }
         if (DictationTextPolicy.IsEmptyResult(transcript))
         {
-            _capture.FinishTranscription();
+            FinishTranscriptionIfCurrent(recordingId);
             return false;
         }
         if (ReviewBeforeInsert)
@@ -448,7 +448,7 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
                 {
                     return false;
                 }
-                _capture.FinishTranscription();
+                FinishTranscriptionIfCurrent(recordingId);
                 return false;
             }
             if (!insert)
@@ -457,12 +457,19 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
                 {
                     return false;
                 }
-                _capture.FinishTranscription();
-                _enterLatch.Cancel();
+                // Atomically claim the decline under _gate so a newer
+                // recording B starting concurrently keeps its own pending
+                // Enter and capture session.
                 lock (_gate)
                 {
+                    if (IsDeliverySupersededLocked(recordingId))
+                    {
+                        return false;
+                    }
                     _pendingEnter = false;
+                    _capture.FinishTranscription();
                 }
+                _enterLatch.Cancel();
                 _enterPoster.Cancel();
                 return false;
             }
@@ -480,25 +487,55 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
         }
         catch
         {
+            // Only the current recording may clear shared delivery state
+            // and complete the capture session; a stale failure must not
+            // clear B's pending Enter or finish B's session.
+            bool current;
             lock (_gate)
             {
-                _pendingEnter = false;
+                if (IsDeliverySupersededLocked(recordingId))
+                {
+                    current = false;
+                }
+                else
+                {
+                    _pendingEnter = false;
+                    _capture.FinishTranscription();
+                    current = true;
+                }
             }
-            _enterLatch.Cancel();
-            _capture.FinishTranscription();
+            if (current)
+            {
+                _enterLatch.Cancel();
+            }
             throw;
         }
+        // Commit insertion and capture completion atomically with the
+        // cancellation/recording gate: the recording-identity check and
+        // FinishTranscription run in one _gate critical section so Escape
+        // or a newer recording B cannot interleave between the decision
+        // and the side effect. A stale result rolls back its own insert
+        // (best effort) without touching B's capture session or undo state.
+        bool staleAfterInsert;
+        bool postEnter;
         lock (_gate)
         {
-            _lastInserted = transcript;
-            _lastInsertedAt = _clock();
+            if (IsDeliverySupersededLocked(recordingId))
+            {
+                staleAfterInsert = true;
+                postEnter = false;
+            }
+            else
+            {
+                staleAfterInsert = false;
+                _lastInserted = transcript;
+                _lastInsertedAt = _clock();
+                _capture.FinishTranscription();
+                postEnter = _pendingEnter;
+                _pendingEnter = false;
+            }
         }
-        // Re-validate before mutating capture state: if Escape or a newer
-        // recording superseded this delivery while insertion ran, roll back
-        // the stale insert (best effort) and leave the current capture
-        // state untouched instead of finishing B's session.
-        bool supersededAfterInsert = IsDeliverySuperseded(recordingId);
-        if (supersededAfterInsert)
+        if (staleAfterInsert)
         {
             try
             {
@@ -507,21 +544,9 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
             catch
             {
             }
-            lock (_gate)
-            {
-                _lastInserted = string.Empty;
-                _lastInsertedAt = null;
-            }
             return false;
         }
         Inserted?.Invoke(transcript);
-        _capture.FinishTranscription();
-        bool postEnter;
-        lock (_gate)
-        {
-            postEnter = _pendingEnter;
-            _pendingEnter = false;
-        }
         if (postEnter && _enterLatch.Consume())
         {
             _enterPoster.Schedule();
@@ -575,19 +600,49 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
     {
         lock (_gate)
         {
-            if (recordingId != 0 && recordingId != _recordingSeq)
+            return IsDeliverySupersededLocked(recordingId);
+        }
+    }
+
+    /// <summary>
+    /// Caller holds <c>_gate</c>. Same gate as <see cref="IsDeliverySuperseded"/>
+    /// without re-locking, for use inside atomic commit sections.
+    /// </summary>
+    private bool IsDeliverySupersededLocked(ulong recordingId)
+    {
+        if (recordingId != 0 && recordingId != _recordingSeq)
+        {
+            return true;
+        }
+        if (_cancelled)
+        {
+            return true;
+        }
+        if (recordingId != 0 && _transcriptionCts?.IsCancellationRequested == true)
+        {
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Completes the capture session only when <paramref name="recordingId"/>
+    /// is still current. The identity check and <c>FinishTranscription</c>
+    /// run in one <c>_gate</c> critical section (controller lock before the
+    /// pipeline lock, matching <see cref="CancelCurrent"/>) so Escape or a
+    /// newer recording cannot interleave between the decision and the side
+    /// effect. Returns true when the session was finished.
+    /// </summary>
+    private bool FinishTranscriptionIfCurrent(ulong recordingId)
+    {
+        lock (_gate)
+        {
+            if (IsDeliverySupersededLocked(recordingId))
             {
-                return true;
+                return false;
             }
-            if (_cancelled)
-            {
-                return true;
-            }
-            if (recordingId != 0 && _transcriptionCts?.IsCancellationRequested == true)
-            {
-                return true;
-            }
-            return false;
+            _capture.FinishTranscription();
+            return true;
         }
     }
 
