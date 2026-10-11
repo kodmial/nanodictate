@@ -25,7 +25,11 @@ $Properties = @("/p:Configuration=$Configuration", "/p:Platform=x64", "/p:Runtim
 $Target = "/t:Build"
 if ($PublishDir) {
   $Target = "/t:Publish"
-  $FullPublishDir = [IO.Path]::GetFullPath((Join-Path (Get-Location) $PublishDir))
+  $FullPublishDir = if ([IO.Path]::IsPathFullyQualified($PublishDir)) {
+    [IO.Path]::GetFullPath($PublishDir)
+  } else {
+    [IO.Path]::GetFullPath((Join-Path (Get-Location) $PublishDir))
+  }
   New-Item -ItemType Directory -Path $FullPublishDir -Force | Out-Null
   if (-not $FullPublishDir.EndsWith([IO.Path]::DirectorySeparatorChar)) {
     $FullPublishDir += [IO.Path]::DirectorySeparatorChar
