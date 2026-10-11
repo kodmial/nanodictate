@@ -32,7 +32,6 @@ $configFile = Join-Path $env:APPDATA 'NanoDictate\config.toml'
 $configSentinel = 'keep-config-' + [guid]::NewGuid().ToString('N')
 $configBackup = Join-Path $work 'config.toml.backup'
 $hadPriorConfig = $false
-$installedOnce = $false
 $report = [ordered]@{
   repository = $Repository
   version = $null
@@ -183,7 +182,6 @@ try {
     Invoke-Setup $setup
     Write-Warning 'No previous Windows installer found: exercising same-version reinstall rather than versioned upgrade'
   }
-  $installedOnce = $true
   # v0.1.33 predates the persistent Run-key registration. Assert the
   # installed file layout for the old version; require startup only after
   # upgrading to the current release.
@@ -244,7 +242,7 @@ try {
     $current = Get-Content -LiteralPath $configFile -Raw -ErrorAction SilentlyContinue
     if ($current -ceq $configSentinel) { Remove-Item -LiteralPath $configFile -Force }
   }
-  if ($installedOnce -and (Test-Path -LiteralPath (Join-Path $installDir 'unins000.exe'))) {
+  if ((Test-Path -LiteralPath (Join-Path $installDir 'unins000.exe'))) {
     Write-Warning 'Cleaning up installed application after an incomplete smoke'
     try { Uninstall } catch { Write-Warning "Cleanup failed: $_" }
   }

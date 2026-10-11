@@ -23,7 +23,7 @@ $dir = Join-Path $work 'installed'
 $unpacked = Join-Path $work 'zip'
 $reg = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $marker = Join-Path $env:APPDATA ("NanoDictate\candidate-smoke-" + [guid]::NewGuid().ToString('N') + '.txt')
-$installed = $false
+$cleanupNeeded = $false
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 
 function Get-Startup {
@@ -57,8 +57,8 @@ try {
   if ($auth.Status -eq 'NotSigned') {
     Write-Warning 'Candidate installer is unsigned: trusted code signing is a separate publisher prerequisite'
   } elseif ($auth.Status -ne 'Valid') { throw "Invalid candidate installer signature: $($auth.Status)" }
+  $cleanupNeeded = $true
   Invoke-Silent (Resolve-Path $setup).Path @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$dir`"")
-  $installed = $true
   $zipFiles = @(Get-ChildItem -LiteralPath $unpacked -Recurse -File)
   if ($zipFiles.Count -eq 0) { throw 'Candidate ZIP is empty' }
   foreach ($file in $zipFiles) {
@@ -75,11 +75,11 @@ try {
   New-Item -ItemType Directory -Force -Path (Split-Path $marker) | Out-Null
   Set-Content -LiteralPath $marker -Value 'preserve' -NoNewline
   Uninstall
-  $installed = $false
+  $cleanupNeeded = $false
   if ((Get-Content -LiteralPath $marker -Raw) -cne 'preserve') { throw 'Uninstall deleted user data' }
   Write-Host "::notice::Exact Windows $Version release candidate passed ZIP/EXE identity, install, registry, uninstall and preservation smoke."
 } finally {
-  if ($installed -and (Test-Path -LiteralPath (Join-Path $dir 'unins000.exe'))) {
+  if ($cleanupNeeded -and (Test-Path -LiteralPath (Join-Path $dir 'unins000.exe'))) {
     try { Uninstall } catch { Write-Warning "Candidate cleanup failed: $_" }
   }
   if (Test-Path -LiteralPath $marker) { Remove-Item -LiteralPath $marker -Force }
