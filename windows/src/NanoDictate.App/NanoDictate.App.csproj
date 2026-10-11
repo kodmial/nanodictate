@@ -27,4 +27,8 @@
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.5.240627000" />
     <ProjectReference Include="..\NanoDictate.Core\NanoDictate.Core.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\..\config.example.toml" Link="config.example.toml" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

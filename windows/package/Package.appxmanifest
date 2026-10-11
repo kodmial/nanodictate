@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- MSIX packaging manifest for the supported Windows NanoDictate release.
-     The CI packaging job fills Identity Version from the release tag and
-     signs with the configured certificate; see windows/DISTRIBUTION.md. -->
+     The packaging script stages this unsigned layout and fills Identity
+     Version from the passed -Version; signing/publishing is out of scope;
+     see windows/DISTRIBUTION.md. -->
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"

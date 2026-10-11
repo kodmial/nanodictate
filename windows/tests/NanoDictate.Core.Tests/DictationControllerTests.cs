@@ -107,7 +107,7 @@ public sealed class DictationControllerTests
         using var controller = new DictationController(capture, sink);
         IReadOnlyList<short>? forwarded = null;
         var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        controller.StopTranscriptionHandler = (samples, _) =>
+        controller.StopTranscriptionHandler = (samples, _, _) =>
         {
             forwarded = samples;
             done.SetResult();
@@ -119,6 +119,56 @@ public sealed class DictationControllerTests
         await done.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.NotNull(forwarded);
         Assert.Equal(new short[] { 1, 2, 3 }, forwarded!);
+    }
+
+    [Fact]
+    public async Task CancelCurrentCancelsPendingTranscription()
+    {
+        var capture = new FakeCaptureDriver();
+        var sink = new FakeInsertionSink();
+        using var controller = new DictationController(capture, sink);
+        CancellationToken capturedToken = default;
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        controller.StopTranscriptionHandler = (samples, token, _) =>
+        {
+            capturedToken = token;
+            done.SetResult();
+            return Task.CompletedTask;
+        };
+        capture.Start();
+        capture.MakeReady();
+        controller.AltDoubleTapped();
+        await done.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        controller.CancelKeyPressed();
+        Assert.True(capturedToken.IsCancellationRequested);
+    }
+
+    [Fact]
+    public async Task StaleRecordingResultIsRejectedAfterNewRecordingStarts()
+    {
+        var capture = new FakeCaptureDriver();
+        var sink = new FakeInsertionSink();
+        using var controller = new DictationController(capture, sink);
+        ulong stoppedId = 0;
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        controller.StopTranscriptionHandler = (samples, _, id) =>
+        {
+            stoppedId = id;
+            done.SetResult();
+            return Task.CompletedTask;
+        };
+        capture.Start();
+        capture.MakeReady();
+        controller.AltDoubleTapped();
+        await done.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.NotEqual(0ul, stoppedId);
+        // Finish A so the session returns to idle, then start B before
+        // A's late transcription result arrives. B supersedes A.
+        Assert.False(controller.CompleteWithTranscript(string.Empty, recordingId: stoppedId));
+        controller.AltDoubleTapped();
+        Assert.Equal(DictationState.Recording, capture.State);
+        Assert.False(controller.CompleteWithTranscript("stale A", recordingId: stoppedId));
+        Assert.Empty(sink.Inserts);
     }
 
     [Fact]

@@ -191,6 +191,9 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
     private readonly Func<DateTime> _clock;
     private bool _disposed;
     private bool _cancelled;
+    private ulong _recordingSeq;
+    private ulong _pendingTranscriptionSeq;
+    private CancellationTokenSource? _transcriptionCts;
     private string _lastInserted = string.Empty;
     private DateTime? _lastInsertedAt;
 
@@ -225,8 +228,11 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
     /// <see cref="PipelineStopResult.Samples"/> to transcription and
     /// delivery via <see cref="CompleteWithTranscript"/>. Runs off the
     /// hotkey thread (fire-and-forget); null means stop-only (tests).
+    /// The session identifier rejects stale results from a previous
+    /// recording; the token is cancelled on Escape or when a new recording
+    /// starts.
     /// </summary>
-    public Func<IReadOnlyList<short>, CancellationToken, Task>? StopTranscriptionHandler { get; set; }
+    public Func<IReadOnlyList<short>, CancellationToken, ulong, Task>? StopTranscriptionHandler { get; set; }
 
     public DictationState State => _capture.State;
 
@@ -314,6 +320,13 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
         {
             _cancelled = false;
             _pendingEnter = false;
+            _recordingSeq++;
+            // A new recording supersedes any still-running transcription
+            // from the previous recording: cancel it so its late result
+            // cannot insert after this recording stops.
+            _transcriptionCts?.Cancel();
+            _transcriptionCts?.Dispose();
+            _transcriptionCts = null;
         }
         _enterLatch.Cancel();
         _enterPoster.Cancel();
@@ -360,7 +373,25 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
         var handler = StopTranscriptionHandler;
         if (handler is not null)
         {
-            _ = Task.Run(() => handler(result.Samples, CancellationToken.None));
+            CancellationToken token;
+            ulong sessionId;
+            lock (_gate)
+            {
+                _transcriptionCts?.Dispose();
+                _transcriptionCts = new CancellationTokenSource();
+                token = _transcriptionCts.Token;
+                if (_recordingSeq == 0)
+                {
+                    // The capture was started outside the controller
+                    // (tests/direct driver use): assign the first session so
+                    // the stop callback still carries a non-zero identifier.
+                    _recordingSeq = 1;
+                }
+                _pendingTranscriptionSeq = _recordingSeq;
+                sessionId = _pendingTranscriptionSeq;
+            }
+            var samples = result.Samples;
+            _ = Task.Run(() => handler(samples, token, sessionId));
         }
     }
 
@@ -368,10 +399,19 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
     /// Delivers an STT transcript after <see cref="StopAndAwaitTranscript"/>.
     /// Applies the Rust retry gate, empty guard, review gate, insertion, undo
     /// window, Enter latch, and overlay-hide rule. Returns true when text was
-    /// inserted.
+    /// inserted. When <paramref name="recordingId"/> is non-zero, results
+    /// from a previous recording are rejected so a late transcription cannot
+    /// insert after a newer recording started.
     /// </summary>
-    public bool CompleteWithTranscript(string transcript, ulong processingSession = 0, ulong session = 0)
+    public bool CompleteWithTranscript(string transcript, ulong processingSession = 0, ulong session = 0, ulong recordingId = 0)
     {
+        lock (_gate)
+        {
+            if (recordingId != 0 && recordingId != _recordingSeq)
+            {
+                return false;
+            }
+        }
         var state = _capture.State;
         if (!DictationTextPolicy.ShouldDeliverResult(IsCancelled(), state == DictationState.Transcribing || state == DictationState.Idle))
         {
@@ -456,6 +496,9 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
         {
             _cancelled = true;
             _pendingEnter = false;
+            // Cancel any pending transcription so its late result cannot
+            // insert; the cancelled flag remains authoritative for late STT.
+            _transcriptionCts?.Cancel();
         }
         _enterLatch.Cancel();
         _enterPoster.Cancel();
@@ -496,6 +539,7 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
 
     public void Dispose()
     {
+        CancellationTokenSource? cts;
         lock (_gate)
         {
             if (_disposed)
@@ -503,7 +547,17 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
                 return;
             }
             _disposed = true;
+            cts = _transcriptionCts;
+            _transcriptionCts = null;
         }
+        try
+        {
+            cts?.Cancel();
+        }
+        catch
+        {
+        }
+        cts?.Dispose();
         _enterPoster.Cancel();
         _enterLatch.Dispose();
         _micCooldown.Dispose();

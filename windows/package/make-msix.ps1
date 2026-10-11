@@ -49,6 +49,7 @@ foreach ($asset in @("StoreLogo.png", "Square150x150Logo.png", "Square44x44Logo.
 }
 Copy-Item "windows/package/Package.appxmanifest" "$Stage/AppxManifest.xml" -Force
 Copy-Item "config.example.toml" "$Stage/config.example.toml" -Force
+Copy-Item "config.example.toml" "$Stage/NanoDictate.App/config.example.toml" -Force
 
 $Manifest = Get-Content "$Stage/AppxManifest.xml" -Raw
 $Parts = $Version.Split(".")
@@ -63,4 +64,4 @@ Compress-Archive -Path "$Stage/*" -DestinationPath $Zip -Force
 
 Get-Item $Zip | Format-Table Name, Length
 Write-Host "Packaging complete: $Zip"
-Write-Host "MSIX stage: $Stage (MakeAppx/signing runs in release CI with the configured certificate)"
+Write-Host "MSIX stage: $Stage (unsigned staging layout; MakeAppx/signing is out of scope, see windows/DISTRIBUTION.md)"

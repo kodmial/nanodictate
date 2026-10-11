@@ -92,7 +92,8 @@ public sealed class HostApp : IDisposable
         short[] samples,
         uint sampleRate,
         SttDiagnostics? diagnostics,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ulong recordingId = 0)
     {
         TranscriptionResult result;
         if (_config.Chunked)
@@ -113,7 +114,8 @@ public sealed class HostApp : IDisposable
                 _config.Transport, _config.ProxyKey,
                 diagnostics, cancellationToken).ConfigureAwait(false);
         }
-        return _controller.CompleteWithTranscript(result.Text);
+        cancellationToken.ThrowIfCancellationRequested();
+        return _controller.CompleteWithTranscript(result.Text, 0, 0, recordingId);
     }
 
     /// <summary>Provider/model selection for UI/menus (no secrets).</summary>
@@ -149,22 +151,28 @@ public sealed class HostApp : IDisposable
     /// transcription and delivery. Runs off the hotkey thread; cancellation
     /// is honored through the token and the controller's cancel flag, and
     /// delivery still flows through <see cref="DictationController.CompleteWithTranscript"/>.
+    /// The session identifier rejects stale results when a newer recording
+    /// started before this transcription completed.
     /// </summary>
-    private async Task TranscribeStoppedAsync(IReadOnlyList<short> stoppedSamples, CancellationToken cancellationToken)
+    private async Task TranscribeStoppedAsync(IReadOnlyList<short> stoppedSamples, CancellationToken cancellationToken, ulong recordingId)
     {
         try
         {
             var samples = stoppedSamples as short[] ?? stoppedSamples.ToArray();
-            await TranscribeAndDeliverAsync(samples, 16000, null, cancellationToken).ConfigureAwait(false);
+            await TranscribeAndDeliverAsync(samples, 16000, null, cancellationToken, recordingId).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
         }
         catch
         {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
             try
             {
-                _controller.CompleteWithTranscript(string.Empty);
+                _controller.CompleteWithTranscript(string.Empty, 0, 0, recordingId);
             }
             catch
             {

@@ -63,10 +63,13 @@ public sealed partial class MainWindow : Window
         {
             return windowsPath;
         }
-        var bundled = Path.Combine(AppContext.BaseDirectory, "config.example.toml");
-        if (!File.Exists(bundled))
+        var bundled = FindBundledExample();
+        if (bundled is null)
         {
-            return bundled;
+            // No user config and no bundled example: return the expected
+            // beside-executable path so PortableConfig.Load fails loudly
+            // with a FileNotFoundException instead of silently continuing.
+            return Path.Combine(AppContext.BaseDirectory, "config.example.toml");
         }
         try
         {
@@ -85,6 +88,24 @@ public sealed partial class MainWindow : Window
         {
             return bundled;
         }
+    }
+
+    private static string? FindBundledExample()
+    {
+        var baseDir = AppContext.BaseDirectory;
+        var candidates = new[]
+        {
+            Path.Combine(baseDir, "config.example.toml"),
+            Path.Combine(Directory.GetParent(baseDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))?.FullName ?? baseDir, "config.example.toml"),
+        };
+        foreach (var candidate in candidates)
+        {
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+        return null;
     }
 }
 

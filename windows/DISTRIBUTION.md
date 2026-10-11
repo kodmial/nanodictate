@@ -20,20 +20,27 @@ checkout plus tag version:
 - `msix-stage/` — MSIX file layout with `AppxManifest.xml` stamped with
   the release version (`<major>.<minor>.<patch>.0`).
 
-Release CI (the `windows.yml` packaging job) uploads the ZIP as the
-Windows release artifact and stages the unsigned MSIX layout with the
-configured certificate subject. Signing runs separately with the
-configured certificate, never on developer machines. The manifest
-version is stamped from the tag only when the tag is a plain
-`<major>.<minor>.<patch>` version (no leading `v`); any other ref
-(including `v`-prefixed tags) falls back to `0.0.0`.
+Release CI (the `windows.yml` packaging job) uploads the portable ZIP
+and the unsigned MSIX staging layout as a GitHub Actions artifact for
+validation only. This change does not implement store signing, MSIX
+signing in `release.yml`, or tag-triggered releases: the manifest
+version is stamped from the `-Version` passed to `make-msix.ps1`. In CI
+the version comes from `github.ref_name` with no tag trigger, so branch
+and pull-request refs fall back to `0.0.0`; only refs starting with
+`<major>.<minor>.<patch>` produce a stamped version (a leading `v`
+falls back to `0.0.0`, and any `-suffix` is stripped).
 
 ## Clean install / first launch
 
-1. Install the signed MSIX (or unzip the portable ZIP for evaluation).
-2. Launch NanoDictate; on first launch the host copies
-   `config.example.toml` to `%APPDATA%\NanoDictate\config.toml` when no
-   config exists (never overwrites an existing user config).
+1. Install the unsigned MSIX staging layout (or unzip the portable ZIP for evaluation).
+2. Launch NanoDictate; on first launch the WinUI app copies its bundled
+   `config.example.toml` (beside the executable, also staged at the
+   package root) to `%APPDATA%\NanoDictate\config.toml` when no
+   config exists (never overwrites an existing user config). The console
+   host (`run`, `doctor`, `providers`, `transcribe-file`) does not copy:
+   it uses `--config PATH` when given, otherwise
+   `%APPDATA%\NanoDictate\config.toml` when present, otherwise
+   `config.example.toml` from the working directory.
 3. Grant microphone access when Windows prompts; if access was denied,
    the host shows the `ms-settings:privacy-microphone` guidance and
    throttles repeat prompts through the Rust cooldown.
