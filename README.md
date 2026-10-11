@@ -1,6 +1,6 @@
 # NanoDictate
 
-Lightweight voice dictation for macOS. Double-tap **Alt**, speak, and NanoDictate types the recognized text directly into the app you are already using.
+Lightweight voice dictation for macOS and Windows 10/11 (Windows releases are being qualified). Double-tap **Alt**, speak, and NanoDictate types the recognized text directly into the app you are already using.
 
 - **~25 MB RAM** in normal background use
 - **Works out of the box** with a preconfigured STT provider and model — no API key required
@@ -45,6 +45,19 @@ Double-Alt   Immediately after insertion: undo
 ```
 
 No configuration is required for the default setup.
+
+## Windows 10/11 (x64)
+
+Windows is distributed directly from our [GitHub Releases](https://github.com/kodmial/nanodictate/releases), without an external app catalogue. On a release that includes Windows artifacts, choose the `nanodictate-X.Y.Z-windows-x64-setup.exe` installer, or use our first-party Scoop bucket:
+
+```powershell
+scoop bucket add nanodictate https://github.com/kodmial/nanodictate
+scoop install nanodictate
+# Update after a later release:
+scoop update nanodictate
+```
+
+Scoop itself must already be installed. The ZIP and EXE contain a self-contained WinUI app using the same Rust engine; end users do **not** install .NET SDK or Rust. The current v0.1.32 release is macOS-only; do not run these commands until a newer combined release publishes its Windows ZIP and Scoop manifest. See [Windows distribution and validation](windows/DISTRIBUTION.md).
 
 ## Features
 
