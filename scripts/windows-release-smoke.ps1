@@ -85,7 +85,7 @@ function Get-VerifiedAssets([object]$release, [string]$folder, [string[]]$names)
   return $expected
 }
 function Invoke-Setup([string]$path) {
-  $arguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=$installDir")
+  $arguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$installDir`"")
   $proc = Start-Process -FilePath $path -ArgumentList $arguments -Wait -PassThru
   if ($proc.ExitCode -ne 0) { throw "Installer $path exited $($proc.ExitCode)" }
 }

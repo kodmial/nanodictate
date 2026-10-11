@@ -32,8 +32,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: windows-published-smoke-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: windows-published-smoke-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   actual-published-install:
