@@ -1,0 +1,64 @@
+name: Windows published distribution smoke
+
+# The existing Windows host workflow verifies CI-built installer bytes.
+# This separate canary downloads and installs *published* release bytes on a
+# fresh Windows VM, as the Homebrew/MacPorts production smoke does on macOS.
+# A Release workflow_run trigger also works when the publication itself was
+# created using GITHUB_TOKEN (which does not trigger on: release).
+on:
+  pull_request:
+    paths:
+      - 'scripts/windows-release-smoke.ps1'
+      - '.github/workflows/windows-release-smoke.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/windows-release-smoke.ps1'
+      - '.github/workflows/windows-release-smoke.yml'
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  schedule:
+    - cron: '53 5 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Semver to smoke (e.g. 0.1.34); empty selects latest stable'
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-published-smoke-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  actual-published-install:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    name: Published EXE + portable ZIP lifecycle (windows-2022)
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - name: Checkout smoke source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Verify published checksums and actual install/upgrade/uninstall
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          ND_SMOKE_VERSION: ${{ inputs.version || '' }}
+        run: |
+          pwsh -NoProfile -File scripts/windows-release-smoke.ps1 -Version "$env:ND_SMOKE_VERSION"
+          if ($LASTEXITCODE -ne 0) { throw "Published Windows installer smoke failed: $LASTEXITCODE" }
+      - name: Upload smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-published-smoke-${{ github.run_id }}
+          path: windows/artifacts/windows-published-smoke.json
+          if-no-files-found: warn

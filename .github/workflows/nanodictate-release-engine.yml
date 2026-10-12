@@ -968,6 +968,14 @@ jobs:
         env:
           RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
         run: pwsh windows/package/make-release.ps1 -Version $env:RELEASE_VERSION -OutDir windows/artifacts
+      - name: Block release if Windows candidate installer fails lifecycle smoke
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          pwsh -NoProfile -File windows/package/test-release-candidate.ps1 -Version "$env:RELEASE_VERSION"
+          if ($LASTEXITCODE -ne 0) { throw "Windows release candidate installer smoke failed" }
+
       - name: Upload Windows release candidate
         uses: actions/upload-artifact@v4
         with:
