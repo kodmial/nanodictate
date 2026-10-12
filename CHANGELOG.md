@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.36] - 2026-10-12
+
+
+
+### Fixed
+
+* test(windows): published-release installer lifecycle canary ([fc9fc36](https://github.com/kodmial/nanodictate/commit/fc9fc36fbe029c72c1e7e31bc01a6bec56720e26))
+
 ## [0.1.35] - 2026-10-11
 
 
@@ -572,7 +580,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.35...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.36...HEAD
+[0.1.36]: https://github.com/kodmial/nanodictate/compare/v0.1.35...v0.1.36
 [0.1.35]: https://github.com/kodmial/nanodictate/compare/v0.1.34...v0.1.35
 [0.1.34]: https://github.com/kodmial/nanodictate/compare/v0.1.33...v0.1.34
 [0.1.33]: https://github.com/kodmial/nanodictate/compare/v0.1.32...v0.1.33
