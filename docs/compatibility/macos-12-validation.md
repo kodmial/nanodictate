@@ -56,8 +56,8 @@ incompatibility. The repeatable gate is therefore split:
   The absence of evidence leaves macOS 12 runtime compatibility UNVERIFIED.
   It must not block automated development or GitHub Release publication.
 - If sustained macOS 12 validation becomes impossible (no hardware, no
-  maintainer capacity), the minimum supported OS is **bumped** (e.g. to
-  macOS 13) instead of being left unverified. The trigger rule: no green
+  maintainer capacity), the owner decides whether to raise the minimum
+  supported OS (e.g. to macOS 13). The trigger rule: no green
   macOS 12 runtime run for 30 days → file a `priority:p1` issue titled
   `macOS 12 validation lapsed` and either restore isolated-host validation or raise the
   floor in `Package.swift`, plists, and packaging metadata together.
