@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.39] - 2026-10-13
+
+
+
+### Fixed
+
+* Add retention limits for debug audio recordings ([0de49f7](https://github.com/kodmial/nanodictate/commit/0de49f76e0ba05924206671fbb71e7c4027f517e))
+
 ## [0.1.38] - 2026-10-13
 
 
@@ -596,7 +604,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.38...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.39...HEAD
+[0.1.39]: https://github.com/kodmial/nanodictate/compare/v0.1.38...v0.1.39
 [0.1.38]: https://github.com/kodmial/nanodictate/compare/v0.1.37...v0.1.38
 [0.1.37]: https://github.com/kodmial/nanodictate/compare/v0.1.36...v0.1.37
 [0.1.36]: https://github.com/kodmial/nanodictate/compare/v0.1.35...v0.1.36
