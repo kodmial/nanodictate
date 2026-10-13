@@ -387,12 +387,9 @@ public enum DebugDump {
       let standardized = (fullPath as NSString).standardizingPath
       // Ownership guard: candidate must stay inside the dedicated directory.
       guard standardized.hasPrefix(expandedDir + "/") else { continue }
-      var isDir: ObjCBool = false
-      guard fileManager.fileExists(atPath: standardized, isDirectory: &isDir), !isDir.boolValue else {
-        continue
-      }
       guard
         let attributes = try? fileManager.attributesOfItem(atPath: standardized),
+        (attributes[.type] as? FileAttributeType) == .typeRegular,
         let mtime = attributes[.modificationDate] as? Date
       else { continue }
       let sizeValue = (attributes[.size] as? NSNumber)?.int64Value ?? 0

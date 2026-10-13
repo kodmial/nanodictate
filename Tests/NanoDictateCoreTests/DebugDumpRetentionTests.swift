@@ -222,6 +222,33 @@ final class DebugDumpRetentionTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: (dir as NSString).appendingPathComponent("recording-victim.wav")))
     }
 
+    @objc func testPruneSkipsSymlinksAndDirectoriesWithManagedNames() {
+        let dir = makeTempDir()
+        DebugDump.maxRecordingFiles = 0
+        DebugDump.maxRecordingBytes = 0
+        DebugDump.maxRecordingAge = 0
+        let now = Date(timeIntervalSince1970: 8_500_000)
+        writeFile(in: dir, name: "recording-victim.wav", bytes: 10, mtime: now)
+        // Symlink with a managed name pointing outside the recordings directory.
+        let outside = NSTemporaryDirectory() + "nanodictate-target-\(UUID().uuidString).wav"
+        _ = try? Data(repeating: 0x41, count: 10).write(to: URL(fileURLWithPath: outside))
+        tempDirs.append(outside)
+        let linkPath = (dir as NSString).appendingPathComponent("recording-link.wav")
+        try? FileManager.default.createSymbolicLink(atPath: linkPath, withDestinationPath: outside)
+        // Directory with a managed name is never a deletion candidate.
+        let managedDir = (dir as NSString).appendingPathComponent("recording-dir.wav")
+        try? FileManager.default.createDirectory(atPath: managedDir, withIntermediateDirectories: true)
+        DebugDump.pruneRecordings(now: now)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: (dir as NSString).appendingPathComponent("recording-victim.wav")))
+        XCTAssertTrue(listNames(in: dir).contains("recording-link.wav"))
+        let linkAttributes = try? FileManager.default.attributesOfItem(atPath: linkPath)
+        XCTAssertEqual(linkAttributes?[.type] as? FileAttributeType, .typeSymbolicLink)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outside))
+        var isDir: ObjCBool = false
+        XCTAssertTrue(FileManager.default.fileExists(atPath: managedDir, isDirectory: &isDir))
+        XCTAssertTrue(isDir.boolValue)
+    }
+
     @objc func testPruneCannotEscapeRecordingsDirectory() {
         let dir = makeTempDir()
         let outside = NSTemporaryDirectory() + "nanodictate-outside-\(UUID().uuidString).wav"
