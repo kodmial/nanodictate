@@ -316,6 +316,13 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// not outlive the overlay session. Main-thread only; cleared on completion.
   private var activeRealtimeTask: Task<Void, Never>?
 
+  /// Retained batch transcription task for the active "processing" phase
+  /// (batch path with bounded hedged failover). The watchdog and
+  /// `handleCancel` cancel it alongside `activeRealtimeTask` so no further
+  /// fallback requests are scheduled after recognition stops. Main-thread
+  /// only; cleared on completion.
+  private var activeBatchTask: Task<Void, Never>?
+
   /// While ReviewGate.confirmAsync waits for the terminal decision, a
   /// physical Return MUST pass through the event tap — the terminal's
   /// readLine needs it (ReviewGate reads stdin on a background queue). Set
@@ -1297,12 +1304,41 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     // watchdog a no-op after any terminal event.
     processingSession += 1
     let session = processingSession
-    // Auto-failover runs the candidates (parallel) AFTER the primary request
-    // timeout: the processing watchdog needs one more networkRequestTimeout
-    // as margin, else it would cut a valid failover mid-flight.
-    let watchdogDuration =
-      OverlayController.processingMaxDuration
-      + (autoFailover && !failoverCandidates.isEmpty ? Transcriber.networkRequestTimeout : 0)
+    // Auto-failover runs the candidates (bounded hedged) AFTER the primary
+    // request finishes: the processing watchdog must cover the primary's
+    // FULL retry sequence plus the hedged schedule, not just one request.
+    // The primary uses the same Transcriber retry loop as any fallback (up
+    // to Transcriber.maxCandidateDuration: maxAttempts requests plus capped
+    // backoff pauses plus the single cookie-challenge replay), so budgeting
+    // only processingMaxDuration (one request timeout + 5 s) would cut a
+    // retrying primary — and leave less than a full budget for later
+    // fallbacks — before failover even starts. hedgedFailover starts at most
+    // maxConcurrentAttempts candidates at once, so N candidates need
+    // ceil(N / maxConcurrentAttempts) rounds; each round holds its slots
+    // until the candidate's FULL retry sequence finishes (a degraded server
+    // answering slowly with HTTP 5xx on every attempt occupies the slot far
+    // beyond a single request timeout). Budgeting one timeout per round
+    // would cut a valid later candidate mid-flight when the first slots
+    // retry until their full budget.
+    let hedgePolicy = RetryProvider.HedgedFailoverPolicy.default
+    let failoverRounds =
+      (failoverCandidates.count + max(1, hedgePolicy.maxConcurrentAttempts) - 1)
+      / max(1, hedgePolicy.maxConcurrentAttempts)
+    // The extra hedge-delay interval is scheduling slack: a hedged
+    // candidate can finish exactly at the computed deadline and its
+    // delivery hops to the main queue, where the watchdog is also
+    // scheduled — without slack the watchdog could cancel a valid result.
+    let failoverMargin =
+      (autoFailover && failoverRounds > 0)
+      ? Double(failoverRounds) * Transcriber.maxCandidateDuration
+        + 2 * hedgePolicy.hedgeDelaySeconds
+      : 0
+    // Primary runs sequentially before any fallback, so its full budget is
+    // always covered (also when failover is off); the failover margin is
+    // added only when auto-failover has candidates.
+    let primaryBudget = max(
+      OverlayController.processingMaxDuration, Transcriber.maxCandidateDuration)
+    let watchdogDuration = primaryBudget + failoverMargin
     // Realtime sessions need their own budget (connect + audio sends +
     // final wait), not the batch watchdog: connectTimeout (10 s) +
     // duration-derived append budget (floor appendTimeout 15 s for all
@@ -1329,16 +1365,21 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         self.state == .transcribing
       else { return }
       // Cancel the retained realtime task so the WebSocket does not remain
-      // open after the watchdog ends the session.
+      // open after the watchdog ends the session. Cancel the retained batch
+      // task as well so hedged failover stops scheduling fallback uploads.
       self.activeRealtimeTask?.cancel()
       self.activeRealtimeTask = nil
+      self.activeBatchTask?.cancel()
+      self.activeBatchTask = nil
       self.failTranscription(Transcriber.sttTimeoutMessage, isNetworkFailure: true)
     }
 
-    // Drop any previous realtime task before starting a new loop so an
+    // Drop any previous realtime/batch task before starting a new loop so an
     // abandoned session cannot linger when dictations overlap.
     activeRealtimeTask?.cancel()
     activeRealtimeTask = nil
+    activeBatchTask?.cancel()
+    activeBatchTask = nil
     let realtimeTask = Task { [weak self] in
       guard let self else { return }
 
@@ -1412,6 +1453,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
               sessionActive: self.processingSession == session && self.state == .transcribing
             )
           else { return }
+          self.activeBatchTask = nil
           self.completeInsertion(text)
         }
       } catch {
@@ -1422,12 +1464,15 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             self.processingSession == session,
             self.state == .transcribing
           else { return }
+          self.activeBatchTask = nil
           self.failTranscription(message, isNetworkFailure: networkText != nil)
         }
       }
     }
     if isRealtimeRequest {
       activeRealtimeTask = realtimeTask
+    } else {
+      activeBatchTask = realtimeTask
     }
   }
 
@@ -2417,23 +2462,23 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         level: "info"
       )
       retryProvider.lastFailedProviderID = activeProviderID
-      // The parallel failover is moved to NanoDictateCore (a testable
-      // function): RetryProvider.parallelFailover — all candidates run in
-      // one withTaskGroup (independent STT requests), the first success
-      // wins and cancels the rest (cancelAll); TranscribeErrors accumulate —
-      // the last one that finished wins; a non-TranscribeError breaks the
-      // chain like the sequential loop (microphone etc.).
+      // Bounded hedged failover (NanoDictateCore): the first ordered fallback
+      // starts alone; extra fallbacks launch only on fast failure or after
+      // the hedge delay, at most HedgedFailoverPolicy.default
+      // .maxConcurrentAttempts in flight. First success wins and cancels the
+      // rest (cancelAll); TranscribeErrors accumulate (last wins); a
+      // non-TranscribeError aborts like the sequential loop (mic etc.).
       // lastFailedProviderID is set BEFORE the group and reset on a success
       // in retranscribe.
       // Defense in depth alongside init-time filtering: realtime candidates
-      // never join the parallel chain — they need the realtime watchdog and
+      // never join the hedged chain — they need the realtime watchdog and
       // task retention, not the batch budget. No batch candidates left —
       // rethrow the primary error instead of failing over nowhere.
       let batchCandidates = failoverCandidates.filter { !Self.isRealtimeProvider($0) }
       guard !batchCandidates.isEmpty else {
         throw error
       }
-      return try await RetryProvider.parallelFailover(
+      return try await RetryProvider.hedgedFailover(
         candidates: batchCandidates
       ) { provider in
         guard let retryResult = try await self.retryProvider.retranscribe(with: provider) else {
@@ -2757,8 +2802,12 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       cancelRecognition = true
       // Cancel a retained realtime session so Esc closes the WebSocket
       // immediately instead of leaving it open until its own timeout.
+      // Cancel the retained batch task as well so hedged failover stops
+      // scheduling fallback uploads after recognition stops.
       activeRealtimeTask?.cancel()
       activeRealtimeTask = nil
+      activeBatchTask?.cancel()
+      activeBatchTask = nil
       // Esc during transcription stops the queued work immediately, not only
       // at the next segment: the isCancelled guard in finishLiveRun drops the
       // final pass, so a cancelled run never sends audio to STT.
