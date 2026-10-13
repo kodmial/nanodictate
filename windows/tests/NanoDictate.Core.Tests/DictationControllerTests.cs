@@ -100,6 +100,212 @@ public sealed class DictationControllerTests
     }
 
     [Fact]
+    public async Task StopForwardsSamplesToTranscriptionHandler()
+    {
+        var capture = new FakeCaptureDriver();
+        var sink = new FakeInsertionSink();
+        using var controller = new DictationController(capture, sink);
+        IReadOnlyList<short>? forwarded = null;
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        controller.StopTranscriptionHandler = (samples, _, _) =>
+        {
+            forwarded = samples;
+            done.SetResult();
+            return Task.CompletedTask;
+        };
+        capture.Start();
+        capture.MakeReady();
+        controller.AltDoubleTapped();
+        await done.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.NotNull(forwarded);
+        Assert.Equal(new short[] { 1, 2, 3 }, forwarded!);
+    }
+
+    [Fact]
+    public async Task CancelCurrentCancelsPendingTranscription()
+    {
+        var capture = new FakeCaptureDriver();
+        var sink = new FakeInsertionSink();
+        using var controller = new DictationController(capture, sink);
+        CancellationToken capturedToken = default;
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        controller.StopTranscriptionHandler = (samples, token, _) =>
+        {
+            capturedToken = token;
+            done.SetResult();
+            return Task.CompletedTask;
+        };
+        capture.Start();
+        capture.MakeReady();
+        controller.AltDoubleTapped();
+        await done.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        controller.CancelKeyPressed();
+        Assert.True(capturedToken.IsCancellationRequested);
+    }
+
+    [Fact]
+    public async Task StaleRecordingResultIsRejectedAfterNewRecordingStarts()
+    {
+        var capture = new FakeCaptureDriver();
+        var sink = new FakeInsertionSink();
+        using var controller = new DictationController(capture, sink);
+        ulong stoppedId = 0;
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        controller.StopTranscriptionHandler = (samples, _, id) =>
+        {
+            stoppedId = id;
+            done.SetResult();
+            return Task.CompletedTask;
+        };
+        capture.Start();
+        capture.MakeReady();
+        controller.AltDoubleTapped();
+        await done.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.NotEqual(0ul, stoppedId);
+        // Finish A so the session returns to idle, then start B before
+        // A's late transcription result arrives. B supersedes A.
+        Assert.False(controller.CompleteWithTranscript(string.Empty, recordingId: stoppedId));
+        controller.AltDoubleTapped();
+        Assert.Equal(DictationState.Recording, capture.State);
+        Assert.False(controller.CompleteWithTranscript("stale A", recordingId: stoppedId));
+        Assert.Empty(sink.Inserts);
+    }
+
+    [Fact]
+    public void StaleEmptyResultDoesNotFinishNewRecording()
+    {
+        var capture = new FakeCaptureDriver();
+        var sink = new FakeInsertionSink();
+        using var controller = new DictationController(capture, sink);
+        ulong stoppedId = 0;
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        controller.StopTranscriptionHandler = (_, _, id) =>
+        {
+            stoppedId = id;
+            done.SetResult();
+            return Task.CompletedTask;
+        };
+        capture.Start();
+        capture.MakeReady();
+        controller.AltDoubleTapped();
+        Assert.True(done.Task.Wait(TimeSpan.FromSeconds(5)));
+        Assert.False(controller.CompleteWithTranscript(string.Empty, recordingId: stoppedId));
+        Assert.Equal(DictationState.Idle, capture.State);
+        // Start B, then deliver stale A empty: B must stay Recording.
+        controller.AltDoubleTapped();
+        Assert.Equal(DictationState.Recording, capture.State);
+        Assert.False(controller.CompleteWithTranscript(string.Empty, recordingId: stoppedId));
+        Assert.Equal(DictationState.Recording, capture.State);
+    }
+
+    [Fact]
+    public void StaleSuccessDoesNotFinishNewRecording()
+    {
+        var capture = new FakeCaptureDriver();
+        var sink = new FakeInsertionSink();
+        using var controller = new DictationController(capture, sink);
+        ulong stoppedId = 0;
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        controller.StopTranscriptionHandler = (_, _, id) =>
+        {
+            stoppedId = id;
+            done.SetResult();
+            return Task.CompletedTask;
+        };
+        capture.Start();
+        capture.MakeReady();
+        controller.AltDoubleTapped();
+        Assert.True(done.Task.Wait(TimeSpan.FromSeconds(5)));
+        Assert.False(controller.CompleteWithTranscript(string.Empty, recordingId: stoppedId));
+        controller.AltDoubleTapped();
+        Assert.Equal(DictationState.Recording, capture.State);
+        Assert.False(controller.CompleteWithTranscript("stale A", recordingId: stoppedId));
+        Assert.Empty(sink.Inserts);
+        Assert.Equal(DictationState.Recording, capture.State);
+    }
+
+    private sealed class BlockingInsertionSink : IInsertionSink
+    {
+        public readonly List<string> Inserts = new();
+        public int Deletes;
+        public readonly ManualResetEventSlim EnteredInsert = new(false);
+        public readonly ManualResetEventSlim ReleaseInsert = new(false);
+        public void Insert(string text, InsertMethod method)
+        {
+            lock (Inserts)
+            {
+                Inserts.Add(text);
+            }
+            EnteredInsert.Set();
+            ReleaseInsert.Wait(TimeSpan.FromSeconds(5));
+        }
+        public void DeleteText(string insertedText) => Interlocked.Increment(ref Deletes);
+        public void DeleteGraphemes(int count) { }
+        public void PostEnter() { }
+    }
+
+    [Fact]
+    public async Task CancelledDeliveryDuringInsertRollsBackWithoutFinishing()
+    {
+        var capture = new FakeCaptureDriver();
+        var sink = new BlockingInsertionSink();
+        using var controller = new DictationController(capture, sink);
+        ulong stoppedId = 0;
+        var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        controller.StopTranscriptionHandler = (_, _, id) =>
+        {
+            stoppedId = id;
+            stopped.SetResult();
+            return Task.CompletedTask;
+        };
+        controller.AltDoubleTapped();
+        Assert.Equal(DictationState.Recording, capture.State);
+        controller.AltDoubleTapped();
+        await stopped.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(DictationState.Transcribing, capture.State);
+        // Delivery blocks inside Insert; Escape cancels while blocked.
+        var delivery = Task.Run(() => controller.CompleteWithTranscript("cancelled A", recordingId: stoppedId));
+        Assert.True(sink.EnteredInsert.Wait(TimeSpan.FromSeconds(5)));
+        controller.CancelKeyPressed();
+        sink.ReleaseInsert.Set();
+        var delivered = await delivery.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(delivered);
+        // Stale insert is rolled back and no capture session is completed.
+        Assert.Equal(1, sink.Deletes);
+        Assert.Equal(DictationState.Transcribing, capture.State);
+    }
+
+    [Fact]
+    public void StaleReviewDeclineDoesNotFinishNewRecording()
+    {
+        var capture = new FakeCaptureDriver();
+        var sink = new FakeInsertionSink();
+        using var controller = new DictationController(capture, sink)
+        {
+            ReviewBeforeInsert = true,
+            ReviewPrompt = new FakeReviewPrompt(),
+        };
+        ulong stoppedId = 0;
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        controller.StopTranscriptionHandler = (_, _, id) =>
+        {
+            stoppedId = id;
+            done.SetResult();
+            return Task.CompletedTask;
+        };
+        capture.Start();
+        capture.MakeReady();
+        controller.AltDoubleTapped();
+        Assert.True(done.Task.Wait(TimeSpan.FromSeconds(5)));
+        Assert.False(controller.CompleteWithTranscript(string.Empty, recordingId: stoppedId));
+        controller.AltDoubleTapped();
+        Assert.Equal(DictationState.Recording, capture.State);
+        ((FakeReviewPrompt)controller.ReviewPrompt).Enqueue("n");
+        Assert.False(controller.CompleteWithTranscript("stale A", recordingId: stoppedId));
+        Assert.Equal(DictationState.Recording, capture.State);
+    }
+
+    [Fact]
     public void EscapeCancelsAndDropsLateTranscript()
     {
         var capture = new FakeCaptureDriver();

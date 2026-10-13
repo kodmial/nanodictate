@@ -42,7 +42,7 @@
 
 # Files whose diff alone must never publish a version. Full paths are anchored
 # on both ends; a bare `LICENSE` must not swallow `packaging/LICENSE.txt`.
-POLICY_EXCLUDED_PATH_RE='^(Sources/NanoDictateCore/Version\.swift|CHANGELOG\.md|README\.md|\.github/.*|\.githooks/.*|docs/.*|packaging/.*|nanodictate\.rb|config\.example\.toml|SECURITY\.md|CODE_OF_CONDUCT\.md|CONTRIBUTING\.md|LICENSE|\.gitignore|\.swift-format|\.swiftlint\.yml|\.coderabbit\.yaml|release-please-config\.json|\.release-please-manifest\.json)$'
+POLICY_EXCLUDED_PATH_RE='^(Sources/NanoDictateCore/Version\.swift|CHANGELOG\.md|README\.md|\.github/.*|\.githooks/.*|docs/.*|packaging/.*|bucket/.*|nanodictate\.rb|config\.example\.toml|SECURITY\.md|CODE_OF_CONDUCT\.md|CONTRIBUTING\.md|LICENSE|\.gitignore|\.swift-format|\.swiftlint\.yml|\.coderabbit\.yaml|release-please-config\.json|\.release-please-manifest\.json)$'
 
 # The macports installer is pinned to the just-synced tree by a one-line PIN_REV
 # edit that the release workflow pushes to main after every tag. That generated

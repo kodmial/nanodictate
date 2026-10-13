@@ -23,6 +23,22 @@ public sealed class PortableConfig
     public double UndoMaxInterval { get; init; } = 2.0;
     /// <summary>Review-before-insert gate (default false).</summary>
     public bool ReviewBeforeInsert { get; init; }
+    /// <summary>STT transport mode (default direct).</summary>
+    public TransportConfig Transport { get; init; } = TransportConfig.Direct;
+    /// <summary>Proxy/gateway secret (never logged).</summary>
+    public string ProxyKey { get; init; } = string.Empty;
+    /// <summary>Chunked long-form mode (default false).</summary>
+    public bool Chunked { get; init; }
+    /// <summary>Chunked final-pass policy (default on-uncertainty).</summary>
+    public ChunkedFinalPass ChunkedFinalPass { get; init; } = ChunkedFinalPass.OnUncertainty;
+    /// <summary>STT request timeout in seconds (default 120).</summary>
+    public double TimeoutSeconds { get; init; } = 120;
+    /// <summary>Automatic provider failover (default false).</summary>
+    public bool AutoFailover { get; init; }
+    /// <summary>Prompt/context bias for STT (default empty).</summary>
+    public string Prompt { get; init; } = string.Empty;
+    /// <summary>Realtime model id (default gpt-live-transcribe).</summary>
+    public string RealtimeModel { get; init; } = "gpt-live-transcribe";
 
     /// <summary>
     /// Loads the portable subset of a NanoDictate TOML config. Unknown keys
@@ -39,6 +55,18 @@ public sealed class PortableConfig
         var doubleAltMaxInterval = 0.4;
         var undoMaxInterval = 2.0;
         var reviewBeforeInsert = false;
+        var transportMode = SttTransportMode.Direct;
+        var httpProxy = string.Empty;
+        var proxyUser = string.Empty;
+        var proxyPassword = string.Empty;
+        var proxyKey = string.Empty;
+        var proxyKeyHeader = "X-Proxy-Key";
+        var chunked = false;
+        var finalPass = ChunkedFinalPass.OnUncertainty;
+        var timeoutSeconds = 120.0;
+        var autoFailover = false;
+        var prompt = string.Empty;
+        var realtimeModel = "gpt-live-transcribe";
         var providers = new List<ProviderEntry>();
         string? currentProvider = null;
         string name = string.Empty, baseUrl = string.Empty, model = string.Empty;
@@ -101,6 +129,36 @@ public sealed class PortableConfig
                 {
                     case "active_provider": active = value; break;
                     case "language": language = value; break;
+                    case "prompt": prompt = value; break;
+                    case "realtime_model": realtimeModel = value; break;
+                    case "transport":
+                        transportMode = TransportConfig.ParseMode(value.ToLowerInvariant());
+                        break;
+                    case "http_proxy": httpProxy = value; break;
+                    case "proxy_user": proxyUser = value; break;
+                    case "proxy_password": proxyPassword = value; break;
+                    case "proxy_key": proxyKey = value; break;
+                    case "proxy_key_header":
+                        if (!string.IsNullOrEmpty(value))
+                        {
+                            proxyKeyHeader = value;
+                        }
+                        break;
+                    case "chunked":
+                        chunked = value.Equals("true", StringComparison.OrdinalIgnoreCase) || value == "1";
+                        break;
+                    case "chunked_final_pass":
+                        finalPass = ChunkedTranscriber.ParseFinalPass(value.ToLowerInvariant());
+                        break;
+                    case "timeout_seconds":
+                        if (double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var t) && t > 0 && t <= 600)
+                        {
+                            timeoutSeconds = t;
+                        }
+                        break;
+                    case "auto_failover":
+                        autoFailover = value.Equals("true", StringComparison.OrdinalIgnoreCase) || value == "1";
+                        break;
                     case "insert_method":
                         insertMethod = InsertMethodParser.Parse(value);
                         break;
@@ -135,6 +193,14 @@ public sealed class PortableConfig
             DoubleAltMaxInterval = doubleAltMaxInterval,
             UndoMaxInterval = undoMaxInterval,
             ReviewBeforeInsert = reviewBeforeInsert,
+            Transport = new TransportConfig(transportMode, httpProxy, proxyUser, proxyPassword, proxyKey, proxyKeyHeader),
+            ProxyKey = proxyKey,
+            Chunked = chunked,
+            ChunkedFinalPass = finalPass,
+            TimeoutSeconds = timeoutSeconds,
+            AutoFailover = autoFailover,
+            Prompt = prompt,
+            RealtimeModel = realtimeModel,
         };
     }
 

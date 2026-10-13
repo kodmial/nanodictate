@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.36] - 2026-10-12
+
+
+
+### Fixed
+
+* test(windows): published-release installer lifecycle canary ([fc9fc36](https://github.com/kodmial/nanodictate/commit/fc9fc36fbe029c72c1e7e31bc01a6bec56720e26))
+
+## [0.1.35] - 2026-10-11
+
+
+
+### Fixed
+
+* **windows:** correct PowerShell interpolation in distribution smoke diagnostics ([c15fd0d](https://github.com/kodmial/nanodictate/commit/c15fd0d3f30642c5c4eb8b16aa69d5156c9e2f56))
+* **windows:** delimit Scoop manifest URL variable under strict PowerShell mode ([d0649ff](https://github.com/kodmial/nanodictate/commit/d0649ff57438898aee5cb2c9ab5e97442f204f61))
+* **windows:** treat removed logon startup value as expected after uninstall ([29d0525](https://github.com/kodmial/nanodictate/commit/29d0525eb991c2ebfbdbaa749f4f3b4be8f819f8))
+
+## [0.1.34] - 2026-10-11
+
+
+
+### Fixed
+
+* **windows:** register persistent per-user startup in installer and remove on uninstall ([acbf87c](https://github.com/kodmial/nanodictate/commit/acbf87c6219d79e641e10a6444fc4281ddfaa9bf))
+
+## [0.1.33] - 2026-10-11
+
+
+
+### Added
+
+* **windows:** integrate WinUI host and Windows product CI ([#140](https://github.com/kodmial/nanodictate/issues/140)) ([65b591a](https://github.com/kodmial/nanodictate/commit/65b591aba84fca5a68b4f957cb7172973bd406c0))
+
 ## [0.1.32] - 2026-10-11
 
 
@@ -546,7 +580,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.32...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.36...HEAD
+[0.1.36]: https://github.com/kodmial/nanodictate/compare/v0.1.35...v0.1.36
+[0.1.35]: https://github.com/kodmial/nanodictate/compare/v0.1.34...v0.1.35
+[0.1.34]: https://github.com/kodmial/nanodictate/compare/v0.1.33...v0.1.34
+[0.1.33]: https://github.com/kodmial/nanodictate/compare/v0.1.32...v0.1.33
 [0.1.32]: https://github.com/kodmial/nanodictate/compare/v0.1.31...v0.1.32
 [0.1.31]: https://github.com/kodmial/nanodictate/compare/v0.1.30...v0.1.31
 [0.1.30]: https://github.com/kodmial/nanodictate/compare/v0.1.29...v0.1.30

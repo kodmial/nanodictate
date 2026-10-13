@@ -1,0 +1,45 @@
+name: Windows distribution smoke
+
+# End-to-end verification of the public Windows distribution, not only a
+# locally built candidate. This is a separate post-publish/nightly canary like
+# Homebrew/MacPorts production smoke. A Windows hosted runner cannot attest
+# interactive microphone/TCC, keyboard hooks, or physical Windows 10 parity.
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  schedule:
+    - cron: '41 4 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/windows-distribution-smoke.yml'
+      - 'windows/package/verify-distribution.ps1'
+
+permissions:
+  contents: read
+
+# Do not let the next release cancel a real production-channel verification.
+concurrency:
+  group: windows-distribution-smoke-${{ github.event_name }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  public-channels:
+    name: Published Windows lifecycle (${{ matrix.channel }})
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: windows-latest
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [inno, scoop]
+    steps:
+      - name: Checkout trusted main smoke implementation
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install and uninstall real published Windows distribution
+        shell: pwsh
+        run: pwsh windows/package/verify-distribution.ps1 -Channel '${{ matrix.channel }}'
