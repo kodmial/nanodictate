@@ -48,6 +48,14 @@ public enum DebugDump {
 
   private static let lock = NSLock()
 
+  /// Serial queue for retention pruning so concurrent saves cannot trigger
+  /// overlapping cleanup runs; the prune itself also takes `lock` to avoid
+  /// overlapping a `saveRecording` write.
+  private static let pruningQueue = DispatchQueue(
+    label: "com.nanodictate.DebugDump.recordingsPruning",
+    qos: .utility
+  )
+
   /// Multipart file-part metadata; raw bytes not saved.
   public struct FilePart {
     public let fieldName: String
@@ -328,12 +336,13 @@ public enum DebugDump {
   /// True when `path` resolves inside the dedicated recordings directory.
   /// Used to guarantee cleanup never escapes that directory.
   public static func isPathInsideRecordingsDirectory(_ path: String) -> Bool {
-    let dir = expandedRecordingsDirectory()
-    let standardized = ((path as NSString).expandingTildeInPath as NSString).standardizingPath
+    let dir = (expandedRecordingsDirectory() as NSString).resolvingSymlinksInPath
+    let standardized = (((path as NSString).expandingTildeInPath as NSString).standardizingPath
+      as NSString).resolvingSymlinksInPath
     return standardized != dir && standardized.hasPrefix(dir + "/")
   }
 
-  /// Schedules retention pruning on a background queue (outside any realtime
+  /// Schedules retention pruning on a dedicated serial background queue (outside any realtime
   /// audio callback). Snapshots directory + limits so later config changes
   /// cannot redirect cleanup. Never throws; failures are logged inside prune.
   public static func scheduleRecordingsPruning() {
@@ -341,8 +350,14 @@ public enum DebugDump {
     let maxFiles = maxRecordingFiles
     let maxBytes = maxRecordingBytes
     let maxAge = maxRecordingAge
-    DispatchQueue.global(qos: .utility).async {
-      pruneRecordings(in: directory, now: Date(), maxFiles: maxFiles, maxBytes: maxBytes, maxAge: maxAge)
+    pruningQueue.async {
+      pruneRecordings(
+        in: directory,
+        now: Date(),
+        maxFiles: maxFiles,
+        maxBytes: maxBytes,
+        maxAge: maxAge
+      )
     }
   }
 
@@ -352,14 +367,20 @@ public enum DebugDump {
   /// candidates; subdirectories and unexpected files are left untouched.
   public static func pruneRecordings(now: Date = Date()) {
     pruneRecordings(
-      in: recordingsDirectory, now: now,
-      maxFiles: maxRecordingFiles, maxBytes: maxRecordingBytes, maxAge: maxRecordingAge)
+      in: recordingsDirectory,
+      now: now,
+      maxFiles: maxRecordingFiles,
+      maxBytes: maxRecordingBytes,
+      maxAge: maxRecordingAge
+    )
   }
 
   /// Snapshot overload used by the background scheduler (and tests).
   public static func pruneRecordings(
     in directory: String, now: Date, maxFiles: Int, maxBytes: Int64, maxAge: TimeInterval
   ) {
+    lock.lock()
+    defer { lock.unlock() }
     let fileManager = FileManager.default
     let expandedDir = ((directory as NSString).expandingTildeInPath as NSString).standardizingPath
     var isDirectory: ObjCBool = false
@@ -404,6 +425,17 @@ public enum DebugDump {
       do {
         try fileManager.removeItem(atPath: standardized)
       } catch {
+        // Tolerate a concurrent deleter winning the race: the file is gone,
+        // which is the desired end state, so do not log a spurious error.
+        if (error as? CocoaError)?.code == .fileNoSuchFile {
+          continue
+        }
+        let nsError = error as NSError
+        if nsError.domain == NSCocoaErrorDomain,
+          nsError.code == CocoaError.fileNoSuchFile.rawValue
+        {
+          continue
+        }
         Logger.log(
           L10n.tr("debug.recordingPruneFailed")
             .replacingOccurrences(of: "{dir}", with: expandedDir)
