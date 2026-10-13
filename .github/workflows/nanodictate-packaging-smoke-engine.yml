@@ -357,7 +357,14 @@ jobs:
             SIGN_ARGS=(--force --sign "$SIGNING_IDENTITY" --keychain "$KC")
             rm -f "/tmp/$CLI_NAME-ci.p12"
           else
-            echo "::warning::No CI signing secrets; ad-hoc signature for the candidate smoke only."
+            # Production release candidates MUST retain the same signing
+            # designated requirement across versions or macOS TCC permissions
+            # (microphone/accessibility) can be reset after an upgrade.
+            if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+              echo "::error::Production signing P12/password are missing: refusing to create an ad-hoc signed release that loses persistent microphone permissions."
+              exit 1
+            fi
+            echo "::notice::Untrusted PR candidate uses an ad-hoc signature; never publish these bytes."
             SIGN_ARGS=(--force -s -)
             KC=""
           fi

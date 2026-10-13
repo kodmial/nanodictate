@@ -10,6 +10,12 @@ on:
       - 'Resources/**'
       - 'config.example.toml'
       - 'rust/**'
+      # Match release.yml's source triggers: combined releases require a
+      # same-SHA macOS candidate even for Windows-only changes.
+      - 'windows/**'
+      - '.github/workflows/windows.yml'
+      - '.github/workflows/nanodictate-release-engine.yml'
+      - '.github/workflows/nanodictate-packaging-smoke-engine.yml'
       - '.github/workflows/packaging-smoke.yml'
       - '.github/workflows/release.yml'
   push:
@@ -25,6 +31,12 @@ on:
       - 'Resources/**'
       - 'config.example.toml'
       - 'rust/**'
+      # Match release.yml's source triggers: combined releases require a
+      # same-SHA macOS candidate even for Windows-only changes.
+      - 'windows/**'
+      - '.github/workflows/windows.yml'
+      - '.github/workflows/nanodictate-release-engine.yml'
+      - '.github/workflows/nanodictate-packaging-smoke-engine.yml'
       - '.github/workflows/packaging-smoke.yml'
       - '.github/workflows/release.yml'
   workflow_run:

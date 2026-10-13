@@ -1,6 +1,6 @@
-# Windows host (activation + insertion stage)
+# Windows product (supported release)
 
-Native Windows host for NanoDictate on the **same production Rust
+Native Windows product for NanoDictate on the **same production Rust
 core used by macOS** (`rust/nanodictate-core` through its stable C ABI).
 
 This stage adds the core interaction model around the capture pipeline
@@ -12,17 +12,43 @@ mode with restore, chunked insertion, undo, synthetic Enter, and
 startup/background/tray/process lifecycle with Windows config/log
 locations. All policy decisions (session readiness, VAD/gain/auto-stop,
 failover/backoff, word diff, text join, review, retry/overlay/mic-request
-gates) stay in Rust; C# provides Windows-native I/O and capabilities.
-Packaging/installer polish remains out of scope.
+gates, STT profile resolution) stay in Rust; C# provides Windows-native
+I/O and capabilities. This is the supported product stage: transcription
+wiring (normal/chunked/realtime), provider/model selection and routing,
+retry/failover, review-before-insert, diagnostics, proxy/transport modes,
+WinUI 3 entrypoint, reproducible packaging, and release CI.
+
+
+## Install and update without developer tools
+
+See [Windows distribution](DISTRIBUTION.md). With Scoop installed:
+
+```powershell
+scoop bucket add nanodictate https://github.com/kodmial/nanodictate
+scoop install nanodictate
+scoop update nanodictate
+```
+
+Windows binary releases share the macOS version and GitHub Release.
+The release workflow refuses to publish a new version without both
+platforms' artifacts and their checksums. A direct EXE installer is
+also published for users without Scoop, once the combined release
+pipeline completes successfully.
 
 ## Layout
 
 ```text
 windows/
-  NanoDictate.sln
-  src/NanoDictate.Core/    # thin P/Invoke adapter + Windows-native I/O, no product logic
-  src/NanoDictate.Smoke/   # minimal executable smoke path
-  tests/NanoDictate.Core.Tests/  # xUnit ABI/ownership/error/session/capture/host tests
+  NanoDictate.sln              # portable: Core + Host + Smoke + Tests (net8.0, any OS)
+  src/NanoDictate.Core/        # thin P/Invoke adapter + Windows-native I/O, no product logic
+  src/NanoDictate.Host/        # supported console/tray product host (run/doctor/transcribe-file/providers)
+  src/NanoDictate.App/         # Windows-only WinUI 3 entrypoint (built on windows-latest only)
+  src/NanoDictate.Smoke/       # minimal executable smoke path
+  tests/NanoDictate.Core.Tests/  # xUnit ABI/ownership/error/session/capture/host/transcription tests
+  package/                     # MSIX manifest + make-msix.ps1 reproducible packaging
+  DISTRIBUTION.md              # installer/update/uninstall/supported versions
+  PARITY.md                    # feature parity matrix and explicit differences
+  VALIDATION.md                # hardware validation runbook + measurement contracts
 ```
 
 `NanoDictate.Core` owns no behavior. Every wrapper marshals arguments,
@@ -36,7 +62,7 @@ Portable configuration (`PortableConfig`) only carries data parsed from
 the shared TOML shape (`config.example.toml`); all policy decisions go
 through `NanoEngine` into Rust.
 
-## Prerequisites
+## Developer build prerequisites
 
 - Windows 10 22H2 or Windows 11, x64.
 - .NET 8 SDK or later.
@@ -48,8 +74,13 @@ through `NanoEngine` into Rust.
 # From the repository root:
 cargo build --release -p nanodictate-core
 dotnet build windows/NanoDictate.sln -c Release
+dotnet build windows/src/NanoDictate.Host/NanoDictate.Host.csproj -c Release
 dotnet test windows/NanoDictate.sln -c Release
 dotnet run --project windows/src/NanoDictate.Smoke -c Release -- config.example.toml
+dotnet run --project windows/src/NanoDictate.Host -c Release -- doctor --config config.example.toml
+# Windows-only (windows-latest):
+dotnet build windows/src/NanoDictate.App/NanoDictate.App.csproj -c Release
+pwsh windows/package/make-msix.ps1 -Version 0.1.33
 ```
 
 The loader resolves the engine in this order: `NANODICTATE_CORE_DLL`

@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Windows-only WinUI 3 entrypoint. Build with
+       windows/package/build-winui.ps1 (Visual Studio MSBuild for MRT/PRI).
+       The cross-platform solution stays on net8.0 so Linux/macOS
+       verification never needs the Windows App SDK. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>NanoDictate.App</RootNamespace>
+    <AssemblyName>NanoDictate.App</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>latest</LangVersion>
+    <UseWinUI>true</UseWinUI>
+    <Platforms>x64</Platforms>
+    <!-- Windows App SDK self-contained build rejects AnyCPU; enforce x64 even for plain dotnet build. -->
+    <Platform>x64</Platform>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <UseRidGraph>true</UseRidGraph>
+    <!-- Unpackaged, self-contained deployment is suitable for a direct installer and Scoop. -->
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+    <PublishReadyToRun>false</PublishReadyToRun>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Description>Windows App SDK / WinUI 3 entrypoint for NanoDictate on the shared Rust engine.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.5.1" />
+    <ProjectReference Include="..\NanoDictate.Core\NanoDictate.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\..\config.example.toml" Link="config.example.toml" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>
