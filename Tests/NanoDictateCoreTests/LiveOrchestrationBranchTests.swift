@@ -396,10 +396,18 @@ final class LiveOrchestrationBranchTests: XCTestCase {
         }
     }
 
-    /// Single-request watchdog (processSingleRequest): budget =
-    /// processingMaxDuration, plus one extra networkRequestTimeout ONLY when
-    /// auto-failover has candidates — failover runs AFTER the primary timeout,
-    /// so cutting it mid-flight would kill a valid failover.
+    /// Single-request watchdog (processSingleRequest): budget = primary retry
+    /// budget plus a hedged-failover margin ONLY when auto-failover has
+    /// candidates — the primary runs the same retry loop BEFORE any fallback
+    /// and failover runs AFTER it, so cutting either mid-flight would kill a
+    /// valid result. The margin covers the bounded hedged schedule: ceil(N /
+    /// maxConcurrentAttempts) rounds of the FULL per-candidate retry budget
+    /// (maxCandidateDuration: up to maxAttempts requests plus capped backoff
+    /// pauses plus the cookie-challenge replay — a retrying candidate holds
+    /// its concurrency slot until the whole sequence finishes) plus twice
+    /// the hedge delay (one interval for the hedged start offset plus one
+    /// scheduling-slack interval so a result arriving exactly at the deadline
+    /// is delivered before the main-queue watchdog fires).
     @objc func testSingleRequestWatchdogBudget_IncludesFailoverMargin() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -407,22 +415,44 @@ final class LiveOrchestrationBranchTests: XCTestCase {
         }
         let body = Self.functionBody(named: "processSingleRequest", in: source)
         XCTAssertFalse(body.isEmpty, "processSingleRequest обязана существовать")
-        let watchdog = Self.substring(
-            from: "let watchdogDuration",
-            to: "failTranscription(Transcriber.sttTimeoutMessage",
-            in: body
+        XCTAssertTrue(
+            body.contains("RetryProvider.HedgedFailoverPolicy.default"),
+            "бюджет обязан учитывать hedged-политику (maxConcurrentAttempts/hedgeDelay)"
         )
-        XCTAssertFalse(watchdog.isEmpty, "блок сторожевого таймера processSingleRequest обязан существовать")
-        // Формула многолинейная — нормализуем пробелы и сверяем композицию.
-        // substring(from:) отдаёт фрагмент ПОСЛЕ маркера "let watchdogDuration"
-        // (второго вхождения в теле функции нет), поэтому префикс объявления
-        // в normalized отсутствует — сверяем композицию с «=» в начале.
-        let normalized = watchdog.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        XCTAssertTrue(
+            body.contains("failoverRounds"),
+            "бюджет обязан вычислять число раундов failover (ceil(N / maxConcurrentAttempts))"
+        )
+        XCTAssertTrue(
+            body.contains("maxConcurrentAttempts"),
+            "число раундов обязано учитывать maxConcurrentAttempts"
+        )
+        let normalized = body.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         XCTAssertTrue(
             normalized.contains(
-                "= OverlayController.processingMaxDuration + (autoFailover && !failoverCandidates.isEmpty ? Transcriber.networkRequestTimeout : 0)"
+                "Double(failoverRounds) * Transcriber.maxCandidateDuration + 2 * hedgePolicy.hedgeDelaySeconds"
             ),
-            "бюджет одиночного запроса = processingMaxDuration + networkRequestTimeout ТОЛЬКО при активном failover с кандидатами"
+            "маржа failover = раунды × полный бюджет кандидата (maxCandidateDuration) + 2 × hedgeDelay (offset + slack)"
+        )
+        XCTAssertTrue(
+            body.contains("Transcriber.maxCandidateDuration"),
+            "базовый бюджет обязан покрывать полную retry-последовательность primary (maxCandidateDuration)"
+        )
+        XCTAssertTrue(
+            normalized.contains(
+                "OverlayController.processingMaxDuration, Transcriber.maxCandidateDuration"
+            ),
+            "база одиночного запроса = max(processingMaxDuration, maxCandidateDuration): primary тоже ретраится"
+        )
+        XCTAssertTrue(
+            normalized.contains(
+                "= primaryBudget + failoverMargin"
+            ),
+            "бюджет одиночного запроса = primaryBudget + hedged-маржа failover"
+        )
+        XCTAssertTrue(
+            body.contains("(autoFailover && failoverRounds > 0)"),
+            "маржа добавляется ТОЛЬКО при активном failover с кандидатами (иначе 0)"
         )
     }
 
