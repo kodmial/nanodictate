@@ -404,9 +404,10 @@ final class LiveOrchestrationBranchTests: XCTestCase {
     /// maxConcurrentAttempts) rounds of the FULL per-candidate retry budget
     /// (maxCandidateDuration: up to maxAttempts requests plus capped backoff
     /// pauses plus the cookie-challenge replay — a retrying candidate holds
-    /// its concurrency slot until the whole sequence finishes) plus the
-    /// hedge delay (later candidates start only after a slot frees or the
-    /// hedge fires).
+    /// its concurrency slot until the whole sequence finishes) plus twice
+    /// the hedge delay (one interval for the hedged start offset plus one
+    /// scheduling-slack interval so a result arriving exactly at the deadline
+    /// is delivered before the main-queue watchdog fires).
     @objc func testSingleRequestWatchdogBudget_IncludesFailoverMargin() {
         guard let source = Self.agentMainSource() else {
             XCTFail("Не удалось прочитать Sources/NanoDictateAgent/main.swift")
@@ -429,9 +430,9 @@ final class LiveOrchestrationBranchTests: XCTestCase {
         let normalized = body.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         XCTAssertTrue(
             normalized.contains(
-                "Double(failoverRounds) * Transcriber.maxCandidateDuration + hedgePolicy.hedgeDelaySeconds"
+                "Double(failoverRounds) * Transcriber.maxCandidateDuration + 2 * hedgePolicy.hedgeDelaySeconds"
             ),
-            "маржа failover = раунды × полный бюджет кандидата (maxCandidateDuration) + hedgeDelay"
+            "маржа failover = раунды × полный бюджет кандидата (maxCandidateDuration) + 2 × hedgeDelay (offset + slack)"
         )
         XCTAssertTrue(
             body.contains("Transcriber.maxCandidateDuration"),

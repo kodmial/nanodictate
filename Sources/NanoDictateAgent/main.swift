@@ -1324,9 +1324,14 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
     let failoverRounds =
       (failoverCandidates.count + max(1, hedgePolicy.maxConcurrentAttempts) - 1)
       / max(1, hedgePolicy.maxConcurrentAttempts)
+    // The extra hedge-delay interval is scheduling slack: a hedged
+    // candidate can finish exactly at the computed deadline and its
+    // delivery hops to the main queue, where the watchdog is also
+    // scheduled — without slack the watchdog could cancel a valid result.
     let failoverMargin =
       (autoFailover && failoverRounds > 0)
-      ? Double(failoverRounds) * Transcriber.maxCandidateDuration + hedgePolicy.hedgeDelaySeconds
+      ? Double(failoverRounds) * Transcriber.maxCandidateDuration
+        + 2 * hedgePolicy.hedgeDelaySeconds
       : 0
     // Primary runs sequentially before any fallback, so its full budget is
     // always covered (also when failover is off); the failover margin is
