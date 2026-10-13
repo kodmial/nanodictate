@@ -103,6 +103,7 @@ extension L10n {
     "review.confirmInsert": "Insert [Enter] / Cancel [Esc]",
     // debug.*
     "debug.recordingSaveFailed": "Failed to save audio recording {path}: {error}",
+    "debug.recordingPruneFailed": "Failed to prune debug recordings in {dir}: {error}",
     // ── CLI + Batch (nanodictate) ──
     "usage.title": "Usage: nanodictate <command> [args]",
     "usage.cmds": "Commands:",
@@ -368,6 +369,7 @@ extension L10n {
     "review.confirmInsert": "Вставить [Enter] / Отменить [Esc]",
     // debug.*
     "debug.recordingSaveFailed": "Не удалось сохранить аудиозапись {path}: {error}",
+    "debug.recordingPruneFailed": "Не удалось очистить отладочные аудиозаписи в {dir}: {error}",
     // ── CLI + Batch (nanodictate) ──
     "usage.title": "Использование: nanodictate <команда> [аргументы]",
     "usage.cmds": "Команды:",
