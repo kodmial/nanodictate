@@ -160,6 +160,12 @@ assert_eq 'decide: null labels fall through to the automatic policy' \
 assert_eq 'paths: only excluded paths are non-releasable' \
   'non-releasable' \
   "$(policy_decide "$EMPTY" $'CHANGELOG.md\nREADME.md\ndocs/packaging/homebrew.md\n.github/workflows/continuum-tech-swift-ci.yml\n.githooks/pre-commit\npackaging/homebrew/nanodictate.rb\nnanodictate.rb\nconfig.example.toml\nSECURITY.md\nCODE_OF_CONDUCT.md\nCONTRIBUTING.md\nLICENSE\n.gitignore\n.swift-format\n.swiftlint.yml\n.coderabbit.yaml\nrelease-please-config.json\n.release-please-manifest.json\nSources/NanoDictateCore/Version.swift' '')"
+assert_eq 'paths: generated Scoop manifest alone never releases another version' \
+  'non-releasable' \
+  "$(policy_decide "$EMPTY" 'bucket/nanodictate.json' '')"
+assert_eq 'paths: generated Scoop manifest plus Windows application change is releasable' \
+  'releasable' \
+  "$(policy_decide "$EMPTY" $'bucket/nanodictate.json\nwindows/src/NanoDictate.App/App.cs' '')"
 assert_eq 'paths: a single source change is releasable' \
   'releasable' \
   "$(policy_decide "$EMPTY" 'Sources/NanoDictateCore/Transcriber.swift' '')"

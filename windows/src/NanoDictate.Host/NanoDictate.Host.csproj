@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>NanoDictate.Host</RootNamespace>
+    <AssemblyName>nanodictate</AssemblyName>
+    <Description>Supported Windows product host for NanoDictate on the shared Rust engine.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\NanoDictate.Core\NanoDictate.Core.csproj" />
+  </ItemGroup>
+
+</Project>

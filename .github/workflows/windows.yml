@@ -1,10 +1,9 @@
 name: Windows host
 
-# Bootstrap CI for the native Windows host on the production Rust core.
-# Builds the Rust cdylib/DLL with the MSVC target, builds the C# host,
-# runs the C# ABI/ownership/error/session tests, and runs the minimal
-# executable smoke path. This is the application CI for #137; the
-# portability-only DLL artifact in rust.yml remains the shared-engine gate.
+# Complete-product CI for the supported Windows NanoDictate release.
+# Builds the Rust cdylib/DLL with the MSVC target, the portable C# product
+# (Core + Host + Smoke + tests), the Windows-only WinUI 3 entrypoint, and
+# stages the MSIX layout plus portable ZIP as the release artifact.
 
 on:
   push:
@@ -32,13 +31,13 @@ concurrency:
 
 jobs:
   build-test:
-    name: Rust DLL + C# host (${{ matrix.os }})
+    name: Rust DLL + C# product (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -68,8 +67,14 @@ jobs:
           if (-not (Test-Path $dll)) { throw "Missing $dll" }
           Get-Item $dll | Format-Table Name, Length
 
-      - name: Build C# host
+      - name: Build portable C# product
         run: dotnet build windows/NanoDictate.sln -c Release
+
+      - name: Build WinUI 3 entrypoint (Windows-only)
+        # Windows App SDK 1.5 PRI/MRT tasks are supplied by Visual Studio MSBuild,
+        # not the dotnet SDK's bundled MSBuild.
+        shell: pwsh
+        run: pwsh windows/package/build-winui.ps1 -Configuration Release
 
       - name: Stage DLL next to managed binaries
         shell: pwsh
@@ -77,15 +82,132 @@ jobs:
           $dll = "rust/target/release/nanodictate_core.dll"
           $targets = @(
             "windows/src/NanoDictate.Core/bin/Release/net8.0",
+            "windows/src/NanoDictate.Host/bin/Release/net8.0",
             "windows/src/NanoDictate.Smoke/bin/Release/net8.0",
             "windows/tests/NanoDictate.Core.Tests/bin/Release/net8.0"
           )
           foreach ($dir in $targets) {
             if (Test-Path $dir) { Copy-Item $dll $dir -Force }
           }
+          New-Item -ItemType Directory -Force -Path windows/artifacts | Out-Null
+          Copy-Item $dll windows/artifacts/ -Force
 
-      - name: Run C# ABI tests
+      - name: Run C# product tests
         run: dotnet test windows/NanoDictate.sln -c Release --no-build
 
       - name: Run smoke executable
         run: dotnet run --project windows/src/NanoDictate.Smoke -c Release --no-build -- config.example.toml
+
+      - name: Run product diagnostics
+        run: dotnet run --project windows/src/NanoDictate.Host -c Release --no-build -- doctor --config config.example.toml
+
+      - name: List providers and routing
+        run: dotnet run --project windows/src/NanoDictate.Host -c Release --no-build -- providers --config config.example.toml
+
+      - name: Install Inno Setup compiler
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
+
+      - name: Build distributable ZIP and EXE installer
+        shell: pwsh
+        run: pwsh windows/package/make-release.ps1 -Version 0.0.0 -OutDir windows/artifacts
+
+      - name: Verify portable files and silent install/upgrade/uninstall
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $zip = "windows/artifacts/nanodictate-0.0.0-windows-x64.zip"
+          $setup = "windows/artifacts/nanodictate-0.0.0-windows-x64-setup.exe"
+          if (-not (Test-Path $zip) -or -not (Test-Path $setup)) { throw "Missing Windows deliverables" }
+          $unpack = Join-Path $env:RUNNER_TEMP "nanodictate-zip-smoke"
+          Expand-Archive $zip $unpack -Force
+          foreach ($name in @("NanoDictate.App.exe", "nanodictate_core.dll", "coreclr.dll", "hostfxr.dll", "config.example.toml")) {
+            if (-not (Test-Path (Join-Path $unpack $name))) { throw "Portable ZIP lacks $name" }
+          }
+          $installed = Join-Path $env:RUNNER_TEMP "nanodictate-install"
+          $userConfig = Join-Path $env:APPDATA "NanoDictate/ci-preservation-marker.txt"
+          New-Item -Force -ItemType Directory (Split-Path $userConfig) | Out-Null
+          Set-Content -Path $userConfig -Value "preserve" -NoNewline
+          $installProcess = Start-Process -FilePath (Resolve-Path $setup) -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/DIR=$installed") -Wait -PassThru
+          if ($installProcess.ExitCode -ne 0) { throw "Silent install failed: $($installProcess.ExitCode)" }
+          if (-not (Test-Path (Join-Path $installed "NanoDictate.App.exe"))) { throw "Installer did not deploy app" }
+          $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+          $expectedRun = '"' + (Join-Path $installed "NanoDictate.App.exe") + '" --background'
+          if ((Get-ItemProperty -Path $runKey -Name NanoDictate -ErrorAction SilentlyContinue).NanoDictate -ne $expectedRun) {
+            throw "Silent installer did not register persistent NanoDictate startup"
+          }
+          # Same-version reinstall must not fail or overwrite user data.
+          $reinstallProcess = Start-Process -FilePath (Resolve-Path $setup) -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/DIR=$installed") -Wait -PassThru
+          if ($reinstallProcess.ExitCode -ne 0) { throw "Silent reinstall failed: $($reinstallProcess.ExitCode)" }
+          # A different installer version must upgrade this installation in place.
+          # Repackage the already-published bits to exercise setup version
+          # migration without pretending to test two distinct application builds.
+          $env:ND_RELEASE_VERSION = "0.0.1"
+          $env:ND_PUBLISH_DIR = (Resolve-Path "windows/artifacts/published-win-x64").Path
+          $env:ND_OUTPUT_DIR = (Resolve-Path "windows/artifacts").Path
+          $isccPaths = @(
+            (Join-Path $env:ProgramFiles "Inno Setup 6/ISCC.exe"),
+            (Join-Path ([Environment]::GetFolderPath("ProgramFilesX86")) "Inno Setup 6/ISCC.exe")
+          )
+          $iscc = $isccPaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw "Inno Setup compiler missing for upgrade test" }
+          & $iscc "windows/package/NanoDictate.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Upgrade installer compilation failed" }
+          $upgrade = "windows/artifacts/nanodictate-0.0.1-windows-x64-setup.exe"
+          if (-not (Test-Path $upgrade)) { throw "Upgrade installer missing" }
+          $upgradeProcess = Start-Process -FilePath (Resolve-Path $upgrade) -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/DIR=$installed") -Wait -PassThru
+          if ($upgradeProcess.ExitCode -ne 0) { throw "Silent upgrade failed: $($upgradeProcess.ExitCode)" }
+          if (-not (Test-Path (Join-Path $installed "NanoDictate.App.exe"))) { throw "Upgrade removed installed executable" }
+          if ((Get-Content $userConfig -Raw) -ne "preserve") { throw "Upgrade destroyed user data" }
+          if ((Get-ItemProperty -Path $runKey -Name NanoDictate -ErrorAction SilentlyContinue).NanoDictate -ne $expectedRun) {
+            throw "Installer upgrade changed the stable logon executable path"
+          }
+          $uninstall = Join-Path $installed "unins000.exe"
+          if (-not (Test-Path $uninstall)) { throw "Uninstaller missing" }
+          $uninstallProcess = Start-Process -FilePath $uninstall -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") -Wait -PassThru
+          if ($uninstallProcess.ExitCode -ne 0) { throw "Silent uninstall failed: $($uninstallProcess.ExitCode)" }
+          if (Test-Path (Join-Path $installed "NanoDictate.App.exe")) { throw "Uninstall left deployed executable" }
+          if ((Get-ItemProperty -Path $runKey -Name NanoDictate -ErrorAction SilentlyContinue).NanoDictate) {
+            throw "Uninstall left orphaned auto-start registry entry"
+          }
+          if ((Get-Content $userConfig -Raw) -ne "preserve") { throw "Uninstall deleted user data" }
+
+      - name: Assert exact candidate ZIP/EXE identity and installation lifecycle
+        shell: pwsh
+        run: pwsh -NoProfile -File windows/package/test-release-candidate.ps1 -Version 0.0.0
+
+      - name: Verify Scoop bucket lifecycle hooks without user interaction
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $manifest = Get-Content "bucket/nanodictate.json" -Raw | ConvertFrom-Json
+          if (!$manifest.post_install -or !$manifest.pre_uninstall) { throw "Missing first-party Scoop lifecycle hooks" }
+          $scoopdir = Join-Path $env:RUNNER_TEMP "scoop-nanodictate-test"
+          $dir = Join-Path $scoopdir "apps/nanodictate/current"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Copy-Item "windows/artifacts/published-win-x64/NanoDictate.App.exe" (Join-Path $dir "NanoDictate.App.exe")
+          $cmd = "install"
+          $global = $false
+          # Do not launch a real WinUI window in a noninteractive hosted runner.
+          function Start-Process { param($FilePath, $ArgumentList) if (!(Test-Path $FilePath)) { throw "Missing launched app: $FilePath" } }
+          foreach ($line in $manifest.pre_install) { Invoke-Expression $line }
+          foreach ($line in $manifest.post_install) { Invoke-Expression $line }
+          $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+          $wanted = '"' + (Join-Path $dir "NanoDictate.App.exe") + '" --background'
+          if ((Get-ItemProperty -Path $runKey -Name NanoDictate).NanoDictate -ne $wanted) { throw "Scoop autostart not stable" }
+          $cmd = "update"
+          foreach ($line in $manifest.pre_install) { Invoke-Expression $line }
+          foreach ($line in $manifest.post_install) { Invoke-Expression $line }
+          if ((Get-ItemProperty -Path $runKey -Name NanoDictate).NanoDictate -ne $wanted) { throw "Scoop update changed startup path" }
+          $cmd = "uninstall"
+          foreach ($line in $manifest.pre_uninstall) { Invoke-Expression $line }
+          if ((Get-ItemProperty -Path $runKey -Name NanoDictate -ErrorAction SilentlyContinue).NanoDictate) { throw "Scoop uninstall did not remove startup entry" }
+
+      - name: Upload Windows distribution smoke artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nanodictate-windows-x64
+          path: |
+            windows/artifacts/nanodictate-0.0.0-windows-x64.zip
+            windows/artifacts/nanodictate-0.0.0-windows-x64-setup.exe
+          if-no-files-found: error
