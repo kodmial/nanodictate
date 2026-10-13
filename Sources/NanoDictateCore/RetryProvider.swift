@@ -400,9 +400,17 @@ public final class RetryProvider {
           // Stray hedge cancellation (sibling cancelAll after a winner that
           // already returned is unreachable here); otherwise ignore.
         case .done(_, .success(let hit)):
+          if Task.isCancelled {
+            group.cancelAll()
+            return .failure(CancellationError())
+          }
           group.cancelAll()
           return .success(hit)
         case .done(_, .failure(let error)):
+          if Task.isCancelled {
+            group.cancelAll()
+            return .failure(CancellationError())
+          }
           if error is CancellationError {
             inFlight = max(0, inFlight - 1)
             if Task.isCancelled {
@@ -418,6 +426,9 @@ public final class RetryProvider {
                 return .failure(lastFailure)
               }
               return .failure(CancellationError())
+            }
+            if nextIndex < candidates.count, inFlight < maxConcurrent {
+              launchNext()
             }
             continue
           }

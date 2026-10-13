@@ -316,6 +316,13 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
   /// not outlive the overlay session. Main-thread only; cleared on completion.
   private var activeRealtimeTask: Task<Void, Never>?
 
+  /// Retained batch transcription task for the active "processing" phase
+  /// (batch path with bounded hedged failover). The watchdog and
+  /// `handleCancel` cancel it alongside `activeRealtimeTask` so no further
+  /// fallback requests are scheduled after recognition stops. Main-thread
+  /// only; cleared on completion.
+  private var activeBatchTask: Task<Void, Never>?
+
   /// While ReviewGate.confirmAsync waits for the terminal decision, a
   /// physical Return MUST pass through the event tap — the terminal's
   /// readLine needs it (ReviewGate reads stdin on a background queue). Set
@@ -1353,16 +1360,21 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
         self.state == .transcribing
       else { return }
       // Cancel the retained realtime task so the WebSocket does not remain
-      // open after the watchdog ends the session.
+      // open after the watchdog ends the session. Cancel the retained batch
+      // task as well so hedged failover stops scheduling fallback uploads.
       self.activeRealtimeTask?.cancel()
       self.activeRealtimeTask = nil
+      self.activeBatchTask?.cancel()
+      self.activeBatchTask = nil
       self.failTranscription(Transcriber.sttTimeoutMessage, isNetworkFailure: true)
     }
 
-    // Drop any previous realtime task before starting a new loop so an
+    // Drop any previous realtime/batch task before starting a new loop so an
     // abandoned session cannot linger when dictations overlap.
     activeRealtimeTask?.cancel()
     activeRealtimeTask = nil
+    activeBatchTask?.cancel()
+    activeBatchTask = nil
     let realtimeTask = Task { [weak self] in
       guard let self else { return }
 
@@ -1436,6 +1448,7 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
               sessionActive: self.processingSession == session && self.state == .transcribing
             )
           else { return }
+          self.activeBatchTask = nil
           self.completeInsertion(text)
         }
       } catch {
@@ -1446,12 +1459,15 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
             self.processingSession == session,
             self.state == .transcribing
           else { return }
+          self.activeBatchTask = nil
           self.failTranscription(message, isNetworkFailure: networkText != nil)
         }
       }
     }
     if isRealtimeRequest {
       activeRealtimeTask = realtimeTask
+    } else {
+      activeBatchTask = realtimeTask
     }
   }
 
@@ -2781,8 +2797,12 @@ final class Agent: NSObject, HotkeyDelegate, AudioLevelDelegate {
       cancelRecognition = true
       // Cancel a retained realtime session so Esc closes the WebSocket
       // immediately instead of leaving it open until its own timeout.
+      // Cancel the retained batch task as well so hedged failover stops
+      // scheduling fallback uploads after recognition stops.
       activeRealtimeTask?.cancel()
       activeRealtimeTask = nil
+      activeBatchTask?.cancel()
+      activeBatchTask = nil
       // Esc during transcription stops the queued work immediately, not only
       // at the next segment: the isCancelled guard in finishLiveRun drops the
       // final pass, so a cancelled run never sends audio to STT.
