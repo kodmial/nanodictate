@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.37] - 2026-10-13
+
+
+
+### Fixed
+
+* Replace fire-all STT failover with bounded hedged failover ([8f99c8a](https://github.com/kodmial/nanodictate/commit/8f99c8a057263578f1681bd2c00f9ddc12343171))
+
 ## [0.1.36] - 2026-10-12
 
 
@@ -580,7 +588,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.36...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.37...HEAD
+[0.1.37]: https://github.com/kodmial/nanodictate/compare/v0.1.36...v0.1.37
 [0.1.36]: https://github.com/kodmial/nanodictate/compare/v0.1.35...v0.1.36
 [0.1.35]: https://github.com/kodmial/nanodictate/compare/v0.1.34...v0.1.35
 [0.1.34]: https://github.com/kodmial/nanodictate/compare/v0.1.33...v0.1.34
