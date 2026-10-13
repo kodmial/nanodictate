@@ -217,6 +217,37 @@ public final class Transcriber {
   /// timeout (20 s) is terminal and spawns no retries.
   public static let maxAttempts = 4
 
+  /// Upper bound of a single inter-retry pause (s): HTTP 429 honors
+  /// `Retry-After` capped at 10 s, otherwise exponential backoff peaks at
+  /// ~4.25 s (base 4 s + jitter), so every pause stays within this cap.
+  public static let maxRetryPauseSeconds: TimeInterval = 10
+
+  /// Worst-case extra wall-clock cost of the single cookie-challenge replay
+  /// (s): one extra STT POST (bounded by `networkRequestTimeout`) plus the
+  /// blocking cookie refresh inline in `sendWithRetry` (two bounded GETs).
+  /// The challenge retry does not burn an attempt (`attempt -= 1`), so a
+  /// cookie-relay candidate may send up to `maxAttempts + 1` POSTs.
+  public static var maxCookieChallengeExtraDuration: TimeInterval {
+    CookieRelayProvider.blockingRefreshBudget + networkRequestTimeout
+  }
+
+  /// Worst-case wall-clock budget of ONE fallback candidate (s): one
+  /// `transcribe` call runs its own retry loop of up to `maxAttempts`
+  /// requests, each bounded by `networkRequestTimeout`, with a capped pause
+  /// between attempts, plus the single cookie-challenge replay (extra POST +
+  /// blocking refresh) when the cookie-relay transport faces a JS challenge.
+  /// A hanging candidate costs only one request timeout
+  /// (timeout is terminal, no retry); a retryable HTTP 429/5xx or fast
+  /// transport failure re-enters the loop, so a degraded server that answers
+  /// slowly with 5xx on every attempt can hold its failover slot for the
+  /// full sequence. Watchdogs covering hedged failover must budget this per
+  /// candidate, not a single request timeout.
+  public static var maxCandidateDuration: TimeInterval {
+    Double(maxAttempts) * networkRequestTimeout
+      + Double(maxAttempts - 1) * maxRetryPauseSeconds
+      + maxCookieChallengeExtraDuration
+  }
+
   /// Multipart bodies at or above this size use the streaming/file-backed
   /// upload on the real network path (issue #32): the body is streamed to a
   /// temporary file instead of a second full-size `Data`, so peak transient
@@ -1123,10 +1154,10 @@ extension Transcriber {
         if attempt >= Self.maxAttempts {
           break
         }
-        // Pause: Retry-After on 429 (cap 10 s), else backoff.
+        // Pause: Retry-After on 429 (capped at maxRetryPauseSeconds), else backoff.
         var delay = Self.backoffDelay(beforeRetry: attempt)
         if case .http(429, _) = error, let retryAfter = retryAfterHeader {
-          delay = min(retryAfter, 10)
+          delay = min(retryAfter, Self.maxRetryPauseSeconds)
         }
         await retrySleep(delay)
       } catch is CancellationError {
