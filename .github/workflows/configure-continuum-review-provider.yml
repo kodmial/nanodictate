@@ -16,10 +16,11 @@ jobs:
     steps:
       - name: Set and verify repository variable
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.TAP_PAT }}
         shell: bash
         run: |
           set -euo pipefail
+          test -n "${GH_TOKEN:-}" || { echo "::error::TAP_PAT is required to provision repository Variables"; exit 2; }
           gh variable set CONTINUUM_REVIEW_PROVIDER --repo "$GITHUB_REPOSITORY" --body pr-agent
           actual="$(gh variable get CONTINUUM_REVIEW_PROVIDER --repo "$GITHUB_REPOSITORY")"
           test "$actual" = "pr-agent"
