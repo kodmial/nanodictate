@@ -20,7 +20,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh variable set CONTINUUM_REVIEW_PROVIDER --repo "$GITHUB_REPOSITORY" --body coderabbit
+          gh variable set CONTINUUM_REVIEW_PROVIDER --repo "$GITHUB_REPOSITORY" --body pr-agent
           actual="$(gh variable get CONTINUUM_REVIEW_PROVIDER --repo "$GITHUB_REPOSITORY")"
-          test "$actual" = "coderabbit"
-          echo "CONTINUUM_REVIEW_PROVIDER=coderabbit verified"
+          test "$actual" = "pr-agent"
+          echo "CONTINUUM_REVIEW_PROVIDER=pr-agent verified"
