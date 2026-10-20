@@ -340,17 +340,82 @@ public sealed class HudContractTests
             app,
             processingWatchdog: TimeSpan.FromMilliseconds(50),
             useTimer: false);
+        var timeout = new TaskCompletionSource<HudSnapshot>(TaskCreationOptions.RunContinuationsAsynchronously);
+        coordinator.SnapshotChanged += snapshot =>
+        {
+            if (snapshot.StatusArgumentKey == HudStatusKeys.ErrorSttTimeout)
+            {
+                timeout.TrySetResult(snapshot);
+            }
+        };
 
         app.Controller.AltDoubleTapped();
         app.Controller.AltDoubleTapped();
 
         var recordingId = await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.True(app.Controller.IsCancelRequested);
-        var snapshot = coordinator.Snapshot;
+        // The timeout is published only after the controller confirms that it
+        // cancelled this exact recording.
+        var snapshot = await timeout.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(HudStatusKeys.Error, snapshot.StatusKey);
         Assert.Equal(HudStatusKeys.ErrorSttTimeout, snapshot.StatusArgumentKey);
         Assert.False(app.Controller.CompleteWithTranscript("late", recordingId: recordingId));
         Assert.Empty(insertions.Inserted);
+    }
+
+    [Fact]
+    public async Task ProcessingWatchdogDoesNotOverrideCommittedDelivery()
+    {
+        var config = new PortableConfig
+        {
+            ActiveProvider = "a",
+            Providers = new[]
+            {
+                new ProviderEntry("a", "A", "https://a.test/v1/audio/transcriptions", string.Empty),
+            },
+        };
+        var insertions = new TrackingInsertions();
+        using var app = new HostApp(
+            config,
+            new ImmediateReadySource(),
+            insertions,
+            new ImmediateTransport(),
+            _ => "k");
+        var delivered = new TaskCompletionSource<DictationDelivery>(TaskCreationOptions.RunContinuationsAsynchronously);
+        app.DeliveryCompleted += delivery => delivered.TrySetResult(delivery);
+        using var coordinator = new HudCoordinator(
+            app,
+            processingWatchdog: TimeSpan.FromMilliseconds(200),
+            useTimer: false);
+
+        app.Controller.AltDoubleTapped();
+        app.Controller.AltDoubleTapped();
+
+        var delivery = await delivered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(delivery.Inserted);
+        // Let the watchdog deadline pass: a committed delivery must not be
+        // reported as a timeout or cancelled.
+        await Task.Delay(300);
+        var snapshot = coordinator.Snapshot;
+        Assert.NotEqual(HudStatusKeys.ErrorSttTimeout, snapshot.StatusArgumentKey);
+        Assert.Equal(HudStatusKeys.Finishing, snapshot.StatusKey);
+        Assert.False(app.Controller.IsCancelRequested);
+        Assert.Equal(new[] { "hi there" }, insertions.Inserted);
+    }
+
+    private sealed class ImmediateTransport : ISttTransport
+    {
+        public Task<SttHttpResponse> SendAsync(
+            string url,
+            IReadOnlyDictionary<string, string> headers,
+            byte[] body,
+            string contentType,
+            TimeSpan timeout,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(new SttHttpResponse(
+                200,
+                new Dictionary<string, string>(),
+                System.Text.Encoding.UTF8.GetBytes("{\"text\": \"hi there\"}")));
     }
 
     private sealed class BlockingTransport : ISttTransport

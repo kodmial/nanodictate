@@ -660,13 +660,43 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
     /// the delivery path completes it (when no newer recording superseded it).
     /// The cancellation flag remains authoritative for every late result.
     /// </summary>
-    public void CancelCurrent()
+    public void CancelCurrent() => CancelCore(0, requireActive: false);
+
+    /// <summary>
+    /// Cancels <paramref name="recordingId"/> only when it is still the
+    /// controller's active recording. The identity check, the cancellation
+    /// claim, the capture transition, and the capture teardown all run under
+    /// <c>_gate</c> — the same gate used by recording start and the delivery
+    /// commit — so a committed delivery or a replacement recording is never
+    /// cancelled by a late watchdog. Returns false when the recording already
+    /// completed or a newer recording owns the controller.
+    /// </summary>
+    public bool TryCancelRecording(ulong recordingId)
+    {
+        if (recordingId == 0)
+        {
+            return false;
+        }
+        return CancelCore(recordingId, requireActive: true);
+    }
+
+    private bool CancelCore(ulong recordingId, bool requireActive)
     {
         bool wasActive;
         ulong cancelledRecordingId;
         lock (_gate)
         {
+            if (recordingId != 0 && recordingId != _recordingSeq)
+            {
+                return false;
+            }
             wasActive = _capture.State != DictationState.Idle;
+            if (requireActive && !wasActive)
+            {
+                // The delivery already committed (or the session otherwise
+                // ended); a watchdog must not turn it into a timeout.
+                return false;
+            }
             cancelledRecordingId = _recordingSeq;
             _cancelled = true;
             _pendingEnter = false;
@@ -701,16 +731,19 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
             {
                 // Best effort: the cancelled flag still drops late results.
             }
-        }
-        _enterLatch.Cancel();
-        _enterPoster.Cancel();
-        try
-        {
-            _capture.Cancel();
-        }
-        catch
-        {
-            // Best effort: the cancelled flag is authoritative for late STT.
+            // Latch, scheduled Enter, and capture teardown are scoped to this
+            // claim: running them under _gate prevents a replacement recording
+            // from starting between the identity check and the side effects.
+            _enterLatch.Cancel();
+            _enterPoster.Cancel();
+            try
+            {
+                _capture.Cancel();
+            }
+            catch
+            {
+                // Best effort: the cancelled flag is authoritative for late STT.
+            }
         }
         if (wasActive)
         {
@@ -720,6 +753,7 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
             Cancelled?.Invoke();
             CancelledWithRecordingId?.Invoke(cancelledRecordingId);
         }
+        return true;
     }
 
     private bool IsCancelled()

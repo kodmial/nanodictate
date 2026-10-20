@@ -177,6 +177,82 @@ public sealed class DictationControllerTests
     }
 
     [Fact]
+    public void TryCancelRecordingRejectsCommittedDelivery()
+    {
+        var capture = new FakeCaptureDriver();
+        var sink = new FakeInsertionSink();
+        using var controller = new DictationController(capture, sink);
+        capture.Start();
+        capture.MakeReady();
+        controller.AltDoubleTapped();
+        var recordingId = controller.CurrentRecordingId;
+        Assert.True(controller.CompleteWithTranscript("committed", recordingId: recordingId));
+
+        Assert.False(controller.TryCancelRecording(recordingId));
+        Assert.False(controller.IsCancelRequested);
+        Assert.Equal(new[] { "committed" }, sink.Inserts.Select(i => i.Text));
+    }
+
+    [Fact]
+    public void TryCancelRecordingRejectsReplacementRecording()
+    {
+        var capture = new FakeCaptureDriver();
+        var sink = new FakeInsertionSink();
+        using var controller = new DictationController(capture, sink);
+        capture.Start();
+        capture.MakeReady();
+        controller.AltDoubleTapped();
+        var previousId = controller.CurrentRecordingId;
+        Assert.False(controller.CompleteWithTranscript(string.Empty, recordingId: previousId));
+
+        controller.AltDoubleTapped();
+        Assert.Equal(DictationState.Recording, capture.State);
+        Assert.False(controller.TryCancelRecording(previousId));
+        Assert.False(controller.IsCancelRequested);
+        Assert.Equal(DictationState.Recording, capture.State);
+    }
+
+    [Fact]
+    public void ActiveRecordingCanBeCancelledByRecordingId()
+    {
+        var capture = new FakeCaptureDriver();
+        var sink = new FakeInsertionSink();
+        using var controller = new DictationController(capture, sink);
+        controller.AltDoubleTapped();
+        var recordingId = controller.CurrentRecordingId;
+
+        Assert.True(controller.TryCancelRecording(recordingId));
+        Assert.True(controller.IsCancelRequested);
+        Assert.Equal(DictationState.Idle, capture.State);
+        Assert.Equal(1, capture.Cancels);
+    }
+
+    [Fact]
+    public async Task ReviewApprovalAfterRecordingScopedCancellationDoesNotInsert()
+    {
+        var capture = new FakeCaptureDriver();
+        var sink = new FakeInsertionSink();
+        var prompt = new BlockingReviewPrompt();
+        using var controller = new DictationController(capture, sink)
+        {
+            ReviewBeforeInsert = true,
+            ReviewPrompt = prompt,
+        };
+        controller.StopTranscriptionHandler = (_, _, _) => Task.CompletedTask;
+        controller.AltDoubleTapped();
+        controller.AltDoubleTapped();
+        var recordingId = controller.CurrentRecordingId;
+
+        var delivery = Task.Run(() => controller.CompleteWithTranscript("late", recordingId: recordingId));
+        Assert.True(prompt.Entered.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(controller.TryCancelRecording(recordingId));
+        prompt.Release.Set();
+
+        Assert.False(await delivery.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Empty(sink.Inserts);
+    }
+
+    [Fact]
     public async Task StaleRecordingResultIsRejectedAfterNewRecordingStarts()
     {
         var capture = new FakeCaptureDriver();

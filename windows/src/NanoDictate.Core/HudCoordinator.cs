@@ -302,8 +302,7 @@ public sealed class HudCoordinator : IDisposable
     private void OnWatchdog(object? state)
     {
         var recordingId = state is ulong id ? id : 0;
-        HudSnapshot? snapshot = null;
-        ulong timedOutRecordingId;
+        ulong generation;
         lock (_gate)
         {
             if (_disposed
@@ -315,28 +314,38 @@ public sealed class HudCoordinator : IDisposable
             _watchdogActive = false;
             _watchdog?.Dispose();
             _watchdog = null;
+            generation = _currentGeneration;
+        }
+
+        // The watchdog is authoritative: claim the exact timed-out recording
+        // under the controller's gate before the HUD reports a timeout. A
+        // committed delivery or a replacement recording returns false, and
+        // must not be turned into a stale timeout.
+        bool cancelled;
+        try
+        {
+            cancelled = _app.Controller.TryCancelRecording(recordingId);
+        }
+        catch
+        {
+            cancelled = false;
+        }
+
+        HudSnapshot? snapshot = null;
+        lock (_gate)
+        {
+            // A new recording may have begun while the controller cancellation
+            // ran; its HUD cycle must not be replaced by the stale timeout.
+            if (_disposed || !cancelled || _currentGeneration != generation)
+            {
+                return;
+            }
             _terminal = true;
-            timedOutRecordingId = _watchdogRecordingId;
-            _timedOutRecordingId = timedOutRecordingId;
+            _timedOutRecordingId = recordingId;
             _presentation.ProcessingTimedOut(_currentGeneration, _clock());
             snapshot = _presentation.Snapshot();
         }
         Raise(snapshot);
-
-        // A timed-out session must not insert its late transcript. Cancel the
-        // owning recording (not a newer one that may have started meanwhile)
-        // so the controller drops the result before insertion.
-        if (_app.Controller.CurrentRecordingId == timedOutRecordingId)
-        {
-            try
-            {
-                _app.Controller.CancelCurrent();
-            }
-            catch
-            {
-                // The cancelled flag is still authoritative for late results.
-            }
-        }
     }
 
     private bool SyncGenerationLocked()
