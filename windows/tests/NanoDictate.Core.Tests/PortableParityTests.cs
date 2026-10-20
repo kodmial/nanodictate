@@ -141,6 +141,35 @@ public sealed class PortableParityTests
     }
 
     [Fact]
+    public async Task CancelledRequestsPropagateTheCallerTokenWithoutFailover()
+    {
+        var fake = new CapturingTransport();
+        fake.EnqueueThrow(new OperationCanceledException());
+        var client = new SttClient(
+            new ProviderCatalog(
+                new[]
+                {
+                    new ProviderEntry("a", "A", "https://a.test/v1/audio/transcriptions", string.Empty),
+                    new ProviderEntry("b", "B", "https://b.test/v1/audio/transcriptions", string.Empty),
+                },
+                "a"),
+            fake, _ => "k", TimeSpan.FromSeconds(5));
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var wav = NanoEngine.WavEncode(new short[160], 16000, 1);
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            client.TranscribeWavAsync(
+                wav, string.Empty, null, true, TransportConfig.Direct,
+                string.Empty, null, cancellation.Token, _ => Task.CompletedTask));
+
+        var token = Assert.Single(fake.CancellationTokens);
+        Assert.Equal(cancellation.Token, token);
+        var url = Assert.Single(fake.Urls);
+        Assert.Contains("https://a.test", url);
+    }
+
+    [Fact]
     public async Task FailoverRequestsUseEachProvidersConfiguredKey()
     {
         var config = new PortableConfig
@@ -315,13 +344,20 @@ public sealed class PortableParityTests
 
     private sealed class CapturingTransport : ISttTransport
     {
-        private readonly Queue<SttHttpResponse> _responses;
+        private readonly Queue<Func<SttHttpResponse>> _script = new();
         public List<string> Authorizations { get; } = new();
+        public List<string> Urls { get; } = new();
+        public List<CancellationToken> CancellationTokens { get; } = new();
 
         public CapturingTransport(params SttHttpResponse[] responses)
         {
-            _responses = new Queue<SttHttpResponse>(responses);
+            foreach (var response in responses)
+            {
+                _script.Enqueue(() => response);
+            }
         }
+
+        public void EnqueueThrow(Exception exception) => _script.Enqueue(() => throw exception);
 
         public Task<SttHttpResponse> SendAsync(
             string url,
@@ -332,7 +368,9 @@ public sealed class PortableParityTests
             CancellationToken cancellationToken)
         {
             Authorizations.Add(headers.TryGetValue("Authorization", out var value) ? value : string.Empty);
-            return Task.FromResult(_responses.Dequeue());
+            Urls.Add(url);
+            CancellationTokens.Add(cancellationToken);
+            return Task.FromResult(_script.Dequeue()());
         }
     }
 }
