@@ -269,6 +269,31 @@ public sealed class HostAppTests
     }
 
     [Fact]
+    public void NonChunkedWatchdogIncludesFailoverAndBackoff()
+    {
+        var config = new PortableConfig
+        {
+            Chunked = false,
+            TimeoutSeconds = 30,
+            AutoFailover = true,
+            Providers = new[]
+            {
+                new ProviderEntry("a", "A", "https://a.test/v1/audio/transcriptions", string.Empty),
+                new ProviderEntry("b", "B", "https://b.test/v1/audio/transcriptions", string.Empty),
+            },
+        };
+        var backoff = TimeSpan.FromMilliseconds(
+            NanoEngine.BackoffDelayMs(0, 500, 8000) +
+            NanoEngine.BackoffDelayMs(1, 500, 8000));
+        Assert.Equal(TimeSpan.FromSeconds(65) + backoff,
+            HostApp.InitialProcessingWatchdog(config));
+        config.AutoFailover = false;
+        Assert.Equal(TimeSpan.FromSeconds(35) +
+            TimeSpan.FromMilliseconds(NanoEngine.BackoffDelayMs(0, 500, 8000)),
+            HostApp.InitialProcessingWatchdog(config));
+    }
+
+    [Fact]
     public void ChunkedProcessingBudgetCoversEveryPlannedRequest()
     {
         var config = new PortableConfig
