@@ -231,7 +231,9 @@ controller/host-level terminal outcome: cancellation is known at
 `CancelCurrent`/the STT task boundary, and errors are known where the STT task
 fails (today `HostApp.TranscribeStoppedAsync` collapses failure to an empty
 delivery; #212 owns an explicit error signal). This change adds no UI and keeps
-the low-level session state unchanged for ABI consumers.
+the low-level session state unchanged for ABI consumers. The versioned
+presentation contract and golden fixture are documented in
+[`hud-contract.md`](hud-contract.md).
 
 ### Regression coverage
 

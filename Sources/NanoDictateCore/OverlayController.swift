@@ -586,6 +586,11 @@ public final class OverlayController: NSObject {
   /// SwiftUI-хост контента панели: его fittingSize задаёт автоматическую
   /// ширину плашки (кламп [180, 240], см. clampedPanelWidth).
   private var hostingView: NSHostingView<OverlayContentView>?
+  /// Logical presentation state, independent of the headless test runner
+  /// suppressing the real window order-front. Only `show()` sets it and only
+  /// `hide()` clears it, so tests can detect a no-op hide without asserting
+  /// on-screen visibility.
+  private var presented = false
   private let state = OverlayState()
   /// Точка показа из последнего show(at:) — на неё пересчитывается frame
   /// при смене фазы (высота панели зависит от фазы: таймер/точки).
@@ -631,6 +636,12 @@ public final class OverlayController: NSObject {
     state
   }
 
+  /// Logical visibility — для тестов: true после `show()` даже в headless
+  /// раннере, где реальное окно намеренно не выводится на экран.
+  var testIsPresented: Bool {
+    presented
+  }
+
   public func show() {
     // Цепочка фоллбэков: AX-каретка → мышь → центр главного экрана.
     show(at: positionedPoint())
@@ -638,6 +649,7 @@ public final class OverlayController: NSObject {
 
   public func show(at point: CGPoint) {
     anchorPoint = point
+    presented = true
     ensurePanel()
     guard let panel else {
       Logger.log("overlay show: panel is nil", level: "error")
@@ -725,6 +737,7 @@ public final class OverlayController: NSObject {
     }
     // Скрытый оверлей не должен держать таймер или точки: сброс фазы
     // в базовую, следующий сеанс стартует с чистого состояния.
+    presented = false
     state.resetPhase()
     panel?.orderOut(nil)
   }
