@@ -119,6 +119,62 @@ public sealed class HostAppTests
     }
 
     [Fact]
+    public void SelectProviderSynchronizesActiveProviderForDefaultApiKeyResolution()
+    {
+        var config = new PortableConfig
+        {
+            ActiveProvider = "a",
+            Providers = new[]
+            {
+                new ProviderEntry("a", "A", string.Empty, string.Empty),
+                new ProviderEntry("b", "B", string.Empty, string.Empty),
+            },
+        };
+        var previousKey = Environment.GetEnvironmentVariable("NANODICTATE_API_KEY");
+        try
+        {
+            Environment.SetEnvironmentVariable("NANODICTATE_API_KEY", "env-key");
+            using var app = new HostApp(config, new FakeSource(), new FakeInsertions(), new FakeTransport());
+            app.SelectProvider("b");
+            Assert.Equal("b", config.ActiveProvider);
+            Assert.Equal("env-key", HostApp.ResolveApiKey("b", config));
+            Assert.Equal(string.Empty, HostApp.ResolveApiKey("a", config));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NANODICTATE_API_KEY", previousKey);
+        }
+    }
+
+    [Fact]
+    public void OmittedActiveProviderKeepsEnvironmentKeyForEveryProvider()
+    {
+        var config = new PortableConfig
+        {
+            ActiveProvider = string.Empty,
+            Providers = new[]
+            {
+                new ProviderEntry("a", "A", string.Empty, string.Empty),
+                new ProviderEntry("b", "B", string.Empty, string.Empty),
+            },
+        };
+        var previousKey = Environment.GetEnvironmentVariable("NANODICTATE_API_KEY");
+        try
+        {
+            Environment.SetEnvironmentVariable("NANODICTATE_API_KEY", "env-key");
+            using var app = new HostApp(config, new FakeSource(), new FakeInsertions(), new FakeTransport());
+            Assert.Equal(string.Empty, config.ActiveProvider);
+            Assert.Equal("a", app.Catalog.Active().Id);
+            Assert.Equal("env-key", HostApp.ResolveApiKey("a", config));
+            Assert.Equal("env-key", HostApp.ResolveApiKey("b", config));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NANODICTATE_API_KEY", previousKey);
+        }
+    }
+
+    [Fact]
     public async Task ReviewEnabledWithoutPromptFailsClosed()
     {
         var config = new PortableConfig

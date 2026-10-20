@@ -41,18 +41,20 @@ public sealed class PortableConfig
     public string RealtimeModel { get; init; } = "gpt-live-transcribe";
 
     /// <summary>
-    /// Repairs an empty or unknown <see cref="ActiveProvider"/> by selecting
-    /// the first configured provider. A provider-less config is left as-is so
-    /// startup can still surface an unconfigured HUD and settings.
+    /// Repairs an unknown <see cref="ActiveProvider"/> by selecting the first
+    /// configured provider. An omitted active provider stays empty so the
+    /// environment key remains available to every provider for compatibility;
+    /// routing already treats an empty id as the first provider. A
+    /// provider-less config is left as-is so startup can still surface an
+    /// unconfigured HUD and settings.
     /// </summary>
     public void NormalizeProviderSelection()
     {
-        if (Providers.Count == 0)
+        if (Providers.Count == 0 || string.IsNullOrEmpty(ActiveProvider))
         {
             return;
         }
-        if (string.IsNullOrEmpty(ActiveProvider)
-            || Providers.All(p => p.Id != ActiveProvider))
+        if (Providers.All(p => p.Id != ActiveProvider))
         {
             ActiveProvider = Providers[0].Id;
         }

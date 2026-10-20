@@ -14,6 +14,9 @@ public sealed partial class App : Application
 {
     private const string ShowWindowEvent = @"Local\NanoDictateShowWindow";
 
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern int MessageBoxW(IntPtr hWnd, string text, string caption, uint type);
+
     private SingleInstance? _instance;
     private HostApp? _app;
     private GlobalHotkeyService? _hotkeys;
@@ -108,7 +111,7 @@ public sealed partial class App : Application
                 ShowSettingsIfIdle();
             }
         }
-        catch
+        catch (Exception ex)
         {
             _quitting = true;
             _timer?.Stop();
@@ -123,6 +126,18 @@ public sealed partial class App : Application
             }
             _app?.Dispose();
             Cleanup();
+            try
+            {
+                _ = MessageBoxW(
+                    IntPtr.Zero,
+                    $"NanoDictate could not start:\n{ex.Message}",
+                    "NanoDictate",
+                    0x10);
+            }
+            catch
+            {
+                // Reporting the startup failure must never replace it.
+            }
             throw;
         }
     }

@@ -276,6 +276,7 @@ public sealed class HostApp : IDisposable
             throw new NanoException(-1, $"unknown provider '{id}'");
         }
         _activeProviderId = id;
+        _config.ActiveProvider = id;
         var reordered = _catalog.Providers
             .OrderBy(p => p.Id == id ? 0 : 1)
             .ToList();
