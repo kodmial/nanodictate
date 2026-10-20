@@ -11,6 +11,7 @@ namespace NanoDictate.Core.Tests;
 /// assertions only cover fields both hosts advertise; intentional
 /// platform differences live in docs/config-parity.md.
 /// </summary>
+[Collection("EnvironmentVariables")]
 public sealed class PortableParityTests
 {
     private static readonly JsonSerializerOptions JsonOptions = new()

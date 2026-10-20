@@ -5,6 +5,7 @@ using Xunit;
 namespace NanoDictate.Core.Tests;
 
 /// <summary>Product composition: config → catalog → transcribe → controller.</summary>
+[Collection("EnvironmentVariables")]
 public sealed class HostAppTests
 {
     private sealed class FakeInsertions : IInsertionSink
@@ -20,6 +21,19 @@ public sealed class HostAppTests
     {
         public Task<SttHttpResponse> SendAsync(string url, IReadOnlyDictionary<string, string> headers, byte[] body, string contentType, TimeSpan timeout, CancellationToken cancellationToken) =>
             Task.FromResult(new SttHttpResponse(200, new Dictionary<string, string>(), Encoding.UTF8.GetBytes("{\"text\": \"hi there\"}")));
+    }
+
+    private sealed class CapturingTransport : ISttTransport
+    {
+        public List<string> Urls { get; } = new();
+        public List<string> Authorizations { get; } = new();
+
+        public Task<SttHttpResponse> SendAsync(string url, IReadOnlyDictionary<string, string> headers, byte[] body, string contentType, TimeSpan timeout, CancellationToken cancellationToken)
+        {
+            Urls.Add(url);
+            Authorizations.Add(headers.TryGetValue("Authorization", out var value) ? value : string.Empty);
+            return Task.FromResult(new SttHttpResponse(200, new Dictionary<string, string>(), Encoding.UTF8.GetBytes("{\"text\": \"hi there\"}")));
+        }
     }
 
     private sealed class FakeSource : IAudioCaptureSource
@@ -89,6 +103,63 @@ public sealed class HostAppTests
         Assert.True(list.First(p => p.Id == "b").IsActive);
         Assert.False(list.First(p => p.Id == "a").IsActive);
         Assert.Throws<NanoException>(() => app.SelectProvider("missing"));
+    }
+
+    [Fact]
+    public void ResolveApiKeyUsesCurrentActiveProviderOverride()
+    {
+        var config = new PortableConfig
+        {
+            ActiveProvider = "a",
+            Providers = new[]
+            {
+                new ProviderEntry("a", "A", string.Empty, string.Empty, ApiKey: "key-a"),
+                new ProviderEntry("b", "B", string.Empty, string.Empty),
+            },
+        };
+        var previous = Environment.GetEnvironmentVariable("NANODICTATE_API_KEY");
+        Environment.SetEnvironmentVariable("NANODICTATE_API_KEY", "env-key");
+        try
+        {
+            Assert.Equal("env-key", HostApp.ResolveApiKey("b", config, "b"));
+            Assert.Equal("key-a", HostApp.ResolveApiKey("a", config, "b"));
+            Assert.Equal("env-key", HostApp.ResolveApiKey("a", config));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NANODICTATE_API_KEY", previous);
+        }
+    }
+
+    [Fact]
+    public async Task SelectProviderAppliesEnvironmentKeyToNewActiveProvider()
+    {
+        var config = new PortableConfig
+        {
+            ActiveProvider = "a",
+            Providers = new[]
+            {
+                new ProviderEntry("a", "A", "https://a.test/v1/audio/transcriptions", string.Empty),
+                new ProviderEntry("b", "B", "https://b.test/v1/audio/transcriptions", string.Empty),
+            },
+        };
+        var previous = Environment.GetEnvironmentVariable("NANODICTATE_API_KEY");
+        Environment.SetEnvironmentVariable("NANODICTATE_API_KEY", "env-key");
+        try
+        {
+            var transport = new CapturingTransport();
+            using var app = new HostApp(config, new FakeSource(), new FakeInsertions(), transport);
+            app.SelectProvider("b");
+            var samples = new short[1600];
+            var delivered = await app.TranscribeAndDeliverAsync(samples, 16000, null, CancellationToken.None);
+            Assert.True(delivered);
+            Assert.Equal(new[] { "https://b.test/v1/audio/transcriptions" }, transport.Urls);
+            Assert.Equal(new[] { "Bearer env-key" }, transport.Authorizations);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NANODICTATE_API_KEY", previous);
+        }
     }
 
     [Fact]

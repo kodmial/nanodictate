@@ -47,7 +47,7 @@ public sealed class HostApp : IDisposable
             UndoWindow = TimeSpan.FromSeconds(config.UndoMaxInterval),
             ReviewBeforeInsert = config.ReviewBeforeInsert,
         };
-        _apiKeyFor = apiKeyFor ?? (id => ResolveApiKey(id, config));
+        _apiKeyFor = apiKeyFor ?? (id => ResolveApiKey(id, config, _activeProviderId));
         _timeout = TimeSpan.FromSeconds(config.TimeoutSeconds);
         if (transport is null)
         {
@@ -71,15 +71,35 @@ public sealed class HostApp : IDisposable
 
     public ProviderCatalog Catalog => _catalog;
 
-    public static string ResolveApiKey(string providerId, PortableConfig config)
+    private IReadOnlyList<string> FailoverOrderFor(string activeProviderId)
+    {
+        if (string.IsNullOrEmpty(activeProviderId))
+        {
+            return _config.FailoverOrderIds;
+        }
+        var configured = _config.FailoverOrderIds;
+        if (configured.Count == 0 || configured[0] == activeProviderId)
+        {
+            return configured;
+        }
+        return new[] { activeProviderId }
+            .Concat(configured.Where(id => id != activeProviderId))
+            .ToList();
+    }
+
+    public static string ResolveApiKey(
+        string providerId,
+        PortableConfig config,
+        string? activeProviderId = null)
     {
         // Env beats configured keys for the active provider only (parity with
         // macOS applyEnvAPIKey/RetryProvider.resolveAPIKey). An empty
-        // active_provider means the first declared provider is active.
+        // active provider means the first declared provider is active.
         // Role/failover candidates keep their own api_key/api_key_file.
-        var activeId = string.IsNullOrEmpty(config.ActiveProvider)
+        var configuredActive = activeProviderId ?? config.ActiveProvider;
+        var activeId = string.IsNullOrEmpty(configuredActive)
             ? config.Providers.FirstOrDefault()?.Id
-            : config.ActiveProvider;
+            : configuredActive;
         if (!string.IsNullOrEmpty(activeId) && providerId == activeId)
         {
             var env = Environment.GetEnvironmentVariable("NANODICTATE_API_KEY");
@@ -166,7 +186,7 @@ public sealed class HostApp : IDisposable
             _activeProviderId,
             _config.SegmentProvider,
             _config.FinalProvider,
-            _config.FailoverOrderIds);
+            FailoverOrderFor(_activeProviderId));
         _stt = new SttClient(_catalog, _transport, _apiKeyFor, _timeout);
         _chunked = new ChunkedTranscriber(_stt);
     }
