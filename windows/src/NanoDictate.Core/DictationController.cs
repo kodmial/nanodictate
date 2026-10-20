@@ -248,6 +248,13 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
     }
 
     private bool _pendingEnter;
+    /// <summary>
+    /// True between the final delivery gate and the end of
+    /// <see cref="IInsertionSink.Insert"/>. Escape during this window must
+    /// leave the Rust session Transcribing so the inserted text can be rolled
+    /// back before the owner completes the session (see the session contract).
+    /// </summary>
+    private bool _insertionInProgress;
 
     // -- IGlobalHotkeyDelegate -------------------------------------------
 
@@ -476,10 +483,17 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
         }
         // Final delivery decision, synchronized with CancelCurrent and
         // StartCapture (both hold _gate). A check before the review prompt
-        // is not sufficient because the prompt can wait.
-        if (IsDeliverySuperseded(recordingId))
+        // is not sufficient because the prompt can wait. Claim the insertion
+        // window in the same critical section so Escape can tell an in-flight
+        // insertion (leave the session Transcribing for rollback) from a
+        // processing cancel (complete the session immediately).
+        lock (_gate)
         {
-            return false;
+            if (IsDeliverySupersededLocked(recordingId))
+            {
+                return false;
+            }
+            _insertionInProgress = true;
         }
         try
         {
@@ -493,6 +507,7 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
             bool current;
             lock (_gate)
             {
+                _insertionInProgress = false;
                 if (IsDeliverySupersededLocked(recordingId))
                 {
                     current = false;
@@ -520,6 +535,7 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
         bool postEnter;
         lock (_gate)
         {
+            _insertionInProgress = false;
             if (IsDeliverySupersededLocked(recordingId))
             {
                 staleAfterInsert = true;
@@ -558,9 +574,20 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
         return true;
     }
 
-    /// <summary>Escape: cancels capture, the Enter latch, and any scheduled Enter.</summary>
+    /// <summary>
+    /// Escape: cancels capture, the Enter latch, and any scheduled Enter.
+    ///
+    /// A Recording session ends through Rust <c>Cancelled</c>. A stopped
+    /// session (Transcribing) is already past that event's Recording-only
+    /// contract, so its owner completes it with <c>TranscriptionDone</c>
+    /// instead — the same routing the macOS agent uses. The one exception is
+    /// an insertion already in flight: the session stays Transcribing until
+    /// that delivery returns so the stale text can be rolled back first.
+    /// The cancellation flag remains authoritative for every late result.
+    /// </summary>
     public void CancelCurrent()
     {
+        bool finishTranscription;
         lock (_gate)
         {
             _cancelled = true;
@@ -568,9 +595,25 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
             // Cancel any pending transcription so its late result cannot
             // insert; the cancelled flag remains authoritative for late STT.
             _transcriptionCts?.Cancel();
+            finishTranscription = !_insertionInProgress && _capture.State == DictationState.Transcribing;
         }
         _enterLatch.Cancel();
         _enterPoster.Cancel();
+        try
+        {
+            if (finishTranscription)
+            {
+                // Terminal cancel during processing: move Transcribing ->
+                // Idle so a new dictation can start immediately, without
+                // changing the portable Rust contract (Cancelled stays
+                // Recording-only).
+                _capture.FinishTranscription();
+            }
+        }
+        catch
+        {
+            // Best effort: the cancelled flag still drops late results.
+        }
         try
         {
             _capture.Cancel();

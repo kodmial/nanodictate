@@ -34,7 +34,13 @@ pub enum SessionEvent {
     FirstBuffer,
     /// Engine start failed for `generation`.
     EngineFailed,
-    /// User cancelled before capture became ready.
+    /// User cancelled the active recording.
+    ///
+    /// This is deliberately a Recording-only event: once a session is
+    /// Transcribing, its owner must finish it with [`SessionEvent::TranscriptionDone`]
+    /// after dropping the late result. Cancelling a Transcribing session is
+    /// a no-op so a delivery already in flight can roll back safely (see
+    /// the cross-platform session contract in `docs/architecture-rust-engine.md`).
     Cancelled,
     /// Recording stopped (manual or auto-stop); transcription begins.
     StopRequested,
@@ -384,6 +390,80 @@ mod tests {
         s.on_event(SessionEvent::StopRequested, gen);
         assert_eq!(s.state(), DictationState::Transcribing);
         assert!(!s.is_capture_ready());
+        assert!(!s.should_emit_ready_cue());
+    }
+
+    #[test]
+    fn cancel_while_transcribing_is_a_noop_until_owner_finishes() {
+        let mut s = DictationSession::new();
+        let gen = s.start();
+        s.on_event(SessionEvent::FirstBuffer, gen);
+        s.on_event(SessionEvent::StopRequested, gen);
+
+        // Portable contract: Cancelled only ends Recording. A Transcribing
+        // session stays live so an in-flight insertion can roll back before
+        // its owner reports the terminal result.
+        s.on_event(SessionEvent::Cancelled, gen);
+        assert_eq!(s.state(), DictationState::Transcribing);
+        assert!(!s.is_capture_ready());
+
+        // Other stale/terminal events do not disturb the in-flight phase.
+        s.on_event(SessionEvent::EngineFailed, gen);
+        s.on_event(SessionEvent::FirstBuffer, gen);
+        s.on_event(SessionEvent::StopRequested, gen);
+        assert_eq!(s.state(), DictationState::Transcribing);
+        assert!(!s.is_capture_ready());
+
+        // The owner ends the lifecycle explicitly once delivery is settled.
+        s.on_event(SessionEvent::TranscriptionDone, gen);
+        assert_eq!(s.state(), DictationState::Idle);
+        assert!(!s.is_capture_ready());
+    }
+
+    #[test]
+    fn cancel_during_recording_is_terminal_and_ignores_late_events() {
+        let mut s = DictationSession::new();
+        let gen = s.start();
+        s.on_event(SessionEvent::FirstBuffer, gen);
+        assert!(s.should_emit_ready_cue());
+
+        s.on_event(SessionEvent::Cancelled, gen);
+        assert_eq!(s.state(), DictationState::Idle);
+        assert!(!s.is_capture_ready());
+        // Late events from the cancelled generation are state-guarded.
+        s.on_event(SessionEvent::FirstBuffer, gen);
+        s.on_event(SessionEvent::StopRequested, gen);
+        s.on_event(SessionEvent::TranscriptionDone, gen);
+        s.on_event(SessionEvent::EngineFailed, gen);
+        assert_eq!(s.state(), DictationState::Idle);
+        assert!(!s.is_capture_ready());
+        assert!(!s.should_emit_ready_cue());
+    }
+
+    #[test]
+    fn rapid_restart_after_processing_cancel_resets_generation_and_readiness() {
+        let mut s = DictationSession::new();
+        let first = s.start();
+        s.on_event(SessionEvent::FirstBuffer, first);
+        s.on_event(SessionEvent::StopRequested, first);
+        // Cancelling processing is a no-op (owner still owes done), but a
+        // rapid restart must always create a clean recording session.
+        s.on_event(SessionEvent::Cancelled, first);
+        assert_eq!(s.state(), DictationState::Transcribing);
+
+        let second = s.start();
+        assert!(second > first);
+        assert_eq!(s.state(), DictationState::Recording);
+        assert!(!s.is_capture_ready());
+        // Late events from the superseded generation are rejected.
+        s.on_event(SessionEvent::FirstBuffer, first);
+        s.on_event(SessionEvent::TranscriptionDone, first);
+        assert_eq!(s.state(), DictationState::Recording);
+        assert!(!s.is_capture_ready());
+        // The new generation reaches readiness independently.
+        s.on_event(SessionEvent::FirstBuffer, second);
+        assert!(s.is_capture_ready());
+        assert!(s.should_emit_ready_cue());
         assert!(!s.should_emit_ready_cue());
     }
 

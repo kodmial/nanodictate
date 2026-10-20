@@ -112,6 +112,29 @@ public sealed class RealtimeAudioPipelineTests
     }
 
     [Fact]
+    public void CancelAfterStopIsRecordingOnlyNoopAndOwnerCanFinishTranscribing()
+    {
+        using var pipeline = new RealtimeAudioPipeline(Device48kStereo);
+        pipeline.Start();
+        FeedEngineBlocks(pipeline, 0.02f, 2);
+        var stopped = pipeline.Stop();
+        Assert.True(stopped.Samples.Count > 0);
+        Assert.Equal(DictationState.Transcribing, pipeline.State);
+
+        // Rust Cancelled is Recording-only. A stopped session must be
+        // completed by its owner with TranscriptionDone, not resurrected or
+        // aborted by a late cancel.
+        pipeline.Cancel();
+        Assert.Equal(DictationState.Transcribing, pipeline.State);
+        Assert.False(pipeline.IsSessionLive);
+        Assert.False(pipeline.TryHarvestAborted(out _));
+
+        pipeline.FinishTranscription();
+        Assert.Equal(DictationState.Idle, pipeline.State);
+        Assert.False(pipeline.IsCaptureReady);
+    }
+
+    [Fact]
     public void RustAutoStopFiresThroughSharedEngine()
     {
         using var pipeline = new RealtimeAudioPipeline(Device48kStereo);

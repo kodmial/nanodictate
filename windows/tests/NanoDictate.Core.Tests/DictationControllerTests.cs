@@ -276,6 +276,103 @@ public sealed class DictationControllerTests
     }
 
     [Fact]
+    public async Task CancelWhileProcessingFinishesSessionDropsLateResultAndAllowsRestart()
+    {
+        var capture = new FakeCaptureDriver();
+        var sink = new FakeInsertionSink();
+        using var controller = new DictationController(capture, sink);
+        ulong stoppedId = 0;
+        CancellationToken capturedToken = default;
+        var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        controller.StopTranscriptionHandler = (_, token, id) =>
+        {
+            capturedToken = token;
+            stoppedId = id;
+            stopped.SetResult();
+            return Task.CompletedTask;
+        };
+        controller.AltDoubleTapped();
+        Assert.Equal(DictationState.Recording, capture.State);
+        controller.AltDoubleTapped();
+        await stopped.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(DictationState.Transcribing, capture.State);
+        Assert.NotEqual(0ul, stoppedId);
+
+        // Escape during processing is terminal: the stopped session is
+        // completed through TranscriptionDone (Cancelled is Recording-only in
+        // Rust), so a new dictation can start immediately.
+        controller.CancelKeyPressed();
+        Assert.True(capturedToken.IsCancellationRequested);
+        Assert.Equal(DictationState.Idle, capture.State);
+        Assert.False(controller.CompleteWithTranscript("late A", recordingId: stoppedId));
+        Assert.Empty(sink.Inserts);
+
+        controller.AltDoubleTapped();
+        Assert.Equal(DictationState.Recording, capture.State);
+        Assert.Equal(2, capture.Starts);
+    }
+
+    private sealed class BlockingReviewPrompt : IReviewPrompt
+    {
+        public readonly ManualResetEventSlim Entered = new(false);
+        public readonly ManualResetEventSlim Release = new(false);
+        public string? Ask(string text)
+        {
+            Entered.Set();
+            Release.Wait(TimeSpan.FromSeconds(5));
+            return "y";
+        }
+    }
+
+    [Fact]
+    public async Task CancelWhileReviewPendingDropsDecisionAndFinishesSession()
+    {
+        var capture = new FakeCaptureDriver();
+        var sink = new FakeInsertionSink();
+        var prompt = new BlockingReviewPrompt();
+        using var controller = new DictationController(capture, sink)
+        {
+            ReviewBeforeInsert = true,
+            ReviewPrompt = prompt,
+        };
+        ulong stoppedId = 0;
+        var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        controller.StopTranscriptionHandler = (_, _, id) =>
+        {
+            stoppedId = id;
+            stopped.SetResult();
+            return Task.CompletedTask;
+        };
+        controller.AltDoubleTapped();
+        controller.AltDoubleTapped();
+        await stopped.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(DictationState.Transcribing, capture.State);
+
+        var delivery = Task.Run(() => controller.CompleteWithTranscript("review A", recordingId: stoppedId));
+        Assert.True(prompt.Entered.Wait(TimeSpan.FromSeconds(5)));
+        controller.CancelKeyPressed();
+        Assert.Equal(DictationState.Idle, capture.State);
+        prompt.Release.Set();
+        Assert.False(await delivery.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Empty(sink.Inserts);
+    }
+
+    [Fact]
+    public void CancelDuringRecordingStillUsesRecordingTerminalEvent()
+    {
+        var capture = new FakeCaptureDriver();
+        var sink = new FakeInsertionSink();
+        using var controller = new DictationController(capture, sink);
+        controller.AltDoubleTapped();
+        Assert.Equal(DictationState.Recording, capture.State);
+        controller.CancelKeyPressed();
+        Assert.Equal(1, capture.Cancels);
+        Assert.Equal(DictationState.Idle, capture.State);
+        Assert.False(controller.CompleteWithTranscript("late recording"));
+        Assert.Empty(sink.Inserts);
+    }
+
+    [Fact]
     public void StaleReviewDeclineDoesNotFinishNewRecording()
     {
         var capture = new FakeCaptureDriver();
@@ -326,8 +423,13 @@ public sealed class DictationControllerTests
         using var controller = new DictationController(capture, sink);
         capture.Start();
         controller.AltDoubleTapped();
+        Assert.Equal(DictationState.Transcribing, capture.State);
         Assert.False(controller.CompleteWithTranscript("   ...   "));
         Assert.Empty(sink.Inserts);
+        // Empty/failed STT is a terminal result: no insertion, no Enter, and
+        // the Rust session returns to Idle through TranscriptionDone.
+        Assert.Equal(DictationState.Idle, capture.State);
+        Assert.Equal(0, sink.Enters);
     }
 
     [Fact]
