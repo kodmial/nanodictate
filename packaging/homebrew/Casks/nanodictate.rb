@@ -1,6 +1,6 @@
 # Homebrew cask template for the NanoDictate .app bundle (binary install from
-# GitHub Releases). Placeholders 0.1.39, efbdd6d17c84cbf3bb131c876bb51c2d4dc2ccb8d87e96a8984f0518e55250ba,
-# 570aaee2a97d16c17b6e93999f84b71d0094acf5fa459c511445348244fd25bf are filled by scripts/release-prep.rb — do not hand-edit
+# GitHub Releases). Placeholders 0.1.40, 85d47ce2a782876cace8c98e58bf849e6cdeaa20305b9900bb99398542845bd5,
+# 9c3a91f2e43aec0ec9c19c91e90e00ecd6583b0772c36a6fa5a51a785d78b749 are filled by scripts/release-prep.rb — do not hand-edit
 # the generated Casks/nanodictate.rb.
 #
 # ZIP placeholders are distinct from the formula's __SHA256_*__ on purpose:
@@ -42,9 +42,9 @@
 # for the full rationale.
 
 cask "nanodictate" do
-  version "0.1.39"
-  sha256 arm:   "efbdd6d17c84cbf3bb131c876bb51c2d4dc2ccb8d87e96a8984f0518e55250ba",
-         intel: "570aaee2a97d16c17b6e93999f84b71d0094acf5fa459c511445348244fd25bf"
+  version "0.1.40"
+  sha256 arm:   "85d47ce2a782876cace8c98e58bf849e6cdeaa20305b9900bb99398542845bd5",
+         intel: "9c3a91f2e43aec0ec9c19c91e90e00ecd6583b0772c36a6fa5a51a785d78b749"
 
   # arch must be declared as a DSL stanza BEFORE it is referenced: without a
   # preceding `arch` stanza, the DSL's `arch(arm:intel:)` method returns nil in
@@ -55,7 +55,7 @@ cask "nanodictate" do
   # The cask asset is the app-bundle zip; a single URL with the arch
   # interpolated from the DSL's `arch` method (arm64 / x86_64) selects the
   # right asset per machine.
-  url "https://github.com/kodmial/nanodictate/releases/download/v0.1.39/nanodictate-0.1.39-macos-#{arch}.zip"
+  url "https://github.com/kodmial/nanodictate/releases/download/v0.1.40/nanodictate-0.1.40-macos-#{arch}.zip"
   name "NanoDictate"
   desc "macOS dictation via double-Alt: bilingual EN/RU, 4 STT providers"
   homepage "https://github.com/kodmial/nanodictate"
