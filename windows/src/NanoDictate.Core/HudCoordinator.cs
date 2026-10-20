@@ -25,6 +25,7 @@ public sealed class HudCoordinator : IDisposable
     private ulong _fallbackGeneration;
     private ulong _activeRecordingId;
     private ulong _watchdogRecordingId;
+    private ulong _watchdogCancellingRecordingId;
     private ulong _timedOutRecordingId;
     private bool _watchdogActive;
     private bool _terminal;
@@ -172,7 +173,9 @@ public sealed class HudCoordinator : IDisposable
         HudSnapshot? snapshot = null;
         lock (_gate)
         {
-            if (_terminal
+            if ((_watchdogCancellingRecordingId != 0
+                    && recordingId == _watchdogCancellingRecordingId)
+                || _terminal
                 || (recordingId != 0
                     && currentRecordingId != 0
                     && recordingId != currentRecordingId)
@@ -315,6 +318,7 @@ public sealed class HudCoordinator : IDisposable
             _watchdog?.Dispose();
             _watchdog = null;
             generation = _currentGeneration;
+            _watchdogCancellingRecordingId = recordingId;
         }
 
         // The watchdog is authoritative: claim the exact timed-out recording
@@ -334,6 +338,10 @@ public sealed class HudCoordinator : IDisposable
         HudSnapshot? snapshot = null;
         lock (_gate)
         {
+            if (_watchdogCancellingRecordingId == recordingId)
+            {
+                _watchdogCancellingRecordingId = 0;
+            }
             // A new recording may have begun while the controller cancellation
             // ran; its HUD cycle must not be replaced by the stale timeout.
             if (_disposed || !cancelled || _currentGeneration != generation)

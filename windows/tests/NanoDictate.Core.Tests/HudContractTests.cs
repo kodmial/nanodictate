@@ -341,8 +341,13 @@ public sealed class HudContractTests
             processingWatchdog: TimeSpan.FromMilliseconds(50),
             useTimer: false);
         var timeout = new TaskCompletionSource<HudSnapshot>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var sawCancelled = 0;
         coordinator.SnapshotChanged += snapshot =>
         {
+            if (snapshot.StatusKey == HudStatusKeys.Cancelled)
+            {
+                Interlocked.Exchange(ref sawCancelled, 1);
+            }
             if (snapshot.StatusArgumentKey == HudStatusKeys.ErrorSttTimeout)
             {
                 timeout.TrySetResult(snapshot);
@@ -359,6 +364,9 @@ public sealed class HudContractTests
         var snapshot = await timeout.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(HudStatusKeys.Error, snapshot.StatusKey);
         Assert.Equal(HudStatusKeys.ErrorSttTimeout, snapshot.StatusArgumentKey);
+        // The watchdog's synchronous cancellation event must not publish a
+        // transient Cancelled snapshot before the timeout status.
+        Assert.Equal(0, Volatile.Read(ref sawCancelled));
         Assert.False(app.Controller.CompleteWithTranscript("late", recordingId: recordingId));
         Assert.Empty(insertions.Inserted);
     }

@@ -394,7 +394,7 @@ public sealed class HudWindow : Window
 
     private void UpdateArc(float meter)
     {
-        var clamped = Math.Clamp(meter, 0, 1);
+        var clamped = Math.Clamp(meter, 0f, 0.9999f);
         if (clamped <= 0.001f)
         {
             _arc.Data = null;
