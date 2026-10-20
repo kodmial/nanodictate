@@ -50,6 +50,10 @@ on:
         description: "Source CodeRabbit review id"
         required: false
         type: string
+      unresolved_items_json:
+        description: "CodeRabbit-owned current UNRESOLVED batch for one canonical repair"
+        required: false
+        type: string
       run_id:
         description: "Source failed workflow run id"
         required: false
@@ -269,6 +273,7 @@ jobs:
       pr_number: "${{ inputs.pr_number }}"
       head_ref: "${{ inputs.head_ref }}"
       review_id: "${{ inputs.review_id }}"
+      unresolved_items_json: "${{ inputs.unresolved_items_json }}"
       run_id: "${{ inputs.run_id }}"
       ci_workflow_id: "${{ inputs.ci_workflow_id }}"
       base_ref: "${{ inputs.base_ref }}"
