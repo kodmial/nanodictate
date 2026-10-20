@@ -372,6 +372,50 @@ public sealed class HudContractTests
     }
 
     [Fact]
+    public async Task ProcessingWatchdogStopsWhenTranscriptionReturnsForReview()
+    {
+        var config = new PortableConfig
+        {
+            ActiveProvider = "a",
+            ReviewBeforeInsert = true,
+            Providers = new[]
+            {
+                new ProviderEntry("a", "A", "https://a.test/v1/audio/transcriptions", string.Empty),
+            },
+        };
+        var insertions = new TrackingInsertions();
+        using var app = new HostApp(
+            config,
+            new ImmediateReadySource(),
+            insertions,
+            new ImmediateTransport(),
+            _ => "k");
+        var prompt = new BlockingReviewPrompt();
+        app.Controller.ReviewPrompt = prompt;
+        var delivered = new TaskCompletionSource<DictationDelivery>(TaskCreationOptions.RunContinuationsAsynchronously);
+        app.DeliveryCompleted += delivery => delivered.TrySetResult(delivery);
+        using var coordinator = new HudCoordinator(
+            app,
+            processingWatchdog: TimeSpan.FromMilliseconds(300),
+            useTimer: false);
+
+        app.Controller.AltDoubleTapped();
+        app.Controller.AltDoubleTapped();
+
+        await prompt.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        // STT has returned and the user is reviewing: the watchdog must not
+        // discard the transcript while the prompt is still open.
+        await Task.Delay(450);
+        Assert.False(app.Controller.IsCancelRequested);
+        Assert.NotEqual(HudStatusKeys.ErrorSttTimeout, coordinator.Snapshot.StatusArgumentKey);
+
+        prompt.Release.Set();
+        var delivery = await delivered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(delivery.Inserted);
+        Assert.Equal(new[] { "hi there" }, insertions.Inserted);
+    }
+
+    [Fact]
     public async Task ProcessingWatchdogDoesNotOverrideCommittedDelivery()
     {
         var config = new PortableConfig
@@ -409,6 +453,21 @@ public sealed class HudContractTests
         Assert.Equal(HudStatusKeys.Finishing, snapshot.StatusKey);
         Assert.False(app.Controller.IsCancelRequested);
         Assert.Equal(new[] { "hi there" }, insertions.Inserted);
+    }
+
+    private sealed class BlockingReviewPrompt : IReviewPrompt
+    {
+        public TaskCompletionSource Entered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public ManualResetEventSlim Release { get; } = new(false);
+
+        public string? Ask(string text)
+        {
+            Entered.TrySetResult();
+            Release.Wait(TimeSpan.FromSeconds(5));
+            return "y";
+        }
     }
 
     private sealed class ImmediateTransport : ISttTransport

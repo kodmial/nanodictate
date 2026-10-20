@@ -89,21 +89,23 @@ internal static class WindowsInterop
 
     public static IntPtr ForegroundWindow() => GetForegroundWindow();
 
+    public static bool ForegroundWindowBelongsToCurrentProcess()
+    {
+        var foreground = GetForegroundWindow();
+        if (foreground == IntPtr.Zero)
+        {
+            return false;
+        }
+        _ = GetWindowThreadProcessId(foreground, out var processId);
+        return processId == (uint)Environment.ProcessId;
+    }
+
     public static bool RestoreForeground(IntPtr hwnd) =>
         hwnd != IntPtr.Zero
         && SetForegroundWindow(hwnd)
         && GetForegroundWindow() == hwnd;
 
-    public static bool TryCaret(out HudPoint point)
-    {
-        if (UiaCaret.TryGet(out point))
-        {
-            return true;
-        }
-        return TryNativeCaret(out point);
-    }
-
-    private static bool TryNativeCaret(out HudPoint point)
+    public static bool TryNativeCaret(out HudPoint point)
     {
         point = default;
         var foreground = GetForegroundWindow();

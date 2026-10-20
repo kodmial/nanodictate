@@ -8,24 +8,125 @@ namespace NanoDictate.App;
 /// pattern. The native GetGUIThreadInfo caret is only a fallback: many modern
 /// editors never create a Win32 caret, while UIA returns the insertion range.
 /// Failures are silent so placement can always fall back to pointer/screen.
+/// UIA runs on one dedicated MTA worker (never on the HUD dispatcher) with a
+/// reused <c>CUIAutomation</c> instance, because calling UIA synchronously on
+/// the UI thread can make the application unresponsive, especially against its
+/// own windows.
 /// </summary>
 internal static class UiaCaret
 {
     private const int UiaTextPatternId = 10014;
     private static readonly Guid TextPatternIid = new("32eba289-3583-42c9-9c59-3b6d9a1e9b6a");
+    private static readonly object WorkerGate = new();
+    private static readonly AutoResetEvent WorkerSignal = new(false);
+    private static Thread? _worker;
+    private static bool _workerRunning;
+    private static bool _requestPending;
+    private static ulong _requestToken;
+    private static Action<ulong, HudPoint?>? _requestCompleted;
 
-    public static bool TryGet(out HudPoint point)
+    /// <summary>
+    /// Queues the latest caret lookup. Requests received while one lookup is
+    /// running replace any earlier queued request, so at most one runs at a
+    /// time and stale tokens can be ignored by the caller.
+    /// </summary>
+    public static void Request(ulong token, Action<ulong, HudPoint?> completed)
+    {
+        lock (WorkerGate)
+        {
+            _requestToken = token;
+            _requestCompleted = completed;
+            _requestPending = true;
+            if (_worker is null)
+            {
+                _workerRunning = true;
+                _worker = new Thread(WorkerLoop)
+                {
+                    IsBackground = true,
+                    Name = "NanoDictate UIA caret",
+                };
+                _worker.SetApartmentState(ApartmentState.MTA);
+                _worker.Start();
+            }
+        }
+        WorkerSignal.Set();
+    }
+
+    /// <summary>Stops the worker without joining it (never blocks the dispatcher).</summary>
+    public static void Stop()
+    {
+        lock (WorkerGate)
+        {
+            _workerRunning = false;
+            _requestPending = false;
+            _requestCompleted = null;
+        }
+        WorkerSignal.Set();
+    }
+
+    private static void WorkerLoop()
+    {
+        object? automationObject = null;
+        try
+        {
+            automationObject = new CUIAutomation();
+            var automation = (IUIAutomation)automationObject;
+            while (true)
+            {
+                WorkerSignal.WaitOne();
+                ulong token;
+                Action<ulong, HudPoint?>? completed;
+                lock (WorkerGate)
+                {
+                    if (!_workerRunning)
+                    {
+                        break;
+                    }
+                    if (!_requestPending)
+                    {
+                        continue;
+                    }
+                    _requestPending = false;
+                    token = _requestToken;
+                    completed = _requestCompleted;
+                }
+
+                HudPoint? point = null;
+                if (!WindowsInterop.ForegroundWindowBelongsToCurrentProcess()
+                    && TryGet(automation, out var caret))
+                {
+                    point = caret;
+                }
+                completed?.Invoke(token, point);
+            }
+        }
+        catch
+        {
+            // A failed worker leaves placement on the native/pointer fallback.
+        }
+        finally
+        {
+            if (automationObject is not null && Marshal.IsComObject(automationObject))
+            {
+                Marshal.ReleaseComObject(automationObject);
+            }
+            lock (WorkerGate)
+            {
+                _worker = null;
+                _workerRunning = false;
+            }
+        }
+    }
+
+    private static bool TryGet(IUIAutomation automation, out HudPoint point)
     {
         point = default;
-        object? automationObject = null;
         object? elementObject = null;
         object? patternObject = null;
         object? rangesObject = null;
         IntPtr patternPointer = IntPtr.Zero;
         try
         {
-            automationObject = new CUIAutomation();
-            var automation = (IUIAutomation)automationObject;
             if (automation.GetFocusedElement(out var element) < 0 || element is null)
             {
                 return false;
@@ -76,7 +177,6 @@ internal static class UiaCaret
             Release(rangesObject);
             Release(patternObject);
             Release(elementObject);
-            Release(automationObject);
         }
     }
 

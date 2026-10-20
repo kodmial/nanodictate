@@ -213,6 +213,38 @@ public sealed class HostAppTests
     }
 
     [Fact]
+    public void ChunkedProcessingBudgetCoversEveryPlannedRequest()
+    {
+        var config = new PortableConfig
+        {
+            Chunked = true,
+            TimeoutSeconds = 30,
+            AutoFailover = true,
+            Providers = new[]
+            {
+                new ProviderEntry("a", "A", "https://a.test/v1/audio/transcriptions", string.Empty),
+                new ProviderEntry("b", "B", "https://b.test/v1/audio/transcriptions", string.Empty),
+            },
+        };
+        const int sampleRate = 16000;
+        var samples = new short[sampleRate * 120];
+        var chunks = NanoEngine.BatchPlan(samples.Length, sampleRate, 45.0, 1.0);
+        var finalAttempts = NanoEngine.FailoverCandidateCount(config.Providers.Count, config.AutoFailover);
+
+        var budget = HostApp.ChunkedProcessingBudget(config, samples.Length, sampleRate);
+
+        Assert.True(chunks.Length > 1);
+        Assert.True(finalAttempts > 1);
+        Assert.Equal(
+            TimeSpan.FromSeconds(
+                config.TimeoutSeconds * (chunks.Length + finalAttempts)
+                + (finalAttempts - 1) * 8
+                + 5),
+            budget);
+        Assert.True(budget > HostApp.InitialProcessingWatchdog(config));
+    }
+
+    [Fact]
     public void PackagingAndDocsExist()
     {
         var root = FindRepoRoot();

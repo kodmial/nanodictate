@@ -56,6 +56,8 @@ public sealed class HudWindow : Window
     private bool _reduceMotion;
     private int _frame;
     private HudPhase _lastPhase = HudPhase.Idle;
+    private HudPhase _placementPhase = HudPhase.Idle;
+    private ulong _placementToken;
 
     public HudWindow()
     {
@@ -314,6 +316,7 @@ public sealed class HudWindow : Window
 
     public void HidePanel()
     {
+        _placementToken++;
         _dotsTimer.Stop();
         WindowsInterop.Hide(_hwnd);
         _visible = false;
@@ -322,7 +325,9 @@ public sealed class HudWindow : Window
 
     public void CloseForShutdown()
     {
+        _placementToken++;
         _dotsTimer.Stop();
+        UiaCaret.Stop();
         _allowClose = true;
         Close();
     }
@@ -427,7 +432,35 @@ public sealed class HudWindow : Window
 
     private void Place(HudPhase phase)
     {
-        var hasCaret = WindowsInterop.TryCaret(out var caret);
+        _placementPhase = phase;
+        var token = ++_placementToken;
+
+        // Show immediately from the cheap native/pointer fallback. The UIA
+        // lookup runs on its dedicated MTA worker and re-places the HUD when
+        // the caret arrives; a late result for an older placement is ignored.
+        var hasCaret = WindowsInterop.TryNativeCaret(out var caret);
+        ApplyPlacement(phase, caret, hasCaret);
+        UiaCaret.Request(token, OnUiaCaretResult);
+    }
+
+    private void OnUiaCaretResult(ulong token, HudPoint? caret)
+    {
+        if (!caret.HasValue)
+        {
+            return;
+        }
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (token != _placementToken)
+            {
+                return;
+            }
+            ApplyPlacement(_placementPhase, caret.Value, hasCaret: true);
+        });
+    }
+
+    private void ApplyPlacement(HudPhase phase, HudPoint caret, bool hasCaret)
+    {
         var pointer = WindowsInterop.Pointer();
         var anchorProbe = hasCaret ? caret : pointer;
         var scale = WindowsInterop.DpiScaleFor(anchorProbe, _hwnd);

@@ -73,7 +73,7 @@ public sealed partial class App : Application
             _hud = new HudWindow();
             _coordinator = new HudCoordinator(
                 _app,
-                processingWatchdog: TimeSpan.FromSeconds(config.TimeoutSeconds + 5),
+                processingWatchdog: HostApp.InitialProcessingWatchdog(config),
                 clock: null,
                 useTimer: false,
                 reduceMotion: ReadReduceMotion());

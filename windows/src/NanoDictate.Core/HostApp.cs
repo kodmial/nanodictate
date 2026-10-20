@@ -105,6 +105,19 @@ public sealed class HostApp : IDisposable
     /// <summary>Rust auto-stop decided to end the recording.</summary>
     public event Action? AutoStopped;
 
+    /// <summary>
+    /// Chunked STT is about to issue its sequential requests. The budget covers
+    /// every planned chunk plus the conservative final pass, so the HUD
+    /// watchdog can replace its single-request budget before the first call.
+    /// </summary>
+    public event Action<ulong, TimeSpan>? ProcessingBudgetAvailable;
+
+    /// <summary>
+    /// STT returned for this recording, before review/insertion. The HUD stops
+    /// its processing watchdog here so an open review prompt is never timed out.
+    /// </summary>
+    public event Action<ulong>? TranscriptionReturned;
+
     /// <summary>Transcription completed (inserted or empty/review-declined).</summary>
     public event Action<DictationDelivery>? DeliveryCompleted;
 
@@ -138,6 +151,39 @@ public sealed class HostApp : IDisposable
 
     public ProviderCatalog Catalog => _catalog;
 
+    /// <summary>
+    /// Launch-time watchdog budget before a recording plan exists. Chunked
+    /// recordings replace it with <see cref="ChunkedProcessingBudget"/> through
+    /// <see cref="ProcessingBudgetAvailable"/> before the first request.
+    /// </summary>
+    public static TimeSpan InitialProcessingWatchdog(PortableConfig config)
+    {
+        var perRequest = TimeSpan.FromSeconds(config.TimeoutSeconds);
+        var requests = config.Chunked ? 2 : 1;
+        return TimeSpan.FromTicks(perRequest.Ticks * requests) + TimeSpan.FromSeconds(5);
+    }
+
+    /// <summary>
+    /// Total STT request budget for a chunked recording. Every planned chunk is
+    /// one request; the final full-recording pass is budgeted with its possible
+    /// failover candidates and backoff pauses, mirroring the macOS watchdog.
+    /// </summary>
+    public static TimeSpan ChunkedProcessingBudget(
+        PortableConfig config,
+        int sampleCount,
+        uint sampleRate)
+    {
+        var chunks = NanoEngine.BatchPlan(sampleCount, sampleRate, 45.0, 1.0);
+        var providerCount = Math.Max(1, config.Providers.Count);
+        var finalAttempts = Math.Max(
+            1,
+            NanoEngine.FailoverCandidateCount(providerCount, config.AutoFailover));
+        var perRequest = TimeSpan.FromSeconds(config.TimeoutSeconds);
+        var requestTicks = perRequest.Ticks * (chunks.Length + finalAttempts);
+        var backoff = TimeSpan.FromSeconds(Math.Max(0, finalAttempts - 1) * 8);
+        return TimeSpan.FromTicks(requestTicks) + backoff + TimeSpan.FromSeconds(5);
+    }
+
     public static string ResolveApiKey(string providerId, PortableConfig config)
     {
         // Env beats config files for the active provider only (parity with
@@ -170,6 +216,9 @@ public sealed class HostApp : IDisposable
         TranscriptionResult result;
         if (_config.Chunked)
         {
+            ProcessingBudgetAvailable?.Invoke(
+                recordingId,
+                ChunkedProcessingBudget(_config, samples.Length, sampleRate));
             result = await _chunked.TranscribeAsync(
                 samples, sampleRate, 45.0, 1.0,
                 _config.Language, NullIfEmpty(_config.Prompt),
@@ -187,6 +236,7 @@ public sealed class HostApp : IDisposable
                 diagnostics, cancellationToken).ConfigureAwait(false);
         }
         cancellationToken.ThrowIfCancellationRequested();
+        TranscriptionReturned?.Invoke(recordingId);
         bool inserted;
         try
         {

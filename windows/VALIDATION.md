@@ -22,10 +22,14 @@ candidate; file deviations as follow-up issues.
 
 ## Manual hardware checklist
 
-1. Clean install/first launch: install the signed EXE on a fresh profile;
-   logon startup stays quiet and creates `%APPDATA%\NanoDictate\config.toml`
-   from the example without touching an existing config. The shortcut
-   (`--settings`) opens optional settings on request, never automatically.
+1. Clean install/first launch: install the signed EXE on a fresh profile.
+   The PowerShell bootstrap and Scoop install launch optional settings once
+   (`--settings`); their upgrades resume silently (`--background`). The
+   interactive EXE installer offers an optional post-install settings launch
+   (`--settings`) after a fresh install or an upgrade. Logon startup always
+   stays quiet and never opens settings. `%APPDATA%\NanoDictate\config.toml`
+   is created from the example without touching an existing config. The Start
+   Menu shortcut (`--settings`) opens settings on request.
 2. Microphone access: deny once → privacy guidance with
    `ms-settings:privacy-microphone` appears and repeat prompts are
    throttled; allow → recording starts.

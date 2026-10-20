@@ -49,6 +49,8 @@ public sealed class HudCoordinator : IDisposable
         app.CaptureReady += OnCaptureReady;
         app.RawRmsAvailable += OnRawRms;
         app.DeviceChanged += OnDeviceChanged;
+        app.ProcessingBudgetAvailable += OnProcessingBudgetAvailable;
+        app.TranscriptionReturned += OnTranscriptionReturned;
         app.DeliveryCompleted += OnDeliveryCompleted;
         app.DeliveryFailed += OnDeliveryFailed;
 
@@ -191,6 +193,39 @@ public sealed class HudCoordinator : IDisposable
         Raise(snapshot);
     }
 
+    private void OnProcessingBudgetAvailable(ulong recordingId, TimeSpan budget)
+    {
+        lock (_gate)
+        {
+            if (_terminal
+                || !_watchdogActive
+                || !MatchesWatchdogRecordingLocked(recordingId))
+            {
+                return;
+            }
+            // Chunked STT issues several sequential requests; cover the whole
+            // planned request budget until TranscriptionReturned stops it.
+            StartWatchdogLocked(recordingId, budget);
+        }
+    }
+
+    private void OnTranscriptionReturned(ulong recordingId)
+    {
+        lock (_gate)
+        {
+            if (!_watchdogActive || !MatchesWatchdogRecordingLocked(recordingId))
+            {
+                return;
+            }
+            // STT is done; review/insertion may legitimately wait for the user
+            // and must not be cut off by the processing watchdog.
+            StopWatchdogLocked();
+        }
+    }
+
+    private bool MatchesWatchdogRecordingLocked(ulong recordingId) =>
+        _watchdogRecordingId == 0 || recordingId == _watchdogRecordingId;
+
     private void OnRawRms(float rms)
     {
         // Audio callback path: no lock, no UI dispatch, no queue.
@@ -285,14 +320,14 @@ public sealed class HudCoordinator : IDisposable
         return true;
     }
 
-    private void StartWatchdogLocked(ulong recordingId)
+    private void StartWatchdogLocked(ulong recordingId, TimeSpan? budget = null)
     {
         _watchdog?.Dispose();
         _watchdogRecordingId = recordingId;
         _watchdogActive = true;
         // A per-session timer carries its recording id, so a callback queued
         // before a rapid restart cannot time out the new recording.
-        _watchdog = new Timer(OnWatchdog, recordingId, _processingWatchdog, Timeout.InfiniteTimeSpan);
+        _watchdog = new Timer(OnWatchdog, recordingId, budget ?? _processingWatchdog, Timeout.InfiniteTimeSpan);
     }
 
     private void StopWatchdogLocked()
@@ -411,6 +446,8 @@ public sealed class HudCoordinator : IDisposable
         _app.CaptureReady -= OnCaptureReady;
         _app.RawRmsAvailable -= OnRawRms;
         _app.DeviceChanged -= OnDeviceChanged;
+        _app.ProcessingBudgetAvailable -= OnProcessingBudgetAvailable;
+        _app.TranscriptionReturned -= OnTranscriptionReturned;
         _app.DeliveryCompleted -= OnDeliveryCompleted;
         _app.DeliveryFailed -= OnDeliveryFailed;
     }
