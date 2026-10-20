@@ -7,7 +7,7 @@ Shared product logic is not duplicated in C#: every policy decision
 backoff, word diff, text join, transcript extraction, review/retry/
 overlay/mic-request gates, STT profile resolution) calls into Rust.
 C# provides Windows-native I/O only (WASAPI, hooks, SendInput,
-clipboard, registry, tray, paths, HTTP transport framing).
+clipboard, registry, paths, HUD styling, HTTP transport framing).
 
 ## Covered portable workflows
 
@@ -36,13 +36,24 @@ clipboard, registry, tray, paths, HTTP transport framing).
 
 ## Explicit platform differences
 
-- UI: macOS has a menu-bar agent plus overlay; Windows has a WinUI 3
-  window (`NanoDictate.App`, Windows-only) plus a tray/background host
-  (`NanoDictate.Host`) with the same composition. The cross-platform
-  solution excludes the WinUI project so Linux/macOS verification never
-  needs the Windows App SDK.
-- Activation: double-Alt via WH_KEYBOARD_LL (macOS uses its own hotkey
-  service); only Alt codes count, other keys cancel, repeats never count.
+- UI: macOS has a menu-bar agent plus overlay; the installed Windows
+  product (`NanoDictate.App`, Windows-only) is one WinUI 3 process with a
+  transient non-activating HUD, optional settings, and a transient review
+  prompt. The developer dashboard is gone. The console/tray host
+  (`NanoDictate.Host`) remains available for diagnostics, file
+  transcription, and headless backgrounds. The cross-platform solution
+  excludes the WinUI project so Linux/macOS verification never needs the
+  Windows App SDK.
+- HUD presentation: both platforms consume the same #216 fixture for
+  phases, deferred Starting, first-buffer readiness, meter ballistics,
+  terminal hide delays, generation checks, and caret/pointer/screen
+  placement. Windows renders with WinUI and Win32 styles (UIA/native caret,
+  system theme/high-contrast colors, Reduce Motion); macOS keeps
+  SwiftUI/AppKit. Neither platform derives HUD phase from Rust
+  `DictationState`.
+- Activation: double-Alt via WH_KEYBOARD_LL on a dedicated message-loop
+  thread (macOS uses its own hotkey service); only Alt codes count, other
+  keys cancel, repeats never count.
 - Insertion: SendInput KEYEVENTF_UNICODE per UTF-16 unit (macOS: CGEvent);
   same 16-grapheme / 20-unit chunk ceilings for responsiveness.
 - Clipboard: raw Win32 CF_UNICODETEXT bridge preserves the Unicode text
@@ -52,7 +63,9 @@ clipboard, registry, tray, paths, HTTP transport framing).
   mix only (macOS: AVFoundation); device change aborts the session.
 - Config/log paths: `%APPDATA%\NanoDictate\config.toml` and
   `%LOCALAPPDATA%\NanoDictate\Logs` (macOS: Application Support/Logs).
-- Startup: HKCU Run key plus tray (macOS: launchd).
+- Startup: HKCU Run key (macOS: launchd). The WinUI process has no
+  permanent tray icon; a second launch opens optional settings only while
+  idle, and the settings window exposes Quit.
 - `cookie-relay` transport is rejected loudly on Windows (no JS-challenge
   cookie solver); use `direct`, `http`, or `gateway`.
 - `DictationTextPolicy.IsEmptyResult` mirrors the Swift whitespace/letter-

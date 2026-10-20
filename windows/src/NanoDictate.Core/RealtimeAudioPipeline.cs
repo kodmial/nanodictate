@@ -80,6 +80,14 @@ public sealed class RealtimeAudioPipeline : IDisposable
     /// <summary>Fired at most once per session when the Rust auto-stop detector fires.</summary>
     public event Action<IReadOnlyList<short>>? AutoStop;
 
+    /// <summary>
+    /// Latest raw (pre-gain) RMS for a HUD-level observer. Fired after the
+    /// pipeline lock is released, once per ingest call, with only the final
+    /// value when several engine blocks were completed; consumers must treat
+    /// it as coalesced latest-value data, not a queue.
+    /// </summary>
+    public event Action<float>? RawRmsAvailable;
+
     public RealtimeAudioPipeline(AudioFormat deviceFormat)
     {
         // Placeholder binding only: WASAPI resolves the endpoint mix format
@@ -216,6 +224,7 @@ public sealed class RealtimeAudioPipeline : IDisposable
             (int)((long)block.FrameCount * EngineSampleRate / Math.Max(1, block.Format.SampleRate)) + 16);
         CaptureMetrics? readyToFire = null;
         IReadOnlyList<short>? stopToFire = null;
+        float? rmsToFire = null;
         lock (_gate)
         {
             if (!_sessionLive)
@@ -264,7 +273,9 @@ public sealed class RealtimeAudioPipeline : IDisposable
                                 out var firedReady,
                                 out var readyMetrics,
                                 out var firedStop,
-                                out var stopSnapshot);
+                                out var stopSnapshot,
+                                out var blockRms);
+                            rmsToFire = blockRms;
                             if (firedReady && readyToFire is null)
                             {
                                 readyToFire = readyMetrics;
@@ -292,6 +303,10 @@ public sealed class RealtimeAudioPipeline : IDisposable
                 }
             }
         }
+        if (rmsToFire.HasValue)
+        {
+            RawRmsAvailable?.Invoke(rmsToFire.Value);
+        }
         if (readyToFire.HasValue)
         {
             CaptureReady?.Invoke(readyToFire.Value);
@@ -314,9 +329,10 @@ public sealed class RealtimeAudioPipeline : IDisposable
         out bool firedReady,
         out CaptureMetrics readyMetrics,
         out bool firedStop,
-        out IReadOnlyList<short>? stopSnapshot)
+        out IReadOnlyList<short>? stopSnapshot,
+        out float rawRms)
     {
-        var rawRms = NanoEngine.RmsF32(span);
+        rawRms = NanoEngine.RmsF32(span);
         var isSpeech = _vad!.FeedSamples(span, EngineSampleRate);
         // AGC conditions the block in place; the recording below
         // sees the amplified signal, VAD/auto-stop saw the raw one.

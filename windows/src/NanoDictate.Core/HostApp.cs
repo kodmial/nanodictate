@@ -8,6 +8,8 @@ namespace NanoDictate.Core;
 /// </summary>
 public sealed class HostApp : IDisposable
 {
+    private const string DeliveryFailureReportedKey = "NanoDictate.DeliveryFailureReported";
+
     private readonly PortableConfig _config;
     private readonly DictationCaptureService _capture;
     private readonly DictationController _controller;
@@ -58,9 +60,67 @@ public sealed class HostApp : IDisposable
             _timeout);
         _chunked = new ChunkedTranscriber(_stt);
         _controller.StopTranscriptionHandler = TranscribeStoppedAsync;
+        _capture.CaptureReady += metrics => CaptureReady?.Invoke(metrics);
+        _capture.RawRmsAvailable += rms => RawRmsAvailable?.Invoke(rms);
+        _capture.DeviceChanged += error => DeviceChanged?.Invoke(error);
+        _capture.AutoStop += _ =>
+        {
+            // Auto-stop is a user-visible terminal transition owned by the
+            // capture engine. Stop the session off the audio callback and let
+            // the controller's ProcessingStarted event drive the HUD.
+            AutoStopped?.Invoke();
+            var generation = _capture.Generation;
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    // Do not let a late auto-stop callback stop a newer
+                    // recording that started after this session ended.
+                    if (_capture.Generation == generation
+                        && _controller.State == DictationState.Recording)
+                    {
+                        _controller.AltDoubleTapped();
+                    }
+                }
+                catch
+                {
+                    // The capture path will report DeviceChanged/failure.
+                }
+            });
+        };
     }
 
     public DictationController Controller => _controller;
+
+    /// <summary>Fired exactly once per session on the first valid engine block.</summary>
+    public event Action<CaptureMetrics>? CaptureReady;
+
+    /// <summary>Bounded latest-value RMS signal for the native HUD (never queued).</summary>
+    public event Action<float>? RawRmsAvailable;
+
+    /// <summary>Raw audio device change aborted the session.</summary>
+    public event Action<Exception>? DeviceChanged;
+
+    /// <summary>Rust auto-stop decided to end the recording.</summary>
+    public event Action? AutoStopped;
+
+    /// <summary>Transcription completed (inserted or empty/review-declined).</summary>
+    public event Action<DictationDelivery>? DeliveryCompleted;
+
+    /// <summary>Transcription or insertion failed; insertion remains fail-closed.</summary>
+    public event Action<DictationFailure>? DeliveryFailed;
+
+    /// <summary>Resolved provider/model and real release version for the HUD header.</summary>
+    public HudSessionLabel SessionLabel
+    {
+        get
+        {
+            var provider = _catalog.Active();
+            var name = string.IsNullOrEmpty(provider.Name) ? provider.Id : provider.Name;
+            var profile = SttProfile.Resolve(provider.Id, provider.Model);
+            return new HudSessionLabel(name, profile.Model, HudSessionLabel.ResolveVersion());
+        }
+    }
 
     public DictationCaptureService Capture => _capture;
 
@@ -115,7 +175,19 @@ public sealed class HostApp : IDisposable
                 diagnostics, cancellationToken).ConfigureAwait(false);
         }
         cancellationToken.ThrowIfCancellationRequested();
-        return _controller.CompleteWithTranscript(result.Text, 0, 0, recordingId);
+        bool inserted;
+        try
+        {
+            inserted = _controller.CompleteWithTranscript(result.Text, 0, 0, recordingId);
+        }
+        catch (Exception ex)
+        {
+            DeliveryFailed?.Invoke(new DictationFailure(recordingId, ex, DictationFailureKind.Insertion));
+            ex.Data[DeliveryFailureReportedKey] = true;
+            throw;
+        }
+        DeliveryCompleted?.Invoke(new DictationDelivery(recordingId, result.Text, inserted));
+        return inserted;
     }
 
     /// <summary>Provider/model selection for UI/menus (no secrets).</summary>
@@ -164,11 +236,19 @@ public sealed class HostApp : IDisposable
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
         }
-        catch
+        catch (Exception ex)
         {
-            if (cancellationToken.IsCancellationRequested)
+            if (cancellationToken.IsCancellationRequested || _controller.IsCancelRequested)
             {
                 return;
+            }
+            // Keep fail-closed insertion: an STT failure still completes the
+            // capture session with an empty result, but the HUD receives the
+            // truthful error instead of silently coalescing it to "no speech".
+            // Insertion failures already reported their kind above.
+            if (!ex.Data.Contains(DeliveryFailureReportedKey))
+            {
+                DeliveryFailed?.Invoke(new DictationFailure(recordingId, ex, DictationFailureKind.Transcription));
             }
             try
             {

@@ -92,6 +92,55 @@ public sealed class HostAppTests
     }
 
     [Fact]
+    public async Task ReviewEnabledWithoutPromptFailsClosed()
+    {
+        var config = new PortableConfig
+        {
+            ActiveProvider = "a",
+            ReviewBeforeInsert = true,
+            Providers = new[] { new ProviderEntry("a", "A", "https://a.test/v1/audio/transcriptions", string.Empty) },
+        };
+        var insertions = new FakeInsertions();
+        using var app = new HostApp(config, new FakeSource(), insertions, new FakeTransport(), _ => "k");
+        var deliveries = new List<DictationDelivery>();
+        app.DeliveryCompleted += deliveries.Add;
+
+        var inserted = await app.TranscribeAndDeliverAsync(
+            new short[1600], 16000, null, CancellationToken.None);
+
+        Assert.False(inserted);
+        Assert.Empty(insertions.Inserted);
+        var delivery = Assert.Single(deliveries);
+        Assert.False(delivery.Inserted);
+        Assert.Equal("hi there", delivery.Text);
+    }
+
+    [Fact]
+    public async Task ReviewPromptFailureFailsClosed()
+    {
+        var config = new PortableConfig
+        {
+            ActiveProvider = "a",
+            ReviewBeforeInsert = true,
+            Providers = new[] { new ProviderEntry("a", "A", "https://a.test/v1/audio/transcriptions", string.Empty) },
+        };
+        var insertions = new FakeInsertions();
+        using var app = new HostApp(config, new FakeSource(), insertions, new FakeTransport(), _ => "k");
+        app.Controller.ReviewPrompt = new ThrowingReviewPrompt();
+
+        var inserted = await app.TranscribeAndDeliverAsync(
+            new short[1600], 16000, null, CancellationToken.None);
+
+        Assert.False(inserted);
+        Assert.Empty(insertions.Inserted);
+    }
+
+    private sealed class ThrowingReviewPrompt : IReviewPrompt
+    {
+        public string? Ask(string text) => throw new InvalidOperationException("no UI");
+    }
+
+    [Fact]
     public void HostAppWiresStopTranscriptionHandler()
     {
         var config = new PortableConfig

@@ -144,6 +144,39 @@ public sealed class DictationControllerTests
     }
 
     [Fact]
+    public async Task StopRaisesProcessingAndCancelRaisesTerminalOnlyWhenActive()
+    {
+        var capture = new FakeCaptureDriver();
+        var sink = new FakeInsertionSink();
+        using var controller = new DictationController(capture, sink);
+        ulong processingId = 0;
+        var processing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancelled = 0;
+        ulong cancelledId = 0;
+        controller.ProcessingStarted += id =>
+        {
+            processingId = id;
+            processing.SetResult();
+        };
+        controller.Cancelled += () => cancelled++;
+        controller.CancelledWithRecordingId += id => cancelledId = id;
+        controller.StopTranscriptionHandler = (_, _, _) => Task.CompletedTask;
+
+        capture.Start();
+        capture.MakeReady();
+        controller.AltDoubleTapped();
+        await processing.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.NotEqual(0ul, processingId);
+        Assert.Equal(0, cancelled);
+
+        controller.CancelKeyPressed();
+        Assert.Equal(1, cancelled);
+        Assert.Equal(processingId, cancelledId);
+        controller.CancelKeyPressed();
+        Assert.Equal(1, cancelled);
+    }
+
+    [Fact]
     public async Task StaleRecordingResultIsRejectedAfterNewRecordingStarts()
     {
         var capture = new FakeCaptureDriver();

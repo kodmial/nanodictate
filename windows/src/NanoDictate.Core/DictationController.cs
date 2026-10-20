@@ -222,6 +222,15 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
 
     public event Action<string>? Inserted;
 
+    /// <summary>Fired when a stopped recording enters Processing (STT owns the cycle).</summary>
+    public event Action<ulong>? ProcessingStarted;
+
+    /// <summary>Fired on Escape/terminal cancel, independent of a settling Rust owner.</summary>
+    public event Action? Cancelled;
+
+    /// <summary>Same terminal cancel with the recording id, for stale-event filtering.</summary>
+    public event Action<ulong>? CancelledWithRecordingId;
+
     /// <summary>
     /// Capture-stop callback: receives the stopped recording for
     /// transcription. Set by the host to forward
@@ -407,6 +416,9 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
                 _pendingTranscriptionSeq = _recordingSeq;
                 sessionId = _pendingTranscriptionSeq;
             }
+            // Native presentation gets its own completion event: the HUD
+            // must enter Processing on stop, not by inferring Rust state.
+            ProcessingStarted?.Invoke(sessionId);
             var samples = result.Samples;
             _ = Task.Run(() => handler(samples, token, sessionId));
         }
@@ -445,7 +457,25 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
         }
         if (ReviewBeforeInsert)
         {
-            var line = ReviewPrompt?.Ask(transcript) ?? "y";
+            // An explicitly enabled review requirement must never be silently
+            // auto-approved when no review UI could be shown. Missing or
+            // failing prompts are fail-closed: finish the session, insert
+            // nothing, and let the caller surface the outcome.
+            var prompt = ReviewPrompt;
+            if (prompt is null)
+            {
+                FinishTranscriptionIfCurrent(recordingId);
+                return false;
+            }
+            string? line;
+            try
+            {
+                line = prompt.Ask(transcript);
+            }
+            catch
+            {
+                line = null;
+            }
             // The prompt can block while Escape cancels recording A or a new
             // recording B starts. Re-validate under _gate before touching
             // insertion or capture state so a stale approval cannot insert
@@ -632,8 +662,12 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
     /// </summary>
     public void CancelCurrent()
     {
+        bool wasActive;
+        ulong cancelledRecordingId;
         lock (_gate)
         {
+            wasActive = _capture.State != DictationState.Idle;
+            cancelledRecordingId = _recordingSeq;
             _cancelled = true;
             _pendingEnter = false;
             // Cancel any pending transcription so its late result cannot
@@ -677,6 +711,14 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
         catch
         {
             // Best effort: the cancelled flag is authoritative for late STT.
+        }
+        if (wasActive)
+        {
+            // Terminal HUD event: it is bounded independently of a Rust
+            // session that may still be Transcribing while rollback settles.
+            // The id lets the HUD ignore a cancel that raced a newer recording.
+            Cancelled?.Invoke();
+            CancelledWithRecordingId?.Invoke(cancelledRecordingId);
         }
     }
 
@@ -761,6 +803,18 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
     }
 
     public bool OverlayShouldHide() => RustTextPolicy.OverlayShouldHide(_capture.State);
+
+    /// <summary>True after Escape/user cancel until the next cycle starts.</summary>
+    public bool IsCancelRequested
+    {
+        get { lock (_gate) { return _cancelled; } }
+    }
+
+    /// <summary>Current recording sequence, used to scope native presentation events.</summary>
+    public ulong CurrentRecordingId
+    {
+        get { lock (_gate) { return _recordingSeq; } }
+    }
 
     public void Dispose()
     {

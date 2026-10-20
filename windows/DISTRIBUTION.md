@@ -30,10 +30,13 @@ stable `%LOCALAPPDATA%\Programs\NanoDictate` location and does not overwrite
 the user's config or microphone settings.
 
 NanoDictate starts with Windows at **interactive user logon** (not before the
-user signs in). Normal logon starts the UI hidden, retaining the WinUI message
-loop, global Double-Alt hook and STT engine. Launching the shortcut a second
-time shows the existing window. Closing that window hides the app without
-stopping dictation; use its Exit button to quit intentionally.
+user signs in). Normal logon and upgrades start the UI hidden, retaining the
+WinUI message loop, global Double-Alt hook and STT engine. The Start Menu
+shortcut passes `--settings`, and a second launch while dictation is idle opens
+the same optional settings; a second launch during an active session does not
+steal focus or interrupt it. Closing settings leaves dictation running; use its
+Quit button to stop the background process intentionally. There is no mandatory
+first-run window: an automatic logon start never opens settings.
 
 For ordinary unpackaged desktop applications Windows manages microphone
 access via the OS-wide desktop-app microphone toggle; there is no dedicated

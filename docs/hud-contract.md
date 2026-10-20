@@ -188,8 +188,11 @@ inside its screen and DPI bounds. No window coordinates or pixels cross FFI.
 - Rust ABI tests: `rust/nanodictate-core/tests/hud_contract_tests.rs` reads the
   same file and validates `nd_rms_f32`, `nd_dbfs`, and the existing
   `nd_session_*` state/generation rules. No renderer or reducer is added.
-- Windows (#212) should consume the same fixture for its own meter and
-  presentation tests. It should not re-implement the Rust session contract.
+- Windows (#212) consumes the same fixture in
+  `windows/tests/NanoDictate.Core.Tests/HudContractTests.cs` for constants,
+  RMS/VU vectors, all presentation scenarios, and generation guards. The
+  WinUI window (`HudWindow`) only paints `HudSnapshot`; it does not
+  re-implement the Rust session contract.
 
 When adding a scenario, include enough checkpoints to prove visibility, phase,
 recording start, status key/argument, generation, and (where meaningful) the
@@ -201,7 +204,12 @@ Rust state. Change the fixture only together with its consumers.
 cargo test -p nanodictate-core --test hud_contract_tests
 swift build
 swift run NanoDictateCoreTests
+dotnet test windows/NanoDictate.sln -c Release
 ```
 
-The Swift/AppKit checks require macOS. The Rust fixture checks run on every
-platform with a Rust toolchain.
+The Swift/AppKit checks require macOS. The Rust and portable C# fixture
+checks run on every platform with the corresponding toolchain; the WinUI
+entrypoint itself is built on Windows CI. Windows asks UI Automation for
+the focused element's Text pattern selection first (covers editors without a
+Win32 caret), then `GetGUIThreadInfo`, then pointer, then monitor center.
+All coordinates stay in physical screen pixels, matching `HudLayout`.
