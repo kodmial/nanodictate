@@ -201,6 +201,57 @@ final class RustSessionActivationTests: XCTestCase {
         XCTAssertFalse(service.isRustSessionActive, "transcriptionDone must end the Rust lifecycle")
     }
 
+    /// Cancel while processing is a native ownership boundary: Rust
+    /// `cancelled` is Recording-only, so `AudioService.cancel()` after
+    /// `stop()` must leave the Transcribing session for its owner. The
+    /// agent's terminal `notifyTranscriptionDone` then completes it, exactly
+    /// like an empty/failed result. A rapid restart gets a clean generation.
+    @objc func testCancelWhileTranscribingIsCompletedByOwnerAndRestartIsClean() {
+        let engine = FakeEngine()
+        let service = AudioService(logLevel: "info", engine: engine)
+        var readyCount = 0
+        service.onCaptureReady = { _ in readyCount += 1 }
+
+        guard case .success = runStart(service) else {
+            XCTFail("start must succeed")
+            return
+        }
+        engine.node.emit(makeToneBuffer(engine: engine))
+        XCTAssertTrue(eventually { readyCount == 1 }, "session must reach readiness")
+        let firstGeneration = service.activeRustGeneration
+        _ = service.stop()
+        XCTAssertEqual(
+            service.rustSessionStateForDiagnostics, 2, "Rust session Transcribing after stop")
+
+        // Esc/product cancel during processing does not abandon the session:
+        // the stopped lifecycle is still owned by its transcription path.
+        service.cancel()
+        XCTAssertTrue(
+            service.isRustSessionActive,
+            "cancel after stop must not end the Transcribing Rust session")
+        XCTAssertEqual(
+            service.rustSessionStateForDiagnostics, 2,
+            "Recording-only cancelled leaves Transcribing untouched")
+
+        // The owner completes the lifecycle on empty, failed, or cancelled
+        // results; a stale generation is ignored by the engine gate.
+        service.notifyTranscriptionDone(rustGeneration: (firstGeneration ?? 1) &+ 10_000)
+        XCTAssertTrue(service.isRustSessionActive, "stale done must not end the session")
+        service.notifyTranscriptionDone(rustGeneration: firstGeneration)
+        XCTAssertFalse(service.isRustSessionActive, "owner done ends the Rust lifecycle")
+
+        guard case .success = runStart(service) else {
+            XCTFail("restart after processing cancel must succeed")
+            return
+        }
+        XCTAssertEqual(service.rustSessionStartCount, 2, "restart creates a fresh RustSession")
+        XCTAssertEqual(service.rustSessionStateForDiagnostics, 1, "new generation is Recording")
+        XCTAssertFalse(service.isCaptureReady, "new generation starts not-ready")
+        engine.node.emit(makeToneBuffer(engine: engine))
+        XCTAssertTrue(eventually { readyCount == 2 }, "new generation reaches readiness")
+        _ = service.stop()
+    }
+
     /// Repeated shipping cycles each get their own Rust session and each
     /// reaches readiness independently.
     @objc func testRepeatedCyclesEachDriveRustSession() {

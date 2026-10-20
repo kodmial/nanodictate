@@ -427,7 +427,13 @@ public sealed class RealtimeAudioPipeline : IDisposable
         }
     }
 
-    /// <summary>Cancels the live session (state -> Idle, readiness suppressed).</summary>
+    /// <summary>
+    /// Cancels a live Recording session (state -> Idle, readiness
+    /// suppressed). A session already stopped into Transcribing is owned by
+    /// its transcription path and must be completed with
+    /// <see cref="FinishTranscription"/>; <c>Cancelled</c> is Recording-only,
+    /// so this is deliberately a no-op after <see cref="Stop"/>.
+    /// </summary>
     public void Cancel()
     {
         lock (_gate)

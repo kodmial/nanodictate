@@ -177,6 +177,91 @@ current engine generation, exactly once; stale generations are
 rejected) — while the native layer owns how buffers, permissions, and
 the cue itself are produced.
 
+## Dictation session and cancellation contract (#215)
+
+This is a verification contract for the existing shipping session ABI, not a
+new coordinator. Rust owns only the portable generation/readiness/latch rules;
+each native host still owns its OS lifecycle and I/O.
+
+### Production call-site ownership map
+
+| Step | macOS shipping path | Windows shipping path | Rule owner |
+|---|---|---|---|
+| Physical double Alt | `HotkeyService` + `DoubleAltDetector` | `GlobalHotkeyService` + `DoubleAltDetector` | Native gesture helper (small, latency-sensitive; no FFI move) |
+| Start / engine bring-up | `Agent.handleAltDoubleTap` → `AudioService.start` (AVAudioEngine) | `DictationController.AltDoubleTapped` → `DictationCaptureService.Start` (WASAPI) | Native lifecycle |
+| Session generation | `RustSession.start()` + `engineStarted` | `SessionHandle.Start()` + `EngineStarted` | Rust (`DictationSession`) |
+| First buffer / ready cue | Native tap feeds the first valid buffer; `RustSession.firstBuffer`, then the one-shot cue | Native WASAPI block drives `FirstBuffer`; `CaptureReady` fires the one-shot cue | Native supplies buffers; Rust decides readiness |
+| Manual stop / Enter stop | `Agent.sendRecording`/live finalize → `AudioService.stop` → `stopRequested` | `DictationController.StopAndAwaitTranscript` → pipeline `Stop` → `StopRequested` | Native trigger; Rust state transition |
+| Auto-stop | Rust auto-stop decision; native stop path drives `stopRequested` | Rust auto-stop decision; native stop path drives `StopRequested` | Rust decision, native action |
+| STT / retry / failover | URLSession + `Transcriber`; Rust response parsing, retry/failover/backoff policy | `SttClient`/transport; Rust response parsing, retry/failover/backoff policy | Native network; Rust portable policy |
+| Review decision | Terminal `ReviewGate`, Rust `review_decide` | Dialog `IReviewPrompt`, Rust `ReviewDecide` | Native prompt; Rust decision |
+| Enter latch | Rust `EnterSendLatch`, native scheduled synthetic Return | Rust `LatchHandle`, native `CancellableEnterPoster` | Rust one-shot latch; native key posting |
+| In-flight insertion | Native `CGEvent`/clipboard insert, recording/token guards | Native `IInsertionSink`, recording/token gates | Native I/O; Rust retry gate + portable state |
+| Success / empty / error | `completeInsertion`/`handleEmptyResult`/`failTranscription` → `notifyTranscriptionDone` | `CompleteWithTranscript` (empty is the current error carrier) → `FinishTranscription` | Native terminal routing; Rust `TranscriptionDone` |
+| Escape while Recording | `AudioService.cancel` → `cancelled` | `DictationController.CancelCurrent`/pipeline `Cancel` → `Cancelled` | Rust `Cancelled` (Recording only) |
+| Escape while Transcribing | Agent drops the result, then `notifyTranscriptionDone` | Controller drops the result, then `FinishTranscription` (deferred until any in-flight insertion rolls back) | Native owner (Rust `Cancelled` stays Recording-only) |
+| Stale generations/results | Rust generation tags + agent processing/session tokens | Rust generation tags + controller recording sequence + cancellation token | Rust for session events; native for delivery/insertion |
+
+### Cancellation matrix
+
+`SessionEvent::Cancelled` is deliberately **Recording-only**. Once a session is
+Transcribing, Rust ignores `Cancelled`; the owner must settle any in-flight
+delivery and send `TranscriptionDone` (success, empty, or terminal failure) to
+return to Idle. Changing that would break the Windows rollback contract below.
+
+| Phase | Escape / cancel routing | Rust state after settle | Delivery/insertion safety |
+|---|---|---|---|
+| Recording | `Cancelled` | Idle | Late first buffer/stop/done are state-guarded; ready cue stays suppressed |
+| Transcribing, no insertion yet | Native cancel flag/token, then `TranscriptionDone` | Idle | Late transcript fails the cancel/recording gate and never inserts |
+| Transcribing, review prompt pending | Native cancel flag/token, then `TranscriptionDone` | Idle | Late review decision fails the same gate |
+| Transcribing, insertion already in flight | Native cancel flag/token; Rust session is left Transcribing until the insert returns, then the owner sends `TranscriptionDone` | Idle (after the insert returns) | The insert is rolled back with the recording-ID/cancel gate before the deferred completion; the rollback owner is re-checked so a newer recording is never settled by a stale insert |
+| Idle | No Rust event | Idle | Retry-review waits are invalidated by native session tokens |
+
+The macOS agent and the Windows controller now route processing cancellation
+through the same terminal event. `RealtimeAudioPipeline.Cancel()` remains a
+no-op after `Stop()` because the stopped session is no longer in Recording;
+that is the ABI contract, not a dropped event.
+
+### Future HUD terminal feedback (#212/#216)
+
+The Windows HUD must not derive terminal cancel/error from `DictationState`.
+State describes the capture/engine phase and can remain Transcribing until an
+in-flight insertion rolls back before settling. The HUD contract is a
+controller/host-level terminal outcome: cancellation is known at
+`CancelCurrent`/the STT task boundary, and errors are known where the STT task
+fails (today `HostApp.TranscribeStoppedAsync` collapses failure to an empty
+delivery; #212 owns an explicit error signal). This change adds no UI and keeps
+the low-level session state unchanged for ABI consumers. The versioned
+presentation contract and golden fixture are documented in
+[`hud-contract.md`](hud-contract.md).
+
+### Regression coverage
+
+- Rust: `session.rs` unit matrix and `abi_tests.rs`
+  `session_cancel_matrix_before_and_during_processing_through_abi` cover
+  Recording cancel, Transcribing cancel as a no-op, owner done, and rapid
+  restart/stale generations.
+- macOS: `RustSessionActivationTests` drives the shipping `AudioService`
+  through start → first buffer → stop → cancel-while-processing → owner done →
+  fresh generation; `RustParityTests` keeps the readiness latch parity.
+- Windows: `SessionHandleTests` pins the same ABI matrix; `DictationControllerTests`
+  covers cancel while Recording, while processing, while review is pending,
+  and while an insertion is blocked (including a newer recording whose cancel
+  must not read a stale in-flight insertion owner); `RealtimeAudioPipelineTests`
+  pins cancel-after-stop and first-buffer/restart behavior.
+
+### Remaining explicit native differences
+
+- macOS keeps AVFoundation capture, CGEvent/TCC, overlay, timers/recovery, and
+  insertion APIs; Windows keeps WASAPI, `WH_KEYBOARD_LL`, SendInput/clipboard,
+  and its native message loop.
+- The review prompt is a terminal on macOS and a dialog on Windows.
+- Watchdogs, device-change recovery, audio teardown, and hook-thread
+  swallowing are native; Rust owns only the portable decisions above.
+- Windows defers Rust `TranscriptionDone` until an in-flight insertion-rollback
+  returns; macOS settles it on the main queue. Both drop stale results and post
+  no Enter after cancel.
+
 ## Build / link flow
 
 ```text

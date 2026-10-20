@@ -1116,6 +1116,77 @@ fn session_full_lifecycle_start_stop_cancel_through_abi() {
 }
 
 #[test]
+fn session_cancel_matrix_before_and_during_processing_through_abi() {
+    let session = nd_session_new();
+    assert!(!session.is_null());
+
+    // Recording cancellation is terminal: no readiness, no late stop/done.
+    let recording = nd_session_start(session);
+    assert_eq!(
+        nd_session_event(session, ND_EVENT_FIRST_BUFFER, recording),
+        ND_OK
+    );
+    assert_eq!(
+        nd_session_event(session, ND_EVENT_CANCELLED, recording),
+        ND_OK
+    );
+    assert_eq!(nd_session_state(session), ND_STATE_IDLE);
+    assert_eq!(nd_session_is_capture_ready(session), 0);
+    assert_eq!(
+        nd_session_event(session, ND_EVENT_STOP_REQUESTED, recording),
+        ND_OK
+    );
+    assert_eq!(nd_session_state(session), ND_STATE_IDLE);
+
+    // Processing cancellation is deliberately a no-op: the owner keeps the
+    // session Transcribing until the late result/insertion is settled, then
+    // reports TranscriptionDone. This is the cross-platform contract used by
+    // both the macOS agent and the Windows controller.
+    let processing = nd_session_start(session);
+    assert_eq!(
+        nd_session_event(session, ND_EVENT_FIRST_BUFFER, processing),
+        ND_OK
+    );
+    assert_eq!(
+        nd_session_event(session, ND_EVENT_STOP_REQUESTED, processing),
+        ND_OK
+    );
+    assert_eq!(
+        nd_session_event(session, ND_EVENT_CANCELLED, processing),
+        ND_OK
+    );
+    assert_eq!(nd_session_state(session), ND_STATE_TRANSCRIBING);
+    assert_eq!(
+        nd_session_event(session, ND_EVENT_TRANSCRIPTION_DONE, processing),
+        ND_OK
+    );
+    assert_eq!(nd_session_state(session), ND_STATE_IDLE);
+
+    // Rapid restart supersedes the processed generation; stale terminal
+    // events cannot touch the new Recording session.
+    let restarted = nd_session_start(session);
+    assert!(restarted > processing);
+    assert_eq!(
+        nd_session_event(session, ND_EVENT_FIRST_BUFFER, restarted),
+        ND_OK
+    );
+    assert_eq!(
+        nd_session_event(session, ND_EVENT_CANCELLED, processing),
+        ND_OK
+    );
+    assert_eq!(
+        nd_session_event(session, ND_EVENT_TRANSCRIPTION_DONE, processing),
+        ND_OK
+    );
+    assert_eq!(nd_session_state(session), ND_STATE_RECORDING);
+    assert_eq!(nd_session_is_capture_ready(session), 1);
+    assert_eq!(nd_session_should_emit_ready_cue(session), 1);
+    assert_eq!(nd_session_should_emit_ready_cue(session), 0);
+
+    nd_session_free(session);
+}
+
+#[test]
 fn retry_failover_edge_cases_through_abi() {
     // Empty input joins to an empty order (still an owned string).
     let empty = to_c("");

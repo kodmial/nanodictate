@@ -125,7 +125,12 @@ public sealed class DictationCaptureService : IDisposable
         return result;
     }
 
-    /// <summary>Cancels the live session without producing a recording.</summary>
+    /// <summary>
+    /// Cancels a live Recording session without producing a recording.
+    /// After <see cref="Stop"/> the session is Transcribing and must be
+    /// completed with <see cref="FinishTranscription"/>; this call is then a
+    /// deliberate no-op because Rust <c>Cancelled</c> is Recording-only.
+    /// </summary>
     public void Cancel()
     {
         try

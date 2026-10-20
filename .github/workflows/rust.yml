@@ -12,6 +12,7 @@ on:
     branches: [main]
     paths:
       - 'rust/**'
+      - 'Tests/Fixtures/HUD/**'
       - 'Sources/NanoDictateRustFFI/**'
       - 'Sources/NanoDictateRustBridge/**'
       - 'Sources/NanoDictateCore/RustEngine.swift'
@@ -26,11 +27,13 @@ on:
       - 'scripts/swift-rust-build-contract.sh'
       - 'scripts/check-rust-abi.sh'
       - 'docs/architecture-rust-engine.md'
+      - 'docs/hud-contract.md'
       - 'Package.swift'
       - '.github/workflows/rust.yml'
   pull_request:
     paths:
       - 'rust/**'
+      - 'Tests/Fixtures/HUD/**'
       - 'Sources/NanoDictateRustFFI/**'
       - 'Sources/NanoDictateRustBridge/**'
       - 'Sources/NanoDictateCore/RustEngine.swift'
@@ -45,6 +48,7 @@ on:
       - 'scripts/swift-rust-build-contract.sh'
       - 'scripts/check-rust-abi.sh'
       - 'docs/architecture-rust-engine.md'
+      - 'docs/hud-contract.md'
       - 'Package.swift'
       - '.github/workflows/rust.yml'
 
