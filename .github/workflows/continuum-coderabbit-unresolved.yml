@@ -25,3 +25,4 @@ jobs:
     secrets: inherit
     with:
       continuum_ref: main
+      pr_number: "${{ inputs.pr_number }}"
