@@ -393,7 +393,7 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
         }
         catch
         {
-            _capture.Cancel();
+            CancelCurrent();
             throw;
         }
         var handler = StopTranscriptionHandler;

@@ -282,7 +282,7 @@ public sealed class HudWindow : Window
 
         _recordDot.Visibility = snapshot.HasRecordingIndicator ? Visibility.Visible : Visibility.Collapsed;
         _processingDotsPanel.Visibility = snapshot.HasProcessingDots ? Visibility.Visible : Visibility.Collapsed;
-        _peakDot.Visibility = snapshot.Meter > 0.01 ? Visibility.Visible : Visibility.Collapsed;
+        _peakDot.Visibility = snapshot.Peak > 0.01 ? Visibility.Visible : Visibility.Collapsed;
 
         if (snapshot.Peak > 0.01)
         {

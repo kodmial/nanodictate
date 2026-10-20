@@ -15,6 +15,7 @@ internal sealed class FakeCaptureDriver : ICaptureDriver
     public bool IsCaptureReady => _live && _session.IsCaptureReady;
     public int Cancels;
     public int Starts;
+    public bool ThrowOnStop;
 
     public void Start(ulong? triggerNanos = null)
     {
@@ -33,6 +34,10 @@ internal sealed class FakeCaptureDriver : ICaptureDriver
     {
         _session.OnEvent(SessionEvent.StopRequested, _generation);
         _live = false;
+        if (ThrowOnStop)
+        {
+            throw new InvalidOperationException("capture stop failed");
+        }
         return new PipelineStopResult(
             new short[] { 1, 2, 3 }, Array.Empty<NanoEngine.LiveSegment>(), CaptureMetrics.Empty);
     }
@@ -177,15 +182,42 @@ public sealed class DictationControllerTests
     }
 
     [Fact]
+    public void FailedStopSettlesSessionAndRaisesTerminalEvent()
+    {
+        var capture = new FakeCaptureDriver();
+        var sink = new FakeInsertionSink();
+        using var controller = new DictationController(capture, sink);
+        controller.StopTranscriptionHandler = (_, _, _) => Task.CompletedTask;
+        var cancelled = 0;
+        ulong cancelledId = 0;
+        controller.Cancelled += () => cancelled++;
+        controller.CancelledWithRecordingId += id => cancelledId = id;
+
+        controller.AltDoubleTapped();
+        capture.MakeReady();
+        var recordingId = controller.CurrentRecordingId;
+        Assert.NotEqual(0ul, recordingId);
+        capture.ThrowOnStop = true;
+
+        Assert.Throws<InvalidOperationException>(() => controller.AltDoubleTapped());
+        Assert.Equal(DictationState.Idle, capture.State);
+        Assert.Equal(1, cancelled);
+        Assert.Equal(recordingId, cancelledId);
+        Assert.True(controller.IsCancelRequested);
+    }
+
+    [Fact]
     public void TryCancelRecordingRejectsCommittedDelivery()
     {
         var capture = new FakeCaptureDriver();
         var sink = new FakeInsertionSink();
         using var controller = new DictationController(capture, sink);
-        capture.Start();
+        controller.StopTranscriptionHandler = (_, _, _) => Task.CompletedTask;
+        controller.AltDoubleTapped();
         capture.MakeReady();
         controller.AltDoubleTapped();
         var recordingId = controller.CurrentRecordingId;
+        Assert.NotEqual(0ul, recordingId);
         Assert.True(controller.CompleteWithTranscript("committed", recordingId: recordingId));
 
         Assert.False(controller.TryCancelRecording(recordingId));
@@ -199,10 +231,12 @@ public sealed class DictationControllerTests
         var capture = new FakeCaptureDriver();
         var sink = new FakeInsertionSink();
         using var controller = new DictationController(capture, sink);
-        capture.Start();
+        controller.StopTranscriptionHandler = (_, _, _) => Task.CompletedTask;
+        controller.AltDoubleTapped();
         capture.MakeReady();
         controller.AltDoubleTapped();
         var previousId = controller.CurrentRecordingId;
+        Assert.NotEqual(0ul, previousId);
         Assert.False(controller.CompleteWithTranscript(string.Empty, recordingId: previousId));
 
         controller.AltDoubleTapped();
