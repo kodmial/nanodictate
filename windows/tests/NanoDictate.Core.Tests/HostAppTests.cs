@@ -232,6 +232,8 @@ public sealed class HostAppTests
         var finalAttempts = NanoEngine.FailoverCandidateCount(config.Providers.Count, config.AutoFailover);
 
         var budget = HostApp.ChunkedProcessingBudget(config, samples.Length, sampleRate);
+        var chunkBackoff = TimeSpan.FromMilliseconds(
+            NanoEngine.BackoffDelayMs(0, 500, 8000) * (ulong)chunks.Length);
 
         Assert.True(chunks.Length > 1);
         Assert.True(finalAttempts > 1);
@@ -239,9 +241,43 @@ public sealed class HostAppTests
             TimeSpan.FromSeconds(
                 config.TimeoutSeconds * (chunks.Length + finalAttempts)
                 + (finalAttempts - 1) * 8
-                + 5),
+                + 5)
+            + chunkBackoff,
             budget);
         Assert.True(budget > HostApp.InitialProcessingWatchdog(config));
+    }
+
+    [Fact]
+    public void ChunkedProcessingBudgetCoversFailedChunksBeforeSuccessfulFinalPass()
+    {
+        var config = new PortableConfig
+        {
+            Chunked = true,
+            ChunkedFinalPass = ChunkedFinalPass.OnUncertainty,
+            TimeoutSeconds = 30,
+            AutoFailover = false,
+            Providers = new[]
+            {
+                new ProviderEntry("a", "A", "https://a.test/v1/audio/transcriptions", string.Empty),
+            },
+        };
+        const int sampleRate = 16000;
+        var samples = new short[sampleRate * 120];
+        var chunks = NanoEngine.BatchPlan(samples.Length, sampleRate, 45.0, 1.0);
+        var finalAttempts = NanoEngine.FailoverCandidateCount(config.Providers.Count, config.AutoFailover);
+        var perRequest = TimeSpan.FromSeconds(config.TimeoutSeconds);
+        var perChunkBackoff = TimeSpan.FromMilliseconds(NanoEngine.BackoffDelayMs(0, 500, 8000));
+
+        var budget = HostApp.ChunkedProcessingBudget(config, samples.Length, sampleRate);
+
+        // Worst valid timeline: every chunk exhausts its timeout and its
+        // retry backoff, then the final pass succeeds.
+        var validTimeline = TimeSpan.FromTicks(
+            perRequest.Ticks * (chunks.Length + finalAttempts)
+            + perChunkBackoff.Ticks * chunks.Length);
+        Assert.True(chunks.Length > 1);
+        Assert.Equal(1, finalAttempts);
+        Assert.True(budget >= validTimeline);
     }
 
     [Fact]

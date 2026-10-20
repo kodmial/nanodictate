@@ -165,8 +165,10 @@ public sealed class HostApp : IDisposable
 
     /// <summary>
     /// Total STT request budget for a chunked recording. Every planned chunk is
-    /// one request; the final full-recording pass is budgeted with its possible
-    /// failover candidates and backoff pauses, mirroring the macOS watchdog.
+    /// one request and pays its own retry backoff even when no failover
+    /// candidate remains; the final full-recording pass is budgeted with its
+    /// possible failover candidates and backoff pauses, mirroring the macOS
+    /// watchdog.
     /// </summary>
     public static TimeSpan ChunkedProcessingBudget(
         PortableConfig config,
@@ -180,8 +182,10 @@ public sealed class HostApp : IDisposable
             NanoEngine.FailoverCandidateCount(providerCount, config.AutoFailover));
         var perRequest = TimeSpan.FromSeconds(config.TimeoutSeconds);
         var requestTicks = perRequest.Ticks * (chunks.Length + finalAttempts);
-        var backoff = TimeSpan.FromSeconds(Math.Max(0, finalAttempts - 1) * 8);
-        return TimeSpan.FromTicks(requestTicks) + backoff + TimeSpan.FromSeconds(5);
+        var finalBackoff = TimeSpan.FromSeconds(Math.Max(0, finalAttempts - 1) * 8);
+        var chunkBackoff = TimeSpan.FromMilliseconds(
+            NanoEngine.BackoffDelayMs(0, 500, 8000) * (ulong)chunks.Length);
+        return TimeSpan.FromTicks(requestTicks) + finalBackoff + chunkBackoff + TimeSpan.FromSeconds(5);
     }
 
     public static string ResolveApiKey(string providerId, PortableConfig config)
