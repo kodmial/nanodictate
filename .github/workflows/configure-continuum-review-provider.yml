@@ -21,7 +21,7 @@ jobs:
         run: |
           set -euo pipefail
           test -n "${GH_TOKEN:-}" || { echo "::error::TAP_PAT is required to provision repository Variables"; exit 2; }
-          gh variable set CONTINUUM_REVIEW_PROVIDER --repo "$GITHUB_REPOSITORY" --body pr-agent
+          gh variable set CONTINUUM_REVIEW_PROVIDER --repo "$GITHUB_REPOSITORY" --body coderabbit
           actual="$(gh variable get CONTINUUM_REVIEW_PROVIDER --repo "$GITHUB_REPOSITORY")"
-          test "$actual" = "pr-agent"
-          echo "CONTINUUM_REVIEW_PROVIDER=pr-agent verified"
+          test "$actual" = "coderabbit"
+          echo "CONTINUUM_REVIEW_PROVIDER=coderabbit verified"
