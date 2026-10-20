@@ -1,13 +1,6 @@
 name: Configure Continuum review provider
 
-# NanoDictate's explicitly selected reviewer is CodeRabbit.
-# PR-Agent is not a fallback for CodeRabbit quota or CI issues.
-# This repo-local preference must not be rewritten by generic Continuum upgrades.
 on:
-  workflow_dispatch:
-  schedule:
-    # Safety-net recovery if another actor changed the GitHub variable directly.
-    - cron: '23 4 * * *'
   push:
     branches: [main]
     paths:
