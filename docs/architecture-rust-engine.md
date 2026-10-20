@@ -199,7 +199,7 @@ each native host still owns its OS lifecycle and I/O.
 | In-flight insertion | Native `CGEvent`/clipboard insert, recording/token guards | Native `IInsertionSink`, recording/token gates | Native I/O; Rust retry gate + portable state |
 | Success / empty / error | `completeInsertion`/`handleEmptyResult`/`failTranscription` → `notifyTranscriptionDone` | `CompleteWithTranscript` (empty is the current error carrier) → `FinishTranscription` | Native terminal routing; Rust `TranscriptionDone` |
 | Escape while Recording | `AudioService.cancel` → `cancelled` | `DictationController.CancelCurrent`/pipeline `Cancel` → `Cancelled` | Rust `Cancelled` (Recording only) |
-| Escape while Transcribing | Agent drops the result, then `notifyTranscriptionDone` | Controller drops the result, then `FinishTranscription` (except an insertion already in flight) | Native owner (Rust `Cancelled` stays Recording-only) |
+| Escape while Transcribing | Agent drops the result, then `notifyTranscriptionDone` | Controller drops the result, then `FinishTranscription` (deferred until any in-flight insertion rolls back) | Native owner (Rust `Cancelled` stays Recording-only) |
 | Stale generations/results | Rust generation tags + agent processing/session tokens | Rust generation tags + controller recording sequence + cancellation token | Rust for session events; native for delivery/insertion |
 
 ### Cancellation matrix
@@ -214,7 +214,7 @@ return to Idle. Changing that would break the Windows rollback contract below.
 | Recording | `Cancelled` | Idle | Late first buffer/stop/done are state-guarded; ready cue stays suppressed |
 | Transcribing, no insertion yet | Native cancel flag/token, then `TranscriptionDone` | Idle | Late transcript fails the cancel/recording gate and never inserts |
 | Transcribing, review prompt pending | Native cancel flag/token, then `TranscriptionDone` | Idle | Late review decision fails the same gate |
-| Transcribing, insertion already in flight | Native cancel flag/token; Rust session is left Transcribing until the insert returns | Transcribing (by design) | The insert is rolled back with the recording-ID/cancel gate; the owner already knows the cancel, so the future HUD must not infer it from state |
+| Transcribing, insertion already in flight | Native cancel flag/token; Rust session is left Transcribing until the insert returns, then the owner sends `TranscriptionDone` | Idle (after the insert returns) | The insert is rolled back with the recording-ID/cancel gate before the deferred completion; the rollback owner is re-checked so a newer recording is never settled by a stale insert |
 | Idle | No Rust event | Idle | Retry-review waits are invalidated by native session tokens |
 
 The macOS agent and the Windows controller now route processing cancellation
@@ -225,8 +225,8 @@ that is the ABI contract, not a dropped event.
 ### Future HUD terminal feedback (#212/#216)
 
 The Windows HUD must not derive terminal cancel/error from `DictationState`.
-State describes the capture/engine phase and can intentionally remain
-Transcribing while an insertion rolls back. The HUD contract is a
+State describes the capture/engine phase and can remain Transcribing until an
+in-flight insertion rolls back before settling. The HUD contract is a
 controller/host-level terminal outcome: cancellation is known at
 `CancelCurrent`/the STT task boundary, and errors are known where the STT task
 fails (today `HostApp.TranscribeStoppedAsync` collapses failure to an empty
@@ -244,8 +244,9 @@ the low-level session state unchanged for ABI consumers.
   fresh generation; `RustParityTests` keeps the readiness latch parity.
 - Windows: `SessionHandleTests` pins the same ABI matrix; `DictationControllerTests`
   covers cancel while Recording, while processing, while review is pending,
-  and while an insertion is blocked; `RealtimeAudioPipelineTests` pins
-  cancel-after-stop and first-buffer/restart behavior.
+  and while an insertion is blocked (including a newer recording whose cancel
+  must not read a stale in-flight insertion owner); `RealtimeAudioPipelineTests`
+  pins cancel-after-stop and first-buffer/restart behavior.
 
 ### Remaining explicit native differences
 
@@ -255,9 +256,9 @@ the low-level session state unchanged for ABI consumers.
 - The review prompt is a terminal on macOS and a dialog on Windows.
 - Watchdogs, device-change recovery, audio teardown, and hook-thread
   swallowing are native; Rust owns only the portable decisions above.
-- Windows may leave the Rust session Transcribing during the insertion-rollback
-  race; macOS settles it on the main queue. Both drop stale results and post no
-  Enter after cancel.
+- Windows defers Rust `TranscriptionDone` until an in-flight insertion-rollback
+  returns; macOS settles it on the main queue. Both drop stale results and post
+  no Enter after cancel.
 
 ## Build / link flow
 

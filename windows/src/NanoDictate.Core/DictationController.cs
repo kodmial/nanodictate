@@ -249,12 +249,22 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
 
     private bool _pendingEnter;
     /// <summary>
-    /// True between the final delivery gate and the end of
-    /// <see cref="IInsertionSink.Insert"/>. Escape during this window must
-    /// leave the Rust session Transcribing so the inserted text can be rolled
-    /// back before the owner completes the session (see the session contract).
+    /// Recording identifier whose <see cref="IInsertionSink.Insert"/> call is
+    /// currently in flight, or null when no insertion is running. Escape uses
+    /// the owner to tell the current recording's insertion (leave the session
+    /// Transcribing so the inserted text can be rolled back) apart from a
+    /// superseded recording's insertion (settle the current session instead of
+    /// reading the stale owner flag).
     /// </summary>
-    private bool _insertionInProgress;
+    private ulong? _insertionRecordingId;
+
+    /// <summary>
+    /// Recordings cancelled while their own insertion was in flight. The
+    /// delivery path completes the capture session after the insert returns
+    /// and any inserted text is rolled back, unless a newer recording
+    /// superseded the owner first.
+    /// </summary>
+    private readonly HashSet<ulong> _finishAfterInsert = new();
 
     // -- IGlobalHotkeyDelegate -------------------------------------------
 
@@ -484,16 +494,19 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
         // Final delivery decision, synchronized with CancelCurrent and
         // StartCapture (both hold _gate). A check before the review prompt
         // is not sufficient because the prompt can wait. Claim the insertion
-        // window in the same critical section so Escape can tell an in-flight
-        // insertion (leave the session Transcribing for rollback) from a
-        // processing cancel (complete the session immediately).
+        // window in the same critical section, tagged with the owning
+        // recording, so Escape can tell this recording's in-flight insertion
+        // (defer completion for rollback) from a superseded recording's
+        // insertion (settle the current session immediately).
+        ulong insertionOwner;
         lock (_gate)
         {
             if (IsDeliverySupersededLocked(recordingId))
             {
                 return false;
             }
-            _insertionInProgress = true;
+            insertionOwner = _recordingSeq;
+            _insertionRecordingId = insertionOwner;
         }
         try
         {
@@ -507,10 +520,21 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
             bool current;
             lock (_gate)
             {
-                _insertionInProgress = false;
+                if (_insertionRecordingId == insertionOwner)
+                {
+                    _insertionRecordingId = null;
+                }
+                var deferred = _finishAfterInsert.Remove(insertionOwner);
                 if (IsDeliverySupersededLocked(recordingId))
                 {
                     current = false;
+                    // A cancel deferred completion until this insert returned;
+                    // settle the session now that the rollback is done unless a
+                    // newer recording already superseded the owner.
+                    if (deferred && insertionOwner == _recordingSeq)
+                    {
+                        _capture.FinishTranscription();
+                    }
                 }
                 else
                 {
@@ -532,18 +556,25 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
         // and the side effect. A stale result rolls back its own insert
         // (best effort) without touching B's capture session or undo state.
         bool staleAfterInsert;
+        bool deferredFinish;
         bool postEnter;
         lock (_gate)
         {
-            _insertionInProgress = false;
+            if (_insertionRecordingId == insertionOwner)
+            {
+                _insertionRecordingId = null;
+            }
+            deferredFinish = _finishAfterInsert.Remove(insertionOwner);
             if (IsDeliverySupersededLocked(recordingId))
             {
                 staleAfterInsert = true;
+                deferredFinish = deferredFinish && insertionOwner == _recordingSeq;
                 postEnter = false;
             }
             else
             {
                 staleAfterInsert = false;
+                deferredFinish = false;
                 _lastInserted = transcript;
                 _lastInsertedAt = _clock();
                 _capture.FinishTranscription();
@@ -559,6 +590,19 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
             }
             catch
             {
+            }
+            // Deferred cancel: complete only after the insert has been rolled
+            // back, re-checking that no newer recording superseded the owner
+            // while the rollback ran.
+            if (deferredFinish)
+            {
+                lock (_gate)
+                {
+                    if (insertionOwner == _recordingSeq)
+                    {
+                        _capture.FinishTranscription();
+                    }
+                }
             }
             return false;
         }
@@ -582,12 +626,12 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
     /// contract, so its owner completes it with <c>TranscriptionDone</c>
     /// instead — the same routing the macOS agent uses. The one exception is
     /// an insertion already in flight: the session stays Transcribing until
-    /// that delivery returns so the stale text can be rolled back first.
+    /// that delivery returns so the stale text can be rolled back first, then
+    /// the delivery path completes it (when no newer recording superseded it).
     /// The cancellation flag remains authoritative for every late result.
     /// </summary>
     public void CancelCurrent()
     {
-        bool finishTranscription;
         lock (_gate)
         {
             _cancelled = true;
@@ -595,25 +639,37 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
             // Cancel any pending transcription so its late result cannot
             // insert; the cancelled flag remains authoritative for late STT.
             _transcriptionCts?.Cancel();
-            finishTranscription = !_insertionInProgress && _capture.State == DictationState.Transcribing;
+            try
+            {
+                if (_capture.State == DictationState.Transcribing)
+                {
+                    if (_insertionRecordingId == _recordingSeq)
+                    {
+                        // This recording's own insertion is in flight: keep
+                        // the session Transcribing until the insert returns so
+                        // the stale text can be rolled back first, and record
+                        // the deferred completion for the delivery path.
+                        _finishAfterInsert.Add(_recordingSeq);
+                    }
+                    else
+                    {
+                        // Terminal cancel during processing: move
+                        // Transcribing -> Idle so a new dictation can start
+                        // immediately, without changing the portable Rust
+                        // contract (Cancelled stays Recording-only). Done under
+                        // _gate so StartCapture cannot interleave between the
+                        // decision and the side effect.
+                        _capture.FinishTranscription();
+                    }
+                }
+            }
+            catch
+            {
+                // Best effort: the cancelled flag still drops late results.
+            }
         }
         _enterLatch.Cancel();
         _enterPoster.Cancel();
-        try
-        {
-            if (finishTranscription)
-            {
-                // Terminal cancel during processing: move Transcribing ->
-                // Idle so a new dictation can start immediately, without
-                // changing the portable Rust contract (Cancelled stays
-                // Recording-only).
-                _capture.FinishTranscription();
-            }
-        }
-        catch
-        {
-            // Best effort: the cancelled flag still drops late results.
-        }
         try
         {
             _capture.Cancel();

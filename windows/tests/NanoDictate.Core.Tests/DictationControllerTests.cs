@@ -245,7 +245,50 @@ public sealed class DictationControllerTests
     }
 
     [Fact]
-    public async Task CancelledDeliveryDuringInsertRollsBackWithoutFinishing()
+    public async Task CancelNewRecordingDuringBlockedStaleInsertFinishesNewSession()
+    {
+        var capture = new FakeCaptureDriver();
+        var sink = new BlockingInsertionSink();
+        using var controller = new DictationController(capture, sink);
+        ulong stoppedId = 0;
+        var stopCount = 0;
+        var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        controller.StopTranscriptionHandler = (_, _, id) =>
+        {
+            if (Interlocked.Increment(ref stopCount) == 1)
+            {
+                stoppedId = id;
+                stopped.SetResult();
+            }
+            return Task.CompletedTask;
+        };
+        controller.AltDoubleTapped();
+        controller.AltDoubleTapped();
+        await stopped.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(DictationState.Transcribing, capture.State);
+
+        // Recording A's insert blocks. A's session is settled externally, then
+        // recording B starts and stops. Escape during B must settle B's session
+        // rather than reading A's stale in-flight insertion flag.
+        var delivery = Task.Run(() => controller.CompleteWithTranscript("A", recordingId: stoppedId));
+        Assert.True(sink.EnteredInsert.Wait(TimeSpan.FromSeconds(5)));
+        capture.FinishTranscription();
+        controller.AltDoubleTapped();
+        Assert.Equal(DictationState.Recording, capture.State);
+        controller.AltDoubleTapped();
+        Assert.Equal(DictationState.Transcribing, capture.State);
+
+        controller.CancelKeyPressed();
+        Assert.Equal(DictationState.Idle, capture.State);
+
+        sink.ReleaseInsert.Set();
+        Assert.False(await delivery.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(1, sink.Deletes);
+        Assert.Equal(DictationState.Idle, capture.State);
+    }
+
+    [Fact]
+    public async Task CancelledDeliveryDuringInsertRollsBackThenFinishesSession()
     {
         var capture = new FakeCaptureDriver();
         var sink = new BlockingInsertionSink();
@@ -270,9 +313,10 @@ public sealed class DictationControllerTests
         sink.ReleaseInsert.Set();
         var delivered = await delivery.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.False(delivered);
-        // Stale insert is rolled back and no capture session is completed.
+        // The stale insert is rolled back, then the deferred cancel settles
+        // the session through TranscriptionDone.
         Assert.Equal(1, sink.Deletes);
-        Assert.Equal(DictationState.Transcribing, capture.State);
+        Assert.Equal(DictationState.Idle, capture.State);
     }
 
     [Fact]
