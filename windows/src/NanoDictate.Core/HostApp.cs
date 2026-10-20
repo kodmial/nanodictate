@@ -30,7 +30,12 @@ public sealed class HostApp : IDisposable
     {
         _config = config;
         _activeProviderId = config.ActiveProvider;
-        _catalog = new ProviderCatalog(config.Providers, _activeProviderId, config.SegmentProvider, config.FinalProvider);
+        _catalog = new ProviderCatalog(
+            config.Providers,
+            _activeProviderId,
+            config.SegmentProvider,
+            config.FinalProvider,
+            config.FailoverOrderIds);
         _capture = new DictationCaptureService(captureSource);
         _controller = new DictationController(
             new CaptureDriverAdapter(_capture),
@@ -68,10 +73,14 @@ public sealed class HostApp : IDisposable
 
     public static string ResolveApiKey(string providerId, PortableConfig config)
     {
-        // Env beats config files for the active provider only (parity with
-        // macOS applyEnvAPIKey); role/failover candidates keep their own
-        // configured keys (none are stored by this host).
-        if (providerId == config.ActiveProvider || string.IsNullOrEmpty(config.ActiveProvider))
+        // Env beats configured keys for the active provider only (parity with
+        // macOS applyEnvAPIKey/RetryProvider.resolveAPIKey). An empty
+        // active_provider means the first declared provider is active.
+        // Role/failover candidates keep their own api_key/api_key_file.
+        var activeId = string.IsNullOrEmpty(config.ActiveProvider)
+            ? config.Providers.FirstOrDefault()?.Id
+            : config.ActiveProvider;
+        if (!string.IsNullOrEmpty(activeId) && providerId == activeId)
         {
             var env = Environment.GetEnvironmentVariable("NANODICTATE_API_KEY");
             if (!string.IsNullOrEmpty(env))
@@ -79,7 +88,18 @@ public sealed class HostApp : IDisposable
                 return env;
             }
         }
-        return string.Empty;
+        var provider = config.Providers.FirstOrDefault(p => p.Id == providerId);
+        if (provider is null)
+        {
+            return string.Empty;
+        }
+        if (!string.IsNullOrEmpty(provider.ApiKey))
+        {
+            return provider.ApiKey;
+        }
+        return string.IsNullOrEmpty(provider.ApiKeyFile)
+            ? string.Empty
+            : PortableConfig.ReadApiKeyFile(provider.ApiKeyFile);
     }
 
     /// <summary>
@@ -141,7 +161,12 @@ public sealed class HostApp : IDisposable
         var reordered = _catalog.Providers
             .OrderBy(p => p.Id == id ? 0 : 1)
             .ToList();
-        _catalog = new ProviderCatalog(reordered, _activeProviderId, _config.SegmentProvider, _config.FinalProvider);
+        _catalog = new ProviderCatalog(
+            reordered,
+            _activeProviderId,
+            _config.SegmentProvider,
+            _config.FinalProvider,
+            _config.FailoverOrderIds);
         _stt = new SttClient(_catalog, _transport, _apiKeyFor, _timeout);
         _chunked = new ChunkedTranscriber(_stt);
     }

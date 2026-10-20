@@ -21,9 +21,15 @@ clipboard, registry, tray, paths, HTTP transport framing).
   accumulate, completion carries the final hypothesis, transport drops
   fail closed with no silent batch fallback.
 - Provider/model selection and routing: active/segment/final roles from
-  the shared TOML shape; failover order, candidate count, and
-  should-failover through `nd_failover_order` / `nd_failover_candidate_count` /
-  `nd_should_failover`; backoff through `nd_backoff_delay_ms`.
+  the shared TOML shape; explicit top-level `providers = [...]` order and
+  section order; failover order, candidate count, and should-failover through
+  `nd_failover_order` / `nd_failover_candidate_count` / `nd_should_failover`;
+  backoff through `nd_backoff_delay_ms`.
+- Provider credentials: per-provider `api_key` / `api_key_file` with the
+  macOS contract. `NANODICTATE_API_KEY` overrides only the effective active
+  provider (first declared provider when `active_provider` is empty); role
+  and failover providers keep their own keys. Keyless providers send no
+  authorization header, and secrets are never logged or passed to Rust.
 - Review-before-insert: `nd_review_decide` (empty/y/Y inserts, anything
   else or end-of-input cancels, fail-closed).
 - Diagnostics: `doctor` verb runs engine ABI, config resolution, Rust
@@ -55,6 +61,10 @@ clipboard, registry, tray, paths, HTTP transport framing).
 - Startup: HKCU Run key plus tray (macOS: launchd).
 - `cookie-relay` transport is rejected loudly on Windows (no JS-challenge
   cookie solver); use `direct`, `http`, or `gateway`.
+- Per-provider transport/proxy overrides are macOS-only. Windows uses the
+  top-level `transport`/`http_proxy`/`proxy_*` keys. `upload_format` (FLAC,
+  file-backed multipart), `vocabulary`, and `extra_languages` are also macOS-
+  only and are ignored rather than emulated; see `docs/config-parity.md`.
 - `DictationTextPolicy.IsEmptyResult` mirrors the Swift whitespace/letter-
   digit rule in C# because the engine exposes no empty-result entry point;
   it delegates to Rust if one is added.

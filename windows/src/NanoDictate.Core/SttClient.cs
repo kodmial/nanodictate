@@ -12,17 +12,20 @@ public sealed class ProviderCatalog
     private readonly string _activeId;
     private readonly string _segmentId;
     private readonly string _finalId;
+    private readonly IReadOnlyList<string>? _failoverOrderIds;
 
     public ProviderCatalog(
         IReadOnlyList<ProviderEntry> providers,
         string activeId,
         string segmentId = "",
-        string finalId = "")
+        string finalId = "",
+        IReadOnlyList<string>? failoverOrderIds = null)
     {
         _providers = providers;
         _activeId = activeId;
         _segmentId = segmentId;
         _finalId = finalId;
+        _failoverOrderIds = failoverOrderIds;
     }
 
     public IReadOnlyList<ProviderEntry> Providers => _providers;
@@ -69,7 +72,7 @@ public sealed class ProviderCatalog
     /// <summary>Failover order for the given role through Rust.</summary>
     public IReadOnlyList<string> FailoverOrder(string? failedId, bool autoFailover)
     {
-        var ids = _providers.Select(p => p.Id).ToList();
+        var ids = _failoverOrderIds ?? _providers.Select(p => p.Id).ToList();
         var joined = NanoEngine.FailoverOrder(ids, failedId, autoFailover);
         return string.IsNullOrEmpty(joined)
             ? Array.Empty<string>()
@@ -117,6 +120,15 @@ public static class SttRequestBuilder
         {
             throw new NanoException(-1, $"provider '{provider.Id}' has no base URL and no adapter default");
         }
+        // Empty configured model resolves through Rust to the adapter default
+        // (same portable decision as macOS ProviderRequestBuilder.resolveModel).
+        var model = string.IsNullOrEmpty(provider.Model)
+            ? NanoEngine.SttDefaultModel(provider.Id)
+            : provider.Model;
+        if (string.IsNullOrEmpty(profile.Model) && !string.IsNullOrEmpty(model))
+        {
+            profile = SttProfile.Resolve(provider.Id, model);
+        }
         if (profile.IsStreaming)
         {
             throw new NanoException(-1, $"profile '{profile.Model}' requires a streaming session, not a batch upload");
@@ -153,7 +165,6 @@ public static class SttRequestBuilder
             var crlf = Encoding.UTF8.GetBytes("\r\n");
             body.Write(crlf, 0, crlf.Length);
         }
-        var model = string.IsNullOrEmpty(provider.Model) ? profile.Model : provider.Model;
         if (!string.IsNullOrEmpty(model))
         {
             WriteField("model", model);
@@ -263,7 +274,10 @@ public sealed class SttClient
             SttRequestPlan plan;
             try
             {
-                profile = SttProfile.Resolve(provider.Id, provider.Model);
+                var model = string.IsNullOrEmpty(provider.Model)
+                    ? NanoEngine.SttDefaultModel(provider.Id)
+                    : provider.Model;
+                profile = SttProfile.Resolve(provider.Id, model);
                 var needPlanWords = false;
                 plan = SttRequestBuilder.Plan(provider, profile, wavBytes, language, prompt, needPlanWords, transport, _apiKeyFor(provider.Id), proxyKey);
             }
