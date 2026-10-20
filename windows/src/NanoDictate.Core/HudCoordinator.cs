@@ -303,6 +303,7 @@ public sealed class HudCoordinator : IDisposable
     {
         var recordingId = state is ulong id ? id : 0;
         HudSnapshot? snapshot = null;
+        ulong timedOutRecordingId;
         lock (_gate)
         {
             if (_disposed
@@ -315,11 +316,27 @@ public sealed class HudCoordinator : IDisposable
             _watchdog?.Dispose();
             _watchdog = null;
             _terminal = true;
-            _timedOutRecordingId = _watchdogRecordingId;
+            timedOutRecordingId = _watchdogRecordingId;
+            _timedOutRecordingId = timedOutRecordingId;
             _presentation.ProcessingTimedOut(_currentGeneration, _clock());
             snapshot = _presentation.Snapshot();
         }
         Raise(snapshot);
+
+        // A timed-out session must not insert its late transcript. Cancel the
+        // owning recording (not a newer one that may have started meanwhile)
+        // so the controller drops the result before insertion.
+        if (_app.Controller.CurrentRecordingId == timedOutRecordingId)
+        {
+            try
+            {
+                _app.Controller.CancelCurrent();
+            }
+            catch
+            {
+                // The cancelled flag is still authoritative for late results.
+            }
+        }
     }
 
     private bool SyncGenerationLocked()

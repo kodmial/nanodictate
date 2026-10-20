@@ -10,7 +10,7 @@ public sealed record ProviderEntry(string Id, string Name, string BaseUrl, strin
 
 public sealed class PortableConfig
 {
-    public string ActiveProvider { get; init; } = string.Empty;
+    public string ActiveProvider { get; set; } = string.Empty;
     public string Language { get; init; } = string.Empty;
     public IReadOnlyList<ProviderEntry> Providers { get; init; } = Array.Empty<ProviderEntry>();
     public string SegmentProvider { get; init; } = string.Empty;
@@ -39,6 +39,24 @@ public sealed class PortableConfig
     public string Prompt { get; init; } = string.Empty;
     /// <summary>Realtime model id (default gpt-live-transcribe).</summary>
     public string RealtimeModel { get; init; } = "gpt-live-transcribe";
+
+    /// <summary>
+    /// Repairs an empty or unknown <see cref="ActiveProvider"/> by selecting
+    /// the first configured provider. A provider-less config is left as-is so
+    /// startup can still surface an unconfigured HUD and settings.
+    /// </summary>
+    public void NormalizeProviderSelection()
+    {
+        if (Providers.Count == 0)
+        {
+            return;
+        }
+        if (string.IsNullOrEmpty(ActiveProvider)
+            || Providers.All(p => p.Id != ActiveProvider))
+        {
+            ActiveProvider = Providers[0].Id;
+        }
+    }
 
     /// <summary>
     /// Loads the portable subset of a NanoDictate TOML config. Unknown keys

@@ -64,6 +64,7 @@ public sealed partial class App : Application
             NanoEngine.CheckAvailable();
             _configPath = ResolveConfig();
             var config = PortableConfig.Load(_configPath);
+            config.NormalizeProviderSelection();
             var insertions = new InsertionSinkAdapter(
                 new TextInserter(new WindowsInputSender()),
                 new ClipboardInsertService(new WindowsClipboardBridge()));

@@ -112,12 +112,18 @@ public sealed class WindowReviewPrompt : IReviewPrompt
                 answer.TrySetResult("n");
                 return;
             }
+            var target = WindowsInterop.ForegroundWindow();
             var window = new ReviewWindow(text);
             _window = window;
             window.Closed += (_, _) =>
             {
                 _window = null;
-                answer.TrySetResult(window.AnswerText);
+                var result = window.AnswerText;
+                if (result == "y" && !WindowsInterop.RestoreForeground(target))
+                {
+                    result = "n";
+                }
+                answer.TrySetResult(result);
             };
             window.Activate();
         }))

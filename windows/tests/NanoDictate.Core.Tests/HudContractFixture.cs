@@ -11,6 +11,33 @@ namespace NanoDictate.Core.Tests;
 /// </summary>
 internal sealed class HudContractFixture
 {
+    public sealed class ReferenceData
+    {
+        public string Platform { get; set; } = string.Empty;
+        public List<string> Sources { get; set; } = new();
+    }
+
+    public sealed class AppearanceData
+    {
+        public string SessionLabel { get; set; } = string.Empty;
+        public string ReleaseVersion { get; set; } = string.Empty;
+        public string RecordingIndicator { get; set; } = string.Empty;
+        public string Ring { get; set; } = string.Empty;
+        public string Peak { get; set; } = string.Empty;
+        public string Timer { get; set; } = string.Empty;
+        public string Processing { get; set; } = string.Empty;
+        public string ReduceMotion { get; set; } = string.Empty;
+    }
+
+    public sealed class PositioningData
+    {
+        public string Owner { get; set; } = string.Empty;
+        public List<string> AnchorFallbacks { get; set; } = new();
+        public double GapPoints { get; set; }
+        public double ScreenMarginPoints { get; set; }
+        public string Note { get; set; } = string.Empty;
+    }
+
     public sealed class ConstantsData
     {
         public double DbfsFloor { get; set; }
@@ -46,6 +73,8 @@ internal sealed class HudContractFixture
         }
 
         public TerminalHide TerminalHideSeconds { get; set; } = new();
+        public string ProcessingWatchdog { get; set; } = string.Empty;
+        public string HideRecheck { get; set; } = string.Empty;
     }
 
     public sealed class RmsVector
@@ -106,6 +135,10 @@ internal sealed class HudContractFixture
 
     public string Contract { get; set; } = string.Empty;
     public int Version { get; set; }
+    public ReferenceData Reference { get; set; } = new();
+    public string Description { get; set; } = string.Empty;
+    public AppearanceData Appearance { get; set; } = new();
+    public PositioningData Positioning { get; set; } = new();
     public ConstantsData Constants { get; set; } = new();
     public TimingData Timing { get; set; } = new();
     public List<RmsVector> RmsVectors { get; set; } = new();
@@ -122,10 +155,11 @@ internal sealed class HudContractFixture
         var options = new JsonSerializerOptions
         {
             PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+            UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
         };
-        // The fixture uses "event" as a key; SnakeCaseLower maps it to EventName
-        // only through the explicit property name below.
-        options.PropertyNameCaseInsensitive = true;
+        // The fixture's "event" key maps to EventName through [JsonPropertyName];
+        // unknown keys fail loudly so fixture drift cannot silently empty a
+        // vector list.
         var fixture = JsonSerializer.Deserialize<HudContractFixture>(json, options);
         if (fixture is null)
         {

@@ -1,3 +1,4 @@
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -41,6 +42,7 @@ public sealed class HudWindow : Window
     private readonly Grid _ringGrid;
     private readonly Border _panel;
     private readonly Grid _meterTrack;
+    private readonly DispatcherQueueTimer _dotsTimer;
     private readonly SolidColorBrush _foregroundBrush = new();
     private readonly SolidColorBrush _secondaryBrush = new();
     private readonly SolidColorBrush _mutedBrush = new();
@@ -51,6 +53,7 @@ public sealed class HudWindow : Window
     private UISettings? _uiSettings;
     private bool _visible;
     private bool _allowClose;
+    private bool _reduceMotion;
     private int _frame;
     private HudPhase _lastPhase = HudPhase.Idle;
 
@@ -211,6 +214,10 @@ public sealed class HudWindow : Window
         };
         Content = _panel;
 
+        _dotsTimer = DispatcherQueue.CreateTimer();
+        _dotsTimer.Interval = TimeSpan.FromMilliseconds(300);
+        _dotsTimer.Tick += (_, _) => AdvanceProcessingDots();
+
         _hwnd = WindowNative.GetWindowHandle(this);
         WindowsInterop.MakeHudWindow(_hwnd);
         // The HUD is only shown when the presentation snapshot is visible.
@@ -285,15 +292,15 @@ public sealed class HudWindow : Window
             Canvas.SetTop(_peakDot, cy - 2.5);
         }
 
+        _reduceMotion = snapshot.ReduceMotion;
         if (snapshot.HasProcessingDots)
         {
-            _frame = (_frame + 1) % HudContract.ProcessingDotCount;
-            for (var i = 0; i < _processingDots.Length; i++)
-            {
-                _processingDots[i].Opacity = snapshot.ReduceMotion
-                    ? 0.9
-                    : i == _frame ? 1.0 : 0.25;
-            }
+            ApplyProcessingDots();
+            _dotsTimer.Start();
+        }
+        else
+        {
+            _dotsTimer.Stop();
         }
 
         if (!_visible || _lastPhase != snapshot.Phase)
@@ -307,6 +314,7 @@ public sealed class HudWindow : Window
 
     public void HidePanel()
     {
+        _dotsTimer.Stop();
         WindowsInterop.Hide(_hwnd);
         _visible = false;
         _lastPhase = HudPhase.Idle;
@@ -314,8 +322,25 @@ public sealed class HudWindow : Window
 
     public void CloseForShutdown()
     {
+        _dotsTimer.Stop();
         _allowClose = true;
         Close();
+    }
+
+    private void AdvanceProcessingDots()
+    {
+        _frame = (_frame + 1) % HudContract.ProcessingDotCount;
+        ApplyProcessingDots();
+    }
+
+    private void ApplyProcessingDots()
+    {
+        for (var i = 0; i < _processingDots.Length; i++)
+        {
+            _processingDots[i].Opacity = _reduceMotion
+                ? 0.9
+                : i == _frame ? 1.0 : 0.25;
+        }
     }
 
     private void ApplyPalette()

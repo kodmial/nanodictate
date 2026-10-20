@@ -87,6 +87,13 @@ internal static class WindowsInterop
         return new HudRect(0, 0, 1920, 1080);
     }
 
+    public static IntPtr ForegroundWindow() => GetForegroundWindow();
+
+    public static bool RestoreForeground(IntPtr hwnd) =>
+        hwnd != IntPtr.Zero
+        && SetForegroundWindow(hwnd)
+        && GetForegroundWindow() == hwnd;
+
     public static bool TryCaret(out HudPoint point)
     {
         if (UiaCaret.TryGet(out point))
@@ -212,6 +219,9 @@ internal static class WindowsInterop
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
 
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);

@@ -70,6 +70,33 @@ public sealed class HostAppTests
     }
 
     [Fact]
+    public void UnknownActiveProviderFallsBackToFirstConfiguredProvider()
+    {
+        var config = new PortableConfig
+        {
+            ActiveProvider = "missing",
+            Providers = new[]
+            {
+                new ProviderEntry("a", "A", string.Empty, string.Empty),
+                new ProviderEntry("b", "B", string.Empty, string.Empty),
+            },
+        };
+        using var app = new HostApp(config, new FakeSource(), new FakeInsertions(), new FakeTransport(), _ => string.Empty);
+        Assert.Equal("a", app.ActiveProviderId);
+        Assert.Equal("A", app.SessionLabel.Provider);
+    }
+
+    [Fact]
+    public void EmptyProviderConfigurationPreservesStartup()
+    {
+        var config = new PortableConfig();
+        using var app = new HostApp(config, new FakeSource(), new FakeInsertions(), new FakeTransport(), _ => string.Empty);
+        using var coordinator = new HudCoordinator(app, useTimer: false);
+        Assert.False(string.IsNullOrWhiteSpace(app.SessionLabel.Provider));
+        Assert.Equal("NanoDictate", coordinator.Snapshot.Provider);
+    }
+
+    [Fact]
     public void SelectProviderPersistsActiveSelection()
     {
         var config = new PortableConfig

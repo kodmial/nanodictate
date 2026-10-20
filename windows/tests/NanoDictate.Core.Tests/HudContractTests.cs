@@ -50,6 +50,7 @@ public sealed class HudContractTests
     public void RmsVectorsMatchReferenceMath()
     {
         var fixture = HudContractFixture.Load();
+        Assert.NotEmpty(fixture.RmsVectors);
         foreach (var vector in fixture.RmsVectors)
         {
             var rms = (float)vector.Rms;
@@ -318,6 +319,72 @@ public sealed class HudContractTests
         Assert.Equal(HudPhase.Recording, next.Phase);
         Assert.True(next.RecordingStarted);
         Assert.True(next.Generation > snapshot.Generation);
+    }
+
+    [Fact]
+    public async Task ProcessingWatchdogCancelsTheTimedOutRecording()
+    {
+        var config = new PortableConfig
+        {
+            ActiveProvider = "a",
+            Providers = new[]
+            {
+                new ProviderEntry("a", "A", "https://a.test/v1/audio/transcriptions", string.Empty),
+            },
+        };
+        var insertions = new TrackingInsertions();
+        using var app = new HostApp(config, new ImmediateReadySource(), insertions, new BlockingTransport(), _ => "k");
+        var cancelled = new TaskCompletionSource<ulong>(TaskCreationOptions.RunContinuationsAsynchronously);
+        app.Controller.CancelledWithRecordingId += id => cancelled.TrySetResult(id);
+        using var coordinator = new HudCoordinator(
+            app,
+            processingWatchdog: TimeSpan.FromMilliseconds(50),
+            useTimer: false);
+
+        app.Controller.AltDoubleTapped();
+        app.Controller.AltDoubleTapped();
+
+        var recordingId = await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(app.Controller.IsCancelRequested);
+        var snapshot = coordinator.Snapshot;
+        Assert.Equal(HudStatusKeys.Error, snapshot.StatusKey);
+        Assert.Equal(HudStatusKeys.ErrorSttTimeout, snapshot.StatusArgumentKey);
+        Assert.False(app.Controller.CompleteWithTranscript("late", recordingId: recordingId));
+        Assert.Empty(insertions.Inserted);
+    }
+
+    private sealed class BlockingTransport : ISttTransport
+    {
+        public async Task<SttHttpResponse> SendAsync(
+            string url,
+            IReadOnlyDictionary<string, string> headers,
+            byte[] body,
+            string contentType,
+            TimeSpan timeout,
+            CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.Infinite, cancellationToken).ConfigureAwait(false);
+            throw new OperationCanceledException(cancellationToken);
+        }
+    }
+
+    private sealed class TrackingInsertions : IInsertionSink
+    {
+        public List<string> Inserted { get; } = new();
+
+        public void Insert(string text, InsertMethod method) => Inserted.Add(text);
+
+        public void DeleteText(string insertedText)
+        {
+        }
+
+        public void DeleteGraphemes(int count)
+        {
+        }
+
+        public void PostEnter()
+        {
+        }
     }
 
     private sealed class ImmediateReadySource : IAudioCaptureSource

@@ -31,6 +31,7 @@ public sealed class HostApp : IDisposable
         Func<string, string>? apiKeyFor = null)
     {
         _config = config;
+        config.NormalizeProviderSelection();
         _activeProviderId = config.ActiveProvider;
         _catalog = new ProviderCatalog(config.Providers, _activeProviderId, config.SegmentProvider, config.FinalProvider);
         _capture = new DictationCaptureService(captureSource);
@@ -115,7 +116,18 @@ public sealed class HostApp : IDisposable
     {
         get
         {
-            var provider = _catalog.Active();
+            ProviderEntry provider;
+            try
+            {
+                provider = _catalog.Active();
+            }
+            catch (NanoException)
+            {
+                return new HudSessionLabel(
+                    "NanoDictate",
+                    "No provider configured",
+                    HudSessionLabel.ResolveVersion());
+            }
             var name = string.IsNullOrEmpty(provider.Name) ? provider.Id : provider.Name;
             var profile = SttProfile.Resolve(provider.Id, provider.Model);
             return new HudSessionLabel(name, profile.Model, HudSessionLabel.ResolveVersion());
