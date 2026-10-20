@@ -1,0 +1,21 @@
+name: Retry unresolved CodeRabbit findings
+
+on:
+  pull_request_review_comment:
+    types: [created]
+
+permissions:
+  actions: write
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  call:
+    if: >-
+      vars.CONTINUUM_ROLE != 'child' &&
+      (vars.CONTINUUM_REVIEW_PROVIDER || 'none') == 'coderabbit'
+    uses: kodmial/continuum/.github/workflows/continuum-coderabbit-unresolved.yml@main
+    secrets: inherit
+    with:
+      continuum_ref: main
