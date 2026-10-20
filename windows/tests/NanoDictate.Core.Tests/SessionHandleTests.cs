@@ -56,6 +56,52 @@ public sealed class SessionHandleTests
     }
 
     [Fact]
+    public void SessionCancelWhileTranscribingIsRecordingOnly()
+    {
+        using var session = new SessionHandle();
+        var generation = session.Start();
+        session.OnEvent(SessionEvent.FirstBuffer, generation);
+        session.OnEvent(SessionEvent.StopRequested, generation);
+        Assert.Equal(DictationState.Transcribing, session.State);
+
+        // Portable contract: Cancelled only ends Recording. The owner keeps
+        // the session Transcribing until any in-flight delivery is settled,
+        // then reports TranscriptionDone.
+        session.OnEvent(SessionEvent.Cancelled, generation);
+        Assert.Equal(DictationState.Transcribing, session.State);
+        Assert.False(session.IsCaptureReady);
+
+        session.OnEvent(SessionEvent.TranscriptionDone, generation);
+        Assert.Equal(DictationState.Idle, session.State);
+    }
+
+    [Fact]
+    public void SessionRapidRestartRejectsStaleGenerationEvents()
+    {
+        using var session = new SessionHandle();
+        var first = session.Start();
+        session.OnEvent(SessionEvent.FirstBuffer, first);
+        session.OnEvent(SessionEvent.StopRequested, first);
+        session.OnEvent(SessionEvent.Cancelled, first);
+        Assert.Equal(DictationState.Transcribing, session.State);
+
+        var second = session.Start();
+        Assert.True(second > first);
+        Assert.Equal(DictationState.Recording, session.State);
+        Assert.False(session.IsCaptureReady);
+
+        session.OnEvent(SessionEvent.FirstBuffer, first);
+        session.OnEvent(SessionEvent.TranscriptionDone, first);
+        Assert.Equal(DictationState.Recording, session.State);
+        Assert.False(session.IsCaptureReady);
+
+        session.OnEvent(SessionEvent.FirstBuffer, second);
+        Assert.True(session.IsCaptureReady);
+        Assert.True(session.ShouldEmitReadyCue());
+        Assert.False(session.ShouldEmitReadyCue());
+    }
+
+    [Fact]
     public void VadFeedAndRealtimeIngress()
     {
         using var vad = new VadHandle();
