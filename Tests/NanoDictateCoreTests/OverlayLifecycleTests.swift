@@ -199,7 +199,7 @@ final class OverlayLifecycleTests: XCTestCase {
         let scheduledGeneration: UInt64 = 1
         OverlayLifecycle.scheduleHide(
             after: 0.05,
-            stateProvider: { .recording },
+            stateProvider: { .idle },
             isCurrentCycle: { currentGeneration == scheduledGeneration }
         ) {
             hideCount += 1

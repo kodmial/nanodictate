@@ -79,13 +79,25 @@ hides and resets to `idle`.
 | `terminal_hide_seconds.error` | 2.0 |
 | `terminal_hide_seconds.microphone_error` | 2.0 |
 
-Every delayed hide is cycle-scoped. At the deadline the host re-checks both:
+Every delayed hide is cycle-scoped and is scheduled by a native terminal,
+cancel, or error event. At the deadline the host re-checks:
 
 1. the scheduling cycle is still current (generation/cycle token), and
-2. the engine state is Idle (`OverlayLifecycle.shouldHide`).
+2. the native terminal event that scheduled the hide has not been superseded
+   by a newer cycle.
+
+The deadline does **not** require the Rust engine to be Idle. Escape/cancel
+during in-flight STT, a timeout, or an error may hide the HUD while the Rust
+owner is still `Transcribing` and rolling back its transaction. Gating those
+terminal hides on `owner_done` would leave the HUD visible for an unbounded
+time. `OverlayLifecycle.shouldHide` remains the engine-state guard for
+Recording-owned stop paths; it is not a universal precondition for every
+terminal HUD event.
 
 A stale hide is dropped when a newer cycle has started. One schedule produces
-at most one hide. There is no hide while Recording or Transcribing.
+at most one hide. Recording-owned hides never fire while capture remains
+Recording; terminal cancel/error hides are driven by their native event and
+generation, independently of a still-settling Rust owner.
 
 The processing watchdog is at least `Transcriber.networkRequestTimeout + 5 s`.
 Realtime/failover paths may extend it, never shorten it.

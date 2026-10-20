@@ -339,60 +339,60 @@ fn state_code(name: &str) -> u32 {
 
 struct SessionDriver {
     handle: *mut NdSession,
-    generation: u64,
 }
 
 impl SessionDriver {
     fn new() -> Self {
         let handle = nd_session_new();
         assert!(!handle.is_null());
-        Self {
-            handle,
-            generation: 0,
-        }
+        Self { handle }
     }
 
-    fn apply(&mut self, event: &str) {
+    fn apply(&mut self, event: &str, generation: u64) {
         let state = nd_session_state(self.handle);
         match event {
             "double_alt" => {
                 if state == ND_STATE_RECORDING {
                     assert_eq!(
-                        nd_session_event(self.handle, ND_EVENT_STOP_REQUESTED, self.generation),
+                        nd_session_event(self.handle, ND_EVENT_STOP_REQUESTED, generation),
                         ND_OK
                     );
                 } else {
                     // Idle starts normally; a new gesture during processing
                     // starts generation N+1 and abandons the old owner.
-                    self.generation = nd_session_start(self.handle);
-                    assert!(self.generation > 0);
+                    let started = nd_session_start(self.handle);
                     assert_eq!(
-                        nd_session_event(self.handle, ND_EVENT_ENGINE_STARTED, self.generation),
+                        started, generation,
+                        "fixture double_alt must start its declared generation"
+                    );
+                    assert!(started > 0);
+                    assert_eq!(
+                        nd_session_event(self.handle, ND_EVENT_ENGINE_STARTED, started),
                         ND_OK
                     );
                 }
             }
             "first_buffer" => {
                 assert_eq!(
-                    nd_session_event(self.handle, ND_EVENT_FIRST_BUFFER, self.generation),
+                    nd_session_event(self.handle, ND_EVENT_FIRST_BUFFER, generation),
                     ND_OK
                 );
             }
             "escape" => {
                 assert_eq!(
-                    nd_session_event(self.handle, ND_EVENT_CANCELLED, self.generation),
+                    nd_session_event(self.handle, ND_EVENT_CANCELLED, generation),
                     ND_OK
                 );
             }
             "owner_done" => {
                 assert_eq!(
-                    nd_session_event(self.handle, ND_EVENT_TRANSCRIPTION_DONE, self.generation),
+                    nd_session_event(self.handle, ND_EVENT_TRANSCRIPTION_DONE, generation),
                     ND_OK
                 );
             }
             "audio_error" => {
                 assert_eq!(
-                    nd_session_event(self.handle, ND_EVENT_ENGINE_FAILED, self.generation),
+                    nd_session_event(self.handle, ND_EVENT_ENGINE_FAILED, generation),
                     ND_OK
                 );
             }
@@ -418,21 +418,39 @@ fn hud_fixture_session_checkpoints_match_existing_session_abi() {
         for checkpoint in field(scenario, "checkpoints").as_array() {
             let at_ms = number(checkpoint, "at_ms");
             while next_event < events.len() && number(&events[next_event], "at_ms") <= at_ms {
-                driver.apply(string(&events[next_event], "event"));
+                // The initial checkpoint observes the pre-boot state, before
+                // the same-timestamp double_alt event starts the session.
+                if at_ms == 0.0 && number(&events[next_event], "at_ms") == 0.0 {
+                    break;
+                }
+                let event = &events[next_event];
+                driver.apply(string(event, "event"), number(event, "generation") as u64);
                 next_event += 1;
             }
 
-            if let Some(rust_state) = checkpoint
-                .get("rust_state")
-                .filter(|v| matches!(v, Json::String(text) if !text.is_empty()))
-            {
+            let scenario_name = string(scenario, "name");
+            if at_ms == 0.0 {
                 assert_eq!(
                     nd_session_state(driver.handle),
-                    state_code(rust_state.as_str()),
-                    "scenario {} at {at_ms} ms",
-                    string(scenario, "name")
+                    ND_STATE_IDLE,
+                    "scenario {scenario_name} initial state"
                 );
+                continue;
             }
+
+            let rust_state = checkpoint
+                .get("rust_state")
+                .filter(|v| matches!(v, Json::String(text) if !text.is_empty()))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "scenario {scenario_name} checkpoint at {at_ms} ms must declare rust_state"
+                    )
+                });
+            assert_eq!(
+                nd_session_state(driver.handle),
+                state_code(rust_state.as_str()),
+                "scenario {scenario_name} at {at_ms} ms"
+            );
         }
     }
 }

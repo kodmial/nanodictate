@@ -149,15 +149,20 @@ enum HUDContractFixtureLoader {
 /// controller. It does not decide phases or timing.
 final class HUDScenarioPresentation {
   let controller: OverlayController
-  private(set) var presented = false
 
   init(controller: OverlayController = OverlayController()) {
     self.controller = controller
   }
 
+  /// Follows the controller's own logical presentation state instead of
+  /// test-side bookkeeping, so a no-op `hide()` cannot pass a hidden
+  /// checkpoint.
+  var presented: Bool {
+    controller.testIsPresented
+  }
+
   func show(at point: CGPoint = CGPoint(x: 700, y: 500)) {
     controller.show(at: point)
-    presented = true
   }
 
   func setStarting() {
@@ -186,7 +191,6 @@ final class HUDScenarioPresentation {
 
   func hide() {
     controller.hide()
-    presented = false
   }
 
   var phase: OverlayPhase? {

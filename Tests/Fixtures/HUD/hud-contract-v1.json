@@ -40,7 +40,7 @@
       "microphone_error": 2.0
     },
     "processing_watchdog": "Transcriber.networkRequestTimeout + 5 s minimum; realtime/failover paths may extend it, never shorten it.",
-    "hide_recheck": "At the deadline, hide only when the scheduling cycle is still current and the engine state is Idle."
+    "hide_recheck": "At the deadline, hide when the scheduling cycle is still current and its native terminal/cancel/error event has not been superseded. Do not require the engine to be Idle: a cancelling or erroring owner may still be Transcribing."
   },
   "appearance": {
     "session_label": "resolved provider and model, two lines; relay route prefix is preserved",
@@ -529,7 +529,7 @@
           "status_key": "overlay.recording",
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "recording"
         },
         {
           "at_ms": 1400,
@@ -539,7 +539,7 @@
           "status_key": "overlay.recognizing",
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "transcribing"
         },
         {
           "at_ms": 1700,
@@ -549,7 +549,7 @@
           "status_key": "overlay.finishing",
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "transcribing"
         },
         {
           "at_ms": 2500,
@@ -559,7 +559,7 @@
           "status_key": null,
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "transcribing"
         }
       ]
     },
@@ -618,7 +618,7 @@
           "status_key": null,
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "recording"
         },
         {
           "at_ms": 130,
@@ -628,7 +628,7 @@
           "status_key": "overlay.starting",
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "recording"
         },
         {
           "at_ms": 400,
@@ -638,7 +638,7 @@
           "status_key": "overlay.recording",
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "recording"
         },
         {
           "at_ms": 1200,
@@ -648,7 +648,7 @@
           "status_key": "overlay.cancelled",
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "idle"
         },
         {
           "at_ms": 2000,
@@ -658,7 +658,7 @@
           "status_key": null,
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "idle"
         }
       ]
     },
@@ -717,7 +717,7 @@
           "status_key": "overlay.recording",
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "recording"
         },
         {
           "at_ms": 140,
@@ -727,7 +727,7 @@
           "status_key": "overlay.recording",
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "recording"
         },
         {
           "at_ms": 600,
@@ -737,7 +737,7 @@
           "status_key": "overlay.recognizing",
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "transcribing"
         },
         {
           "at_ms": 800,
@@ -747,7 +747,7 @@
           "status_key": "overlay.finishing",
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "transcribing"
         },
         {
           "at_ms": 1600,
@@ -757,7 +757,7 @@
           "status_key": null,
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "transcribing"
         }
       ]
     },
@@ -806,7 +806,7 @@
           "status_key": "overlay.recording",
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "recording"
         },
         {
           "at_ms": 500,
@@ -826,7 +826,7 @@
           "status_key": null,
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "idle"
         }
       ]
     },
@@ -885,7 +885,7 @@
           "status_key": "overlay.recording",
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "recording"
         },
         {
           "at_ms": 900,
@@ -974,7 +974,7 @@
           "status_key": "overlay.starting",
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "recording"
         },
         {
           "at_ms": 300,
@@ -984,7 +984,7 @@
           "status_key": "error.micEnableFailed",
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "idle"
         },
         {
           "at_ms": 2300,
@@ -994,7 +994,7 @@
           "status_key": null,
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "idle"
         }
       ]
     },
@@ -1048,7 +1048,7 @@
           "status_key": "overlay.recording",
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "recording"
         },
         {
           "at_ms": 800,
@@ -1058,7 +1058,7 @@
           "status_key": "overlay.recognizing",
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "transcribing"
         },
         {
           "at_ms": 1100,
@@ -1068,7 +1068,7 @@
           "status_key": "overlay.error",
           "status_argument_key": "error.noInternet",
           "generation": 1,
-          "rust_state": null
+          "rust_state": "transcribing"
         },
         {
           "at_ms": 3100,
@@ -1078,7 +1078,7 @@
           "status_key": null,
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "transcribing"
         }
       ]
     },
@@ -1132,7 +1132,7 @@
           "status_key": "overlay.recording",
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "recording"
         },
         {
           "at_ms": 800,
@@ -1142,7 +1142,7 @@
           "status_key": "overlay.recognizing",
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "transcribing"
         },
         {
           "at_ms": 2800,
@@ -1152,7 +1152,7 @@
           "status_key": "overlay.error",
           "status_argument_key": "error.sttTimeout",
           "generation": 1,
-          "rust_state": null
+          "rust_state": "transcribing"
         },
         {
           "at_ms": 4800,
@@ -1162,7 +1162,7 @@
           "status_key": null,
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "transcribing"
         }
       ]
     },
@@ -1216,7 +1216,7 @@
           "status_key": "overlay.recording",
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "recording"
         },
         {
           "at_ms": 800,
@@ -1226,7 +1226,7 @@
           "status_key": "overlay.recognizing",
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "transcribing"
         },
         {
           "at_ms": 1100,
@@ -1236,7 +1236,7 @@
           "status_key": "overlay.emptyResult",
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "transcribing"
         },
         {
           "at_ms": 1900,
@@ -1246,7 +1246,7 @@
           "status_key": null,
           "status_argument_key": null,
           "generation": 1,
-          "rust_state": null
+          "rust_state": "transcribing"
         }
       ]
     },
@@ -1294,6 +1294,11 @@
           "at_ms": 2000,
           "event": "checkpoint",
           "generation": 2
+        },
+        {
+          "at_ms": 2100,
+          "event": "owner_done",
+          "generation": 1
         },
         {
           "at_ms": 2500,
@@ -1349,6 +1354,16 @@
         },
         {
           "at_ms": 2000,
+          "visible": true,
+          "phase": "recording",
+          "recording_started": true,
+          "status_key": "overlay.recording",
+          "status_argument_key": null,
+          "generation": 2,
+          "rust_state": "recording"
+        },
+        {
+          "at_ms": 2100,
           "visible": true,
           "phase": "recording",
           "recording_started": true,
