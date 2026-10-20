@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import NanoDictateRustBridge
 @testable import NanoDictateCore
 
 /// Tests of functionality that DISPLAYS something: overlay (mic panel).
@@ -387,6 +388,275 @@ final class OverlayControllerTests: XCTestCase {
         )
     }
 
+
+    // MARK: - Versioned HUD contract fixture (presentation scenarios)
+    //
+    // Each test follows one golden scenario, drives the real controller with
+    // the same phase operations the agent uses, and checks the fixture
+    // checkpoints. The fixture supplies the expected observable state; it is
+    // not a second presentation state machine.
+
+    @objc func testHUDContract_QuickStartRecordingProcessingInsertHide() {
+        let fixture = HUDContractFixtureLoader.load()
+        guard let scenario = fixture.requiredScenario(named: "quick_start_recording_insert_hide")
+        else { return }
+        let presentation = HUDScenarioPresentation()
+
+        assertHUDCheckpoint(scenario, at: 0, presentation: presentation, generation: 1)
+        presentation.show()
+        presentation.setRecording()
+        presentation.setStatus(L10n.tr("overlay.recording"))
+        assertHUDCheckpoint(scenario, at: 80, presentation: presentation, generation: 1)
+        presentation.setProcessing()
+        presentation.setStatus(L10n.tr("overlay.recognizing"))
+        assertHUDCheckpoint(scenario, at: 1400, presentation: presentation, generation: 1)
+        presentation.reset()
+        presentation.setStatus(L10n.tr("overlay.finishing"))
+        assertHUDCheckpoint(scenario, at: 1700, presentation: presentation, generation: 1)
+        presentation.hide()
+        assertHUDCheckpoint(scenario, at: 2500, presentation: presentation, generation: 1)
+    }
+
+    @objc func testHUDContract_SlowStartShowsStartingWithoutTimer() {
+        let fixture = HUDContractFixtureLoader.load()
+        guard
+          let scenario = fixture.requiredScenario(named: "slow_start_then_record_and_cancel")
+        else { return }
+        let presentation = HUDScenarioPresentation()
+
+        assertHUDCheckpoint(scenario, at: 0, presentation: presentation, generation: 1)
+        assertHUDCheckpoint(scenario, at: 60, presentation: presentation, generation: 1)
+        presentation.show()
+        presentation.setStarting()
+        presentation.setStatus(L10n.tr("overlay.starting"))
+        assertHUDCheckpoint(scenario, at: 130, presentation: presentation, generation: 1)
+        presentation.setRecording()
+        presentation.setStatus(L10n.tr("overlay.recording"))
+        assertHUDCheckpoint(scenario, at: 400, presentation: presentation, generation: 1)
+        presentation.reset()
+        presentation.setStatus(L10n.tr("overlay.cancelled"))
+        assertHUDCheckpoint(scenario, at: 1200, presentation: presentation, generation: 1)
+        presentation.hide()
+        assertHUDCheckpoint(scenario, at: 2000, presentation: presentation, generation: 1)
+    }
+
+    @objc func testHUDContract_QuickFirstBufferSkipsStarting() {
+        let fixture = HUDContractFixtureLoader.load()
+        guard
+          let scenario = fixture.requiredScenario(named: "quick_start_skips_starting_phase")
+        else { return }
+        let presentation = HUDScenarioPresentation()
+
+        assertHUDCheckpoint(scenario, at: 0, presentation: presentation, generation: 1)
+        presentation.show()
+        presentation.setRecording()
+        presentation.setStatus(L10n.tr("overlay.recording"))
+        assertHUDCheckpoint(scenario, at: 80, presentation: presentation, generation: 1)
+        assertHUDCheckpoint(scenario, at: 140, presentation: presentation, generation: 1)
+        presentation.setProcessing()
+        presentation.setStatus(L10n.tr("overlay.recognizing"))
+        assertHUDCheckpoint(scenario, at: 600, presentation: presentation, generation: 1)
+        presentation.reset()
+        presentation.setStatus(L10n.tr("overlay.finishing"))
+        assertHUDCheckpoint(scenario, at: 800, presentation: presentation, generation: 1)
+        presentation.hide()
+        assertHUDCheckpoint(scenario, at: 1600, presentation: presentation, generation: 1)
+    }
+
+    @objc func testHUDContract_CancelDuringRecordingIsTerminalUi() {
+        let fixture = HUDContractFixtureLoader.load()
+        guard let scenario = fixture.requiredScenario(named: "cancel_during_recording")
+        else { return }
+        let presentation = HUDScenarioPresentation()
+
+        assertHUDCheckpoint(scenario, at: 0, presentation: presentation, generation: 1)
+        presentation.show()
+        presentation.setRecording()
+        presentation.setStatus(L10n.tr("overlay.recording"))
+        assertHUDCheckpoint(scenario, at: 100, presentation: presentation, generation: 1)
+        presentation.reset()
+        presentation.setStatus(L10n.tr("overlay.cancelled"))
+        assertHUDCheckpoint(scenario, at: 500, presentation: presentation, generation: 1)
+        presentation.hide()
+        assertHUDCheckpoint(scenario, at: 1300, presentation: presentation, generation: 1)
+    }
+
+    @objc func testHUDContract_CancelDuringProcessingHidesBeforeRustSettles() {
+        let fixture = HUDContractFixtureLoader.load()
+        guard
+          let scenario = fixture.requiredScenario(
+            named: "cancel_during_processing_owner_settles_rust")
+        else { return }
+        let presentation = HUDScenarioPresentation()
+        guard let rustSession = try? RustSession() else {
+            XCTFail("Rust session must be available on the shipping link")
+            return
+        }
+        guard let generation = try? rustSession.start() else {
+            XCTFail("Rust session start must succeed")
+            return
+        }
+        try? rustSession.onEvent(.firstBuffer, generation: generation)
+        try? rustSession.onEvent(.stopRequested, generation: generation)
+        XCTAssertEqual(rustSession.state, 2, "Rust is Transcribing while the dots show")
+
+        assertHUDCheckpoint(scenario, at: 0, presentation: presentation, generation: 1)
+        presentation.show()
+        presentation.setRecording()
+        presentation.setStatus(L10n.tr("overlay.recording"))
+        assertHUDCheckpoint(scenario, at: 100, presentation: presentation, generation: 1)
+        presentation.setProcessing()
+        presentation.setStatus(L10n.tr("overlay.recognizing"))
+        assertHUDCheckpoint(scenario, at: 900, presentation: presentation, generation: 1)
+
+        // Escape hides the HUD and shows the bounded Cancelled status, while
+        // the Rust transaction is still owned by its transcription path.
+        presentation.reset()
+        presentation.setStatus(L10n.tr("overlay.cancelled"))
+        try? rustSession.onEvent(.cancelled, generation: generation)
+        XCTAssertEqual(
+            rustSession.state, 2,
+            "Cancelled is Recording-only; Transcribing waits for its owner")
+        assertHUDCheckpoint(scenario, at: 1200, presentation: presentation, generation: 1)
+        presentation.hide()
+        assertHUDCheckpoint(scenario, at: 2000, presentation: presentation, generation: 1)
+        XCTAssertEqual(rustSession.state, 2, "hiding the HUD does not end the Rust session")
+
+        try? rustSession.onEvent(.transcriptionDone, generation: generation)
+        XCTAssertEqual(rustSession.state, 0, "owner completion settles Rust to Idle")
+        assertHUDCheckpoint(scenario, at: 2200, presentation: presentation, generation: 1)
+    }
+
+    @objc func testHUDContract_AudioErrorIsBoundedAndNeverStartsTimer() {
+        let fixture = HUDContractFixtureLoader.load()
+        guard let scenario = fixture.requiredScenario(named: "audio_error_after_slow_start")
+        else { return }
+        let presentation = HUDScenarioPresentation()
+
+        assertHUDCheckpoint(scenario, at: 0, presentation: presentation, generation: 1)
+        presentation.show()
+        presentation.setStarting()
+        presentation.setStatus(L10n.tr("overlay.starting"))
+        assertHUDCheckpoint(scenario, at: 130, presentation: presentation, generation: 1)
+        presentation.setStatus(L10n.tr("error.micEnableFailed"))
+        assertHUDCheckpoint(scenario, at: 300, presentation: presentation, generation: 1)
+        XCTAssertFalse(presentation.recordingStarted, "a failed start must never run the timer")
+        presentation.hide()
+        assertHUDCheckpoint(scenario, at: 2300, presentation: presentation, generation: 1)
+    }
+
+    @objc func testHUDContract_NetworkErrorsUseShortLocalizedText() {
+        let fixture = HUDContractFixtureLoader.load()
+        for (name, timestamp) in [
+            ("stt_error_no_internet", 1100.0), ("stt_timeout", 2800.0),
+        ] {
+            guard let scenario = fixture.requiredScenario(named: name) else { continue }
+            let presentation = HUDScenarioPresentation()
+            presentation.show()
+            presentation.setRecording()
+            presentation.setStatus(L10n.tr("overlay.recording"))
+            assertHUDCheckpoint(scenario, at: 100, presentation: presentation, generation: 1)
+            presentation.setProcessing()
+            presentation.setStatus(L10n.tr("overlay.recognizing"))
+            assertHUDCheckpoint(scenario, at: 800, presentation: presentation, generation: 1)
+            presentation.reset()
+            guard let checkpoint = scenario.checkpoints.first(where: { $0.atMs == timestamp })
+            else {
+                XCTFail("\(name) has no terminal checkpoint at \(timestamp) ms")
+                continue
+            }
+            presentation.setStatus(hudStatusText(for: checkpoint) ?? "")
+            assertHUDCheckpoint(
+                scenario, at: timestamp, presentation: presentation, generation: 1)
+            presentation.hide()
+            assertHUDCheckpoint(scenario, at: timestamp + 2000, presentation: presentation,
+                                 generation: 1)
+        }
+    }
+
+    @objc func testHUDContract_EmptyResultIsNotAnError() {
+        let fixture = HUDContractFixtureLoader.load()
+        guard let scenario = fixture.requiredScenario(named: "empty_result") else { return }
+        let presentation = HUDScenarioPresentation()
+        presentation.show()
+        presentation.setRecording()
+        presentation.setStatus(L10n.tr("overlay.recording"))
+        assertHUDCheckpoint(scenario, at: 100, presentation: presentation, generation: 1)
+        presentation.setProcessing()
+        presentation.setStatus(L10n.tr("overlay.recognizing"))
+        assertHUDCheckpoint(scenario, at: 800, presentation: presentation, generation: 1)
+        presentation.reset()
+        presentation.setStatus(L10n.tr("overlay.emptyResult"))
+        assertHUDCheckpoint(scenario, at: 1100, presentation: presentation, generation: 1)
+        XCTAssertEqual(presentation.status ?? "", L10n.tr("overlay.emptyResult"))
+        presentation.hide()
+        assertHUDCheckpoint(scenario, at: 1900, presentation: presentation, generation: 1)
+    }
+
+    @objc func testHUDContract_RapidRestartStaysVisiblePastStaleDeadline() {
+        let fixture = HUDContractFixtureLoader.load()
+        guard
+          let scenario = fixture.requiredScenario(named: "stale_hide_after_rapid_restart")
+        else { return }
+        let presentation = HUDScenarioPresentation()
+
+        assertHUDCheckpoint(scenario, at: 0, presentation: presentation, generation: 1)
+        presentation.show()
+        presentation.setRecording()
+        presentation.setStatus(L10n.tr("overlay.recording"))
+        presentation.setProcessing()
+        presentation.setStatus(L10n.tr("overlay.recognizing"))
+        presentation.reset()
+        presentation.setStatus(L10n.tr("overlay.cancelled"))
+        assertHUDCheckpoint(scenario, at: 900, presentation: presentation, generation: 1)
+
+        // Generation 2 starts before generation 1's hide deadline.
+        presentation.show()
+        presentation.setRecording()
+        presentation.setStatus(L10n.tr("overlay.recording"))
+        assertHUDCheckpoint(scenario, at: 1580, presentation: presentation, generation: 2)
+        // The old deadline must not dismiss generation 2.
+        assertHUDCheckpoint(scenario, at: 1700, presentation: presentation, generation: 2)
+        assertHUDCheckpoint(scenario, at: 2000, presentation: presentation, generation: 2)
+        presentation.reset()
+        presentation.setStatus(L10n.tr("overlay.cancelled"))
+        assertHUDCheckpoint(scenario, at: 2500, presentation: presentation, generation: 2)
+        presentation.hide()
+        assertHUDCheckpoint(scenario, at: 3300, presentation: presentation, generation: 2)
+    }
+
+    /// Reduce Motion is a native presentation decision: the VU envelope and
+    /// all pulses are bypassed, while the 50 ms ring tick and status changes
+    /// still update. Rendering itself is not reachable headlessly, so the
+    /// view branches are pinned structurally like the existing ProcessingDots
+    /// test; the fixture carries the expected passthrough traces.
+    @objc func testHUDContract_ReduceMotionBypassesEnvelopeAndPulses() {
+        let fixture = HUDContractFixtureLoader.load()
+        XCTAssertTrue(
+            fixture.vuTraces.contains { $0.reduceMotion },
+            "fixture must carry reduce-motion VU passthrough vectors")
+        guard let source = Self.overlayControllerSource() else {
+            XCTFail("Не удалось прочитать Sources/NanoDictateCore/OverlayController.swift")
+            return
+        }
+        XCTAssertTrue(
+            source.contains("guard !reduceMotion else"),
+            "the meter loop must bypass the envelope when Reduce Motion is on")
+        XCTAssertTrue(
+            source.contains("peak = fresh"),
+            "Reduce Motion keeps peak on the current target instead of holding")
+        guard let recStart = source.range(of: "private struct RECDot: View") else {
+            XCTFail("RECDot not found")
+            return
+        }
+        let recTail = source[recStart.upperBound...]
+        let recEnd = recTail.range(of: "\n/// Анимация") ?? (recTail.startIndex..<recTail.endIndex)
+        let recView = String(recTail[..<recEnd.lowerBound])
+        XCTAssertTrue(
+            recView.contains("reduceMotion ? nil : Animation.easeInOut"),
+            "REC dot must be static when Reduce Motion is enabled")
+    }
+
     // MARK: - onChange(of: state.recordingStart): таймер жив только в фазе .recording (CR12 №4)
 
     /// Структурный тест (как OverlayLifecycleTests): поведенчески ветки
@@ -467,6 +737,42 @@ final class OverlayControllerTests: XCTestCase {
             view.contains("reduceMotion\n              ? nil"),
             "animation при Reduce Motion — nil (без repeatForever)"
         )
+    }
+
+
+    // MARK: - HUD fixture helpers
+
+    private func assertHUDCheckpoint(
+        _ scenario: HUDContractFixture.PresentationScenario,
+        at atMs: Double,
+        presentation: HUDScenarioPresentation,
+        generation: UInt64,
+        file: StaticString = #file,
+        line: UInt = #line
+    ) {
+        guard let checkpoint = scenario.checkpoints.first(where: { $0.atMs == atMs }) else {
+            XCTFail(
+                "scenario \(scenario.name) has no checkpoint at \(atMs) ms",
+                file: file, line: line)
+            return
+        }
+        XCTAssertEqual(
+            presentation.presented, checkpoint.visible,
+            "\(scenario.name)@\(atMs) visible", file: file, line: line)
+        XCTAssertEqual(
+            hudPhaseName(presentation.phase), checkpoint.phase,
+            "\(scenario.name)@\(atMs) phase", file: file, line: line)
+        XCTAssertEqual(
+            presentation.recordingStarted, checkpoint.recordingStarted,
+            "\(scenario.name)@\(atMs) recording timer", file: file, line: line)
+        XCTAssertEqual(
+            checkpoint.generation, generation,
+            "\(scenario.name)@\(atMs) fixture generation", file: file, line: line)
+        if let expectedStatus = hudStatusText(for: checkpoint) {
+            XCTAssertEqual(
+                presentation.status, expectedStatus,
+                "\(scenario.name)@\(atMs) status", file: file, line: line)
+        }
     }
 
     /// Загрузка исходника OverlayController для структурных проверок вью-веток,

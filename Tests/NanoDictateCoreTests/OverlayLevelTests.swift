@@ -230,4 +230,85 @@ final class OverlayLevelTests: XCTestCase {
         _ = peak.update(level: 0.4, dt: 0)
         XCTAssertEqual(peak.value, 0.4, accuracy: 0.001)
     }
+    // MARK: - Versioned HUD contract fixture (golden VU vectors)
+
+    /// The fixture is the cross-platform golden reference for #212's Windows
+    /// presentation adapter. The macOS reference math must reproduce every
+    /// RMS/dBFS/meter/stroke/hot vector exactly enough for parity tests.
+    @objc func testHUDContract_RMSVectorsMatchReferenceMath() {
+        let fixture = HUDContractFixtureLoader.load()
+        XCTAssertEqual(fixture.contract, "nanodictate.shared-hud")
+        XCTAssertEqual(fixture.version, 1)
+        XCTAssertEqual(fixture.constants.dbfsFloor, OverlayLevel.floordB, accuracy: 0.0001)
+        XCTAssertEqual(
+            Float(fixture.constants.attackSeconds), Float(OverlayLevel.attackTime),
+            accuracy: 0.0001)
+        XCTAssertEqual(
+            Float(fixture.constants.releaseSeconds), Float(OverlayLevel.releaseTime),
+            accuracy: 0.0001)
+        XCTAssertEqual(
+            Float(fixture.constants.peakHoldSeconds), Float(OverlayPeak.holdTime),
+            accuracy: 0.0001)
+        XCTAssertEqual(
+            fixture.constants.peakFallRatePerSecond, OverlayPeak.fallRate, accuracy: 0.0001)
+        XCTAssertEqual(
+            fixture.constants.hotThresholdDbfs, OverlayLevel.hotThresholddB, accuracy: 0.0001)
+        XCTAssertEqual(fixture.constants.strokeMinPoints, 3, accuracy: 0.0001)
+        XCTAssertEqual(fixture.constants.strokeMaxPoints, 9, accuracy: 0.0001)
+
+        for vector in fixture.rmsVectors {
+            XCTAssertEqual(
+                AudioMetrics.dbfs(vector.rms), vector.dbfs, accuracy: 0.001,
+                "dBFS for RMS \(vector.rms)")
+            XCTAssertEqual(
+                OverlayLevel.meter(fromRMS: vector.rms), vector.meter, accuracy: 0.0001,
+                "meter for RMS \(vector.rms)")
+            XCTAssertEqual(
+                Float(OverlayLevel.strokeWidth(forMeter: vector.meter)), vector.strokePoints,
+                accuracy: 0.0001, "stroke width for RMS \(vector.rms)")
+            XCTAssertEqual(
+                OverlayLevel.isHot(meter: vector.meter), vector.hot,
+                "hot zone for RMS \(vector.rms)")
+        }
+    }
+
+    /// Each tick starts from the previous envelope value, then feeds the
+    /// resulting meter through the peak follower. The reduce-motion trace
+    /// bypasses both and follows the target directly.
+    @objc func testHUDContract_VUTracesMatchEnvelopeAndPeak() {
+        let fixture = HUDContractFixtureLoader.load()
+        XCTAssertEqual(fixture.vuTraces.map(\.name), [
+            "attack_release", "peak_hold_then_fall", "reduce_motion_passthrough",
+        ])
+
+        for trace in fixture.vuTraces {
+            XCTAssertEqual(trace.tickSeconds, 0.05, accuracy: 0.0001)
+            var meter: Float = 0
+            var peak = OverlayPeak()
+            for (index, step) in trace.steps.enumerated() {
+                let target = OverlayLevel.meter(fromRMS: step.rms)
+                XCTAssertEqual(target, step.targetMeter, accuracy: 0.0001)
+                if trace.reduceMotion {
+                    meter = target
+                    peak.reset()
+                } else {
+                    meter = OverlayLevel.enveloped(
+                        current: meter, target: target, dt: trace.tickSeconds)
+                }
+                let observedPeak = trace.reduceMotion
+                    ? meter
+                    : peak.update(level: meter, dt: trace.tickSeconds)
+                XCTAssertEqual(
+                    meter, step.meter, accuracy: 0.0005,
+                    "\(trace.name) meter at tick \(index)")
+                XCTAssertEqual(
+                    observedPeak, step.peak, accuracy: 0.0005,
+                    "\(trace.name) peak at tick \(index)")
+                XCTAssertEqual(
+                    Float(OverlayLevel.strokeWidth(forMeter: meter)), step.strokePoints,
+                    accuracy: 0.0005, "\(trace.name) stroke at tick \(index)")
+            }
+        }
+    }
+
 }

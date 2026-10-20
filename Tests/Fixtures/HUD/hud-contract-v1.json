@@ -1,0 +1,1383 @@
+{
+  "contract": "nanodictate.shared-hud",
+  "version": 1,
+  "reference": {
+    "platform": "macOS",
+    "sources": [
+      "Sources/NanoDictateCore/OverlayController.swift",
+      "Sources/NanoDictateCore/OverlayLevel.swift",
+      "Sources/NanoDictateCore/OverlayLifecycle.swift"
+    ]
+  },
+  "description": "Executable presentation contract for the visible microphone HUD. Rust owns session/readiness/level primitives; each native host owns rendering, positioning, timers, accessibility, and its terminal UI events.",
+  "constants": {
+    "dbfs_floor": -50.0,
+    "attack_seconds": 0.07,
+    "release_seconds": 0.5,
+    "peak_hold_seconds": 0.8,
+    "peak_fall_rate_per_second": 0.7,
+    "meter_tick_seconds": 0.05,
+    "starting_grace_seconds": 0.12,
+    "stroke_min_points": 3.0,
+    "stroke_max_points": 9.0,
+    "hot_threshold_dbfs": -6.0,
+    "ring_diameter_points": 68.0,
+    "rec_dot_diameter_points": 8.0,
+    "processing_dot_count": 3,
+    "panel_corner_radius_points": 10.0,
+    "panel_min_width_points": 180.0,
+    "panel_max_width_points": 240.0,
+    "panel_height_idle_points": 150.0,
+    "panel_height_recording_points": 178.0,
+    "clock_tick_seconds": 1.0
+  },
+  "timing": {
+    "terminal_hide_seconds": {
+      "insert": 0.8,
+      "cancelled": 0.8,
+      "empty_result": 0.8,
+      "error": 2.0,
+      "microphone_error": 2.0
+    },
+    "processing_watchdog": "Transcriber.networkRequestTimeout + 5 s minimum; realtime/failover paths may extend it, never shorten it.",
+    "hide_recheck": "At the deadline, hide only when the scheduling cycle is still current and the engine state is Idle."
+  },
+  "appearance": {
+    "session_label": "resolved provider and model, two lines; relay route prefix is preserved",
+    "release_version": "OverlayVersion v-prefixed release string in the header",
+    "recording_indicator": "REC dot only in Recording",
+    "ring": "accent-colored arc from 0..meter, 3..9 pt stroke",
+    "peak": "dot at peak angle, ~0.8 s hold then decay",
+    "timer": "m:ss, starts only at the first valid buffer",
+    "processing": "three animated dots until a terminal result",
+    "reduce_motion": "no pulsing; meter and peak follow the target directly and animations are static"
+  },
+  "positioning": {
+    "owner": "native presentation, not Rust and not this fixture",
+    "anchor_fallbacks": [
+      "caret",
+      "pointer",
+      "screen_center"
+    ],
+    "gap_points": 12.0,
+    "screen_margin_points": 8.0,
+    "note": "The macOS reference clamps the panel to the active screen; Windows intends the same caret/mouse/center policy within its screen and DPI bounds. No pixel or window layout is enforced through FFI."
+  },
+  "rms_vectors": [
+    {
+      "rms": 0.0,
+      "dbfs": -120.0,
+      "meter": 0.0,
+      "stroke_points": 3.0,
+      "hot": false
+    },
+    {
+      "rms": 1e-09,
+      "dbfs": -180.0,
+      "meter": 0.0,
+      "stroke_points": 3.0,
+      "hot": false
+    },
+    {
+      "rms": 0.00316,
+      "dbfs": -50.006258,
+      "meter": 0.0,
+      "stroke_points": 3.0,
+      "hot": false
+    },
+    {
+      "rms": 0.01,
+      "dbfs": -40.0,
+      "meter": 0.2,
+      "stroke_points": 4.2,
+      "hot": false
+    },
+    {
+      "rms": 0.05,
+      "dbfs": -26.0206,
+      "meter": 0.479588,
+      "stroke_points": 5.877528,
+      "hot": false
+    },
+    {
+      "rms": 0.1,
+      "dbfs": -20.0,
+      "meter": 0.6,
+      "stroke_points": 6.6,
+      "hot": false
+    },
+    {
+      "rms": 0.5,
+      "dbfs": -6.0206,
+      "meter": 0.879588,
+      "stroke_points": 8.277528,
+      "hot": false
+    },
+    {
+      "rms": 0.7071,
+      "dbfs": -3.010383,
+      "meter": 0.939792,
+      "stroke_points": 8.638754,
+      "hot": true
+    },
+    {
+      "rms": 1.0,
+      "dbfs": 0.0,
+      "meter": 1.0,
+      "stroke_points": 9.0,
+      "hot": true
+    },
+    {
+      "rms": 2.0,
+      "dbfs": 6.0206,
+      "meter": 1.0,
+      "stroke_points": 9.0,
+      "hot": true
+    }
+  ],
+  "vu_traces": [
+    {
+      "name": "attack_release",
+      "tick_seconds": 0.05,
+      "reduce_motion": false,
+      "steps": [
+        {
+          "at_ms": 0.0,
+          "rms": 0.1,
+          "target_meter": 0.6,
+          "meter": 0.428571,
+          "peak": 0.428571,
+          "stroke_points": 5.571429
+        },
+        {
+          "at_ms": 50.0,
+          "rms": 0.1,
+          "target_meter": 0.6,
+          "meter": 0.55102,
+          "peak": 0.55102,
+          "stroke_points": 6.306122
+        },
+        {
+          "at_ms": 100.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.498584,
+          "peak": 0.55102,
+          "stroke_points": 5.991503
+        },
+        {
+          "at_ms": 150.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.451137,
+          "peak": 0.55102,
+          "stroke_points": 5.706824
+        },
+        {
+          "at_ms": 200.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.408206,
+          "peak": 0.55102,
+          "stroke_points": 5.449236
+        },
+        {
+          "at_ms": 250.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.36936,
+          "peak": 0.55102,
+          "stroke_points": 5.21616
+        },
+        {
+          "at_ms": 300.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.334211,
+          "peak": 0.55102,
+          "stroke_points": 5.005265
+        },
+        {
+          "at_ms": 350.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.302406,
+          "peak": 0.55102,
+          "stroke_points": 4.814439
+        },
+        {
+          "at_ms": 400.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.273629,
+          "peak": 0.55102,
+          "stroke_points": 4.641772
+        },
+        {
+          "at_ms": 450.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.247589,
+          "peak": 0.55102,
+          "stroke_points": 4.485537
+        }
+      ]
+    },
+    {
+      "name": "peak_hold_then_fall",
+      "tick_seconds": 0.05,
+      "reduce_motion": false,
+      "steps": [
+        {
+          "at_ms": 0.0,
+          "rms": 0.5,
+          "target_meter": 0.879588,
+          "meter": 0.628277,
+          "peak": 0.628277,
+          "stroke_points": 6.769663
+        },
+        {
+          "at_ms": 50.0,
+          "rms": 0.2,
+          "target_meter": 0.720412,
+          "meter": 0.694088,
+          "peak": 0.694088,
+          "stroke_points": 7.164527
+        },
+        {
+          "at_ms": 100.0,
+          "rms": 0.2,
+          "target_meter": 0.720412,
+          "meter": 0.712891,
+          "peak": 0.712891,
+          "stroke_points": 7.277345
+        },
+        {
+          "at_ms": 150.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.64505,
+          "peak": 0.712891,
+          "stroke_points": 6.870302
+        },
+        {
+          "at_ms": 200.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.583666,
+          "peak": 0.712891,
+          "stroke_points": 6.501994
+        },
+        {
+          "at_ms": 250.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.528123,
+          "peak": 0.712891,
+          "stroke_points": 6.168735
+        },
+        {
+          "at_ms": 300.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.477865,
+          "peak": 0.712891,
+          "stroke_points": 5.86719
+        },
+        {
+          "at_ms": 350.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.43239,
+          "peak": 0.712891,
+          "stroke_points": 5.594341
+        },
+        {
+          "at_ms": 400.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.391243,
+          "peak": 0.712891,
+          "stroke_points": 5.347457
+        },
+        {
+          "at_ms": 450.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.354011,
+          "peak": 0.712891,
+          "stroke_points": 5.124067
+        },
+        {
+          "at_ms": 500.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.320323,
+          "peak": 0.712891,
+          "stroke_points": 4.921935
+        },
+        {
+          "at_ms": 550.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.28984,
+          "peak": 0.712891,
+          "stroke_points": 4.739039
+        },
+        {
+          "at_ms": 600.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.262258,
+          "peak": 0.712891,
+          "stroke_points": 4.573547
+        },
+        {
+          "at_ms": 650.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.237301,
+          "peak": 0.712891,
+          "stroke_points": 4.423805
+        },
+        {
+          "at_ms": 700.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.214719,
+          "peak": 0.712891,
+          "stroke_points": 4.288312
+        },
+        {
+          "at_ms": 750.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.194285,
+          "peak": 0.712891,
+          "stroke_points": 4.165713
+        },
+        {
+          "at_ms": 800.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.175797,
+          "peak": 0.712891,
+          "stroke_points": 4.05478
+        },
+        {
+          "at_ms": 850.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.159067,
+          "peak": 0.712891,
+          "stroke_points": 3.954405
+        },
+        {
+          "at_ms": 900.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.14393,
+          "peak": 0.712891,
+          "stroke_points": 3.863581
+        },
+        {
+          "at_ms": 950.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.130233,
+          "peak": 0.677891,
+          "stroke_points": 3.781401
+        },
+        {
+          "at_ms": 1000.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.11784,
+          "peak": 0.642891,
+          "stroke_points": 3.70704
+        },
+        {
+          "at_ms": 1050.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.106626,
+          "peak": 0.607891,
+          "stroke_points": 3.639757
+        },
+        {
+          "at_ms": 1100.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.096479,
+          "peak": 0.572891,
+          "stroke_points": 3.578876
+        },
+        {
+          "at_ms": 1150.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.087298,
+          "peak": 0.537891,
+          "stroke_points": 3.523788
+        },
+        {
+          "at_ms": 1200.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.078991,
+          "peak": 0.502891,
+          "stroke_points": 3.473943
+        },
+        {
+          "at_ms": 1250.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.071474,
+          "peak": 0.467891,
+          "stroke_points": 3.428842
+        }
+      ]
+    },
+    {
+      "name": "reduce_motion_passthrough",
+      "tick_seconds": 0.05,
+      "reduce_motion": true,
+      "steps": [
+        {
+          "at_ms": 0.0,
+          "rms": 0.1,
+          "target_meter": 0.6,
+          "meter": 0.6,
+          "peak": 0.6,
+          "stroke_points": 6.6
+        },
+        {
+          "at_ms": 50.0,
+          "rms": 0.1,
+          "target_meter": 0.6,
+          "meter": 0.6,
+          "peak": 0.6,
+          "stroke_points": 6.6
+        },
+        {
+          "at_ms": 100.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.0,
+          "peak": 0.0,
+          "stroke_points": 3.0
+        },
+        {
+          "at_ms": 150.0,
+          "rms": 0.0,
+          "target_meter": 0.0,
+          "meter": 0.0,
+          "peak": 0.0,
+          "stroke_points": 3.0
+        }
+      ]
+    }
+  ],
+  "presentation_scenarios": [
+    {
+      "name": "quick_start_recording_insert_hide",
+      "description": "First buffer arrives inside the 120 ms grace window: no Starting flash, then Recording, Processing, terminal Finishing, hide.",
+      "session_generation": 1,
+      "events": [
+        {
+          "at_ms": 0,
+          "event": "double_alt",
+          "generation": 1
+        },
+        {
+          "at_ms": 80,
+          "event": "first_buffer",
+          "generation": 1
+        },
+        {
+          "at_ms": 1400,
+          "event": "double_alt",
+          "generation": 1
+        },
+        {
+          "at_ms": 1700,
+          "event": "insert_done",
+          "generation": 1
+        },
+        {
+          "at_ms": 2500,
+          "event": "hide_deadline",
+          "generation": 1
+        }
+      ],
+      "checkpoints": [
+        {
+          "at_ms": 0,
+          "visible": false,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": null,
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 80,
+          "visible": true,
+          "phase": "recording",
+          "recording_started": true,
+          "status_key": "overlay.recording",
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 1400,
+          "visible": true,
+          "phase": "processing",
+          "recording_started": false,
+          "status_key": "overlay.recognizing",
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 1700,
+          "visible": true,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": "overlay.finishing",
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 2500,
+          "visible": false,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": null,
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        }
+      ]
+    },
+    {
+      "name": "slow_start_then_record_and_cancel",
+      "description": "Bring-up exceeds the grace window: Starting is visible without a timer, Recording starts only on the first buffer.",
+      "session_generation": 1,
+      "events": [
+        {
+          "at_ms": 0,
+          "event": "double_alt",
+          "generation": 1
+        },
+        {
+          "at_ms": 60,
+          "event": "grace_pending",
+          "generation": 1
+        },
+        {
+          "at_ms": 130,
+          "event": "starting_visible",
+          "generation": 1
+        },
+        {
+          "at_ms": 400,
+          "event": "first_buffer",
+          "generation": 1
+        },
+        {
+          "at_ms": 1200,
+          "event": "escape",
+          "generation": 1
+        },
+        {
+          "at_ms": 2000,
+          "event": "hide_deadline",
+          "generation": 1
+        }
+      ],
+      "checkpoints": [
+        {
+          "at_ms": 0,
+          "visible": false,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": null,
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 60,
+          "visible": false,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": null,
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 130,
+          "visible": true,
+          "phase": "starting",
+          "recording_started": false,
+          "status_key": "overlay.starting",
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 400,
+          "visible": true,
+          "phase": "recording",
+          "recording_started": true,
+          "status_key": "overlay.recording",
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 1200,
+          "visible": true,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": "overlay.cancelled",
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 2000,
+          "visible": false,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": null,
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        }
+      ]
+    },
+    {
+      "name": "quick_start_skips_starting_phase",
+      "description": "A fast first buffer transitions directly to Recording; the deferred Starting phase is never shown.",
+      "session_generation": 1,
+      "events": [
+        {
+          "at_ms": 0,
+          "event": "double_alt",
+          "generation": 1
+        },
+        {
+          "at_ms": 80,
+          "event": "first_buffer",
+          "generation": 1
+        },
+        {
+          "at_ms": 140,
+          "event": "starting_deadline",
+          "generation": 1
+        },
+        {
+          "at_ms": 600,
+          "event": "double_alt",
+          "generation": 1
+        },
+        {
+          "at_ms": 800,
+          "event": "insert_done",
+          "generation": 1
+        },
+        {
+          "at_ms": 1600,
+          "event": "hide_deadline",
+          "generation": 1
+        }
+      ],
+      "checkpoints": [
+        {
+          "at_ms": 0,
+          "visible": false,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": null,
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 80,
+          "visible": true,
+          "phase": "recording",
+          "recording_started": true,
+          "status_key": "overlay.recording",
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 140,
+          "visible": true,
+          "phase": "recording",
+          "recording_started": true,
+          "status_key": "overlay.recording",
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 600,
+          "visible": true,
+          "phase": "processing",
+          "recording_started": false,
+          "status_key": "overlay.recognizing",
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 800,
+          "visible": true,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": "overlay.finishing",
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 1600,
+          "visible": false,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": null,
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        }
+      ]
+    },
+    {
+      "name": "cancel_during_recording",
+      "description": "Escape while Recording is a terminal UI event: Cancelled is shown, then the panel hides after its bounded delay.",
+      "session_generation": 1,
+      "events": [
+        {
+          "at_ms": 0,
+          "event": "double_alt",
+          "generation": 1
+        },
+        {
+          "at_ms": 100,
+          "event": "first_buffer",
+          "generation": 1
+        },
+        {
+          "at_ms": 500,
+          "event": "escape",
+          "generation": 1
+        },
+        {
+          "at_ms": 1300,
+          "event": "hide_deadline",
+          "generation": 1
+        }
+      ],
+      "checkpoints": [
+        {
+          "at_ms": 0,
+          "visible": false,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": null,
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 100,
+          "visible": true,
+          "phase": "recording",
+          "recording_started": true,
+          "status_key": "overlay.recording",
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 500,
+          "visible": true,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": "overlay.cancelled",
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": "idle"
+        },
+        {
+          "at_ms": 1300,
+          "visible": false,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": null,
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        }
+      ]
+    },
+    {
+      "name": "cancel_during_processing_owner_settles_rust",
+      "description": "Escape while Processing hides the HUD immediately while the Rust session stays Transcribing until its owner reports the terminal result.",
+      "session_generation": 1,
+      "events": [
+        {
+          "at_ms": 0,
+          "event": "double_alt",
+          "generation": 1
+        },
+        {
+          "at_ms": 100,
+          "event": "first_buffer",
+          "generation": 1
+        },
+        {
+          "at_ms": 900,
+          "event": "double_alt",
+          "generation": 1
+        },
+        {
+          "at_ms": 1200,
+          "event": "escape",
+          "generation": 1
+        },
+        {
+          "at_ms": 2000,
+          "event": "hide_deadline",
+          "generation": 1
+        },
+        {
+          "at_ms": 2200,
+          "event": "owner_done",
+          "generation": 1
+        }
+      ],
+      "checkpoints": [
+        {
+          "at_ms": 0,
+          "visible": false,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": null,
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 100,
+          "visible": true,
+          "phase": "recording",
+          "recording_started": true,
+          "status_key": "overlay.recording",
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 900,
+          "visible": true,
+          "phase": "processing",
+          "recording_started": false,
+          "status_key": "overlay.recognizing",
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": "transcribing"
+        },
+        {
+          "at_ms": 1200,
+          "visible": true,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": "overlay.cancelled",
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": "transcribing"
+        },
+        {
+          "at_ms": 2000,
+          "visible": false,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": null,
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": "transcribing"
+        },
+        {
+          "at_ms": 2200,
+          "visible": false,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": null,
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": "idle"
+        }
+      ]
+    },
+    {
+      "name": "audio_error_after_slow_start",
+      "description": "Audio/capture bring-up fails after Starting became visible: bounded microphone error, then hide; no Recording timer ever starts.",
+      "session_generation": 1,
+      "events": [
+        {
+          "at_ms": 0,
+          "event": "double_alt",
+          "generation": 1
+        },
+        {
+          "at_ms": 130,
+          "event": "starting_visible",
+          "generation": 1
+        },
+        {
+          "at_ms": 300,
+          "event": "audio_error",
+          "generation": 1
+        },
+        {
+          "at_ms": 2300,
+          "event": "hide_deadline",
+          "generation": 1
+        }
+      ],
+      "checkpoints": [
+        {
+          "at_ms": 0,
+          "visible": false,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": null,
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 130,
+          "visible": true,
+          "phase": "starting",
+          "recording_started": false,
+          "status_key": "overlay.starting",
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 300,
+          "visible": true,
+          "phase": "starting",
+          "recording_started": false,
+          "status_key": "error.micEnableFailed",
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 2300,
+          "visible": false,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": null,
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        }
+      ]
+    },
+    {
+      "name": "stt_error_no_internet",
+      "description": "STT network failure maps to the short human message and a bounded error status, then hides.",
+      "session_generation": 1,
+      "events": [
+        {
+          "at_ms": 0,
+          "event": "double_alt",
+          "generation": 1
+        },
+        {
+          "at_ms": 100,
+          "event": "first_buffer",
+          "generation": 1
+        },
+        {
+          "at_ms": 800,
+          "event": "double_alt",
+          "generation": 1
+        },
+        {
+          "at_ms": 1100,
+          "event": "stt_error",
+          "generation": 1
+        },
+        {
+          "at_ms": 3100,
+          "event": "hide_deadline",
+          "generation": 1
+        }
+      ],
+      "checkpoints": [
+        {
+          "at_ms": 0,
+          "visible": false,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": null,
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 100,
+          "visible": true,
+          "phase": "recording",
+          "recording_started": true,
+          "status_key": "overlay.recording",
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 800,
+          "visible": true,
+          "phase": "processing",
+          "recording_started": false,
+          "status_key": "overlay.recognizing",
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 1100,
+          "visible": true,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": "overlay.error",
+          "status_argument_key": "error.noInternet",
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 3100,
+          "visible": false,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": null,
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        }
+      ]
+    },
+    {
+      "name": "stt_timeout",
+      "description": "The processing watchdog ends a hung STT request with the localized timeout status, then hides.",
+      "session_generation": 1,
+      "events": [
+        {
+          "at_ms": 0,
+          "event": "double_alt",
+          "generation": 1
+        },
+        {
+          "at_ms": 100,
+          "event": "first_buffer",
+          "generation": 1
+        },
+        {
+          "at_ms": 800,
+          "event": "double_alt",
+          "generation": 1
+        },
+        {
+          "at_ms": 2800,
+          "event": "stt_timeout",
+          "generation": 1
+        },
+        {
+          "at_ms": 4800,
+          "event": "hide_deadline",
+          "generation": 1
+        }
+      ],
+      "checkpoints": [
+        {
+          "at_ms": 0,
+          "visible": false,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": null,
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 100,
+          "visible": true,
+          "phase": "recording",
+          "recording_started": true,
+          "status_key": "overlay.recording",
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 800,
+          "visible": true,
+          "phase": "processing",
+          "recording_started": false,
+          "status_key": "overlay.recognizing",
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 2800,
+          "visible": true,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": "overlay.error",
+          "status_argument_key": "error.sttTimeout",
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 4800,
+          "visible": false,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": null,
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        }
+      ]
+    },
+    {
+      "name": "empty_result",
+      "description": "An empty STT result uses the dedicated transient Empty result status, not an error and not an insertion.",
+      "session_generation": 1,
+      "events": [
+        {
+          "at_ms": 0,
+          "event": "double_alt",
+          "generation": 1
+        },
+        {
+          "at_ms": 100,
+          "event": "first_buffer",
+          "generation": 1
+        },
+        {
+          "at_ms": 800,
+          "event": "double_alt",
+          "generation": 1
+        },
+        {
+          "at_ms": 1100,
+          "event": "empty_result",
+          "generation": 1
+        },
+        {
+          "at_ms": 1900,
+          "event": "hide_deadline",
+          "generation": 1
+        }
+      ],
+      "checkpoints": [
+        {
+          "at_ms": 0,
+          "visible": false,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": null,
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 100,
+          "visible": true,
+          "phase": "recording",
+          "recording_started": true,
+          "status_key": "overlay.recording",
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 800,
+          "visible": true,
+          "phase": "processing",
+          "recording_started": false,
+          "status_key": "overlay.recognizing",
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 1100,
+          "visible": true,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": "overlay.emptyResult",
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 1900,
+          "visible": false,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": null,
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        }
+      ]
+    },
+    {
+      "name": "stale_hide_after_rapid_restart",
+      "description": "A hide scheduled by generation 1 must be ignored after generation 2 starts; only the new cycle's own terminal hide may dismiss the panel.",
+      "session_generation": 2,
+      "events": [
+        {
+          "at_ms": 0,
+          "event": "double_alt",
+          "generation": 1
+        },
+        {
+          "at_ms": 100,
+          "event": "first_buffer",
+          "generation": 1
+        },
+        {
+          "at_ms": 800,
+          "event": "double_alt",
+          "generation": 1
+        },
+        {
+          "at_ms": 900,
+          "event": "escape",
+          "generation": 1
+        },
+        {
+          "at_ms": 1500,
+          "event": "double_alt",
+          "generation": 2
+        },
+        {
+          "at_ms": 1580,
+          "event": "first_buffer",
+          "generation": 2
+        },
+        {
+          "at_ms": 1700,
+          "event": "stale_hide_deadline",
+          "generation": 1
+        },
+        {
+          "at_ms": 2000,
+          "event": "checkpoint",
+          "generation": 2
+        },
+        {
+          "at_ms": 2500,
+          "event": "escape",
+          "generation": 2
+        },
+        {
+          "at_ms": 3300,
+          "event": "hide_deadline",
+          "generation": 2
+        }
+      ],
+      "checkpoints": [
+        {
+          "at_ms": 0,
+          "visible": false,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": null,
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": null
+        },
+        {
+          "at_ms": 900,
+          "visible": true,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": "overlay.cancelled",
+          "status_argument_key": null,
+          "generation": 1,
+          "rust_state": "transcribing"
+        },
+        {
+          "at_ms": 1580,
+          "visible": true,
+          "phase": "recording",
+          "recording_started": true,
+          "status_key": "overlay.recording",
+          "status_argument_key": null,
+          "generation": 2,
+          "rust_state": "recording"
+        },
+        {
+          "at_ms": 1700,
+          "visible": true,
+          "phase": "recording",
+          "recording_started": true,
+          "status_key": "overlay.recording",
+          "status_argument_key": null,
+          "generation": 2,
+          "rust_state": "recording"
+        },
+        {
+          "at_ms": 2000,
+          "visible": true,
+          "phase": "recording",
+          "recording_started": true,
+          "status_key": "overlay.recording",
+          "status_argument_key": null,
+          "generation": 2,
+          "rust_state": "recording"
+        },
+        {
+          "at_ms": 2500,
+          "visible": true,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": "overlay.cancelled",
+          "status_argument_key": null,
+          "generation": 2,
+          "rust_state": "idle"
+        },
+        {
+          "at_ms": 3300,
+          "visible": false,
+          "phase": "idle",
+          "recording_started": false,
+          "status_key": null,
+          "status_argument_key": null,
+          "generation": 2,
+          "rust_state": "idle"
+        }
+      ]
+    }
+  ]
+}
