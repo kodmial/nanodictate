@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.40] - 2026-10-20
+
+
+
+### Fixed
+
+* P0 Shared Rust: verify existing session/cancellation contract with cross-platform regression tests ([283d8e5](https://github.com/kodmial/nanodictate/commit/283d8e5e5dc8d05d21f06cbccd7a91c0e5dc9b19))
+
 ## [0.1.39] - 2026-10-13
 
 
@@ -604,7 +612,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.39...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.40...HEAD
+[0.1.40]: https://github.com/kodmial/nanodictate/compare/v0.1.39...v0.1.40
 [0.1.39]: https://github.com/kodmial/nanodictate/compare/v0.1.38...v0.1.39
 [0.1.38]: https://github.com/kodmial/nanodictate/compare/v0.1.37...v0.1.38
 [0.1.37]: https://github.com/kodmial/nanodictate/compare/v0.1.36...v0.1.37
