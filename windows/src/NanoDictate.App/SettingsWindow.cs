@@ -78,6 +78,7 @@ public sealed class SettingsWindow : Window
             try
             {
                 _app.SelectProvider(id);
+                SaveSettings();
                 _changed();
             }
             catch (Exception ex)
@@ -168,7 +169,23 @@ public sealed class SettingsWindow : Window
         {
             return;
         }
-        _app.Controller.ReviewBeforeInsert = enabled;
-        _changed();
+        try
+        {
+            _app.Controller.ReviewBeforeInsert = enabled;
+            SaveSettings();
+            _changed();
+        }
+        catch (Exception ex)
+        {
+            _diagnostics.Text = ex.Message;
+        }
+    }
+
+    private void SaveSettings()
+    {
+        PortableConfig.SaveSettings(
+            _configPath,
+            _app.ActiveProviderId,
+            _app.Controller.ReviewBeforeInsert);
     }
 }

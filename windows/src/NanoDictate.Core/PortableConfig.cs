@@ -224,6 +224,114 @@ public sealed class PortableConfig
         };
     }
 
+    /// <summary>
+    /// Persists the two user-editable selection settings without reserializing
+    /// the file, so provider sections, comments, and unrelated values stay
+    /// intact. The file is replaced atomically after both keys are updated.
+    /// </summary>
+    public static void SaveSettings(string path, string activeProvider, bool reviewBeforeInsert)
+    {
+        var content = File.Exists(path) ? File.ReadAllText(path) : string.Empty;
+        content = UpdateRootKey(content, "active_provider", Quote(activeProvider));
+        content = UpdateRootKey(content, "review_before_insert", reviewBeforeInsert ? "true" : "false");
+        var directory = Path.GetDirectoryName(path);
+        if (!string.IsNullOrEmpty(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+        var temporary = path + ".tmp";
+        File.WriteAllText(temporary, content);
+        File.Move(temporary, path, overwrite: true);
+    }
+
+    private static string Quote(string value) =>
+        "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+
+    private static string UpdateRootKey(string content, string key, string value)
+    {
+        var newline = content.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+        var lines = content.Replace("\r\n", "\n").Split('\n').ToList();
+        var firstSection = -1;
+        var replaced = false;
+        for (var i = 0; i < lines.Count; i++)
+        {
+            var line = lines[i];
+            var leading = 0;
+            while (leading < line.Length && (line[leading] == ' ' || line[leading] == '\t'))
+            {
+                leading++;
+            }
+            var stripped = line.Substring(leading);
+            var header = stripped;
+            var comment = header.IndexOf('#');
+            if (comment >= 0)
+            {
+                header = header.Substring(0, comment);
+            }
+            header = header.Trim();
+            if (header.StartsWith('[') && header.EndsWith(']'))
+            {
+                firstSection = i;
+                break;
+            }
+            var equals = stripped.IndexOf('=');
+            if (equals < 0 || stripped.Substring(0, equals).Trim() != key)
+            {
+                continue;
+            }
+            var equalsInLine = leading + equals;
+            var valueStart = equalsInLine + 1;
+            while (valueStart < line.Length && (line[valueStart] == ' ' || line[valueStart] == '\t'))
+            {
+                valueStart++;
+            }
+            if (valueStart < line.Length && line[valueStart] == '"')
+            {
+                var close = FindClosingQuote(line, valueStart + 1);
+                if (close >= 0)
+                {
+                    lines[i] = line.Substring(0, valueStart) + value + line.Substring(close + 1);
+                    replaced = true;
+                    break;
+                }
+            }
+            lines[i] = line.Substring(0, valueStart).TrimEnd() + " " + value;
+            replaced = true;
+            break;
+        }
+
+        if (!replaced && firstSection >= 0)
+        {
+            lines.Insert(firstSection, $"{key} = {value}");
+        }
+        var result = string.Join(newline, lines);
+        if (!replaced && firstSection < 0)
+        {
+            if (!string.IsNullOrEmpty(result) && !result.EndsWith(newline, StringComparison.Ordinal))
+            {
+                result += newline;
+            }
+            result += $"{key} = {value}{newline}";
+        }
+        return result;
+    }
+
+    private static int FindClosingQuote(string line, int start)
+    {
+        for (var i = start; i < line.Length; i++)
+        {
+            if (line[i] == '\\')
+            {
+                i++;
+            }
+            else if (line[i] == '"')
+            {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     private static string StripInlineComment(string value)
     {
         var inDouble = false;
