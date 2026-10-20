@@ -159,8 +159,25 @@ public sealed class HostApp : IDisposable
     public static TimeSpan InitialProcessingWatchdog(PortableConfig config)
     {
         var perRequest = TimeSpan.FromSeconds(config.TimeoutSeconds);
-        var requests = config.Chunked ? 2 : 1;
-        return TimeSpan.FromTicks(perRequest.Ticks * requests) + TimeSpan.FromSeconds(5);
+        if (config.Chunked)
+        {
+            // The chunk plan publishes its full budget before the first STT request.
+            return TimeSpan.FromTicks(perRequest.Ticks * 2) + TimeSpan.FromSeconds(5);
+        }
+
+        // A non-chunked recording has no later budget update. Cover every
+        // permitted provider attempt and its retry backoff, including a
+        // retryable failure on the last attempt, before watchdog cancellation.
+        var attempts = Math.Max(1,
+            NanoEngine.FailoverCandidateCount(Math.Max(1, config.Providers.Count), config.AutoFailover));
+        var backoffTicks = 0L;
+        for (var attempt = 0; attempt < attempts; attempt++)
+        {
+            backoffTicks = checked(backoffTicks +
+                TimeSpan.FromMilliseconds(NanoEngine.BackoffDelayMs((uint)attempt, 500, 8000)).Ticks);
+        }
+        return TimeSpan.FromTicks(checked(perRequest.Ticks * attempts + backoffTicks))
+            + TimeSpan.FromSeconds(5);
     }
 
     /// <summary>
