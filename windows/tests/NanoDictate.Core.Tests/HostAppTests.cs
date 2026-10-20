@@ -287,10 +287,16 @@ public sealed class HostAppTests
             NanoEngine.BackoffDelayMs(1, 500, 8000));
         Assert.Equal(TimeSpan.FromSeconds(65) + backoff,
             HostApp.InitialProcessingWatchdog(config));
-        config.AutoFailover = false;
+        var noFailover = new PortableConfig
+        {
+            Chunked = false,
+            TimeoutSeconds = 30,
+            AutoFailover = false,
+            Providers = config.Providers,
+        };
         Assert.Equal(TimeSpan.FromSeconds(35) +
             TimeSpan.FromMilliseconds(NanoEngine.BackoffDelayMs(0, 500, 8000)),
-            HostApp.InitialProcessingWatchdog(config));
+            HostApp.InitialProcessingWatchdog(noFailover));
     }
 
     [Fact]
