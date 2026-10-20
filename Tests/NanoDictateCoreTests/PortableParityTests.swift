@@ -124,7 +124,6 @@ final class PortableParityTests: XCTestCase {
     let config = try AppConfig.load(from: configURL.path)
     XCTAssertEqual(config.activeProvider, string(expected, "active_provider"), name)
     XCTAssertEqual(config.language, string(expected, "language"), name)
-    XCTAssertEqual(config.prompt, string(expected, "prompt"), name)
     XCTAssertEqual(config.routing.segmentProvider, string(expected, "segment_provider"), name)
     XCTAssertEqual(config.routing.finalProvider, string(expected, "final_provider"), name)
     if let expectedOrder = expected["failover_order"] as? [String] {
@@ -180,13 +179,13 @@ final class PortableParityTests: XCTestCase {
         needsWordTimestamps: testCase["needs_word_timestamps"] as? Bool ?? false
       )
 
-      XCTAssertEqual(spec.url?.absoluteString, string(expected, "url"), name)
+      XCTAssertEqual(spec.url?.absoluteString, Self.string(expected, "url"), name)
       let headers = spec.headers.filter { !(apiKey.isEmpty && $0.0 == "Authorization") }
       let authorization = headers.first(where: { $0.0 == "Authorization" })?.1
       XCTAssertEqual(authorization, expected["authorization"] as? String, name)
 
       let body = String(decoding: spec.bodyData, as: UTF8.self)
-      for (field, value) in stringDictionary(expected, "fields") {
+      for (field, value) in Self.stringDictionary(expected, "fields") {
         XCTAssertTrue(
           body.contains("name=\"\(field)\"\r\n\r\n\(value)\r\n"),
           "\(name): missing field \(field)")
@@ -198,7 +197,7 @@ final class PortableParityTests: XCTestCase {
       XCTAssertTrue(
         body.contains(
           "name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: "
-            + string(expected, "file_content_type") + "\r\n\r\n"),
+            + Self.string(expected, "file_content_type") + "\r\n\r\n"),
         "\(name): file part content type")
     }
   }

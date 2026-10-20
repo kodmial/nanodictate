@@ -22,7 +22,7 @@ Tests use fake transports/request plans only; they never contact a provider.
 | --- | --- | --- | --- |
 | `active_provider` | Read; unknown id throws during load | Read; unknown id throws when the catalog selects it | Shared fixture for valid ids; permissive loader noted below |
 | `language` | Read; empty omits the language hint | Read; same request gating | Shared fixture |
-| `prompt` | Read; gated by profile support | Read; gated by profile support | Shared fixture |
+| `prompt` (request field) | Per-request context; gated by profile support | Per-request context; gated by profile support | Shared request fixture |
 | `[providers.X] name` | Read | Read | Shared fixture |
 | `[providers.X] base_url` | Read; empty uses Rust adapter default | Read; empty uses Rust adapter default | Shared fixture |
 | `[providers.X] model` | Read; empty uses Rust adapter default | Read; empty uses Rust adapter default | Shared fixture + request fixture |
@@ -91,6 +91,10 @@ Windows:
   raw WAV; the Windows request builder supports the shared multipart subset
   only. Keep a configured Cloudflare provider for macOS or use an
   OpenAI-compatible multipart provider on Windows.
+- **Top-level `prompt` configuration**: Windows reads it as a default request
+  context; macOS has no such config key and uses only per-request context
+  (vocabulary/chaining). The request-field contract itself is shared and
+  covered by the request fixture.
 - **macOS UI/lifecycle keys** (`ui_language`, `sounds_enabled`, `log_level`,
   `undo_sound_enabled`) are not Windows host policy.
 - **Strict TOML errors**: macOS rejects malformed lines and duplicate provider

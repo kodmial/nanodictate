@@ -39,7 +39,6 @@ public sealed class PortableParityTests
     {
         public string ActiveProvider { get; set; } = string.Empty;
         public string Language { get; set; } = string.Empty;
-        public string Prompt { get; set; } = string.Empty;
         public string SegmentProvider { get; set; } = string.Empty;
         public string FinalProvider { get; set; } = string.Empty;
         public List<ExpectedProvider> Providers { get; set; } = new();
@@ -227,7 +226,6 @@ public sealed class PortableParityTests
             var expected = testCase.Expected;
             Assert.Equal(expected.ActiveProvider, config.ActiveProvider);
             Assert.Equal(expected.Language, config.Language);
-            Assert.Equal(expected.Prompt, config.Prompt);
             Assert.Equal(expected.SegmentProvider, config.SegmentProvider);
             Assert.Equal(expected.FinalProvider, config.FinalProvider);
             if (expected.FailoverOrder is not null)

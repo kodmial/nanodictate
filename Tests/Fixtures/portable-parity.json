@@ -17,7 +17,6 @@
       "expected": {
         "active_provider": "airubiz",
         "language": "ru",
-        "prompt": "",
         "segment_provider": "",
         "final_provider": "",
         "providers": [
@@ -42,7 +41,6 @@
       "config": [
         "active_provider = \"openai\"",
         "language = \"en\"",
-        "prompt = \"Kubernetes\"",
         "providers = [\"local\", \"groq\", \"openai\", \"missing\"]",
         "[routing]",
         "segment_provider = \"groq\"",
@@ -68,7 +66,6 @@
       "expected": {
         "active_provider": "openai",
         "language": "en",
-        "prompt": "Kubernetes",
         "segment_provider": "groq",
         "final_provider": "local",
         "providers": [
@@ -123,7 +120,6 @@
       "expected": {
         "active_provider": "openai",
         "language": "",
-        "prompt": "",
         "segment_provider": "",
         "final_provider": "",
         "providers": [
@@ -174,7 +170,6 @@
       "expected": {
         "active_provider": "",
         "language": "de",
-        "prompt": "",
         "segment_provider": "",
         "final_provider": "",
         "providers": [
@@ -219,7 +214,6 @@
       "expected": {
         "active_provider": "custom",
         "language": "ru",
-        "prompt": "",
         "segment_provider": "",
         "final_provider": "",
         "providers": [
