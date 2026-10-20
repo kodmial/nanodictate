@@ -21,6 +21,8 @@ public sealed class HudCoordinator : IDisposable
     private Timer? _watchdog;
     private readonly TimeSpan _processingWatchdog;
     private HudSnapshot? _lastSnapshot;
+    private ulong _snapshotSeq;
+    private ulong _raisedSeq;
     private ulong _currentGeneration;
     private ulong _fallbackGeneration;
     private ulong _activeRecordingId;
@@ -67,24 +69,32 @@ public sealed class HudCoordinator : IDisposable
         get { lock (_gate) { return _presentation.Snapshot(); } }
     }
 
-    public event Action<HudSnapshot>? SnapshotChanged;
+    /// <summary>
+    /// Signals that presentation state changed. Handlers must read
+    /// <see cref="Snapshot"/> on their own thread instead of using an event
+    /// argument so a queued signal can never apply an older snapshot.
+    /// </summary>
+    public event Action? SnapshotChanged;
 
     /// <summary>Refreshes the provider/model header after an optional settings change.</summary>
     public void RefreshLabel()
     {
         HudSnapshot? snapshot = null;
+        ulong seq = 0;
         lock (_gate)
         {
             _presentation.UpdateLabel(_app.SessionLabel);
             snapshot = _presentation.Snapshot();
+            seq = ++_snapshotSeq;
         }
-        Raise(snapshot);
+        Raise(snapshot, seq);
     }
 
     /// <summary>Advance presentation timers once (also used deterministically by tests).</summary>
     public void Tick()
     {
         HudSnapshot? snapshot = null;
+        ulong seq = 0;
         lock (_gate)
         {
             if (_disposed)
@@ -93,13 +103,15 @@ public sealed class HudCoordinator : IDisposable
             }
             _presentation.Advance(_clock());
             snapshot = _presentation.Snapshot();
+            seq = ++_snapshotSeq;
         }
-        Raise(snapshot);
+        Raise(snapshot, seq);
     }
 
     private void OnMicStartAttempted(MicStartOutcome outcome)
     {
         HudSnapshot? snapshot = null;
+        ulong seq = 0;
         lock (_gate)
         {
             if (outcome.Started)
@@ -121,14 +133,16 @@ public sealed class HudCoordinator : IDisposable
                 _presentation.MicrophoneError(_currentGeneration, _clock());
             }
             snapshot = _presentation.Snapshot();
+            seq = ++_snapshotSeq;
         }
-        Raise(snapshot);
+        Raise(snapshot, seq);
     }
 
     private void OnCaptureReady(CaptureMetrics metrics)
     {
         _ = metrics;
         HudSnapshot? snapshot = null;
+        ulong seq = 0;
         lock (_gate)
         {
             // A first buffer can arrive before MicStartAttempted.Started and
@@ -145,13 +159,15 @@ public sealed class HudCoordinator : IDisposable
             }
             _presentation.CaptureReady(_currentGeneration, _clock());
             snapshot = _presentation.Snapshot();
+            seq = ++_snapshotSeq;
         }
-        Raise(snapshot);
+        Raise(snapshot, seq);
     }
 
     private void OnProcessingStarted(ulong recordingId)
     {
         HudSnapshot? snapshot = null;
+        ulong seq = 0;
         lock (_gate)
         {
             if (_terminal)
@@ -165,14 +181,16 @@ public sealed class HudCoordinator : IDisposable
             _activeRecordingId = recordingId;
             StartWatchdogLocked(recordingId);
             snapshot = _presentation.Snapshot();
+            seq = ++_snapshotSeq;
         }
-        Raise(snapshot);
+        Raise(snapshot, seq);
     }
 
     private void OnCancelled(ulong recordingId)
     {
         var currentRecordingId = _app.Controller.CurrentRecordingId;
         HudSnapshot? snapshot = null;
+        ulong seq = 0;
         lock (_gate)
         {
             if ((_watchdogCancellingRecordingId != 0
@@ -189,8 +207,9 @@ public sealed class HudCoordinator : IDisposable
             _terminal = true;
             _presentation.Cancelled(_currentGeneration, _clock());
             snapshot = _presentation.Snapshot();
+            seq = ++_snapshotSeq;
         }
-        Raise(snapshot);
+        Raise(snapshot, seq);
     }
 
     private void OnProcessingBudgetAvailable(ulong recordingId, TimeSpan budget)
@@ -236,6 +255,7 @@ public sealed class HudCoordinator : IDisposable
     {
         _ = error;
         HudSnapshot? snapshot = null;
+        ulong seq = 0;
         lock (_gate)
         {
             if (_currentGeneration == 0 || _terminal)
@@ -246,13 +266,15 @@ public sealed class HudCoordinator : IDisposable
             _terminal = true;
             _presentation.MicrophoneError(_currentGeneration, _clock());
             snapshot = _presentation.Snapshot();
+            seq = ++_snapshotSeq;
         }
-        Raise(snapshot);
+        Raise(snapshot, seq);
     }
 
     private void OnDeliveryCompleted(DictationDelivery delivery)
     {
         HudSnapshot? snapshot = null;
+        ulong seq = 0;
         lock (_gate)
         {
             if (_terminal || !IsCurrentDeliveryLocked(delivery.RecordingId))
@@ -276,13 +298,15 @@ public sealed class HudCoordinator : IDisposable
                 _presentation.Cancelled(_currentGeneration, _clock());
             }
             snapshot = _presentation.Snapshot();
+            seq = ++_snapshotSeq;
         }
-        Raise(snapshot);
+        Raise(snapshot, seq);
     }
 
     private void OnDeliveryFailed(DictationFailure failure)
     {
         HudSnapshot? snapshot = null;
+        ulong seq = 0;
         lock (_gate)
         {
             if (_terminal || !IsCurrentDeliveryLocked(failure.RecordingId))
@@ -303,8 +327,9 @@ public sealed class HudCoordinator : IDisposable
                 _presentation.MicrophoneError(_currentGeneration, _clock(), key);
             }
             snapshot = _presentation.Snapshot();
+            seq = ++_snapshotSeq;
         }
-        Raise(snapshot);
+        Raise(snapshot, seq);
     }
 
     private bool IsCurrentDeliveryLocked(ulong recordingId)
@@ -371,6 +396,7 @@ public sealed class HudCoordinator : IDisposable
         }
 
         HudSnapshot? snapshot = null;
+        ulong seq = 0;
         lock (_gate)
         {
             if (_watchdogCancellingRecordingId == recordingId)
@@ -387,8 +413,9 @@ public sealed class HudCoordinator : IDisposable
             _timedOutRecordingId = recordingId;
             _presentation.ProcessingTimedOut(_currentGeneration, _clock());
             snapshot = _presentation.Snapshot();
+            seq = ++_snapshotSeq;
         }
-        Raise(snapshot);
+        Raise(snapshot, seq);
     }
 
     private bool SyncGenerationLocked()
@@ -411,7 +438,7 @@ public sealed class HudCoordinator : IDisposable
         return true;
     }
 
-    private void Raise(HudSnapshot? snapshot)
+    private void Raise(HudSnapshot? snapshot, ulong seq)
     {
         if (snapshot is null)
         {
@@ -419,13 +446,23 @@ public sealed class HudCoordinator : IDisposable
         }
         lock (_gate)
         {
+            // The sequence is assigned while the snapshot is taken under
+            // _gate, so a handler that lost the scheduling race cannot
+            // publish an older state over a newer one. Advance the raised
+            // sequence even for an unchanged snapshot so an older pending
+            // raise cannot resurrect its state later.
+            if (seq <= _raisedSeq)
+            {
+                return;
+            }
+            _raisedSeq = seq;
             if (_lastSnapshot == snapshot)
             {
                 return;
             }
             _lastSnapshot = snapshot;
         }
-        SnapshotChanged?.Invoke(snapshot);
+        SnapshotChanged?.Invoke();
     }
 
     public void Dispose()

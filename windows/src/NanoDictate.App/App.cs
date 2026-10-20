@@ -142,20 +142,23 @@ public sealed partial class App : Application
         }
     }
 
-    private void OnSnapshotChanged(HudSnapshot snapshot)
+    private void OnSnapshotChanged()
     {
         var hud = _hud;
-        if (hud is null)
+        var coordinator = _coordinator;
+        if (hud is null || coordinator is null)
         {
             return;
         }
         if (hud.DispatcherQueue.HasThreadAccess)
         {
-            hud.Apply(snapshot);
+            hud.Apply(coordinator.Snapshot);
         }
         else
         {
-            hud.DispatcherQueue.TryEnqueue(() => hud.Apply(snapshot));
+            // Read the current snapshot on the UI thread: an earlier queued
+            // signal must never paint state that has already been superseded.
+            hud.DispatcherQueue.TryEnqueue(() => hud.Apply(coordinator.Snapshot));
         }
     }
 

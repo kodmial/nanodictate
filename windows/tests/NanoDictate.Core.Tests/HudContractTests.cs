@@ -1,3 +1,4 @@
+using System.Reflection;
 using NanoDictate.Core;
 using Xunit;
 
@@ -322,6 +323,38 @@ public sealed class HudContractTests
     }
 
     [Fact]
+    public void StaleSnapshotSequenceCannotReplaceNewerState()
+    {
+        var config = new PortableConfig
+        {
+            ActiveProvider = "a",
+            Providers = new[] { new ProviderEntry("a", "A", string.Empty, string.Empty) },
+        };
+        using var app = new HostApp(config, new ImmediateReadySource(), new NoopInsertions());
+        using var coordinator = new HudCoordinator(app, useTimer: false);
+        var signals = 0;
+        coordinator.SnapshotChanged += () => Interlocked.Increment(ref signals);
+
+        app.Controller.AltDoubleTapped();
+        var older = coordinator.Snapshot;
+        var olderSequence = (ulong)typeof(HudCoordinator)
+            .GetField("_snapshotSeq", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(coordinator)!;
+
+        app.Controller.CancelKeyPressed();
+        var newer = coordinator.Snapshot;
+        var signalsAfterNewer = Volatile.Read(ref signals);
+        Assert.NotEqual(older, newer);
+
+        typeof(HudCoordinator)
+            .GetMethod("Raise", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(coordinator, new object?[] { older, olderSequence });
+
+        Assert.Equal(signalsAfterNewer, Volatile.Read(ref signals));
+        Assert.Equal(newer, coordinator.Snapshot);
+    }
+
+    [Fact]
     public async Task ProcessingWatchdogCancelsTheTimedOutRecording()
     {
         var config = new PortableConfig
@@ -342,8 +375,9 @@ public sealed class HudContractTests
             useTimer: false);
         var timeout = new TaskCompletionSource<HudSnapshot>(TaskCreationOptions.RunContinuationsAsynchronously);
         var sawCancelled = 0;
-        coordinator.SnapshotChanged += snapshot =>
+        coordinator.SnapshotChanged += () =>
         {
+            var snapshot = coordinator.Snapshot;
             if (snapshot.StatusKey == HudStatusKeys.Cancelled)
             {
                 Interlocked.Exchange(ref sawCancelled, 1);
