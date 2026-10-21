@@ -32,6 +32,7 @@ $configFile = Join-Path $env:APPDATA 'NanoDictate\config.toml'
 $configSentinel = 'keep-config-' + [guid]::NewGuid().ToString('N')
 $configBackup = Join-Path $work 'config.toml.backup'
 $hadPriorConfig = $false
+$script:downloadSeconds = 0.0
 $report = [ordered]@{
   repository = $Repository
   version = $null
@@ -39,13 +40,21 @@ $report = [ordered]@{
   portable_checksums = $false
   portable_layout = $false
   installer_checksum = $false
+  installer_bytes = $null
+  portable_zip_bytes = $null
+  download_seconds = $null
+  setup_seconds = @()
+  uninstall_seconds = @()
   authenticode = 'unchecked'
   install = $false
   upgrade_or_reinstall = $false
   uninstall = $false
   user_data_preserved = $false
+  first_launch = 'NOT_TESTED_HEADLESS'
   interactive_hardware = 'NOT_TESTED'
 }
+$script:setupDurations = @()
+$script:uninstallDurations = @()
 New-Item -ItemType Directory -Path $work, (Split-Path $reportFile) -Force | Out-Null
 
 function Invoke-GhJson([string]$route) {
@@ -67,8 +76,11 @@ function Get-VerifiedAssets([object]$release, [string]$folder, [string[]]$names)
   foreach ($name in @('SHA256SUMS.txt') + $names) { Assert-Asset $release $name }
   $ghArgs = @('release','download',$release.tag_name,'--repo',$Repository,'--dir',$folder,'--clobber')
   foreach ($name in @('SHA256SUMS.txt') + $names) { $ghArgs += @('--pattern',$name) }
+  $downloadTimer = [Diagnostics.Stopwatch]::StartNew()
   & gh @ghArgs
+  $downloadTimer.Stop()
   if ($LASTEXITCODE -ne 0) { throw "Failed to download $($release.tag_name) from GitHub Releases" }
+  $script:downloadSeconds = ($script:downloadSeconds + $downloadTimer.Elapsed.TotalSeconds)
   $sumFile = Join-Path $folder 'SHA256SUMS.txt'
   $expected = @{}
   foreach ($line in Get-Content -LiteralPath $sumFile) {
@@ -88,7 +100,10 @@ function Get-VerifiedAssets([object]$release, [string]$folder, [string[]]$names)
 }
 function Invoke-Setup([string]$path) {
   $arguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$installDir`"")
+  $timer = [Diagnostics.Stopwatch]::StartNew()
   $proc = Start-Process -FilePath $path -ArgumentList $arguments -Wait -PassThru
+  $timer.Stop()
+  $script:setupDurations += [Math]::Round($timer.Elapsed.TotalSeconds, 2)
   if ($proc.ExitCode -ne 0) { throw "Installer $path exited $($proc.ExitCode)" }
 }
 function Get-RunValue {
@@ -115,7 +130,10 @@ function Assert-Installed([bool]$RequireStartup = $true) {
 function Uninstall {
   $uninstaller = Join-Path $installDir 'unins000.exe'
   if (-not (Test-Path -LiteralPath $uninstaller)) { throw "Inno uninstaller missing" }
+  $timer = [Diagnostics.Stopwatch]::StartNew()
   $proc = Start-Process -FilePath $uninstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART') -Wait -PassThru
+  $timer.Stop()
+  $script:uninstallDurations += [Math]::Round($timer.Elapsed.TotalSeconds, 2)
   if ($proc.ExitCode -ne 0) { throw "Uninstaller exited $($proc.ExitCode)" }
   if (Test-Path -LiteralPath (Join-Path $installDir 'NanoDictate.App.exe')) { throw 'Uninstall left the application executable' }
   $run = Get-RunValue
@@ -137,6 +155,8 @@ try {
   $sums = Get-VerifiedAssets $release $latestDir @($zipName,$setupName)
   $report.portable_checksums = $true
   $report.installer_checksum = $true
+  $report.installer_bytes = (Get-Item -LiteralPath (Join-Path $latestDir $setupName)).Length
+  $report.portable_zip_bytes = (Get-Item -LiteralPath (Join-Path $latestDir $zipName)).Length
 
   $zipDir = Join-Path $work 'portable'
   Expand-Archive -LiteralPath (Join-Path $latestDir $zipName) -DestinationPath $zipDir -Force
@@ -231,8 +251,17 @@ try {
       Write-Warning "Scoop manifest version $($bucket.version) differs from tested $versionText (manifest sync may be pending)"
     }
   }
+  $report.download_seconds = if ($null -eq $script:downloadSeconds) { $null } else { [Math]::Round($script:downloadSeconds, 2) }
+  $report.setup_seconds = @($script:setupDurations)
+  $report.uninstall_seconds = @($script:uninstallDurations)
+  Write-Host ("MEASURED: published installer={0:N1} MB download={1:N1}s setup={2}s uninstall={3}s" -f (
+    $report.installer_bytes / 1MB), $report.download_seconds,
+    ($report.setup_seconds -join ','), ($report.uninstall_seconds -join ','))
   Write-Host "::notice::Published Windows $($release.tag_name) passed checksum, portable, install, upgrade/reinstall, uninstall and data-retention smoke."
 } finally {
+  $report.download_seconds = if ($null -eq $script:downloadSeconds) { $null } else { [Math]::Round($script:downloadSeconds, 2) }
+  $report.setup_seconds = @($script:setupDurations)
+  $report.uninstall_seconds = @($script:uninstallDurations)
   $report | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $reportFile -Encoding utf8
   try {
     if ((Test-Path -LiteralPath (Join-Path $installDir 'unins000.exe'))) {

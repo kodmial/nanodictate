@@ -4,9 +4,9 @@ Lightweight voice dictation for macOS and Windows 10/11 (Windows releases are be
 
 - **~25 MB RAM** in normal background use
 - **Works out of the box** with a preconfigured STT provider and model — no API key required
-- Types directly into the currently focused macOS app
+- Types directly into the currently focused macOS or Windows app
 - **Double-Alt** to start/stop, **Esc** to cancel, quick double-Alt to undo the last insertion
-- Stable-signed release builds so Microphone and Accessibility permissions normally persist across upgrades
+- Stable-signed macOS release builds so Microphone and Accessibility permissions normally persist across upgrades; Windows signing status is documented separately
 - OpenAI, Groq, Cloudflare Workers AI, and custom OpenAI-compatible transcription endpoints
 - Apple Silicon and Intel
 - macOS **12 Monterey or later**
@@ -48,13 +48,15 @@ No configuration is required for the default setup.
 
 ## Windows 10/11 (x64)
 
-Windows is distributed directly from our [GitHub Releases](https://github.com/kodmial/nanodictate/releases), without an external catalogue. **One command installs or updates** the verified Windows EXE, enables per-user startup, and launches NanoDictate:
+Windows is distributed directly from our [GitHub Releases](https://github.com/kodmial/nanodictate/releases), without an external catalogue. **Preferred:** download `nanodictate-X.Y.Z-windows-x64-setup.exe` and run it. The per-user installer needs no administrator rights, Rust, Visual Studio, .NET SDK, Scoop, or manual provider setup.
+
+Alternatively, **one command installs or updates** the newest complete stable release, verifies its published SHA-256, enables per-user startup, and starts it:
 
 ```powershell
 irm https://raw.githubusercontent.com/kodmial/nanodictate/main/scripts/install-windows.ps1 | iex
 ```
 
-No administrator rights, Rust, Visual Studio, .NET SDK, Scoop, or manual configuration is required. The command downloads a versioned installer and checks its SHA-256 against the published release checksum before executing it. Alternatively, use our first-party Scoop bucket:
+There is also a first-party Scoop bucket for users who already have Scoop:
 
 ```powershell
 scoop bucket add nanodictate https://github.com/kodmial/nanodictate
@@ -63,7 +65,7 @@ scoop install nanodictate
 scoop update nanodictate
 ```
 
-Scoop itself must already be installed. The ZIP and EXE contain a self-contained WinUI app using the same Rust engine; end users do **not** install .NET SDK or Rust. The combined v0.1.33 release includes Windows and macOS artifacts. Startup runs NanoDictate in the background whenever you sign in to Windows, and future updates keep the same per-user configuration and startup path. See [Windows distribution and validation](windows/DISTRIBUTION.md).
+The ZIP and EXE contain a self-contained WinUI app using the same Rust engine; end users do **not** install .NET SDK or Rust. Every channel installs one `NanoDictate.App.exe`, starts it quietly in the background (no settings window or console), and creates `%APPDATA%\NanoDictate\config.toml` from the bundled keyless Airubiz default on first use. Double-Alt then shows only the temporary microphone HUD. Settings remains optional from the Start Menu. Future updates keep the same per-user configuration and startup path. See [Windows distribution and validation](windows/DISTRIBUTION.md) for upgrade, uninstall, signing limits and current hardware-test status.
 
 ## Features
 
@@ -77,7 +79,7 @@ Scoop itself must already be installed. The ZIP and EXE contain a self-contained
 - Cloudflare Workers AI transcription
 - Custom OpenAI-compatible endpoints
 - Runtime provider switching
-- Interactive terminal UI
+- Interactive terminal UI (macOS agent CLI)
 - One-shot audio-file transcription
 - Optional provider failover
 - Optional chunked transcription and provider routing
@@ -102,7 +104,7 @@ adapter default when `model` is empty). Explicit `model = "whisper-1"`
 remains a legacy compatibility path; see `docs/stt-capabilities.md` for the
 model profiles and migration notes.
 
-List providers:
+List providers (macOS agent CLI; the Windows release installs only the background WinUI app, while the source-built `NanoDictate.Host` offers `doctor`, `providers` and `transcribe-file` diagnostics):
 
 ```bash
 nanodictate provider list
@@ -155,10 +157,12 @@ nanodictate --version
 The user configuration is stored at:
 
 ```text
-~/.config/nanodictate/config.toml
+macOS:   ~/.config/nanodictate/config.toml
+Windows: %APPDATA%\NanoDictate\config.toml
 ```
 
-It is created automatically from the bundled defaults on first launch. Recreate it explicitly with:
+It is created automatically from the bundled defaults on first launch and a
+pre-existing file is never replaced. On macOS, recreate it explicitly with:
 
 ```bash
 nanodictate config init

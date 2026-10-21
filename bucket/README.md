@@ -1,8 +1,9 @@
 # NanoDictate first-party Scoop bucket
 
 This directory is the Windows equivalent of the project's first-party Homebrew tap.
-For the simplest installation without Scoop, use the [one-command, verified
-Windows installer](../scripts/install-windows.ps1):
+For the simplest installation without Scoop, download the published setup EXE.
+The [one-command, verified Windows installer](../scripts/install-windows.ps1)
+is an alternative:
 
 ```powershell
 irm https://raw.githubusercontent.com/kodmial/nanodictate/main/scripts/install-windows.ps1 | iex
@@ -10,8 +11,10 @@ irm https://raw.githubusercontent.com/kodmial/nanodictate/main/scripts/install-w
 
 Both installation channels register user-logon startup automatically. Scoop
 uses its stable `apps/nanodictate/current` junction across versions; uninstall
-cleans up its own Run entry. After an update, NanoDictate automatically
-restarts in background mode, without asking for configuration again.
+cleans up its own Run entry. A fresh install and every update start exactly one
+background agent without forcing a settings window; the optional settings UI
+stays available from the Start Menu. Configuration is created once from the
+bundled keyless default and is never replaced by an update.
 
 It is maintained automatically after each successful **combined macOS and Windows**
 GitHub Release. It is **not submitted** to any public Scoop, WinGet, Microsoft Store

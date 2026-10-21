@@ -24,6 +24,17 @@ $unpacked = Join-Path $work 'zip'
 $reg = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $marker = Join-Path $env:APPDATA ("NanoDictate\candidate-smoke-" + [guid]::NewGuid().ToString('N') + '.txt')
 $cleanupNeeded = $false
+$reportPath = Join-Path $OutDir 'windows-candidate-measurements.json'
+$measurements = [ordered]@{
+  version = $Version
+  installer_bytes = (Get-Item -LiteralPath $setup).Length
+  portable_zip_bytes = (Get-Item -LiteralPath $zip).Length
+  install_seconds = $null
+  reinstall_seconds = $null
+  uninstall_seconds = $null
+  first_launch = 'NOT_TESTED_HEADLESS'
+  interactive_hardware = 'NOT_TESTED'
+}
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 
 function Get-Startup {
@@ -53,12 +64,22 @@ try {
       throw "Candidate ZIP missing $name"
     }
   }
+  $example = Get-Content -LiteralPath (Join-Path $unpacked 'config.example.toml') -Raw
+  if ($example -notmatch '(?m)^active_provider = "airubiz"$') {
+    throw 'Bundled config.example.toml does not select the keyless Airubiz default'
+  }
+  if ($example -notmatch '(?m)^\[providers\.airubiz\]$' -or $example -notmatch 'gigaam-v3-ctc-sherpa') {
+    throw 'Bundled config.example.toml lacks the Airubiz provider/model defaults'
+  }
   $auth = Get-AuthenticodeSignature -LiteralPath $setup
   if ($auth.Status -eq 'NotSigned') {
     Write-Warning 'Candidate installer is unsigned: trusted code signing is a separate publisher prerequisite'
   } elseif ($auth.Status -ne 'Valid') { throw "Invalid candidate installer signature: $($auth.Status)" }
   $cleanupNeeded = $true
+  $installTimer = [Diagnostics.Stopwatch]::StartNew()
   Invoke-Silent (Resolve-Path $setup).Path @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$dir`"")
+  $installTimer.Stop()
+  $measurements.install_seconds = [Math]::Round($installTimer.Elapsed.TotalSeconds, 2)
   $zipFiles = @(Get-ChildItem -LiteralPath $unpacked -Recurse -File)
   if ($zipFiles.Count -eq 0) { throw 'Candidate ZIP is empty' }
   foreach ($file in $zipFiles) {
@@ -74,10 +95,28 @@ try {
   if ((Get-Startup) -cne $wanted) { throw 'Candidate installer did not register stable per-user auto-start' }
   New-Item -ItemType Directory -Force -Path (Split-Path $marker) | Out-Null
   Set-Content -LiteralPath $marker -Value 'preserve' -NoNewline
+  # Same-version reinstall must be resilient, keep startup pointed at the
+  # installed EXE, and preserve user files exactly like a versioned upgrade.
+  $reinstallTimer = [Diagnostics.Stopwatch]::StartNew()
+  Invoke-Silent (Resolve-Path $setup).Path @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$dir`"")
+  $reinstallTimer.Stop()
+  $measurements.reinstall_seconds = [Math]::Round($reinstallTimer.Elapsed.TotalSeconds, 2)
+  if ((Get-Startup) -cne $wanted) { throw 'Reinstall changed the stable per-user autostart entry' }
+  if ((Get-Content -LiteralPath $marker -Raw) -cne 'preserve') { throw 'Reinstall deleted user data' }
+  $uninstallTimer = [Diagnostics.Stopwatch]::StartNew()
   Uninstall
+  $uninstallTimer.Stop()
+  $measurements.uninstall_seconds = [Math]::Round($uninstallTimer.Elapsed.TotalSeconds, 2)
   $cleanupNeeded = $false
   if ((Get-Content -LiteralPath $marker -Raw) -cne 'preserve') { throw 'Uninstall deleted user data' }
-  Write-Host "::notice::Exact Windows $Version release candidate passed ZIP/EXE identity, install, registry, uninstall and preservation smoke."
+  $measurements | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $reportPath -Encoding utf8
+  Write-Host ("MEASURED: installer={0:N1} MB zip={1:N1} MB install={2:N1}s reinstall={3:N1}s uninstall={4:N1}s" -f (
+    $measurements.installer_bytes / 1MB), ($measurements.portable_zip_bytes / 1MB),
+    $measurements.install_seconds, $measurements.reinstall_seconds, $measurements.uninstall_seconds)
+  if ($env:GITHUB_STEP_SUMMARY) {
+    "Windows candidate ${Version}: installer $([Math]::Round($measurements.installer_bytes / 1MB, 1)) MB, install $($measurements.install_seconds)s, reinstall $($measurements.reinstall_seconds)s, uninstall $($measurements.uninstall_seconds)s. Interactive first launch/microphone/HUD: **NOT_TESTED_HEADLESS**." | Add-Content $env:GITHUB_STEP_SUMMARY
+  }
+  Write-Host "::notice::Exact Windows $Version release candidate passed ZIP/EXE identity, config defaults, install, reinstall, registry, uninstall and preservation smoke."
 } finally {
   if ($cleanupNeeded -and (Test-Path -LiteralPath (Join-Path $dir 'unins000.exe'))) {
     try { Uninstall } catch { Write-Warning "Candidate cleanup failed: $_" }

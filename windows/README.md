@@ -22,7 +22,20 @@ forking timing or meter behavior.
 
 ## Install and update without developer tools
 
-See [Windows distribution](DISTRIBUTION.md). With Scoop installed:
+Ordinary users should download `nanodictate-X.Y.Z-windows-x64-setup.exe`
+from the [GitHub Release](https://github.com/kodmial/nanodictate/releases)
+and run it. It is a per-user Inno Setup installer: no administrator
+rights, .NET SDK, Rust toolchain, Visual Studio, or Scoop are required.
+
+Alternatively, one non-admin PowerShell command downloads the newest
+complete stable release, verifies its published SHA-256, installs it in
+place, repairs per-user logon startup, and starts it:
+
+```powershell
+irm https://raw.githubusercontent.com/kodmial/nanodictate/main/scripts/install-windows.ps1 | iex
+```
+
+With Scoop already installed, the first-party bucket is also available:
 
 ```powershell
 scoop bucket add nanodictate https://github.com/kodmial/nanodictate
@@ -30,11 +43,23 @@ scoop install nanodictate
 scoop update nanodictate
 ```
 
-Windows binary releases share the macOS version and GitHub Release.
-The release workflow refuses to publish a new version without both
-platforms' artifacts and their checksums. A direct EXE installer is
-also published for users without Scoop, once the combined release
-pipeline completes successfully.
+The EXE, PowerShell and Scoop paths all install one self-contained
+`NanoDictate.App.exe`, register the same per-user `Run` startup entry,
+and silently upgrade in place. A **fresh install and every upgrade start
+one quiet background agent**; none opens a settings window, console or
+developer dashboard. On first launch the app copies the bundled
+`config.example.toml` to `%APPDATA%\NanoDictate\config.toml` unless the
+user already has one. The default provider is keyless Airubiz, so the
+first Double-Alt works without account setup. Settings stays optional:
+use the Start Menu shortcut, or launch `NanoDictate.App.exe --settings`
+while dictation is idle. Closing settings leaves the background agent
+running.
+
+Windows binary releases share the macOS version and GitHub Release. The
+release workflow refuses to publish a new version without both platforms'
+artifacts and their checksums. See
+[Windows distribution](DISTRIBUTION.md) for upgrade, uninstall, signing
+and SHA-256 limitations.
 
 ## Layout
 
@@ -43,10 +68,10 @@ windows/
   NanoDictate.sln              # portable: Core + Host + Smoke + Tests (net8.0, any OS)
   src/NanoDictate.Core/        # thin P/Invoke adapter + Windows-native I/O, no product logic
   src/NanoDictate.App/         # installed WinUI 3 HUD + optional settings (windows-latest only)
-  src/NanoDictate.Host/        # console/tray host (run/doctor/transcribe-file/providers)
+  src/NanoDictate.Host/        # source-built diagnostics/headless host (run/doctor/transcribe-file/providers)
   src/NanoDictate.Smoke/       # minimal executable smoke path
   tests/NanoDictate.Core.Tests/  # xUnit ABI/ownership/error/session/capture/host/transcription tests
-  package/                     # MSIX manifest + make-msix.ps1 reproducible packaging
+  package/                     # shipped Inno EXE + reproducible ZIP; MSIX scripts are experimental/legacy
   DISTRIBUTION.md              # installer/update/uninstall/supported versions
   PARITY.md                    # feature parity matrix and explicit differences
   VALIDATION.md                # hardware validation runbook + measurement contracts
@@ -81,8 +106,16 @@ dotnet run --project windows/src/NanoDictate.Smoke -c Release -- config.example.
 dotnet run --project windows/src/NanoDictate.Host -c Release -- doctor --config config.example.toml
 # Windows-only (windows-latest):
 dotnet build windows/src/NanoDictate.App/NanoDictate.App.csproj -c Release
-pwsh windows/package/make-msix.ps1 -Version 0.1.33
+pwsh windows/package/make-release.ps1 -Version 0.0.0 -OutDir windows/artifacts
 ```
+
+`make-release.ps1` produces the shipped portable ZIP and Inno Setup EXE.
+`make-msix.ps1` and `Package.appxmanifest` remain in the tree only as
+experimental/legacy staging helpers; no MSIX is published, signed or
+required by the supported installation flow. `NanoDictate.Host` is built
+from source for on-demand `doctor`, `providers` and `transcribe-file`
+diagnostics; it is not installed by the Windows EXE/ZIP. There is no
+permanent tray icon in the installed product.
 
 The loader resolves the engine in this order: `NANODICTATE_CORE_DLL`
 environment variable, app directory, `rust/target/release/`, then the
