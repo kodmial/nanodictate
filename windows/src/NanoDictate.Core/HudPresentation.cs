@@ -59,6 +59,8 @@ public sealed class HudPresentation
 
     public HudPhase Phase => _visible ? _phase : HudPhase.Idle;
 
+    internal HudPhase ActivePhase => _phase;
+
     public bool Visible => _visible;
 
     public ulong Generation => _generation;

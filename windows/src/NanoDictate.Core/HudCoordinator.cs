@@ -258,7 +258,10 @@ public sealed class HudCoordinator : IDisposable
         ulong seq = 0;
         lock (_gate)
         {
-            if (_currentGeneration == 0 || _terminal)
+            if (_currentGeneration == 0
+                || _terminal
+                || (_presentation.ActivePhase != HudPhase.Starting
+                    && _presentation.ActivePhase != HudPhase.Recording))
             {
                 return;
             }

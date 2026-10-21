@@ -323,6 +323,71 @@ public sealed class HudContractTests
     }
 
     [Fact]
+    public void DeviceChangeDuringRecordingStillReportsMicrophoneError()
+    {
+        var config = new PortableConfig
+        {
+            ActiveProvider = "a",
+            Providers = new[] { new ProviderEntry("a", "A", string.Empty, string.Empty) },
+        };
+        var source = new ImmediateReadySource();
+        using var app = new HostApp(config, source, new NoopInsertions(), new ImmediateTransport(), _ => "k");
+        using var coordinator = new HudCoordinator(app, useTimer: false);
+
+        app.Controller.AltDoubleTapped();
+        Assert.Equal(HudPhase.Recording, coordinator.Snapshot.Phase);
+
+        source.RaiseDeviceChanged(new IOException("device unplugged"));
+        var snapshot = coordinator.Snapshot;
+        Assert.Equal(HudPhase.Starting, snapshot.Phase);
+        Assert.Equal(HudStatusKeys.ErrorMicEnableFailed, snapshot.StatusKey);
+    }
+
+    [Fact]
+    public async Task DeviceChangeDuringProcessingDoesNotReplaceDelivery()
+    {
+        var config = new PortableConfig
+        {
+            ActiveProvider = "a",
+            Providers = new[]
+            {
+                new ProviderEntry("a", "A", "https://a.test/v1/audio/transcriptions", string.Empty),
+            },
+        };
+        var source = new ImmediateReadySource();
+        var insertions = new TrackingInsertions();
+        var transport = new GatedTransport();
+        using var app = new HostApp(config, source, insertions, transport, _ => "k");
+        using var coordinator = new HudCoordinator(app, useTimer: false);
+        var delivered = new TaskCompletionSource<DictationDelivery>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var failed = new TaskCompletionSource<DictationFailure>(TaskCreationOptions.RunContinuationsAsynchronously);
+        app.DeliveryCompleted += delivery => delivered.TrySetResult(delivery);
+        app.DeliveryFailed += failure => failed.TrySetResult(failure);
+
+        app.Controller.AltDoubleTapped();
+        app.Controller.AltDoubleTapped();
+        Assert.Equal(HudPhase.Processing, coordinator.Snapshot.Phase);
+
+        // A notification accepted while capture was live can arrive after
+        // Stop; it must not turn a successful Processing session into an error.
+        source.RaiseDeviceChanged(new IOException("device unplugged"));
+        Assert.Equal(HudPhase.Processing, coordinator.Snapshot.Phase);
+        Assert.Equal(HudStatusKeys.Recognizing, coordinator.Snapshot.StatusKey);
+
+        transport.Release.TrySetResult();
+        var completed = await Task.WhenAny(delivered.Task, failed.Task).WaitAsync(TimeSpan.FromSeconds(5));
+        if (completed == failed.Task)
+        {
+            var failure = await failed.Task;
+            throw new Xunit.Sdk.XunitException($"delivery failed: {failure.Error}");
+        }
+        var delivery = await delivered.Task;
+        Assert.True(delivery.Inserted);
+        Assert.Equal(new[] { "hi there" }, insertions.Inserted);
+        Assert.Equal(HudStatusKeys.Finishing, coordinator.Snapshot.StatusKey);
+    }
+
+    [Fact]
     public void StaleSnapshotSequenceCannotReplaceNewerState()
     {
         var config = new PortableConfig
@@ -519,6 +584,27 @@ public sealed class HudContractTests
                 System.Text.Encoding.UTF8.GetBytes("{\"text\": \"hi there\"}")));
     }
 
+    private sealed class GatedTransport : ISttTransport
+    {
+        public TaskCompletionSource Release { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<SttHttpResponse> SendAsync(
+            string url,
+            IReadOnlyDictionary<string, string> headers,
+            byte[] body,
+            string contentType,
+            TimeSpan timeout,
+            CancellationToken cancellationToken)
+        {
+            await Release.Task;
+            return new SttHttpResponse(
+                200,
+                new Dictionary<string, string>(),
+                System.Text.Encoding.UTF8.GetBytes("{\"text\": \"hi there\"}"));
+        }
+    }
+
     private sealed class BlockingTransport : ISttTransport
     {
         public async Task<SttHttpResponse> SendAsync(
@@ -564,6 +650,8 @@ public sealed class HudContractTests
         public event Action<CapturedBlock>? BlockAvailable;
 
         public event Action<Exception>? DeviceChanged;
+
+        public void RaiseDeviceChanged(Exception error) => DeviceChanged?.Invoke(error);
 
         public void Start()
         {

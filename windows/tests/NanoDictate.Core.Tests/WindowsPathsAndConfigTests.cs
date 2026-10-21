@@ -93,7 +93,7 @@ public sealed class WindowsPathsAndConfigTests
             var text = File.ReadAllText(path);
             Assert.Contains("language = \"ru\"", text);
             Assert.Contains("active_provider = \"b\" # selected", text);
-            Assert.Contains("review_before_insert = true", text);
+            Assert.Contains("review_before_insert = true # set \"true\" to enable", text);
             Assert.Contains("timeout_seconds = 30", text);
             Assert.Contains("name = \"A\" # keep", text);
             Assert.Contains("api_key = \"secret\"", text);
@@ -104,6 +104,35 @@ public sealed class WindowsPathsAndConfigTests
             Assert.True(config.ReviewBeforeInsert);
             Assert.Equal(30, config.TimeoutSeconds);
             Assert.Equal(2, config.Providers.Count);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void SaveSettingsPreservesCommentAfterSingleQuotedRootValue()
+    {
+        var toml = """
+            active_provider = 'a' # selected
+            review_before_insert = false # keep
+            [providers.a]
+            name = "A"
+            """;
+        var path = Path.Combine(Path.GetTempPath(), $"nanodictate-save-single-quote-{Guid.NewGuid():N}.toml");
+        File.WriteAllText(path, toml);
+        try
+        {
+            PortableConfig.SaveSettings(path, "b", true);
+
+            var text = File.ReadAllText(path);
+            Assert.Contains("active_provider = \"b\" # selected", text);
+            Assert.Contains("review_before_insert = true # keep", text);
+
+            var config = PortableConfig.Load(path);
+            Assert.Equal("b", config.ActiveProvider);
+            Assert.True(config.ReviewBeforeInsert);
         }
         finally
         {

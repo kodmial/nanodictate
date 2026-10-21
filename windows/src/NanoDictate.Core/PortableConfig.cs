@@ -295,7 +295,15 @@ public sealed class PortableConfig
                     break;
                 }
             }
-            lines[i] = line.Substring(0, valueStart).TrimEnd() + " " + value;
+            var searchFrom = valueStart;
+            if (valueStart < line.Length && line[valueStart] == '\'')
+            {
+                var closeSingle = line.IndexOf('\'', valueStart + 1);
+                searchFrom = closeSingle >= 0 ? closeSingle + 1 : line.Length;
+            }
+            var hash = line.IndexOf('#', searchFrom);
+            var trailing = hash >= 0 ? " " + line.Substring(hash) : string.Empty;
+            lines[i] = line.Substring(0, valueStart).TrimEnd() + " " + value + trailing;
             replaced = true;
             break;
         }
