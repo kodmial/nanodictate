@@ -3,7 +3,7 @@ name: Windows host
 # Complete-product CI for the supported Windows NanoDictate release.
 # Builds the Rust cdylib/DLL with the MSVC target, the portable C# product
 # (Core + Host + Smoke + tests), the Windows-only WinUI 3 entrypoint, and
-# stages the MSIX layout plus portable ZIP as the release artifact.
+# builds the shipped self-contained ZIP plus per-user Inno Setup EXE.
 
 on:
   push:
@@ -13,6 +13,11 @@ on:
       - 'Tests/Fixtures/HUD/**'
       - 'windows/**'
       - 'scripts/build-windows-host.sh'
+      - 'scripts/install-windows.ps1'
+      - 'scripts/scoop-manifest.jq'
+      - 'scripts/test-windows-distribution.ps1'
+      - 'scripts/test-windows-install-chain.ps1'
+      - 'bucket/**'
       - 'config.example.toml'
       - '.github/workflows/windows.yml'
   pull_request:
@@ -21,6 +26,11 @@ on:
       - 'Tests/Fixtures/HUD/**'
       - 'windows/**'
       - 'scripts/build-windows-host.sh'
+      - 'scripts/install-windows.ps1'
+      - 'scripts/scoop-manifest.jq'
+      - 'scripts/test-windows-distribution.ps1'
+      - 'scripts/test-windows-install-chain.ps1'
+      - 'bucket/**'
       - 'config.example.toml'
       - '.github/workflows/windows.yml'
 
@@ -45,6 +55,14 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+
+      - name: Verify Windows first-use distribution contracts
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/test-windows-distribution.ps1
+
+      - name: Verify Windows installer release selection chain
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/test-windows-install-chain.ps1
 
       - name: Ensure MSVC target
         run: rustup target add x86_64-pc-windows-msvc
@@ -212,4 +230,5 @@ jobs:
           path: |
             windows/artifacts/nanodictate-0.0.0-windows-x64.zip
             windows/artifacts/nanodictate-0.0.0-windows-x64-setup.exe
+            windows/artifacts/windows-candidate-measurements.json
           if-no-files-found: error

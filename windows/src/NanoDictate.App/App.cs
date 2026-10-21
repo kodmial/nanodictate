@@ -317,48 +317,11 @@ public sealed partial class App : Application
         {
             return windowsPath;
         }
-        var bundled = FindBundledExample();
-        if (bundled is null)
-        {
-            return Path.Combine(AppContext.BaseDirectory, "config.example.toml");
-        }
-        try
-        {
-            var dir = Path.GetDirectoryName(windowsPath);
-            if (!string.IsNullOrEmpty(dir))
-            {
-                Directory.CreateDirectory(dir);
-            }
-            if (!File.Exists(windowsPath))
-            {
-                File.Copy(bundled, windowsPath);
-            }
-            return windowsPath;
-        }
-        catch
-        {
-            return bundled;
-        }
-    }
-
-    private static string? FindBundledExample()
-    {
-        var baseDir = AppContext.BaseDirectory;
-        var candidates = new[]
-        {
-            Path.Combine(baseDir, "config.example.toml"),
-            Path.Combine(
-                Directory.GetParent(baseDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))?.FullName ?? baseDir,
-                "config.example.toml"),
-        };
-        foreach (var candidate in candidates)
-        {
-            if (File.Exists(candidate))
-            {
-                return candidate;
-            }
-        }
-        return null;
+        var bundled = UserConfigBootstrap.FindBundledExample(AppContext.BaseDirectory);
+        var resolved = UserConfigBootstrap.EnsureUserConfig(windowsPath, bundled);
+        return string.IsNullOrEmpty(resolved)
+            ? Path.Combine(AppContext.BaseDirectory, UserConfigBootstrap.ExampleFileName)
+            : resolved;
     }
 
     [STAThread]
