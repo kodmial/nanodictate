@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.43] - 2026-10-21
+
+
+
+### Fixed
+
+* P0 Windows: validate existing Inno/PowerShell installation and actual first-use UX ([5ac2ba4](https://github.com/kodmial/nanodictate/commit/5ac2ba4597b19d25863b0fd3413ec1234406bda7))
+
 ## [0.1.42] - 2026-10-21
 
 
@@ -628,7 +636,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.42...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.43...HEAD
+[0.1.43]: https://github.com/kodmial/nanodictate/compare/v0.1.42...v0.1.43
 [0.1.42]: https://github.com/kodmial/nanodictate/compare/v0.1.41...v0.1.42
 [0.1.41]: https://github.com/kodmial/nanodictate/compare/v0.1.40...v0.1.41
 [0.1.40]: https://github.com/kodmial/nanodictate/compare/v0.1.39...v0.1.40
