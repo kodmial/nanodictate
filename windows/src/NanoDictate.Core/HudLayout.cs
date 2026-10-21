@@ -3,6 +3,12 @@ namespace NanoDictate.Core;
 /// <summary>Screen-space point in physical pixels (Win32 top-left origin).</summary>
 public readonly record struct HudPoint(double X, double Y);
 
+/// <summary>
+/// Screen-space caret anchor in physical pixels. <see cref="Point"/> is the
+/// caret's bottom-left point and <see cref="Height"/> is its vertical extent.
+/// </summary>
+public readonly record struct HudCaret(HudPoint Point, double Height);
+
 /// <summary>Screen-space size in physical pixels.</summary>
 public readonly record struct HudSize(double Width, double Height);
 
@@ -42,7 +48,12 @@ public static class HudLayout
         return screenCenter;
     }
 
-    public static HudRect PanelFrame(HudPoint anchor, HudRect screen, HudSize panel, double scale = 1)
+    public static HudRect PanelFrame(
+        HudPoint anchor,
+        HudRect screen,
+        HudSize panel,
+        double scale = 1,
+        double anchorHeight = 0)
     {
         scale = scale > 0 ? scale : 1;
         var gap = GapPoints * scale;
@@ -53,7 +64,8 @@ public static class HudLayout
             screen.X + margin,
             Math.Max(screen.X + margin, screen.Right - panel.Width - margin));
 
-        var aboveY = anchor.Y - gap - panel.Height;
+        var anchorTop = anchor.Y - Math.Max(0, anchorHeight);
+        var aboveY = anchorTop - gap - panel.Height;
         if (aboveY >= screen.Y + margin)
         {
             return new HudRect(clampedX, aboveY, panel.Width, panel.Height);

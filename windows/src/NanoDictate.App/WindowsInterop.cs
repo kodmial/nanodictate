@@ -105,9 +105,9 @@ internal static class WindowsInterop
         && SetForegroundWindow(hwnd)
         && GetForegroundWindow() == hwnd;
 
-    public static bool TryNativeCaret(out HudPoint point)
+    public static bool TryNativeCaret(out HudCaret caret)
     {
-        point = default;
+        caret = default;
         var foreground = GetForegroundWindow();
         if (foreground == IntPtr.Zero)
         {
@@ -127,12 +127,13 @@ internal static class WindowsInterop
         {
             return false;
         }
-        var caret = new Point32(info.CaretRect.Left, info.CaretRect.Bottom);
-        if (!ClientToScreen(info.CaretWindow, ref caret))
+        var height = Math.Max(0, info.CaretRect.Bottom - info.CaretRect.Top);
+        var point = new Point32(info.CaretRect.Left, info.CaretRect.Bottom);
+        if (!ClientToScreen(info.CaretWindow, ref point))
         {
             return false;
         }
-        point = new HudPoint(caret.X, caret.Y);
+        caret = new HudCaret(new HudPoint(point.X, point.Y), height);
         return true;
     }
 

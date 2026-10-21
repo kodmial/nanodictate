@@ -726,4 +726,18 @@ public sealed class HudContractTests
         Assert.Equal(780, scaled.X, 3);
         Assert.Equal(8, clamped.Y, 0.001);
     }
+
+    [Fact]
+    public void LayoutAnchorsAboveFromCaretTopEdge()
+    {
+        var screen = new HudRect(0, 0, 1440, 900);
+        var panel = new HudSize(200, 150);
+        var caretBottom = new HudPoint(700, 500);
+
+        var above = HudLayout.PanelFrame(caretBottom, screen, panel, anchorHeight: 40);
+        Assert.Equal(500 - 40 - 12 - 150, above.Y, 0.001);
+
+        var negative = HudLayout.PanelFrame(caretBottom, screen, panel, anchorHeight: -10);
+        Assert.Equal(500 - 12 - 150, negative.Y, 0.001);
+    }
 }

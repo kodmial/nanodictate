@@ -23,14 +23,14 @@ internal static class UiaCaret
     private static bool _workerRunning;
     private static bool _requestPending;
     private static ulong _requestToken;
-    private static Action<ulong, HudPoint?>? _requestCompleted;
+    private static Action<ulong, HudCaret?>? _requestCompleted;
 
     /// <summary>
     /// Queues the latest caret lookup. Requests received while one lookup is
     /// running replace any earlier queued request, so at most one runs at a
     /// time and stale tokens can be ignored by the caller.
     /// </summary>
-    public static void Request(ulong token, Action<ulong, HudPoint?> completed)
+    public static void Request(ulong token, Action<ulong, HudCaret?> completed)
     {
         lock (WorkerGate)
         {
@@ -75,7 +75,7 @@ internal static class UiaCaret
             {
                 WorkerSignal.WaitOne();
                 ulong token;
-                Action<ulong, HudPoint?>? completed;
+                Action<ulong, HudCaret?>? completed;
                 lock (WorkerGate)
                 {
                     if (!_workerRunning)
@@ -91,13 +91,13 @@ internal static class UiaCaret
                     completed = _requestCompleted;
                 }
 
-                HudPoint? point = null;
+                HudCaret? caretResult = null;
                 if (!WindowsInterop.ForegroundWindowBelongsToCurrentProcess()
                     && TryGet(automation, out var caret))
                 {
-                    point = caret;
+                    caretResult = caret;
                 }
-                completed?.Invoke(token, point);
+                completed?.Invoke(token, caretResult);
             }
         }
         catch
@@ -118,9 +118,9 @@ internal static class UiaCaret
         }
     }
 
-    private static bool TryGet(IUIAutomation automation, out HudPoint point)
+    private static bool TryGet(IUIAutomation automation, out HudCaret caret)
     {
-        point = default;
+        caret = default;
         object? elementObject = null;
         object? patternObject = null;
         object? rangesObject = null;
@@ -163,7 +163,7 @@ internal static class UiaCaret
             {
                 return false;
             }
-            if (TryReadRectangles(rectangles, out point))
+            if (TryReadRectangles(rectangles, out caret))
             {
                 return true;
             }
@@ -176,11 +176,11 @@ internal static class UiaCaret
             {
                 return false;
             }
-            return TryReadRectangles(expanded, out point);
+            return TryReadRectangles(expanded, out caret);
         }
         catch
         {
-            point = default;
+            caret = default;
             return false;
         }
         finally
@@ -196,9 +196,9 @@ internal static class UiaCaret
         }
     }
 
-    private static bool TryReadRectangles(IntPtr safeArray, out HudPoint point)
+    private static bool TryReadRectangles(IntPtr safeArray, out HudCaret caret)
     {
-        point = default;
+        caret = default;
         try
         {
             if (SafeArrayGetDim(safeArray) < 1
@@ -229,7 +229,9 @@ internal static class UiaCaret
                     {
                         continue;
                     }
-                    point = new HudPoint(values[i], values[i + 1] + values[i + 3]);
+                    caret = new HudCaret(
+                        new HudPoint(values[i], values[i + 1] + values[i + 3]),
+                        Math.Max(0, values[i + 3]));
                     return true;
                 }
             }

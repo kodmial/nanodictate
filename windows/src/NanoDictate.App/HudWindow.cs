@@ -459,7 +459,7 @@ public sealed class HudWindow : Window
         UiaCaret.Request(token, OnUiaCaretResult);
     }
 
-    private void OnUiaCaretResult(ulong token, HudPoint? caret)
+    private void OnUiaCaretResult(ulong token, HudCaret? caret)
     {
         if (!caret.HasValue)
         {
@@ -475,20 +475,22 @@ public sealed class HudWindow : Window
         });
     }
 
-    private void ApplyPlacement(HudPhase phase, HudPoint caret, bool hasCaret)
+    private void ApplyPlacement(HudPhase phase, HudCaret caret, bool hasCaret)
     {
         var pointer = WindowsInterop.Pointer();
-        var anchorProbe = hasCaret ? caret : pointer;
+        var anchorProbe = hasCaret ? caret.Point : pointer;
         var scale = WindowsInterop.DpiScaleFor(anchorProbe, _hwnd);
         var panel = new HudSize(PanelWidth * scale, HudLayout.PanelHeight(phase) * scale);
         var screen = WindowsInterop.WorkAreaFor(anchorProbe);
         var center = new HudPoint(screen.X + screen.Width / 2, screen.Y + screen.Height / 2);
-        var anchor = HudLayout.ResolvePoint(
-            hasCaret ? caret : null,
-            pointer,
-            center,
-            p => p.X >= screen.X && p.X <= screen.Right && p.Y >= screen.Y && p.Y <= screen.Bottom);
-        var frame = HudLayout.PanelFrame(anchor, screen, panel, scale);
+        bool IsUsable(HudPoint p) =>
+            p.X >= screen.X && p.X <= screen.Right && p.Y >= screen.Y && p.Y <= screen.Bottom;
+        var caretPoint = hasCaret ? caret.Point : (HudPoint?)null;
+        var anchor = HudLayout.ResolvePoint(caretPoint, pointer, center, IsUsable);
+        var anchorHeight = caretPoint.HasValue && IsUsable(caretPoint.Value)
+            ? caret.Height
+            : 0;
+        var frame = HudLayout.PanelFrame(anchor, screen, panel, scale, anchorHeight);
         AppWindow.MoveAndResize(new RectInt32(
             (int)Math.Round(frame.X),
             (int)Math.Round(frame.Y),
