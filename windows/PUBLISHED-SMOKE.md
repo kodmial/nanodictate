@@ -12,9 +12,12 @@ the **already published** installer and ZIP, checks both against the release's
 `SHA256SUMS.txt`, expands and checks the portable app, installs the last
 published Windows version when available, upgrades using the new public EXE,
 checks installed files and HKCU Run startup, then silently uninstalls and
-verifies per-user configuration survived. This catches releases whose real
-public assets differ from the CI-tested build. It also verifies the current
-Scoop bucket's pinned URL and ZIP hash when its version matches the release.
+verifies per-user configuration survived. The JSON evidence records the
+published installer/ZIP size, download time and install/uninstall durations.
+This catches releases whose real public assets differ from the CI-tested
+build. It also verifies the current Scoop bucket's pinned URL and ZIP hash
+when its version matches the release, and warns instead of failing while the
+first-party manifest is briefly behind a fresh release.
 
 The canary is not a GUI or microphone hardware test: a headless runner does
 not validate the WinUI message loop, double-Alt keys, WASAPI device capture,

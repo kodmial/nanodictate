@@ -1,84 +1,136 @@
-# Windows hardware validation
+# Windows validation and evidence status
 
-Manual validation runbook for real Windows hardware plus the automated
-contracts CI enforces on every change. Check off each item on the release
-candidate; file deviations as follow-up issues.
+Runbook for the shipped Windows product plus the contracts CI enforces on
+every change. Check off physical items on a release candidate; file deviations
+as follow-up issues.
 
-## Automated contracts (CI, no hardware)
+## Shipped first-use path
 
-- `windows.yml` builds the Rust DLL, the portable solution, the WinUI 3
-  app, and the host; runs Rust tests, xUnit tests, the smoke executable
-  (deterministic + synthetic capture + transcription planning vectors),
-  `doctor`, and `providers`; stages the MSIX layout and uploads the ZIP.
-- xUnit asserts: failover/backoff/review/retry/overlay/mic-request gates
-  match Rust; multipart shape and field gating; proxy rewrites; chunked
-  stitching and final-pass policy; realtime resampling and fail-closed
-  lifecycle; config parsing; capture readiness/undo/Enter semantics; the
-  shared HUD fixture constants, RMS/VU vectors, all ten presentation
-  scenarios, generation guards, and fail-closed review without a prompt.
-- Smoke asserts: mean per-block cost stays far below the 100 ms block
-  budget and prints activation-to-ready, callback cost, CPU/working-set,
-  consumed-vs-emitted frames, copies per block (2), and auto-stop outcome.
+1. Download `nanodictate-X.Y.Z-windows-x64-setup.exe` from the stable GitHub
+   Release (or run `scripts/install-windows.ps1`).
+2. The per-user installer starts one `NanoDictate.App.exe --background`. No
+   settings window, console or developer dashboard appears on first use.
+3. On first launch the app copies the bundled `config.example.toml` to
+   `%APPDATA%\NanoDictate\config.toml` if absent. The default keyless Airubiz
+   provider and model make an immediate first dictation possible.
+4. Double-Alt shows the transient microphone HUD only; release audio, STT and
+   insertion follow the shared session contract, then the HUD hides.
+5. Settings remains optional via the Start Menu shortcut or a second launch
+   while idle. Closing settings leaves the background agent running.
+
+## Automated evidence (headless)
+
+- `windows.yml` builds the Rust DLL, portable solution, WinUI 3 app and host;
+  runs Rust tests, xUnit tests, the smoke executable (deterministic, synthetic
+  capture and transcription planning), `doctor` and `providers`; builds the
+  real self-contained ZIP and Inno EXE; and exercises silent install,
+  same-version reinstall, versioned upgrade, uninstall, startup registration
+  and config preservation.
+- `test-windows-distribution.ps1` guards the first-use launch contracts and
+  `test-windows-install-chain.ps1` exercises the offline manifest -> release
+  asset -> SHA256SUMS selection, including a lagging manifest and an
+  incomplete release upload.
+- `test-release-candidate.ps1` checks exact ZIP/EXE payload identity, the
+  bundled keyless Airubiz defaults, install/reinstall/uninstall and records
+  the measured installer/ZIP size and elapsed times. It reports the actual
+  candidate, not an unsupported performance target.
+- xUnit asserts first-use config bootstrap (copy once, never overwrite,
+  keyless Airubiz defaults), single-instance ownership/recovery, failover/
+  backoff/review/retry/overlay/mic-request gates, multipart/transport shape,
+  chunked stitching, synthetic capture readiness/undo/Enter semantics, and
+  the shared HUD fixture constants, RMS/VU vectors, presentation scenarios,
+  generation guards and fail-closed review.
+- Smoke asserts mean per-block cost stays well below the 100 ms block budget
+  and prints activation-to-ready, callback cost, CPU/working-set,
+  consumed-vs-emitted frames, copies per block and auto-stop outcome.
+- Published-release smoke (`windows-release-smoke.yml`,
+  `windows-distribution-smoke.yml`) downloads public assets, checks them
+  against `SHA256SUMS.txt`, installs/upgrades/uninstalls and preserves user
+  configuration. Authenticode is reported separately as `VALID` or
+  `UNVERIFIED`; a passing install never implies a signed build.
+
+## Evidence status by stage
+
+| Stage | Automated evidence | Physical Windows status |
+| --- | --- | --- |
+| Release selection, asset, SHA-256 | PowerShell/static scripts plus published smoke | Verified by CI when release assets exist |
+| Inno install/upgrade/uninstall, startup, config retention | Candidate and published smoke | Verified headless |
+| First-run config from bundled example, keyless Airubiz | xUnit bootstrap + candidate payload check | Not separately re-run on real desktop |
+| One quiet background launch, no forced settings | Installer/script/manifest contract tests | **Outstanding interactive check** |
+| Second launch / single instance | xUnit mutex + existing idle-settings routing tests | WinUI relaunch on real desktop **outstanding** |
+| Double-Alt hook, Escape/Return | Deterministic routing tests | **Outstanding real keyboard check** |
+| HUD phases, meter, placement, theme | Shared fixture, xUnit, synthetic capture | **Outstanding real HUD/caret check** |
+| WASAPI microphone, privacy denial, device loss | Classifier and synthetic pipeline tests | **Outstanding real device/privacy check** |
+| STT request/response and failover | Mock transport and Rust policy vectors | Live provider over real network **outstanding** |
+| Unicode/Russian/emoji insertion, undo, clipboard | Sender/chunk/undo tests | **Outstanding real focused-app check** |
+
+Do not infer supported hardware behavior from `doctor`, the ZIP smoke, a
+virtual audio device or a hosted runner. Record a real Windows 10 and Windows
+11 desktop run before claiming it.
 
 ## Manual hardware checklist
 
-1. Clean install/first launch: install the signed EXE on a fresh profile.
-   The PowerShell bootstrap and Scoop install launch optional settings once
-   (`--settings`); their upgrades resume silently (`--background`). The
-   interactive EXE installer offers an optional post-install settings launch
-   (`--settings`) after a fresh install or an upgrade. Logon startup always
-   stays quiet and never opens settings. `%APPDATA%\NanoDictate\config.toml`
-   is created from the example without touching an existing config. The Start
-   Menu shortcut (`--settings`) opens settings on request.
-2. Microphone access: deny once → privacy guidance with
-   `ms-settings:privacy-microphone` appears and repeat prompts are
-   throttled; allow → recording starts.
-3. Repeated recording: start/stop 10 times; every session reaches
-   readiness exactly once and releases COM objects (no leak, no wedge).
-4. Immediate speech: speak within 200 ms of activation; the first word
+1. Clean install/first launch: install the published EXE on a fresh profile.
+   Confirm exactly one `NanoDictate.App.exe` starts in the background, no
+   settings window or console appears, and `%APPDATA%\NanoDictate\config.toml`
+   is created from the example without touching any pre-existing config.
+2. Silent upgrade: install a previous published version, edit the config, then
+   run the newer EXE (and separately `install-windows.ps1`). Confirm one
+   background agent, preserved config and unchanged logon startup path.
+3. Microphone access: deny once -> privacy guidance with
+   `ms-settings:privacy-microphone` appears and repeat prompts are throttled;
+   allow -> recording starts. Unplug the only microphone -> actionable
+   no-device/disconnect message.
+4. Repeated recording: start/stop 10 times; every session reaches readiness
+   exactly once and releases COM objects (no leak, no wedge).
+5. Immediate speech: speak within 200 ms of activation; the first word
    survives (no warm-up frames dropped).
-5. Device change: unplug/replug the default capture device mid-session →
+6. Device change: unplug/replug the default capture device mid-session ->
    session aborts with DeviceChanged; one restart resumes.
-6. Global activation: double-Alt toggles from a focused editor; single
-   Alt, other keys, and repeats never trigger.
-7. Escape/Return: Escape cancels capture, latch, and scheduled Enter;
-   Return arms the latch and stops; synthetic Enter is never re-routed.
-8. Unicode insertion: Cyrillic + emoji insert correctly in direct mode;
+7. Global activation: double-Alt toggles from a focused editor; single Alt,
+   other keys, and repeats never trigger.
+8. Escape/Return: Escape cancels capture, latch, and scheduled Enter; Return
+   arms the latch and stops; synthetic Enter is never re-routed.
+9. Unicode insertion: Cyrillic + emoji insert correctly in direct mode;
    Backspace undo erases exactly the last insertion inside the window.
-9. Clipboard mode: insert via clipboard restores the original text after
-   0.5 s; overlapping inserts keep only the latest restore.
-10. Normal/chunked transcription: short utterance inserts once; a
-    2-minute recording in chunked mode stitches in order with no
-    duplication at seams.
-11. Retry/failover: airplane-mode attempt fails fast with no silent
-    fallback; with two providers and auto-failover, the failed provider
-    moves to the end and the second answers.
-12. Restart/startup: enable startup → reboot → dictation hotkey works with
-    no visible window; a second launch opens optional settings only while
-    idle and never creates a second hook.
-13. HUD phases: fast start skips `Starting`; a slow start shows it only
-    after the grace window; the timer starts on the first valid buffer;
-    stop shows Processing with three dots and insert/empty/cancel hide
-    within 0.8 s, errors/microphone failure within 2 s.
-14. HUD placement/style: the panel appears above the UIA text caret when
-    the focused editor exposes TextPattern (native caret/pointer/screen
-    center fallback), is clamped on secondary/DPI-scaled monitors, respects
-    light/dark/high-contrast colors and Reduce Motion, stays topmost, takes
-    no focus, is click-through, and never appears in the taskbar or Alt-Tab.
-15. HUD robustness: Escape during Processing hides the panel immediately
-    even while Rust is still settling; a rapid restart keeps the new
-    generation visible; a stale hide or late callback cannot dismiss it.
-16. Review prompt: enabled review shows the transient window; missing or
+10. Clipboard mode: insert via clipboard restores the original text after
+    0.5 s; overlapping inserts keep only the latest restore.
+11. Normal/chunked transcription: short utterance inserts once; a 2-minute
+    recording in chunked mode stitches in order with no duplication at seams.
+12. Retry/failover: airplane-mode attempt fails fast with no silent fallback;
+    with two providers and auto-failover, the failed provider moves to the end
+    and the second answers.
+13. Restart/startup: sign out and back in -> dictation hotkey works with no
+    visible window; a second launch opens optional settings only while idle
+    and never creates a second hook or process.
+14. HUD phases: fast start skips `Starting`; a slow start shows it only after
+    the grace window; the timer starts on the first valid buffer; stop shows
+    Processing with three dots and insert/empty/cancel hide within 0.8 s,
+    errors/microphone failure within 2 s.
+15. HUD placement/style: the panel appears above the UIA text caret when the
+    focused editor exposes TextPattern (native caret/pointer/screen center
+    fallback), is clamped on secondary/DPI-scaled monitors, respects
+    light/dark/high-contrast colors and Reduce Motion, stays topmost, takes no
+    focus, is click-through, and never appears in the taskbar or Alt-Tab.
+16. HUD robustness: Escape during Processing hides the panel immediately even
+    while Rust is still settling; a rapid restart keeps the new generation
+    visible; a stale hide or late callback cannot dismiss it.
+17. Review prompt: enabled review shows the transient window; missing or
     failed UI inserts nothing (fail-closed); a second launch while
     recording/transcribing does not open settings or steal focus.
+18. Uninstall: use the Inno uninstaller and Scoop's uninstall separately.
+    Confirm the application and its own Run value are removed while
+    `%APPDATA%\NanoDictate\config.toml` and logs remain.
 
 ## Measurement comparison
 
-Record per session: activation-to-ready (trigger→request,
-request→engine-started, engine-started→first-buffer), mean/max block
+Record per session: activation-to-ready (trigger->request,
+request->engine-started, engine-started->first-buffer), mean/max block
 callback cost, CPU time, working set, device frames vs engine samples,
-and auto-stop outcome (the smoke line prints the same fields). Compare
+and auto-stop outcome (the smoke line prints the same fields). Record
+installer size and download/install/launch elapsed time from the actual
+candidate or published smoke before proposing a performance change. Compare
 against the macOS contracts in `docs/stt-benchmark.md` and
-`docs/realtime-transcription.md`; file material regressions (missed
-first word, block cost near the 100 ms budget, sample loss, or
-duplicated seams) as release blockers.
+`docs/realtime-transcription.md`; file material regressions (missed first
+word, block cost near the 100 ms budget, sample loss, duplicated seams, or a
+clearly redundant transfer) as release blockers.

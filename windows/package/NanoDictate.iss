@@ -45,7 +45,10 @@ Name: "{autoprograms}\NanoDictate"; Filename: "{app}\NanoDictate.App.exe"; Param
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "NanoDictate"; ValueData: """{app}\NanoDictate.App.exe"" --background"; Flags: uninsdeletevalue
 
 [Run]
-Filename: "{app}\NanoDictate.App.exe"; Parameters: "--settings"; Description: "Launch NanoDictate"; Flags: nowait postinstall skipifsilent
+; A fresh install and an upgrade both start one quiet background agent. The
+; optional settings window is on demand via the Start Menu shortcut or a
+; second launch while dictation is idle, never a forced first-run wizard.
+Filename: "{app}\NanoDictate.App.exe"; Parameters: "--background"; Description: "Launch NanoDictate in the background"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
 ; User configuration and logs deliberately survive upgrades and uninstall.

@@ -44,6 +44,22 @@ public sealed class OwnershipTests
     }
 
     [Fact]
+    public void SingleInstanceAllowsOnlyOneOwnerAndRecoversAfterDispose()
+    {
+        var name = $"Local\\NanoDictateTest-{Guid.NewGuid():N}";
+        using (var first = new SingleInstance(name))
+        {
+            Assert.True(first.IsFirst);
+            using (var second = new SingleInstance(name))
+            {
+                Assert.False(second.IsFirst);
+            }
+        }
+        using var recovered = new SingleInstance(name);
+        Assert.True(recovered.IsFirst);
+    }
+
+    [Fact]
     public void NullFreeFunctionsAreSafe()
     {
         // Disposing fresh handles exercises each *_free path once;
