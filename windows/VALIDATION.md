@@ -18,6 +18,58 @@ as follow-up issues.
 5. Settings remains optional via the Start Menu shortcut or a second launch
    while idle. Closing settings leaves the background agent running.
 
+## Installer process-tree incident (issue #234)
+
+The Windows host run
+[39684741385 / job 119516008970](https://github.com/kodmial/nanodictate/actions/runs/39684741385/job/119516008970)
+at HEAD `ccb8dee403fe5f89830bc5d5cb5487720ff8c83b` started step 19
+`Verify portable files and silent install/upgrade/uninstall` at
+2026-10-21 22:16:23 UTC. The step emitted its inline script and `##[endgroup]`
+at 22:16:23, then produced no further output and was cancelled at 23:12:42
+UTC (56m19s) when the job reached its 60-minute limit. During job finalization,
+GitHub logged:
+
+```
+Terminate orphan process: pid (5632) (NanoDictate.App)
+```
+
+The finalization log identifies the persistent product agent (pid 5632) as the
+surviving process, not the setup root. No setup process remained at cleanup,
+consistent with Setup having completed before the outer wait blocked. GitHub
+did not serve the live job log while the step was running and the step logged
+no subphase entry/exit, so neither the exact live stack nor which of the four
+phases was stalled could be observed. The end-of-job log above is the strongest
+available process detail; the orphan's final exit state was not recorded because
+GitHub terminated it during job finalization. The step's inline script contained
+four unbounded `Start-Process ... -Wait` calls for first install, same-version
+reinstall, versioned upgrade and uninstall. Microsoft documents `Start-Process -Wait` as
+waiting for the whole process tree, while Inno `[Run] ... nowait postinstall`
+intentionally starts `NanoDictate.App.exe --background` and leaves it running.
+Setup could therefore complete while the outer tree wait remained blocked for
+the lifetime of the background agent.
+
+The regression harness in `scripts/test-windows-installer-runner.ps1` proves
+both halves deterministically on Windows: legacy `Start-Process -Wait` stays
+blocked by a short-lived launcher's persistent child, while the shared runner
+returns after the installer root completes and leaves that independent child
+alive.
+
+The repair is `scripts/windows-installer-runner.psm1`. It waits for the direct
+installer, then for Inno-style bootstrap/worker descendants, but never for
+`NanoDictate.App`. The module supports Windows PowerShell 5.1 and PowerShell 7;
+on 5.1 it uses explicit Windows command-line quoting because
+`ProcessStartInfo.ArgumentList` is unavailable there. Every
+install/reinstall/upgrade/uninstall phase has a deadline, writes phase evidence
+and retains `/LOG` output; timeouts terminate only processes owned by that test
+phase. The workflows upload `windows/artifacts/installer-logs/**` with
+`if: always()` so a failed validation still leaves the useful diagnostic. The CI lifecycle also runs the exact
+user-facing `Install-NanoDictateVerified` path, checks one background agent and
+preserves user configuration across reinstall, versioned upgrade and uninstall.
+The first successful Windows run records the actual phase durations in
+`windows-ci-lifecycle-measurements.json`; the 240-second setup and 120-second
+uninstall caps leave headroom for runner variability while failing long before
+the 45-minute job budget.
+
 ## Automated evidence (headless)
 
 - `windows.yml` builds the Rust DLL, portable solution, WinUI 3 app and host;
@@ -31,9 +83,14 @@ as follow-up issues.
   asset -> SHA256SUMS selection, including a lagging manifest and an
   incomplete release upload.
 - `test-release-candidate.ps1` checks exact ZIP/EXE payload identity, the
-  bundled keyless Airubiz defaults, install/reinstall/uninstall and records
-  the measured installer/ZIP size and elapsed times. It reports the actual
-  candidate, not an unsupported performance target.
+  bundled keyless Airubiz defaults, install/reinstall/uninstall, exactly one
+  persistent background agent and records the measured installer/ZIP size and
+  elapsed times. It reports the actual candidate, not an unsupported
+  performance target.
+- `test-ci-installer-lifecycle.ps1` exercises the user-facing install function
+  against the candidate EXE, then same-version reinstall, a versioned in-place
+  upgrade and uninstall. Every phase uses the shared bounded runner, retains
+  Inno logs and fails closed with a per-operation deadline.
 - xUnit asserts first-use config bootstrap (copy once, never overwrite,
   keyless Airubiz defaults), single-instance ownership/recovery, failover/
   backoff/review/retry/overlay/mic-request gates, multipart/transport shape,

@@ -9,11 +9,13 @@ on:
   pull_request:
     paths:
       - 'scripts/windows-release-smoke.ps1'
+      - 'scripts/windows-installer-runner.psm1'
       - '.github/workflows/windows-release-smoke.yml'
   push:
     branches: [main]
     paths:
       - 'scripts/windows-release-smoke.ps1'
+      - 'scripts/windows-installer-runner.psm1'
       - '.github/workflows/windows-release-smoke.yml'
   workflow_run:
     workflows: [Release]
@@ -40,7 +42,7 @@ jobs:
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     name: Published EXE + portable ZIP lifecycle (windows-2022)
     runs-on: windows-2022
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout smoke source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -60,5 +62,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-published-smoke-${{ github.run_id }}
-          path: windows/artifacts/windows-published-smoke.json
+          path: |
+            windows/artifacts/windows-published-smoke.json
+            windows/artifacts/installer-logs/**
           if-no-files-found: warn

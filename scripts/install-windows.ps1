@@ -18,6 +18,25 @@ $repo = 'https://github.com/kodmial/nanodictate'
 $headers = @{ 'User-Agent' = 'NanoDictate-installer'; 'Accept' = 'application/vnd.github+json' }
 $manifestUrl = 'https://raw.githubusercontent.com/kodmial/nanodictate/main/bucket/nanodictate.json'
 $latestReleaseUrl = 'https://api.github.com/repos/kodmial/nanodictate/releases/latest'
+$runnerUrl = 'https://raw.githubusercontent.com/kodmial/nanodictate/main/scripts/windows-installer-runner.psm1'
+
+function Import-NanoDictateRunner {
+    # Repo checkouts/CI import the shared module directly. The documented
+    # irm | iex path has no local files, so load the same module source from
+    # the same branch as this script instead of duplicating the runner.
+    if (Get-Module -Name 'windows-installer-runner') { return }
+    $local = if ($PSScriptRoot) { Join-Path $PSScriptRoot 'windows-installer-runner.psm1' } else { '' }
+    if ($local -and (Test-Path -LiteralPath $local -PathType Leaf)) {
+        Import-Module $local -Force
+        return
+    }
+    $runnerSource = [string](Invoke-RestMethod -Uri $runnerUrl -Headers $headers -UseBasicParsing)
+    if ($runnerSource -notmatch 'function Invoke-BoundedInstallerProcess') {
+        throw 'The NanoDictate installer runner could not be loaded.'
+    }
+    New-Module -Name 'windows-installer-runner' -ScriptBlock ([scriptblock]::Create($runnerSource)) |
+        Import-Module -Force
+}
 
 function Get-ManifestVersion {
     try {
@@ -74,6 +93,72 @@ function Get-VerifiedRelease([string]$ManifestVersion) {
     throw "No complete published Windows release found. $($errors -join '; ')"
 }
 
+function Install-NanoDictateVerified {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallerPath,
+        [Parameter(Mandatory = $true)][string]$Version,
+        [Parameter(Mandatory = $true)][string]$Target,
+        [ValidateRange(1, 3600)][int]$TimeoutSeconds = 240,
+        [string]$LogDirectory
+    )
+    Import-NanoDictateRunner
+    $installer = (Resolve-Path -LiteralPath $InstallerPath).Path
+    $succeeded = $false
+    try {
+        $exe = Join-Path $Target 'NanoDictate.App.exe'
+        # Inno updates the same install path and AppId; stop only the previous
+        # agent that runs from this exact target before replacing locked payloads.
+        [void](Stop-NanoDictateProcessesUnderPath -InstallDirectory $Target)
+
+        $install = [Diagnostics.Stopwatch]::StartNew()
+        # /DIR must stay quoted for profile paths containing spaces. The bounded
+        # runner waits for the real Inno phase, not the persistent --background app
+        # that the installer intentionally leaves running.
+        $setup = Invoke-BoundedInstallerProcess -FilePath $installer -ArgumentList @(
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', ('/DIR="' + $Target + '"')
+        ) -Phase 'user-install' -TimeoutSeconds $TimeoutSeconds `
+            -LogDirectory $LogDirectory -InnoLogFileName 'user-install.log'
+        $install.Stop()
+
+        Assert-NanoDictatePayload -InstallDirectory $Target
+        $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+        $expectedStartup = '"' + $exe + '" --background'
+        if ((Get-NanoDictateStartupValue) -ne $expectedStartup) {
+            # Also repairs the previously published v0.1.33 installer, which did
+            # not yet register logon startup. Does not require administrator rights.
+            New-Item -Path $key -Force | Out-Null
+            Set-ItemProperty -Path $key -Name 'NanoDictate' -Value $expectedStartup
+        }
+        Assert-NanoDictateStartup -InstallDirectory $Target
+
+        # Inno already launched one --background agent. Wait for it, and only
+        # start the app ourselves when setup could not leave one running.
+        $agents = @(Start-NanoDictateBackgroundIfNeeded -InstallDirectory $Target -TimeoutSeconds 30)
+        if ($agents.Count -eq 1) {
+            Write-Host ("Background agent pid {0} is running." -f $agents[0].Id)
+        } else {
+            Write-Warning 'NanoDictate installed successfully but no background agent is currently running.'
+        }
+        $succeeded = $true
+        return [pscustomobject]@{
+            Version                = $Version
+            InstallSeconds         = [Math]::Round($install.Elapsed.TotalSeconds, 2)
+            InstallerExitCode      = $setup.ExitCode
+            BackgroundAgentRunning = ($agents.Count -eq 1)
+            BackgroundAgentIds     = @($agents | ForEach-Object { $_.Id })
+        }
+    } finally {
+        if (-not $succeeded) {
+            # A failed or timed-out install must not leave a half-started agent
+            # from this exact target. Installed files/user data are retained for
+            # diagnosis; only the process this phase may have launched is stopped.
+            try { [void](Stop-NanoDictateProcessesUnderPath -InstallDirectory $Target) } catch {
+                Write-Warning "Could not stop a partial NanoDictate agent: $_"
+            }
+        }
+    }
+}
+
 function Invoke-NanoDictateInstall {
     if (-not $VerifyOnly) {
         if (-not [Environment]::Is64BitOperatingSystem) { throw 'NanoDictate requires 64-bit Windows 10/11.' }
@@ -104,34 +189,21 @@ function Invoke-NanoDictateInstall {
         }
 
         $target = Join-Path $env:LOCALAPPDATA 'Programs\NanoDictate'
-        $exe = Join-Path $target 'NanoDictate.App.exe'
-        # Inno updates the same install path and AppId; stop the previous version
-        # before replacing binaries to avoid dialogs/reboots/file-in-use failures.
-        $targetPrefix = $target.TrimEnd('\') + '\'
-        @(Get-Process -Name 'NanoDictate.App' -ErrorAction SilentlyContinue) | Where-Object {
-            try { $_.Path -and $_.Path.StartsWith($targetPrefix, [StringComparison]::OrdinalIgnoreCase) }
-            catch { $false }
-        } | Stop-Process -Force -ErrorAction Stop
-        $install = [Diagnostics.Stopwatch]::StartNew()
-        # /DIR must stay quoted for profile paths containing spaces.
-        $setup = Start-Process -FilePath $installer -ArgumentList @(
-            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', ('/DIR="' + $target + '"')
-        ) -Wait -PassThru
-        $install.Stop()
-        if ($setup.ExitCode -ne 0) { throw "NanoDictate setup failed: $($setup.ExitCode)" }
-        if (-not (Test-Path $exe)) { throw 'Setup exited successfully but the application is absent.' }
-        $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-        $autostart = (Get-ItemProperty -Path $key -Name 'NanoDictate' -ErrorAction SilentlyContinue).NanoDictate
-        if ($autostart -ne ('"' + $exe + '" --background')) {
-            # Also repairs the previously published v0.1.33 installer, which did
-            # not yet register logon startup. Does not require administrator rights.
-            New-Item -Path $key -Force | Out-Null
-            Set-ItemProperty -Path $key -Name 'NanoDictate' -Value ('"' + $exe + '" --background')
+        # First install and upgrade both start exactly one quiet background
+        # agent. Settings stays optional (Start Menu shortcut or a second idle
+        # launch). The install log stays beside the downloaded installer only
+        # when a caller explicitly requests retained diagnostics.
+        $logDirectory = Join-Path $env:LOCALAPPDATA 'NanoDictate\installer-logs'
+        $result = Install-NanoDictateVerified -InstallerPath $installer -Version $version `
+            -Target $target -TimeoutSeconds 240 -LogDirectory $logDirectory
+        if ($result.BackgroundAgentRunning) {
+            Write-Host ("Installed NanoDictate {0} in {1:N1}s and started it in the background." -f
+                $version, $result.InstallSeconds)
+        } else {
+            Write-Host ("Installed NanoDictate {0} in {1:N1}s. It will start at your next sign-in." -f
+                $version, $result.InstallSeconds)
         }
-        # First install and upgrade both start exactly one quiet background agent.
-        # Settings stays optional (Start Menu shortcut or a second idle launch).
-        Start-Process -FilePath $exe -ArgumentList '--background'
-        Write-Host ("Installed NanoDictate {0} in {1:N1}s and started it in the background." -f $version, $install.Elapsed.TotalSeconds)
+        Write-Host ("Installer diagnostics: {0}" -f $logDirectory)
         Write-Host 'It will start automatically when you sign into Windows. Double-Alt starts and stops dictation.'
     } finally {
         Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
