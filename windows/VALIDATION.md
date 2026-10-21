@@ -53,8 +53,8 @@ as follow-up issues.
 
 | Stage | Automated evidence | Physical Windows status |
 | --- | --- | --- |
-| Release selection, asset, SHA-256 | PowerShell/static scripts plus published smoke | Verified by CI when release assets exist |
-| Inno install/upgrade/uninstall, startup, config retention | Candidate and published smoke | Verified headless |
+| Release selection, asset, SHA-256 | PowerShell/static scripts plus published smoke; verified by CI when release assets exist | Not applicable (no physical Windows check) |
+| Inno install/upgrade/uninstall, startup, config retention | Candidate and published smoke; verified headless | **Outstanding physical install/upgrade/uninstall check** |
 | First-run config from bundled example, keyless Airubiz | xUnit bootstrap + candidate payload check | Not separately re-run on real desktop |
 | One quiet background launch, no forced settings | Installer/script/manifest contract tests | **Outstanding interactive check** |
 | Second launch / single instance | xUnit mutex + existing idle-settings routing tests | WinUI relaunch on real desktop **outstanding** |

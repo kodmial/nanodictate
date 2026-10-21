@@ -58,6 +58,7 @@ Assert-Contains 'installer quotes the per-user install directory' $install '(''/
 $iss = Read-Text 'windows/package/NanoDictate.iss'
 $runSection = [regex]::Match($iss, '(?ms)^\[Run\](.*?)(?=^\[|\z)').Groups[1].Value
 Assert-Match 'Inno post-install launch is background' $runSection 'Parameters:\s*"--background"'
+Assert-NotContains 'Inno direct silent install still starts the background agent' $runSection 'skipifsilent'
 Assert-NotContains 'Inno post-install launch never forces settings' $runSection '--settings'
 Assert-Match 'Start Menu shortcut opens optional settings on demand' $iss 'Parameters:\s*"--settings"'
 Assert-Contains 'Inno installs per-user without administrator rights' $iss 'PrivilegesRequired=lowest'

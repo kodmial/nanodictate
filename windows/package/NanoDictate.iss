@@ -48,7 +48,7 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 ; A fresh install and an upgrade both start one quiet background agent. The
 ; optional settings window is on demand via the Start Menu shortcut or a
 ; second launch while dictation is idle, never a forced first-run wizard.
-Filename: "{app}\NanoDictate.App.exe"; Parameters: "--background"; Description: "Launch NanoDictate in the background"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\NanoDictate.App.exe"; Parameters: "--background"; Description: "Launch NanoDictate in the background"; Flags: nowait postinstall
 
 [UninstallDelete]
 ; User configuration and logs deliberately survive upgrades and uninstall.
