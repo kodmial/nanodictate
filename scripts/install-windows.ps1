@@ -46,9 +46,9 @@ try {
         New-Item -Path $key -Force | Out-Null
         Set-ItemProperty -Path $key -Name 'NanoDictate' -Value ('"' + $exe + '" --background')
     }
-    # First use displays the main window; subsequent upgrades resume silently.
+    # First use opens optional settings; subsequent upgrades resume silently.
     if (-not $previousInstall) {
-        Start-Process -FilePath $exe
+        Start-Process -FilePath $exe -ArgumentList '--settings'
     } else {
         Start-Process -FilePath $exe -ArgumentList '--background'
     }

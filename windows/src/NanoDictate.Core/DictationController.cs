@@ -192,6 +192,7 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
     private bool _disposed;
     private bool _cancelled;
     private ulong _recordingSeq;
+    private ulong _stopClaimedSeq;
     private ulong _pendingTranscriptionSeq;
     private CancellationTokenSource? _transcriptionCts;
     private string _lastInserted = string.Empty;
@@ -221,6 +222,15 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
     public event Action<MicStartOutcome>? MicStartAttempted;
 
     public event Action<string>? Inserted;
+
+    /// <summary>Fired when a stopped recording enters Processing (STT owns the cycle).</summary>
+    public event Action<ulong>? ProcessingStarted;
+
+    /// <summary>Fired on Escape/terminal cancel, independent of a settling Rust owner.</summary>
+    public event Action? Cancelled;
+
+    /// <summary>Same terminal cancel with the recording id, for stale-event filtering.</summary>
+    public event Action<ulong>? CancelledWithRecordingId;
 
     /// <summary>
     /// Capture-stop callback: receives the stopped recording for
@@ -377,6 +387,18 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
 
     private void StopAndAwaitTranscript()
     {
+        lock (_gate)
+        {
+            // Auto-stop and a user double-Alt can both observe Recording
+            // while WASAPI teardown runs. Only one caller may stop this
+            // recording; a losing caller must not cancel the winner's
+            // transcription by failing a second Stop.
+            if (_stopClaimedSeq == _recordingSeq && _recordingSeq != 0)
+            {
+                return;
+            }
+            _stopClaimedSeq = _recordingSeq;
+        }
         PipelineStopResult result;
         try
         {
@@ -384,7 +406,7 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
         }
         catch
         {
-            _capture.Cancel();
+            CancelCurrent();
             throw;
         }
         var handler = StopTranscriptionHandler;
@@ -407,6 +429,9 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
                 _pendingTranscriptionSeq = _recordingSeq;
                 sessionId = _pendingTranscriptionSeq;
             }
+            // Native presentation gets its own completion event: the HUD
+            // must enter Processing on stop, not by inferring Rust state.
+            ProcessingStarted?.Invoke(sessionId);
             var samples = result.Samples;
             _ = Task.Run(() => handler(samples, token, sessionId));
         }
@@ -445,7 +470,25 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
         }
         if (ReviewBeforeInsert)
         {
-            var line = ReviewPrompt?.Ask(transcript) ?? "y";
+            // An explicitly enabled review requirement must never be silently
+            // auto-approved when no review UI could be shown. Missing or
+            // failing prompts are fail-closed: finish the session, insert
+            // nothing, and let the caller surface the outcome.
+            var prompt = ReviewPrompt;
+            if (prompt is null)
+            {
+                FinishTranscriptionIfCurrent(recordingId);
+                return false;
+            }
+            string? line;
+            try
+            {
+                line = prompt.Ask(transcript);
+            }
+            catch
+            {
+                line = null;
+            }
             // The prompt can block while Escape cancels recording A or a new
             // recording B starts. Re-validate under _gate before touching
             // insertion or capture state so a stale approval cannot insert
@@ -630,10 +673,44 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
     /// the delivery path completes it (when no newer recording superseded it).
     /// The cancellation flag remains authoritative for every late result.
     /// </summary>
-    public void CancelCurrent()
+    public void CancelCurrent() => CancelCore(0, requireActive: false);
+
+    /// <summary>
+    /// Cancels <paramref name="recordingId"/> only when it is still the
+    /// controller's active recording. The identity check, the cancellation
+    /// claim, the capture transition, and the capture teardown all run under
+    /// <c>_gate</c> — the same gate used by recording start and the delivery
+    /// commit — so a committed delivery or a replacement recording is never
+    /// cancelled by a late watchdog. Returns false when the recording already
+    /// completed or a newer recording owns the controller.
+    /// </summary>
+    public bool TryCancelRecording(ulong recordingId)
     {
+        if (recordingId == 0)
+        {
+            return false;
+        }
+        return CancelCore(recordingId, requireActive: true);
+    }
+
+    private bool CancelCore(ulong recordingId, bool requireActive)
+    {
+        bool wasActive;
+        ulong cancelledRecordingId;
         lock (_gate)
         {
+            if (recordingId != 0 && recordingId != _recordingSeq)
+            {
+                return false;
+            }
+            wasActive = _capture.State != DictationState.Idle;
+            if (requireActive && !wasActive)
+            {
+                // The delivery already committed (or the session otherwise
+                // ended); a watchdog must not turn it into a timeout.
+                return false;
+            }
+            cancelledRecordingId = _recordingSeq;
             _cancelled = true;
             _pendingEnter = false;
             // Cancel any pending transcription so its late result cannot
@@ -667,17 +744,29 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
             {
                 // Best effort: the cancelled flag still drops late results.
             }
+            // Latch, scheduled Enter, and capture teardown are scoped to this
+            // claim: running them under _gate prevents a replacement recording
+            // from starting between the identity check and the side effects.
+            _enterLatch.Cancel();
+            _enterPoster.Cancel();
+            try
+            {
+                _capture.Cancel();
+            }
+            catch
+            {
+                // Best effort: the cancelled flag is authoritative for late STT.
+            }
         }
-        _enterLatch.Cancel();
-        _enterPoster.Cancel();
-        try
+        if (wasActive)
         {
-            _capture.Cancel();
+            // Terminal HUD event: it is bounded independently of a Rust
+            // session that may still be Transcribing while rollback settles.
+            // The id lets the HUD ignore a cancel that raced a newer recording.
+            Cancelled?.Invoke();
+            CancelledWithRecordingId?.Invoke(cancelledRecordingId);
         }
-        catch
-        {
-            // Best effort: the cancelled flag is authoritative for late STT.
-        }
+        return true;
     }
 
     private bool IsCancelled()
@@ -761,6 +850,18 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
     }
 
     public bool OverlayShouldHide() => RustTextPolicy.OverlayShouldHide(_capture.State);
+
+    /// <summary>True after Escape/user cancel until the next cycle starts.</summary>
+    public bool IsCancelRequested
+    {
+        get { lock (_gate) { return _cancelled; } }
+    }
+
+    /// <summary>Current recording sequence, used to scope native presentation events.</summary>
+    public ulong CurrentRecordingId
+    {
+        get { lock (_gate) { return _recordingSeq; } }
+    }
 
     public void Dispose()
     {

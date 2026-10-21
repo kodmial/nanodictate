@@ -58,6 +58,8 @@ public sealed class GlobalHotkeyService : IDisposable
     private const int WmSyskeydown = 0x0104;
     private const int WmKeyup = 0x0101;
     private const int WmSyskeyup = 0x0105;
+    private const uint WmQuit = 0x0012;
+    private const uint PmNoRemove = 0x0000;
 
     private readonly object _gate = new();
     private DoubleAltDetector _detector;
@@ -70,6 +72,11 @@ public sealed class GlobalHotkeyService : IDisposable
     private IntPtr _hookId = IntPtr.Zero;
     private LowLevelKeyboardProc? _proc;
     private int _hookFailures;
+    private Thread? _hookThread;
+    private uint _hookThreadId;
+    private ManualResetEventSlim? _hookReady;
+    private Exception? _hookStartError;
+    private bool _stopRequested;
 
     // Per-key down-state for autorepeat detection: KBDLLHOOKSTRUCT.flags has
     // no repeat bit (0x4000 belongs to WM_KEYDOWN lParam, which a low-level
@@ -270,23 +277,142 @@ public sealed class GlobalHotkeyService : IDisposable
         {
             throw new PlatformNotSupportedException("Global hotkeys require Windows (WH_KEYBOARD_LL).");
         }
+        ManualResetEventSlim ready;
+        Thread thread;
         lock (_gate)
         {
             ThrowIfDisposed();
-            if (_hookId != IntPtr.Zero)
+            if (_hookThread is not null)
             {
-                return;
+                if (_hookThread.IsAlive)
+                {
+                    return;
+                }
+                _hookReady?.Dispose();
+                _hookReady = null;
+                _hookThreadId = 0;
+                _hookThread = null;
             }
+            _stopRequested = false;
+            _hookStartError = null;
+            _hookThreadId = 0;
+            lock (_downKeys)
+            {
+                _downKeys.Clear();
+            }
+            ready = new ManualResetEventSlim(false);
+            _hookReady = ready;
+            thread = new Thread(HookThreadMain)
+            {
+                IsBackground = true,
+                Name = "NanoDictate keyboard hook",
+            };
+            _hookThread = thread;
+            thread.Start();
+        }
+
+        // The installing thread must own a real Win32 message pump: Windows
+        // delivers WH_KEYBOARD_LL callbacks to that thread. Waiting here keeps
+        // construction deterministic for callers (App and console host).
+        if (!ready.Wait(TimeSpan.FromSeconds(5)))
+        {
+            Stop();
+            throw new NanoException(-1, "Timed out starting the global keyboard hook message loop.");
+        }
+        Exception? failure;
+        lock (_gate)
+        {
+            failure = _hookStartError;
+        }
+        if (failure is not null)
+        {
+            Stop();
+            if (failure is NanoException nano)
+            {
+                throw nano;
+            }
+            throw new NanoException(-1, $"Failed to start the global keyboard hook: {failure.Message}");
+        }
+    }
+
+    private void HookThreadMain()
+    {
+        var ready = _hookReady;
+        IntPtr hook = IntPtr.Zero;
+        try
+        {
+            _hookThreadId = GetCurrentThreadId();
+            // Force creation of the thread message queue before installing;
+            // PostThreadMessage(WM_QUIT) must work even during immediate stop.
+            _ = PeekMessage(out _, IntPtr.Zero, 0, 0, PmNoRemove);
             _proc = HookCallback;
             var module = GetModuleHandle(null);
-            var id = SetWindowsHookEx(WhKeyboardLl, _proc, module, 0);
-            if (id == IntPtr.Zero)
+            hook = SetWindowsHookEx(WhKeyboardLl, _proc, module, 0);
+            if (hook == IntPtr.Zero)
             {
                 Interlocked.Increment(ref _hookFailures);
                 var error = Marshal.GetLastWin32Error();
-                throw new NanoException(error, $"Failed to install the global keyboard hook (Win32 error {error}). Restart the app; if it persists, check that no security software blocks low-level keyboard hooks.");
+                _hookStartError = new NanoException(error, $"Failed to install the global keyboard hook (Win32 error {error}). Restart the app; if it persists, check that no security software blocks low-level keyboard hooks.");
             }
-            _hookId = id;
+            else
+            {
+                lock (_gate)
+                {
+                    _hookId = hook;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _hookStartError = ex;
+            Interlocked.Increment(ref _hookFailures);
+        }
+        finally
+        {
+            ready?.Set();
+        }
+
+        if (hook == IntPtr.Zero)
+        {
+            return;
+        }
+
+        bool stopRequested;
+        lock (_gate)
+        {
+            stopRequested = _stopRequested;
+        }
+        if (stopRequested)
+        {
+            lock (_gate)
+            {
+                if (_hookId == hook)
+                {
+                    _hookId = IntPtr.Zero;
+                }
+            }
+            UnhookWindowsHookEx(hook);
+            return;
+        }
+
+        try
+        {
+            // Blocks until Stop posts WM_QUIT. The hook callback is delivered
+            // on this same thread while a message is being retrieved.
+            while (GetMessage(out _, IntPtr.Zero, 0, 0) > 0)
+            {
+            }
+        }
+        finally
+        {
+            lock (_gate)
+            {
+                if (_hookId == hook)
+                {
+                    _hookId = IntPtr.Zero;
+                }
+            }
+            UnhookWindowsHookEx(hook);
         }
     }
 
@@ -300,38 +426,37 @@ public sealed class GlobalHotkeyService : IDisposable
         {
             throw new PlatformNotSupportedException("Global hotkeys require Windows (WH_KEYBOARD_LL).");
         }
-        lock (_gate)
-        {
-            ThrowIfDisposed();
-            if (_hookId != IntPtr.Zero)
-            {
-                UnhookWindowsHookEx(_hookId);
-                _hookId = IntPtr.Zero;
-            }
-            _proc = HookCallback;
-            var module = GetModuleHandle(null);
-            var id = SetWindowsHookEx(WhKeyboardLl, _proc, module, 0);
-            if (id == IntPtr.Zero)
-            {
-                Interlocked.Increment(ref _hookFailures);
-                var error = Marshal.GetLastWin32Error();
-                throw new NanoException(error, $"Failed to reinstall the global keyboard hook (Win32 error {error}).");
-            }
-            _hookId = id;
-        }
+        Stop();
+        Start();
     }
 
     public void Stop()
     {
+        Thread? thread;
+        uint threadId;
         lock (_gate)
         {
             CancelExpiryLocked();
             _detector.CancelPendingTap();
-            if (_hookId != IntPtr.Zero && OperatingSystem.IsWindows())
-            {
-                UnhookWindowsHookEx(_hookId);
-            }
+            thread = _hookThread;
+            threadId = _hookThreadId;
+            _stopRequested = true;
+        }
+        if (thread is not null && OperatingSystem.IsWindows() && threadId != 0)
+        {
+            _ = PostThreadMessage(threadId, WmQuit, IntPtr.Zero, IntPtr.Zero);
+        }
+        if (thread is not null && thread != Thread.CurrentThread)
+        {
+            thread.Join(TimeSpan.FromSeconds(2));
+        }
+        lock (_gate)
+        {
+            _hookThread = null;
+            _hookThreadId = 0;
             _hookId = IntPtr.Zero;
+            _hookReady?.Dispose();
+            _hookReady = null;
         }
     }
 
@@ -473,13 +598,8 @@ public sealed class GlobalHotkeyService : IDisposable
                 return;
             }
             _disposed = true;
-            CancelExpiryLocked();
-            if (_hookId != IntPtr.Zero && OperatingSystem.IsWindows())
-            {
-                UnhookWindowsHookEx(_hookId);
-            }
-            _hookId = IntPtr.Zero;
         }
+        Stop();
         try
         {
             _dispatchCts.Cancel();
@@ -519,4 +639,28 @@ public sealed class GlobalHotkeyService : IDisposable
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr GetModuleHandle(string? lpModuleName);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Msg
+    {
+        public IntPtr Hwnd;
+        public uint Message;
+        public UIntPtr WParam;
+        public IntPtr LParam;
+        public uint Time;
+        public int PointX;
+        public int PointY;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern int GetMessage(out Msg lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool PostThreadMessage(uint idThread, uint msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool PeekMessage(out Msg lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax, uint wRemoveMsg);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
 }

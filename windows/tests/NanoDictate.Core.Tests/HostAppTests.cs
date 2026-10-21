@@ -84,6 +84,33 @@ public sealed class HostAppTests
     }
 
     [Fact]
+    public void UnknownActiveProviderFallsBackToFirstConfiguredProvider()
+    {
+        var config = new PortableConfig
+        {
+            ActiveProvider = "missing",
+            Providers = new[]
+            {
+                new ProviderEntry("a", "A", string.Empty, string.Empty),
+                new ProviderEntry("b", "B", string.Empty, string.Empty),
+            },
+        };
+        using var app = new HostApp(config, new FakeSource(), new FakeInsertions(), new FakeTransport(), _ => string.Empty);
+        Assert.Equal("a", app.ActiveProviderId);
+        Assert.Equal("A", app.SessionLabel.Provider);
+    }
+
+    [Fact]
+    public void EmptyProviderConfigurationPreservesStartup()
+    {
+        var config = new PortableConfig();
+        using var app = new HostApp(config, new FakeSource(), new FakeInsertions(), new FakeTransport(), _ => string.Empty);
+        using var coordinator = new HudCoordinator(app, useTimer: false);
+        Assert.False(string.IsNullOrWhiteSpace(app.SessionLabel.Provider));
+        Assert.Equal("NanoDictate", coordinator.Snapshot.Provider);
+    }
+
+    [Fact]
     public void SelectProviderPersistsActiveSelection()
     {
         var config = new PortableConfig
@@ -163,6 +190,111 @@ public sealed class HostAppTests
     }
 
     [Fact]
+    public void SelectProviderSynchronizesActiveProviderForDefaultApiKeyResolution()
+    {
+        var config = new PortableConfig
+        {
+            ActiveProvider = "a",
+            Providers = new[]
+            {
+                new ProviderEntry("a", "A", string.Empty, string.Empty),
+                new ProviderEntry("b", "B", string.Empty, string.Empty),
+            },
+        };
+        var previousKey = Environment.GetEnvironmentVariable("NANODICTATE_API_KEY");
+        try
+        {
+            Environment.SetEnvironmentVariable("NANODICTATE_API_KEY", "env-key");
+            using var app = new HostApp(config, new FakeSource(), new FakeInsertions(), new FakeTransport());
+            app.SelectProvider("b");
+            Assert.Equal("b", config.ActiveProvider);
+            Assert.Equal("env-key", HostApp.ResolveApiKey("b", config));
+            Assert.Equal(string.Empty, HostApp.ResolveApiKey("a", config));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NANODICTATE_API_KEY", previousKey);
+        }
+    }
+
+    [Fact]
+    public void OmittedActiveProviderScopesEnvironmentKeyToFirstProvider()
+    {
+        var config = new PortableConfig
+        {
+            ActiveProvider = string.Empty,
+            Providers = new[]
+            {
+                new ProviderEntry("a", "A", string.Empty, string.Empty),
+                new ProviderEntry("b", "B", string.Empty, string.Empty),
+            },
+        };
+        var previousKey = Environment.GetEnvironmentVariable("NANODICTATE_API_KEY");
+        try
+        {
+            Environment.SetEnvironmentVariable("NANODICTATE_API_KEY", "env-key");
+            using var app = new HostApp(config, new FakeSource(), new FakeInsertions(), new FakeTransport());
+            Assert.Equal(string.Empty, config.ActiveProvider);
+            Assert.Equal("a", app.Catalog.Active().Id);
+            Assert.Equal("env-key", HostApp.ResolveApiKey("a", config));
+            Assert.Equal(string.Empty, HostApp.ResolveApiKey("b", config));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NANODICTATE_API_KEY", previousKey);
+        }
+    }
+
+    [Fact]
+    public async Task ReviewEnabledWithoutPromptFailsClosed()
+    {
+        var config = new PortableConfig
+        {
+            ActiveProvider = "a",
+            ReviewBeforeInsert = true,
+            Providers = new[] { new ProviderEntry("a", "A", "https://a.test/v1/audio/transcriptions", string.Empty) },
+        };
+        var insertions = new FakeInsertions();
+        using var app = new HostApp(config, new FakeSource(), insertions, new FakeTransport(), _ => "k");
+        var deliveries = new List<DictationDelivery>();
+        app.DeliveryCompleted += deliveries.Add;
+
+        var inserted = await app.TranscribeAndDeliverAsync(
+            new short[1600], 16000, null, CancellationToken.None);
+
+        Assert.False(inserted);
+        Assert.Empty(insertions.Inserted);
+        var delivery = Assert.Single(deliveries);
+        Assert.False(delivery.Inserted);
+        Assert.Equal("hi there", delivery.Text);
+    }
+
+    [Fact]
+    public async Task ReviewPromptFailureFailsClosed()
+    {
+        var config = new PortableConfig
+        {
+            ActiveProvider = "a",
+            ReviewBeforeInsert = true,
+            Providers = new[] { new ProviderEntry("a", "A", "https://a.test/v1/audio/transcriptions", string.Empty) },
+        };
+        var insertions = new FakeInsertions();
+        using var app = new HostApp(config, new FakeSource(), insertions, new FakeTransport(), _ => "k");
+        app.Controller.ReviewPrompt = new ThrowingReviewPrompt();
+
+        var inserted = await app.TranscribeAndDeliverAsync(
+            new short[1600], 16000, null, CancellationToken.None);
+
+        Assert.False(inserted);
+        Assert.Empty(insertions.Inserted);
+    }
+
+    private sealed class ThrowingReviewPrompt : IReviewPrompt
+    {
+        public string? Ask(string text) => throw new InvalidOperationException("no UI");
+    }
+
+    [Fact]
     public void HostAppWiresStopTranscriptionHandler()
     {
         var config = new PortableConfig
@@ -205,6 +337,105 @@ public sealed class HostAppTests
         {
             File.Delete(path);
         }
+    }
+
+    [Fact]
+    public void NonChunkedWatchdogIncludesFailoverAndBackoff()
+    {
+        var config = new PortableConfig
+        {
+            Chunked = false,
+            TimeoutSeconds = 30,
+            AutoFailover = true,
+            Providers = new[]
+            {
+                new ProviderEntry("a", "A", "https://a.test/v1/audio/transcriptions", string.Empty),
+                new ProviderEntry("b", "B", "https://b.test/v1/audio/transcriptions", string.Empty),
+            },
+        };
+        var backoff = TimeSpan.FromMilliseconds(
+            NanoEngine.BackoffDelayMs(0, 500, 8000) +
+            NanoEngine.BackoffDelayMs(1, 500, 8000));
+        Assert.Equal(TimeSpan.FromSeconds(65) + backoff,
+            HostApp.InitialProcessingWatchdog(config));
+        var noFailover = new PortableConfig
+        {
+            Chunked = false,
+            TimeoutSeconds = 30,
+            AutoFailover = false,
+            Providers = config.Providers,
+        };
+        Assert.Equal(TimeSpan.FromSeconds(35) +
+            TimeSpan.FromMilliseconds(NanoEngine.BackoffDelayMs(0, 500, 8000)),
+            HostApp.InitialProcessingWatchdog(noFailover));
+    }
+
+    [Fact]
+    public void ChunkedProcessingBudgetCoversEveryPlannedRequest()
+    {
+        var config = new PortableConfig
+        {
+            Chunked = true,
+            TimeoutSeconds = 30,
+            AutoFailover = true,
+            Providers = new[]
+            {
+                new ProviderEntry("a", "A", "https://a.test/v1/audio/transcriptions", string.Empty),
+                new ProviderEntry("b", "B", "https://b.test/v1/audio/transcriptions", string.Empty),
+            },
+        };
+        const int sampleRate = 16000;
+        var samples = new short[sampleRate * 120];
+        var chunks = NanoEngine.BatchPlan(samples.Length, sampleRate, 45.0, 1.0);
+        var finalAttempts = NanoEngine.FailoverCandidateCount(config.Providers.Count, config.AutoFailover);
+
+        var budget = HostApp.ChunkedProcessingBudget(config, samples.Length, sampleRate);
+        var chunkBackoff = TimeSpan.FromMilliseconds(
+            NanoEngine.BackoffDelayMs(0, 500, 8000) * (ulong)chunks.Length);
+
+        Assert.True(chunks.Length > 1);
+        Assert.True(finalAttempts > 1);
+        Assert.Equal(
+            TimeSpan.FromSeconds(
+                config.TimeoutSeconds * (chunks.Length + finalAttempts)
+                + (finalAttempts - 1) * 8
+                + 5)
+            + chunkBackoff,
+            budget);
+        Assert.True(budget > HostApp.InitialProcessingWatchdog(config));
+    }
+
+    [Fact]
+    public void ChunkedProcessingBudgetCoversFailedChunksBeforeSuccessfulFinalPass()
+    {
+        var config = new PortableConfig
+        {
+            Chunked = true,
+            ChunkedFinalPass = ChunkedFinalPass.OnUncertainty,
+            TimeoutSeconds = 30,
+            AutoFailover = false,
+            Providers = new[]
+            {
+                new ProviderEntry("a", "A", "https://a.test/v1/audio/transcriptions", string.Empty),
+            },
+        };
+        const int sampleRate = 16000;
+        var samples = new short[sampleRate * 120];
+        var chunks = NanoEngine.BatchPlan(samples.Length, sampleRate, 45.0, 1.0);
+        var finalAttempts = NanoEngine.FailoverCandidateCount(config.Providers.Count, config.AutoFailover);
+        var perRequest = TimeSpan.FromSeconds(config.TimeoutSeconds);
+        var perChunkBackoff = TimeSpan.FromMilliseconds(NanoEngine.BackoffDelayMs(0, 500, 8000));
+
+        var budget = HostApp.ChunkedProcessingBudget(config, samples.Length, sampleRate);
+
+        // Worst valid timeline: every chunk exhausts its timeout and its
+        // retry backoff, then the final pass succeeds.
+        var validTimeline = TimeSpan.FromTicks(
+            perRequest.Ticks * (chunks.Length + finalAttempts)
+            + perChunkBackoff.Ticks * chunks.Length);
+        Assert.True(chunks.Length > 1);
+        Assert.Equal(1, finalAttempts);
+        Assert.True(budget >= validTimeline);
     }
 
     [Fact]
