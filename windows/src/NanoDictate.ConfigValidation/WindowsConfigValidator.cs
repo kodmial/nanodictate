@@ -244,12 +244,11 @@ public static class WindowsConfigValidator
             errors.Add("active_provider has no matching provider table");
             return new ConfigValidationResult(activeProvider, errors);
         }
-        if (selectedValue is not TomlTable selectedTable)
+        if (selectedValue is not TomlTable)
         {
             errors.Add("active_provider must refer to a provider table");
             return new ConfigValidationResult(activeProvider, errors);
         }
-        ValidateProviderFieldTypes(selectedTable, errors);
 
         var entry = config.Providers.FirstOrDefault(provider => provider.Id == activeProvider);
         if (entry is null)

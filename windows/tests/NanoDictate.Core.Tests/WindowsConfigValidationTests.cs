@@ -326,6 +326,25 @@ public sealed class WindowsConfigValidationTests
         AssertInvalid(config, expected);
     }
 
+    [Fact]
+    public void SelectedProviderFieldTypesAreReportedOnce()
+    {
+        var path = WriteConfig(
+            "active_provider = \"a\"\n[providers.a]\nbase_url = \"https://example.test\"\nmodel = 42\n");
+        try
+        {
+            var result = WindowsConfigValidator.ValidateFile(path);
+            Assert.False(result.IsValid);
+            Assert.Single(
+                result.Errors,
+                error => error.Contains("provider field must be a string", StringComparison.Ordinal));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     [Theory]
     [InlineData("active_provider = \"custom\"\n[providers.custom]\nmodel = \"m\"\n",
         "selected provider has no base_url and no default endpoint")]
