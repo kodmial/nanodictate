@@ -1,5 +1,7 @@
-# Canonical config. Copied to ~/.config/nanodictate/config.toml on first launch.
-# Edit user config, not this file.
+# Canonical config. Copied on first launch to:
+#   macOS:   ~/.config/nanodictate/config.toml
+#   Windows: %APPDATA%\NanoDictate\config.toml
+# Edit the user config, not this file. An existing config is never replaced.
 # Secrets: placeholders. Provider api_key/api_key_file or env NANODICTATE_API_KEY.
 # Env beats api_key_file for active provider only. Failover candidates and roles
 # keep their own api_key/api_key_file. Not written to config. Empty base_url/model = adapter defaults.

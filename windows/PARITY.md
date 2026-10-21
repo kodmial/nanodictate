@@ -42,12 +42,14 @@ clipboard, registry, paths, HUD styling, HTTP transport framing).
 
 ## Explicit platform differences
 
-- UI: macOS has a menu-bar agent plus overlay; the installed Windows
-  product (`NanoDictate.App`, Windows-only) is one WinUI 3 process with a
-  transient non-activating HUD, optional settings, and a transient review
-  prompt. The developer dashboard is gone. The console/tray host
-  (`NanoDictate.Host`) remains available for diagnostics, file
-  transcription, and headless backgrounds. The cross-platform solution
+- UI: both platforms run a background agent with a transient HUD. macOS
+  uses `NSApplicationActivationPolicy.accessory` (no menu-bar item and no
+  Dock icon); Windows runs one WinUI 3 process (`NanoDictate.App`) with a
+  non-activating HUD, optional settings, and a transient review prompt.
+  Neither ships a developer dashboard or permanent tray icon. The
+  source-built console host (`NanoDictate.Host`) provides on-demand
+  `doctor`, `providers`, `transcribe-file`, and headless `run` commands but
+  is not installed by the Windows EXE/ZIP. The cross-platform solution
   excludes the WinUI project so Linux/macOS verification never needs the
   Windows App SDK.
 - HUD presentation: both platforms consume the same #216 fixture for
@@ -69,9 +71,10 @@ clipboard, registry, paths, HUD styling, HTTP transport framing).
   mix only (macOS: AVFoundation); device change aborts the session.
 - Config/log paths: `%APPDATA%\NanoDictate\config.toml` and
   `%LOCALAPPDATA%\NanoDictate\Logs` (macOS: Application Support/Logs).
-- Startup: HKCU Run key (macOS: launchd). The WinUI process has no
-  permanent tray icon; a second launch opens optional settings only while
-  idle, and the settings window exposes Quit.
+- Startup: HKCU Run key (macOS: launchd). Logon startup, the Inno installer,
+  PowerShell and Scoop launch `NanoDictate.App.exe --background`. The WinUI
+  process has no permanent tray icon; a second launch opens optional
+  settings only while idle, and the settings window exposes Quit.
 - `cookie-relay` transport is rejected loudly on Windows (no JS-challenge
   cookie solver); use `direct`, `http`, or `gateway`.
 - Per-provider transport/proxy overrides are macOS-only. Windows uses the

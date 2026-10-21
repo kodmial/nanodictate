@@ -1,9 +1,10 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-  Reproducible Windows packaging: builds the Rust DLL, the portable host,
-  the WinUI 3 app, and stages an MSIX layout plus a portable ZIP.
-  Update/uninstall semantics are documented in windows/DISTRIBUTION.md.
+  EXPERIMENTAL/LEGACY MSIX staging helper. This is not the shipped Windows
+  install method and no signed MSIX is published. The supported release uses
+  make-release.ps1 to produce the self-contained ZIP and per-user Inno Setup
+  EXE; see windows/DISTRIBUTION.md.
 #>
 param(
   [string]$Configuration = "Release",

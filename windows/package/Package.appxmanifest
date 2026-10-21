@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- MSIX packaging manifest for the supported Windows NanoDictate release.
-     The packaging script stages this unsigned layout and fills Identity
-     Version from the passed -Version; signing/publishing is out of scope;
-     see windows/DISTRIBUTION.md. -->
+<!-- EXPERIMENTAL/LEGACY unsigned MSIX staging manifest. This is not the
+     shipped Windows release channel; no signed MSIX is published or required.
+     The supported installer is the per-user Inno Setup EXE built by
+     make-release.ps1. See windows/DISTRIBUTION.md. -->
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
