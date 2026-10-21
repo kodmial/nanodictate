@@ -17,6 +17,7 @@ $ErrorActionPreference = 'Stop'
 $repo = 'https://github.com/kodmial/nanodictate'
 $headers = @{ 'User-Agent' = 'NanoDictate-installer'; 'Accept' = 'application/vnd.github+json' }
 $manifestUrl = 'https://raw.githubusercontent.com/kodmial/nanodictate/main/bucket/nanodictate.json'
+$latestReleaseUrl = 'https://api.github.com/repos/kodmial/nanodictate/releases/latest'
 
 function Get-ManifestVersion {
     try {
@@ -34,7 +35,7 @@ function Get-LatestReleaseVersion {
     # A stale manifest must not pin users to an older release. If the public
     # API is unavailable, the manifest remains a safe fallback.
     try {
-        $release = Invoke-RestMethod -Uri "$repo/releases/latest" -Headers $headers -UseBasicParsing
+        $release = Invoke-RestMethod -Uri $latestReleaseUrl -Headers $headers -UseBasicParsing
         $tag = [string]$release.tag_name
         if ($tag -match '^v(\d+\.\d+\.\d+)$') { return $Matches[1] }
     } catch {

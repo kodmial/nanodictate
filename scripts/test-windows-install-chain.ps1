@@ -53,7 +53,7 @@ function Invoke-RestMethod {
     if ($Uri -match 'bucket/nanodictate\.json') {
         return [pscustomobject]@{ version = $script:manifest }
     }
-    if ($Uri -match '/releases/latest$') {
+    if ($Uri -eq 'https://api.github.com/repos/kodmial/nanodictate/releases/latest') {
         if (-not $script:latest) { throw 'GitHub API unavailable' }
         return [pscustomobject]@{ tag_name = "v$($script:latest)" }
     }
