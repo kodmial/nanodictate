@@ -124,6 +124,7 @@ internal static class UiaCaret
         object? elementObject = null;
         object? patternObject = null;
         object? rangesObject = null;
+        object? rangeObject = null;
         IntPtr patternPointer = IntPtr.Zero;
         try
         {
@@ -157,11 +158,25 @@ internal static class UiaCaret
             {
                 return false;
             }
+            rangeObject = range;
             if (range.GetBoundingRectangles(out var rectangles) < 0 || rectangles == IntPtr.Zero)
             {
                 return false;
             }
-            return TryReadRectangles(rectangles, out point);
+            if (TryReadRectangles(rectangles, out point))
+            {
+                return true;
+            }
+            // A collapsed caret is a degenerate range, and UIA returns no
+            // rectangle for it. The range is a copy, so expanding it to one
+            // character (TextUnit_Character = 0) does not change the user's selection.
+            if (range.ExpandToEnclosingUnit(0) < 0
+                || range.GetBoundingRectangles(out var expanded) < 0
+                || expanded == IntPtr.Zero)
+            {
+                return false;
+            }
+            return TryReadRectangles(expanded, out point);
         }
         catch
         {
@@ -174,6 +189,7 @@ internal static class UiaCaret
             {
                 Marshal.Release(patternPointer);
             }
+            Release(rangeObject);
             Release(rangesObject);
             Release(patternObject);
             Release(elementObject);
