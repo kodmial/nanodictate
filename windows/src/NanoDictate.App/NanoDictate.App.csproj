@@ -26,6 +26,8 @@
     <SelfContained>true</SelfContained>
     <PublishReadyToRun>false</PublishReadyToRun>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Never package local Mono registry telemetry state. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);.mono/**</DefaultItemExcludes>
     <Description>Windows App SDK / WinUI 3 entrypoint for NanoDictate on the shared Rust engine.</Description>
   </PropertyGroup>
 

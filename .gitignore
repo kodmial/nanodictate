@@ -55,3 +55,6 @@ __pycache__/
 windows/**/bin/
 windows/**/obj/
 windows/artifacts/
+
+# Mono registry emulation state written by local Windows tooling
+.mono/

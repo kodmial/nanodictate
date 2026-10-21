@@ -495,7 +495,7 @@ public sealed class HudContractTests
         app.DeliveryCompleted += delivery => delivered.TrySetResult(delivery);
         using var coordinator = new HudCoordinator(
             app,
-            processingWatchdog: TimeSpan.FromMilliseconds(300),
+            processingWatchdog: TimeSpan.FromSeconds(1),
             useTimer: false);
 
         app.Controller.AltDoubleTapped();
@@ -504,7 +504,7 @@ public sealed class HudContractTests
         await prompt.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
         // STT has returned and the user is reviewing: the watchdog must not
         // discard the transcript while the prompt is still open.
-        await Task.Delay(450);
+        await Task.Delay(1500);
         Assert.False(app.Controller.IsCancelRequested);
         Assert.NotEqual(HudStatusKeys.ErrorSttTimeout, coordinator.Snapshot.StatusArgumentKey);
 
@@ -536,7 +536,7 @@ public sealed class HudContractTests
         app.DeliveryCompleted += delivery => delivered.TrySetResult(delivery);
         using var coordinator = new HudCoordinator(
             app,
-            processingWatchdog: TimeSpan.FromMilliseconds(200),
+            processingWatchdog: TimeSpan.FromSeconds(1),
             useTimer: false);
 
         app.Controller.AltDoubleTapped();
@@ -546,7 +546,7 @@ public sealed class HudContractTests
         Assert.True(delivery.Inserted);
         // Let the watchdog deadline pass: a committed delivery must not be
         // reported as a timeout or cancelled.
-        await Task.Delay(300);
+        await Task.Delay(1200);
         var snapshot = coordinator.Snapshot;
         Assert.NotEqual(HudStatusKeys.ErrorSttTimeout, snapshot.StatusArgumentKey);
         Assert.Equal(HudStatusKeys.Finishing, snapshot.StatusKey);

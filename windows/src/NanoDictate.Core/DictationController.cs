@@ -192,6 +192,7 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
     private bool _disposed;
     private bool _cancelled;
     private ulong _recordingSeq;
+    private ulong _stopClaimedSeq;
     private ulong _pendingTranscriptionSeq;
     private CancellationTokenSource? _transcriptionCts;
     private string _lastInserted = string.Empty;
@@ -386,6 +387,18 @@ public sealed class DictationController : IGlobalHotkeyDelegate, IDisposable
 
     private void StopAndAwaitTranscript()
     {
+        lock (_gate)
+        {
+            // Auto-stop and a user double-Alt can both observe Recording
+            // while WASAPI teardown runs. Only one caller may stop this
+            // recording; a losing caller must not cancel the winner's
+            // transcription by failing a second Stop.
+            if (_stopClaimedSeq == _recordingSeq && _recordingSeq != 0)
+            {
+                return;
+            }
+            _stopClaimedSeq = _recordingSeq;
+        }
         PipelineStopResult result;
         try
         {
