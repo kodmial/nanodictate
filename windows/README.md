@@ -3,20 +3,21 @@
 Native Windows product for NanoDictate on the **same production Rust
 core used by macOS** (`rust/nanodictate-core` through its stable C ABI).
 
-This stage adds the core interaction model around the capture pipeline
-from the previous stage: global double-Alt activation with false-trigger
-protection and hook recovery, Escape cancellation and Return/Enter
-workflow, microphone/privacy failure handling with settings guidance,
-direct Unicode insertion (SendInput KEYEVENTF_UNICODE) plus clipboard
-mode with restore, chunked insertion, undo, synthetic Enter, and
-startup/background/tray/process lifecycle with Windows config/log
-locations. All policy decisions (session readiness, VAD/gain/auto-stop,
+The installed product is one WinUI 3 process: a non-activating transient
+microphone HUD, optional settings, and a transient review prompt, with no
+developer dashboard. Global double-Alt activation includes false-trigger
+protection and hook recovery; Escape cancels and Return/Enter follows the
+shared session contract. Microphone/privacy guidance, direct Unicode
+insertion (SendInput KEYEVENTF_UNICODE), clipboard insertion with restore,
+chunked insertion, undo, synthetic Enter, single-instance startup, and
+Windows config/log paths come from the same composition as before.
+
+All policy decisions (session readiness, VAD/gain/auto-stop,
 failover/backoff, word diff, text join, review, retry/overlay/mic-request
 gates, STT profile resolution) stay in Rust; C# provides Windows-native
-I/O and capabilities. This is the supported product stage: transcription
-wiring (normal/chunked/realtime), provider/model selection and routing,
-retry/failover, review-before-insert, diagnostics, proxy/transport modes,
-WinUI 3 entrypoint, reproducible packaging, and release CI.
+I/O, presentation, and capabilities. The HUD consumes the shared #216
+fixture contract (`Tests/Fixtures/HUD/hud-contract-v1.json`) rather than
+forking timing or meter behavior.
 
 
 ## Install and update without developer tools
@@ -41,8 +42,8 @@ pipeline completes successfully.
 windows/
   NanoDictate.sln              # portable: Core + Host + Smoke + Tests (net8.0, any OS)
   src/NanoDictate.Core/        # thin P/Invoke adapter + Windows-native I/O, no product logic
-  src/NanoDictate.Host/        # supported console/tray product host (run/doctor/transcribe-file/providers)
-  src/NanoDictate.App/         # Windows-only WinUI 3 entrypoint (built on windows-latest only)
+  src/NanoDictate.App/         # installed WinUI 3 HUD + optional settings (windows-latest only)
+  src/NanoDictate.Host/        # console/tray host (run/doctor/transcribe-file/providers)
   src/NanoDictate.Smoke/       # minimal executable smoke path
   tests/NanoDictate.Core.Tests/  # xUnit ABI/ownership/error/session/capture/host/transcription tests
   package/                     # MSIX manifest + make-msix.ps1 reproducible packaging
@@ -141,12 +142,25 @@ no Rust algorithm is forked in C#.
 
 ## Host capabilities (this stage)
 
+- **Native HUD** (`HudWindow`, `HudCoordinator`, `HudPresentation`):
+  WinUI renders only the shared contract phases (`starting`, `recording`,
+  `processing`, terminal status). Starting is deferred 0.12 s; Recording and
+  the `m:ss` timer begin at the first valid engine block, not at
+  `MicStartAttempted.Started`. Meter ticks and terminal hides are
+  generation/cycle checked, so a stale hide or late callback cannot dismiss
+  a new dictation. The window is topmost, click-through, absent from
+  Alt-Tab/taskbar, and shown without activation; placement follows the UIA
+  text caret → native caret → pointer → screen center with DPI/multi-monitor
+  clamping. System light/dark/high-contrast colors and Reduce Motion are
+  applied without changing the shared HUD contract.
 - **Activation** (`GlobalHotkeyService` + `DoubleAltDetector`): WH_KEYBOARD_LL
-  hook; only Alt key codes count as taps; any other key/modifier cancels the
-  pending first tap; held-key repeat never counts; pending expiry fires
-  `AltPendingCancelled`; hook install/reinstall failures throw loudly and
-  `Recover()` reinstalls after silent removal. Off Windows, `Start`
-  throws `PlatformNotSupportedException` (never a silent no-op).
+  hook installed on a dedicated message-loop thread (the WinUI thread is no
+  longer a message-pump prerequisite for the console host); only Alt key codes
+  count as taps; any other key/modifier cancels the pending first tap;
+  held-key repeat never counts; pending expiry fires `AltPendingCancelled`;
+  hook install/reinstall failures throw loudly and `Recover()` reinstalls
+  after silent removal. Off Windows, `Start` throws
+  `PlatformNotSupportedException` (never a silent no-op).
 - **Cancel/Enter** (`DictationController` as `IGlobalHotkeyDelegate`):
   Escape cancels capture, the Enter latch, and any scheduled Enter; Return
   arms the Rust latch (`LatchHandle`) in Recording and stops, no-ops in
@@ -175,11 +189,14 @@ no Rust algorithm is forked in C#.
   Enter-stop posts exactly one synthetic Enter 0.25 s after insertion;
   Escape cancels the scheduled post. Word-diff/text-join/review/retry/
   overlay choices all come from Rust (`RustTextPolicy`/`NanoEngine`).
-- **Lifecycle + paths** (`HostLifecycle`, `StartupManager`, `WindowsPaths`):
-  global-mutex single instance, Run-key startup registration, tray status
-  behind `ITrayIcon`, Ctrl+C shutdown; `%APPDATA%\NanoDictate\config.toml`
-  and `%LOCALAPPDATA%\NanoDictate\Logs` (macOS uses
-  `~/Library/Application Support` + `~/.config`; never mixed silently).
+- **Lifecycle + paths** (`SingleInstance`, `StartupManager`, `WindowsPaths`):
+  global-mutex single instance, Run-key startup registration, Ctrl+C shutdown
+  in the console host; `%APPDATA%\NanoDictate\config.toml` and
+  `%LOCALAPPDATA%\NanoDictate\Logs` (macOS uses
+  `~/Library/Application Support` + `~/.config`; never mixed silently). A
+  second WinUI launch signals the running process, which opens optional
+  settings only while dictation is idle; it never installs a second hook or
+  takes over an active recording.
 - **Config** (`PortableConfig`): carries `insert_method` (`cgevent` maps to
   Direct on Windows), `double_alt_max_interval`, `undo_max_interval`, and
   `review_before_insert`; every policy still resolves through Rust.

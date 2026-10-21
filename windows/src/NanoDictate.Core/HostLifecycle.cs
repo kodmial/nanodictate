@@ -64,11 +64,12 @@ public sealed class SingleInstance : IDisposable
 }
 
 /// <summary>
-/// Startup registration (Run key) and background/tray/process lifecycle.
+/// Startup registration (Run key) and background/process lifecycle.
 /// Platform difference (explicit): macOS uses launchd; Windows uses
-/// HKCU\...\Run plus a tray icon. Registry access is Windows-only and fails
-/// loudly elsewhere; tray rendering stays behind <see cref="ITrayIcon"/> so
-/// headless tests never need WinForms.
+/// HKCU\...\Run. The tray abstraction remains for the optional console host;
+/// the installed WinUI product has no permanent tray icon. Registry access is
+/// Windows-only and fails loudly elsewhere; tray rendering stays behind
+/// <see cref="ITrayIcon"/> so headless tests never need WinForms.
 /// </summary>
 public static class StartupManager
 {

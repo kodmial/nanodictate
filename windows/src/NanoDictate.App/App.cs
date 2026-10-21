@@ -1,99 +1,313 @@
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Controls;
 using NanoDictate.Core;
 
 namespace NanoDictate.App;
 
 /// <summary>
-/// WinUI 3 application entrypoint. Owns no product policy: it composes the
-/// same <see cref="HostApp"/> as the console host (shared Rust engine plus
-/// Windows-native capture/insertion) and surfaces status, provider/model
-/// selection, review-before-insert, and diagnostics through native controls.
+/// Single installed WinUI process. It owns the shared Rust engine plus the
+/// Windows capture/insertion/hotkey adapters, and presents only a transient
+/// microphone HUD (plus optional settings and a transient review prompt).
+/// There is no developer dashboard or second executable in normal use.
 /// </summary>
-public sealed partial class MainWindow : Window
+public sealed partial class App : Application
 {
-    private readonly PortableConfig _config;
-    private readonly HostApp _app;
-    private readonly GlobalHotkeyService _hotkeys;
-    private bool _exiting;
+    private const string ShowWindowEvent = @"Local\NanoDictateShowWindow";
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern int MessageBoxW(IntPtr hWnd, string text, string caption, uint type);
+
+    private SingleInstance? _instance;
+    private HostApp? _app;
+    private GlobalHotkeyService? _hotkeys;
+    private HudCoordinator? _coordinator;
+    private HudWindow? _hud;
+    private SettingsWindow? _settings;
+    private WindowReviewPrompt? _reviewPrompt;
+    private DispatcherQueueTimer? _timer;
+    private EventWaitHandle? _showWindowSignal;
+    private CancellationTokenSource? _showWindowCancellation;
+    private string _configPath = string.Empty;
     private bool _micPrivacyOpened;
-    private readonly TextBlock _status;
-    private readonly ComboBox _providers;
-    private readonly CheckBox _review;
+    private bool _quitting;
 
-    public MainWindow()
+    public App()
     {
-        Title = "NanoDictate";
-        _config = PortableConfig.Load(ResolveConfig());
-        var insertions = new InsertionSinkAdapter(
-            new TextInserter(new WindowsInputSender()),
-            new ClipboardInsertService(new WindowsClipboardBridge()));
-        _app = new HostApp(_config, new WasapiCaptureSource(), insertions);
-
-        var panel = new StackPanel { Spacing = 8, Padding = new Thickness(16) };
-        _status = new TextBlock { Text = "idle" };
-        _providers = new ComboBox { Header = "Provider" };
-        var providers = _app.ListProviders();
-        foreach (var (id, name, isActive) in providers)
-        {
-            _providers.Items.Add($"{name} ({id})");
-            if (isActive)
-            {
-                _providers.SelectedIndex = _providers.Items.Count - 1;
-            }
-        }
-        _providers.SelectionChanged += (_, _) =>
-        {
-            var index = _providers.SelectedIndex;
-            if (index >= 0 && index < providers.Count) { _app.SelectProvider(providers[index].Id); }
-        };
-        _review = new CheckBox { Content = "Review before insert", IsChecked = _config.ReviewBeforeInsert };
-        _review.Checked += (_, _) => _app.Controller.ReviewBeforeInsert = true;
-        _review.Unchecked += (_, _) => _app.Controller.ReviewBeforeInsert = false;
-        var doctor = new Button { Content = "Run diagnostics" };
-        doctor.Click += (_, _) => ShowDiagnostics();
-        panel.Children.Add(_status);
-        panel.Children.Add(_providers);
-        panel.Children.Add(_review);
-        panel.Children.Add(doctor);
-        var exit = new Button { Content = "Exit NanoDictate" };
-        exit.Click += (_, _) => { _exiting = true; Close(); };
-        panel.Children.Add(exit);
-        Content = panel;
-        _app.Controller.ReviewPrompt = new WindowReviewPrompt(DispatcherQueue, panel);
-        _app.Controller.MicStartAttempted += outcome => DispatcherQueue.TryEnqueue(() =>
-        {
-            _status.Text = outcome.Started ? "recording" : $"microphone: {outcome.Guidance ?? "unavailable"}";
-            if (!outcome.Started && outcome.Failure == MicFailureKind.Denied && !_micPrivacyOpened)
-            {
-                // Unpackaged Windows desktop apps use the OS-wide desktop-app
-                // microphone privacy switch, not a per-app consent broker.
-                // Open the exact privacy page once so consent is the only
-                // action requested of a user who has disabled microphone access.
-                _micPrivacyOpened = true;
-                try { MicPrivacyGuide.OpenSettings(); }
-                catch (Exception ex) { _status.Text = $"Enable microphone access in Windows Settings: {ex.Message}"; }
-            }
-        });
-        _app.Controller.Inserted += _ => DispatcherQueue.TryEnqueue(() => _status.Text = "inserted");
-        _hotkeys = new GlobalHotkeyService(_config.DoubleAltMaxInterval) { Delegate = _app.Controller };
-        // Closing the window hides it; dictation remains active until Exit is selected.
-        AppWindow.Closing += (_, args) =>
-        {
-            if (!_exiting)
-            {
-                args.Cancel = true;
-                AppWindow.Hide();
-            }
-        };
-        Closed += (_, _) => { _hotkeys.Dispose(); _app.Dispose(); };
-        _hotkeys.Start();
+        UnhandledException += (_, e) => System.Diagnostics.Debug.WriteLine(e.Message);
     }
 
-    private void ShowDiagnostics()
+    protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
-        var checks = WindowsDiagnostics.Run(ResolveConfig());
-        _status.Text = WindowsDiagnostics.AllPassed(checks) ? "diagnostics: ok" : "diagnostics: FAIL";
+        var commandLine = Environment.GetCommandLineArgs().Skip(1).ToArray();
+        var wantsSettings = commandLine.Any(a =>
+            string.Equals(a, "--settings", StringComparison.OrdinalIgnoreCase));
+
+        _instance = new SingleInstance();
+        if (!_instance.IsFirst)
+        {
+            // Updates/logon start with --background and must stay silent. An
+            // explicit --settings launch or a plain relaunch is the user's
+            // on-demand route to the optional settings window.
+            if (wantsSettings || commandLine.Length == 0)
+            {
+                SignalExistingInstance();
+            }
+            _instance.Dispose();
+            _instance = null;
+            Exit();
+            return;
+        }
+
+        try
+        {
+            // Create the relaunch signal before the heavier composition so a
+            // second launch racing startup can still reach this process.
+            _showWindowSignal = new EventWaitHandle(false, EventResetMode.AutoReset, ShowWindowEvent);
+            _showWindowCancellation = new CancellationTokenSource();
+            NanoEngine.CheckAvailable();
+            _configPath = ResolveConfig();
+            var config = PortableConfig.Load(_configPath);
+            config.NormalizeProviderSelection();
+            var insertions = new InsertionSinkAdapter(
+                new TextInserter(new WindowsInputSender()),
+                new ClipboardInsertService(new WindowsClipboardBridge()));
+
+            _app = new HostApp(config, new WasapiCaptureSource(), insertions);
+            _hud = new HudWindow();
+            _coordinator = new HudCoordinator(
+                _app,
+                processingWatchdog: HostApp.InitialProcessingWatchdog(config),
+                clock: null,
+                useTimer: false,
+                reduceMotion: ReadReduceMotion());
+            _coordinator.SnapshotChanged += OnSnapshotChanged;
+            _reviewPrompt = new WindowReviewPrompt(_hud.DispatcherQueue);
+            _app.Controller.ReviewPrompt = _reviewPrompt;
+            _app.Controller.MicStartAttempted += OnMicStartAttempted;
+            _app.Controller.CancelledWithRecordingId += id =>
+            {
+                if (id == _app.Controller.CurrentRecordingId)
+                {
+                    _reviewPrompt.Cancel();
+                }
+            };
+
+            _hotkeys = new GlobalHotkeyService(config.DoubleAltMaxInterval) { Delegate = _app.Controller };
+            _hotkeys.Start();
+
+            _timer = _hud.DispatcherQueue.CreateTimer();
+            _timer.Interval = TimeSpan.FromMilliseconds(50);
+            _timer.Tick += (_, _) => _coordinator?.Tick();
+            _timer.Start();
+
+            _hud.Closed += (_, _) => Quit();
+            StartSecondLaunchListener();
+
+            // The installed app is a quiet background agent. Settings is
+            // never a mandatory first-run window: the shortcut passes
+            // --settings, and a second launch while idle opens it on demand.
+            if (wantsSettings)
+            {
+                ShowSettingsIfIdle();
+            }
+        }
+        catch (Exception ex)
+        {
+            _quitting = true;
+            _timer?.Stop();
+            _hotkeys?.Dispose();
+            _coordinator?.Dispose();
+            try
+            {
+                _hud?.CloseForShutdown();
+            }
+            catch
+            {
+            }
+            _app?.Dispose();
+            Cleanup();
+            try
+            {
+                _ = MessageBoxW(
+                    IntPtr.Zero,
+                    $"NanoDictate could not start:\n{ex.Message}",
+                    "NanoDictate",
+                    0x10);
+            }
+            catch
+            {
+                // Reporting the startup failure must never replace it.
+            }
+            throw;
+        }
+    }
+
+    private void OnSnapshotChanged()
+    {
+        var hud = _hud;
+        var coordinator = _coordinator;
+        if (hud is null || coordinator is null)
+        {
+            return;
+        }
+        if (hud.DispatcherQueue.HasThreadAccess)
+        {
+            hud.Apply(coordinator.Snapshot);
+        }
+        else
+        {
+            // Read the current snapshot on the UI thread: an earlier queued
+            // signal must never paint state that has already been superseded.
+            hud.DispatcherQueue.TryEnqueue(() => hud.Apply(coordinator.Snapshot));
+        }
+    }
+
+    private void OnMicStartAttempted(MicStartOutcome outcome)
+    {
+        if (outcome.Started)
+        {
+            _reviewPrompt?.Cancel();
+            return;
+        }
+        if (outcome.Failure != MicFailureKind.Denied || _micPrivacyOpened)
+        {
+            return;
+        }
+        // Unpackaged desktop apps use the OS-wide microphone privacy switch,
+        // not a per-app consent broker. Open the exact page once; the HUD
+        // already surfaces the bounded microphone error.
+        _micPrivacyOpened = true;
+        _hud?.DispatcherQueue.TryEnqueue(() =>
+        {
+            try
+            {
+                MicPrivacyGuide.OpenSettings();
+            }
+            catch
+            {
+                // The HUD remains the source of truth if Settings cannot open.
+            }
+        });
+    }
+
+    private void StartSecondLaunchListener()
+    {
+        var signal = _showWindowSignal
+            ?? throw new InvalidOperationException("Relaunch signal unavailable");
+        var cancellation = _showWindowCancellation?.Token
+            ?? throw new InvalidOperationException("Relaunch signal unavailable");
+        var dispatcher = _hud?.DispatcherQueue
+            ?? throw new InvalidOperationException("HUD dispatcher unavailable");
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    if (signal.WaitOne(500))
+                    {
+                        // A second launch never hijacks an active recording or
+                        // transcription; it only reveals optional settings.
+                        dispatcher.TryEnqueue(ShowSettingsIfIdle);
+                    }
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        });
+    }
+
+    private void SignalExistingInstance()
+    {
+        // The first process may still be between claiming the mutex and
+        // creating the event; give it a short window instead of dropping an
+        // explicit relaunch.
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            try
+            {
+                using var signal = EventWaitHandle.OpenExisting(ShowWindowEvent);
+                signal.Set();
+                return;
+            }
+            catch (WaitHandleCannotBeOpenedException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return;
+            }
+            Thread.Sleep(50);
+        }
+    }
+
+    private void ShowSettingsIfIdle()
+    {
+        if (_quitting || _app is null)
+        {
+            return;
+        }
+        if (_app.Controller.State != DictationState.Idle)
+        {
+            return;
+        }
+        if (_settings is null)
+        {
+            var settings = new SettingsWindow(
+                _app,
+                _configPath,
+                changed: () => _coordinator?.RefreshLabel(),
+                exit: Quit);
+            settings.Closed += (_, _) => _settings = null;
+            _settings = settings;
+        }
+        _settings.Open();
+    }
+
+    private void Quit()
+    {
+        if (_quitting)
+        {
+            return;
+        }
+        _quitting = true;
+        _timer?.Stop();
+        _hotkeys?.Dispose();
+        _hotkeys = null;
+        _coordinator?.Dispose();
+        _coordinator = null;
+        _settings?.Close();
+        _settings = null;
+        _hud?.CloseForShutdown();
+        _hud = null;
+        _app?.Dispose();
+        _app = null;
+        Cleanup();
+        Exit();
+    }
+
+    private void Cleanup()
+    {
+        _showWindowCancellation?.Cancel();
+        _showWindowSignal?.Dispose();
+        _showWindowSignal = null;
+        _showWindowCancellation?.Dispose();
+        _showWindowCancellation = null;
+        _instance?.Dispose();
+        _instance = null;
+    }
+
+    private static bool ReadReduceMotion()
+    {
+        try
+        {
+            return !new Windows.UI.ViewManagement.UISettings().AnimationsEnabled;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static string ResolveConfig()
@@ -106,9 +320,6 @@ public sealed partial class MainWindow : Window
         var bundled = FindBundledExample();
         if (bundled is null)
         {
-            // No user config and no bundled example: return the expected
-            // beside-executable path so PortableConfig.Load fails loudly
-            // with a FileNotFoundException instead of silently continuing.
             return Path.Combine(AppContext.BaseDirectory, "config.example.toml");
         }
         try
@@ -136,7 +347,9 @@ public sealed partial class MainWindow : Window
         var candidates = new[]
         {
             Path.Combine(baseDir, "config.example.toml"),
-            Path.Combine(Directory.GetParent(baseDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))?.FullName ?? baseDir, "config.example.toml"),
+            Path.Combine(
+                Directory.GetParent(baseDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))?.FullName ?? baseDir,
+                "config.example.toml"),
         };
         foreach (var candidate in candidates)
         {
@@ -146,130 +359,6 @@ public sealed partial class MainWindow : Window
             }
         }
         return null;
-    }
-}
-
-internal sealed class WindowReviewPrompt : IReviewPrompt
-{
-    private readonly Microsoft.UI.Dispatching.DispatcherQueue _dispatcher;
-    private readonly FrameworkElement _root;
-
-    public WindowReviewPrompt(Microsoft.UI.Dispatching.DispatcherQueue dispatcher, FrameworkElement root)
-    {
-        _dispatcher = dispatcher;
-        _root = root;
-    }
-
-    public string? Ask(string text)
-    {
-        // Called from the STT worker. Never block the WinUI dispatcher thread.
-        var answer = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        if (!_dispatcher.TryEnqueue(async () =>
-        {
-            try
-            {
-                var dialog = new ContentDialog
-                {
-                    XamlRoot = _root.XamlRoot,
-                    Title = "Insert dictation?",
-                    Content = new ScrollViewer { Content = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap } },
-                    PrimaryButtonText = "Insert",
-                    CloseButtonText = "Discard",
-                    DefaultButton = ContentDialogButton.Close,
-                };
-                var result = await dialog.ShowAsync();
-                answer.TrySetResult(result == ContentDialogResult.Primary ? "y" : "n");
-            }
-            catch { answer.TrySetResult("n"); }
-        })) { return "n"; }
-        return answer.Task.Wait(TimeSpan.FromMinutes(2)) ? answer.Task.Result : "n";
-    }
-}
-
-public sealed partial class App : Application
-{
-    private const string ShowWindowEvent = @"Local\NanoDictateShowWindow";
-    private MainWindow? _window;
-    private SingleInstance? _instance;
-    private EventWaitHandle? _showWindowSignal;
-    private CancellationTokenSource? _showWindowCancellation;
-
-    public App()
-    {
-        UnhandledException += (_, e) => System.Diagnostics.Debug.WriteLine(e.Message);
-    }
-
-    protected override void OnLaunched(LaunchActivatedEventArgs args)
-    {
-        _instance = new SingleInstance();
-        if (!_instance.IsFirst)
-        {
-            // A second launch (Start menu / Scoop shortcut) opens the existing
-            // background instance rather than failing or installing two hooks.
-            try
-            {
-                using var signal = EventWaitHandle.OpenExisting(ShowWindowEvent);
-                signal.Set();
-            }
-            catch (WaitHandleCannotBeOpenedException) { }
-            _instance.Dispose();
-            _instance = null;
-            Exit();
-            return;
-        }
-
-        try
-        {
-            NanoEngine.CheckAvailable();
-            _window = new MainWindow();
-            _showWindowSignal = new EventWaitHandle(false, EventResetMode.AutoReset, ShowWindowEvent);
-            _showWindowCancellation = new CancellationTokenSource();
-            var signal = _showWindowSignal;
-            var cancellation = _showWindowCancellation.Token;
-            var dispatcher = _window.DispatcherQueue;
-            var main = _window;
-            _ = Task.Run(() =>
-            {
-                try
-                {
-                    while (!cancellation.IsCancellationRequested)
-                    {
-                        if (signal.WaitOne(500))
-                        {
-                            dispatcher.TryEnqueue(() =>
-                            {
-                                main.AppWindow.Show();
-                                main.Activate();
-                            });
-                        }
-                    }
-                }
-                catch (ObjectDisposedException) { }
-            });
-            _window.Closed += (_, _) =>
-            {
-                _showWindowCancellation?.Cancel();
-                _showWindowSignal?.Dispose();
-                _instance?.Dispose();
-                _instance = null;
-            };
-            _window.Activate();
-            // Registry/Scoop starts at each user logon with --background.
-            // WinUI's dispatcher/hotkey hook keeps running while hidden.
-            if (Environment.GetCommandLineArgs().Skip(1).Any(a =>
-                string.Equals(a, "--background", StringComparison.OrdinalIgnoreCase)))
-            {
-                _window.AppWindow.Hide();
-            }
-        }
-        catch
-        {
-            _showWindowCancellation?.Cancel();
-            _showWindowSignal?.Dispose();
-            _instance?.Dispose();
-            _instance = null;
-            throw;
-        }
     }
 
     [STAThread]

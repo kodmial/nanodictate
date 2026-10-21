@@ -69,6 +69,133 @@ public sealed class WindowsPathsAndConfigTests
     }
 
     [Fact]
+    public void SaveSettingsPersistsBothValuesAndPreservesRemainingConfig()
+    {
+        var toml = """
+            language = "ru"
+            active_provider = "a" # selected
+            review_before_insert = false # set "true" to enable
+            timeout_seconds = 30
+
+            [providers.a]
+            name = "A" # keep
+            api_key = "secret"
+
+            [providers.b]
+            name = "B"
+            """;
+        var path = Path.Combine(Path.GetTempPath(), $"nanodictate-save-settings-{Guid.NewGuid():N}.toml");
+        File.WriteAllText(path, toml);
+        try
+        {
+            PortableConfig.SaveSettings(path, "b", true);
+
+            var text = File.ReadAllText(path);
+            Assert.Contains("language = \"ru\"", text);
+            Assert.Contains("active_provider = \"b\" # selected", text);
+            Assert.Contains("review_before_insert = true # set \"true\" to enable", text);
+            Assert.Contains("timeout_seconds = 30", text);
+            Assert.Contains("name = \"A\" # keep", text);
+            Assert.Contains("api_key = \"secret\"", text);
+            Assert.Contains("[providers.b]", text);
+
+            var config = PortableConfig.Load(path);
+            Assert.Equal("b", config.ActiveProvider);
+            Assert.True(config.ReviewBeforeInsert);
+            Assert.Equal(30, config.TimeoutSeconds);
+            Assert.Equal(2, config.Providers.Count);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void SaveSettingsPreservesCommentAfterSingleQuotedRootValue()
+    {
+        var toml = """
+            active_provider = 'a' # selected
+            review_before_insert = false # keep
+            [providers.a]
+            name = "A"
+            """;
+        var path = Path.Combine(Path.GetTempPath(), $"nanodictate-save-single-quote-{Guid.NewGuid():N}.toml");
+        File.WriteAllText(path, toml);
+        try
+        {
+            PortableConfig.SaveSettings(path, "b", true);
+
+            var text = File.ReadAllText(path);
+            Assert.Contains("active_provider = \"b\" # selected", text);
+            Assert.Contains("review_before_insert = true # keep", text);
+
+            var config = PortableConfig.Load(path);
+            Assert.Equal("b", config.ActiveProvider);
+            Assert.True(config.ReviewBeforeInsert);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void SaveSettingsInsertsMissingRootKeysBeforeFirstSection()
+    {
+        var toml = """
+            language = "ru"
+
+            [providers.a]
+            name = "A"
+            review_before_insert = true # section value
+
+            [providers.b]
+            name = "B"
+            """;
+        var path = Path.Combine(Path.GetTempPath(), $"nanodictate-save-root-{Guid.NewGuid():N}.toml");
+        File.WriteAllText(path, toml);
+        try
+        {
+            PortableConfig.SaveSettings(path, "b", false);
+
+            var text = File.ReadAllText(path);
+            Assert.True(text.IndexOf("active_provider = \"b\"", StringComparison.Ordinal)
+                < text.IndexOf("[providers.a]", StringComparison.Ordinal));
+            Assert.True(text.IndexOf("review_before_insert = false", StringComparison.Ordinal)
+                < text.IndexOf("[providers.a]", StringComparison.Ordinal));
+            Assert.Contains("review_before_insert = true # section value", text);
+
+            var config = PortableConfig.Load(path);
+            Assert.Equal("b", config.ActiveProvider);
+            Assert.False(config.ReviewBeforeInsert);
+            Assert.Equal(2, config.Providers.Count);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void SaveSettingsCreatesMissingConfigFile()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"nanodictate-save-new-{Guid.NewGuid():N}.toml");
+        try
+        {
+            PortableConfig.SaveSettings(path, "a", true);
+
+            var config = PortableConfig.Load(path);
+            Assert.Equal("a", config.ActiveProvider);
+            Assert.True(config.ReviewBeforeInsert);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
     public void PortableConfigRejectsUnknownInsertMethod()
     {
         var toml = "insert_method = \"clipbord\"\n";
