@@ -1,6 +1,8 @@
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
@@ -89,6 +91,7 @@ public sealed class HudWindow : Window
             TextAlignment = TextAlignment.Center,
             TextWrapping = TextWrapping.Wrap,
         };
+        AutomationProperties.SetLiveSetting(_status, AutomationLiveSetting.Polite);
         _version = new TextBlock
         {
             FontSize = 10,
@@ -268,7 +271,14 @@ public sealed class HudWindow : Window
         _provider.Text = snapshot.Provider;
         _model.Text = snapshot.Model;
         _version.Text = string.IsNullOrEmpty(snapshot.Version) ? string.Empty : "v" + snapshot.Version;
-        _status.Text = snapshot.StatusText;
+        var statusText = snapshot.StatusText;
+        if (_status.Text != statusText)
+        {
+            _status.Text = statusText;
+            var peer = FrameworkElementAutomationPeer.FromElement(_status)
+                ?? FrameworkElementAutomationPeer.CreatePeerForElement(_status);
+            peer?.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
+        }
         _timer.Text = snapshot.HasTimer ? snapshot.ElapsedText : string.Empty;
 
         var hot = HudLevel.IsHot(snapshot.Meter);
