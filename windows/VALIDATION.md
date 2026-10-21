@@ -127,9 +127,10 @@ virtual audio device or a hosted runner. Record a real Windows 10 and Windows
 Record per session: activation-to-ready (trigger->request,
 request->engine-started, engine-started->first-buffer), mean/max block
 callback cost, CPU time, working set, device frames vs engine samples,
-and auto-stop outcome (the smoke line prints the same fields). Record
-installer size and download/install/launch elapsed time from the actual
-candidate or published smoke before proposing a performance change. Compare
+and auto-stop outcome (the smoke line prints the same fields). Use the actual
+candidate or published smoke for installer size and the download/install
+timings it records. Record launch elapsed time during the manual desktop check
+before proposing a performance change. Compare
 against the macOS contracts in `docs/stt-benchmark.md` and
 `docs/realtime-transcription.md`; file material regressions (missed first
 word, block cost near the 100 ms budget, sample loss, duplicated seams, or a

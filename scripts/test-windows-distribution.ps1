@@ -93,6 +93,9 @@ Assert-Contains 'candidate smoke records installer measurements' $candidate 'win
 Assert-Contains 'candidate smoke exercises reinstall' $candidate 'Reinstall changed the stable per-user autostart entry'
 Assert-Contains 'candidate smoke checks startup registration' $candidate 'did not register stable per-user auto-start'
 
+$smoke = Read-Text 'scripts/windows-release-smoke.ps1'
+Assert-Match 'published smoke serializes timing measurements on failure' $smoke '(?s)\}\s*finally\s*\{.*?\$report\.download_seconds\s*=.*?\$report\.setup_seconds\s*=.*?\$report\.uninstall_seconds\s*=.*?\$report\s*\|\s*ConvertTo-Json'
+
 $chainTest = Read-Text 'scripts/test-windows-install-chain.ps1'
 Assert-Contains 'offline chain test exercises a lagging manifest' $chainTest 'newer GitHub release wins over a lagging manifest'
 Assert-Contains 'offline chain test exercises an incomplete release upload' $chainTest 'incomplete latest asset falls back'
@@ -110,6 +113,7 @@ foreach ($required in @('NanoDictate.App.exe', 'NanoDictate.App.dll', 'nanodicta
 
 $validation = Read-Text 'windows/VALIDATION.md'
 Assert-NotContains 'validation does not require a signed MSIX' $validation 'signed MSIX'
+Assert-Contains 'validation measures launch time manually' $validation 'Record launch elapsed time during the manual desktop check'
 $parity = Read-Text 'windows/PARITY.md'
 Assert-NotContains 'parity does not claim a macOS menu-bar app' $parity 'macOS has a menu-bar agent'
 $distribution = Read-Text 'windows/DISTRIBUTION.md'

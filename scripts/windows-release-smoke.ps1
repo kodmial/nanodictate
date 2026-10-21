@@ -259,6 +259,9 @@ try {
     ($report.setup_seconds -join ','), ($report.uninstall_seconds -join ','))
   Write-Host "::notice::Published Windows $($release.tag_name) passed checksum, portable, install, upgrade/reinstall, uninstall and data-retention smoke."
 } finally {
+  $report.download_seconds = if ($null -eq $script:downloadSeconds) { $null } else { [Math]::Round($script:downloadSeconds, 2) }
+  $report.setup_seconds = @($script:setupDurations)
+  $report.uninstall_seconds = @($script:uninstallDurations)
   $report | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $reportFile -Encoding utf8
   try {
     if ((Test-Path -LiteralPath (Join-Path $installDir 'unins000.exe'))) {
