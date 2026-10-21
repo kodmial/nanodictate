@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.42] - 2026-10-21
+
+
+
+### Fixed
+
+* P0 Windows: macOS-equivalent native microphone HUD in existing WinUI/Rust app ([3fbb715](https://github.com/kodmial/nanodictate/commit/3fbb71549d5eb1f31b7361a31b447e447f923ce2))
+
 ## [0.1.41] - 2026-10-20
 
 
@@ -620,7 +628,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.41...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.42...HEAD
+[0.1.42]: https://github.com/kodmial/nanodictate/compare/v0.1.41...v0.1.42
 [0.1.41]: https://github.com/kodmial/nanodictate/compare/v0.1.40...v0.1.41
 [0.1.40]: https://github.com/kodmial/nanodictate/compare/v0.1.39...v0.1.40
 [0.1.39]: https://github.com/kodmial/nanodictate/compare/v0.1.38...v0.1.39
