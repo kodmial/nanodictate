@@ -17,6 +17,7 @@ on:
       - 'scripts/scoop-manifest.jq'
       - 'scripts/test-windows-distribution.ps1'
       - 'scripts/test-windows-install-chain.ps1'
+      - 'scripts/validate-windows-config.ps1'
       - 'bucket/**'
       - 'config.example.toml'
       - '.github/workflows/windows.yml'
@@ -30,6 +31,7 @@ on:
       - 'scripts/scoop-manifest.jq'
       - 'scripts/test-windows-distribution.ps1'
       - 'scripts/test-windows-install-chain.ps1'
+      - 'scripts/validate-windows-config.ps1'
       - 'bucket/**'
       - 'config.example.toml'
       - '.github/workflows/windows.yml'
@@ -56,6 +58,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
       - name: Verify Windows first-use distribution contracts
         shell: pwsh
         run: pwsh -NoProfile -File scripts/test-windows-distribution.ps1
@@ -66,11 +73,6 @@ jobs:
 
       - name: Ensure MSVC target
         run: rustup target add x86_64-pc-windows-msvc
-
-      - name: Install .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
 
       - name: Rust tests (shared core)
         run: cargo test -p nanodictate-core

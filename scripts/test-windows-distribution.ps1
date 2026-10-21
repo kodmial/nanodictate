@@ -83,13 +83,18 @@ Assert-Contains 'generated Scoop manifests launch background' $scoopGenerator "S
 Assert-NotContains 'generated Scoop manifests never force settings' $scoopGenerator "-ArgumentList '--settings'"
 
 $config = Read-Text 'config.example.toml'
-Assert-Match 'bundled default selects keyless Airubiz' $config '(?m)^active_provider = "airubiz"$'
-Assert-Match 'bundled default contains the Airubiz provider' $config '(?m)^\[providers\.airubiz\]$'
-Assert-Match 'bundled default keeps the Airubiz key empty' $config '(?ms)\[providers\.airubiz\].*?^api_key = ""$'
 Assert-Contains 'bundled default documents both config locations' $config '%APPDATA%\NanoDictate\config.toml'
+$sharedValidator = Join-Path $repoRoot 'scripts/validate-windows-config.ps1'
+try {
+  & $sharedValidator -ConfigPath (Join-Path $repoRoot 'config.example.toml')
+  Pass 'bundled default passes shared provider-agnostic and product-default validation'
+} catch {
+  Fail 'bundled default passes shared provider-agnostic and product-default validation' $_.Exception.Message
+}
 
 $candidate = Read-Text 'windows/package/test-release-candidate.ps1'
-Assert-Contains 'candidate smoke checks bundled first-use defaults' $candidate 'does not select the keyless Airubiz default'
+Assert-Contains 'candidate smoke validates the packaged config through the shared validator' $candidate 'scripts/validate-windows-config.ps1'
+Assert-Contains 'candidate smoke validates the extracted candidate config' $candidate "Join-Path `$unpacked 'config.example.toml'"
 Assert-Contains 'candidate smoke records installer measurements' $candidate 'windows-candidate-measurements.json'
 Assert-Contains 'candidate smoke exercises reinstall' $candidate 'Reinstall changed the stable per-user autostart entry'
 Assert-Contains 'candidate smoke checks startup registration' $candidate 'did not register stable per-user auto-start'
