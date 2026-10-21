@@ -121,6 +121,42 @@ public sealed class SttProductTests
     }
 
     [Fact]
+    public async Task ChunkedFailureRetriesThroughSuccessfulFinalPass()
+    {
+        const int sampleRate = 16000;
+        var samples = new short[sampleRate * 120];
+        var chunks = NanoEngine.BatchPlan(samples.Length, sampleRate, 45.0, 1.0);
+        Assert.True(chunks.Length > 1);
+
+        var fake = new FakeTransport();
+        fake.Enqueue(new SttHttpResponse(503, new Dictionary<string, string>(), Encoding.UTF8.GetBytes("busy")));
+        for (var i = 1; i < chunks.Length; i++)
+        {
+            fake.Enqueue(Ok($"chunk {i}"));
+        }
+        fake.Enqueue(Ok("final"));
+
+        var client = new SttClient(TwoProviders(), fake, _ => "k", TimeSpan.FromSeconds(5));
+        var transcriber = new ChunkedTranscriber(client);
+        var result = await transcriber.TranscribeAsync(
+            samples,
+            sampleRate,
+            45.0,
+            1.0,
+            string.Empty,
+            null,
+            false,
+            ChunkedFinalPass.OnUncertainty,
+            TransportConfig.Direct,
+            string.Empty,
+            null,
+            CancellationToken.None);
+
+        Assert.Equal("final", result.Text);
+        Assert.Equal(chunks.Length + 1, fake.Seen.Count);
+    }
+
+    [Fact]
     public void ChunkedStitchAndFinalPassArePure()
     {
         var stitched = ChunkedTranscriber.Stitch(new[] { "hello brave world", "brave world again" });

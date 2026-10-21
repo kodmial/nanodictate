@@ -36,8 +36,8 @@ LicenseFile=
 Source: "{#PublishDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\NanoDictate"; Filename: "{app}\NanoDictate.App.exe"
-Name: "{autoprograms}\NanoDictate"; Filename: "{app}\NanoDictate.App.exe"
+Name: "{group}\NanoDictate"; Filename: "{app}\NanoDictate.App.exe"; Parameters: "--settings"
+Name: "{autoprograms}\NanoDictate"; Filename: "{app}\NanoDictate.App.exe"; Parameters: "--settings"
 
 [Registry]
 ; Same per-user Run value and stable installation path across upgrades.
@@ -45,7 +45,7 @@ Name: "{autoprograms}\NanoDictate"; Filename: "{app}\NanoDictate.App.exe"
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "NanoDictate"; ValueData: """{app}\NanoDictate.App.exe"" --background"; Flags: uninsdeletevalue
 
 [Run]
-Filename: "{app}\NanoDictate.App.exe"; Description: "Launch NanoDictate"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\NanoDictate.App.exe"; Parameters: "--settings"; Description: "Launch NanoDictate"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
 ; User configuration and logs deliberately survive upgrades and uninstall.

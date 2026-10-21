@@ -35,6 +35,7 @@ public sealed class DictationCaptureService : IDisposable
         _source.DeviceChanged += OnDeviceChanged;
         _pipeline.CaptureReady += m => CaptureReady?.Invoke(m);
         _pipeline.AutoStop += samples => AutoStop?.Invoke(samples);
+        _pipeline.RawRmsAvailable += rms => RawRmsAvailable?.Invoke(rms);
     }
 
     /// <summary>Fired exactly once per session on the first valid block.</summary>
@@ -42,6 +43,9 @@ public sealed class DictationCaptureService : IDisposable
 
     /// <summary>Fired at most once per session when Rust auto-stop fires.</summary>
     public event Action<IReadOnlyList<short>>? AutoStop;
+
+    /// <summary>Coalesced latest raw RMS for HUD metering (no PCM copy).</summary>
+    public event Action<float>? RawRmsAvailable;
 
     /// <summary>Fired when the OS device changed mid-capture (session aborted).</summary>
     public event Action<Exception>? DeviceChanged;
