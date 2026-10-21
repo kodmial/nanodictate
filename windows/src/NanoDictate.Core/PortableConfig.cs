@@ -6,13 +6,31 @@ namespace NanoDictate.Core;
 /// (profile resolution, failover ordering, backoff, transcript rules) is
 /// computed by the Rust engine through <see cref="NanoEngine"/>.
 /// </summary>
-public sealed record ProviderEntry(string Id, string Name, string BaseUrl, string Model);
+public sealed record ProviderEntry(
+    string Id,
+    string Name,
+    string BaseUrl,
+    string Model,
+    string ApiKey = "",
+    string? ApiKeyFile = null)
+{
+    /// <summary>
+    /// Redacts configured secrets from diagnostic/object output. Request
+    /// headers are the only place a resolved key may be materialized.
+    /// </summary>
+    public override string ToString() =>
+        $"ProviderEntry {{ Id = {Id}, Name = {Name}, BaseUrl = {BaseUrl}, Model = {Model}, "
+        + $"ApiKey = {(string.IsNullOrEmpty(ApiKey) ? "empty" : "redacted")}, "
+        + $"ApiKeyFile = {(string.IsNullOrEmpty(ApiKeyFile) ? "none" : "configured")} }}";
+}
 
 public sealed class PortableConfig
 {
     public string ActiveProvider { get; set; } = string.Empty;
     public string Language { get; init; } = string.Empty;
     public IReadOnlyList<ProviderEntry> Providers { get; init; } = Array.Empty<ProviderEntry>();
+    /// <summary>Explicit top-level failover order (`providers = [...]`); empty uses section order.</summary>
+    public IReadOnlyList<string> ProvidersOrder { get; init; } = Array.Empty<string>();
     public string SegmentProvider { get; init; } = string.Empty;
     public string FinalProvider { get; init; } = string.Empty;
     /// <summary>Insertion method (default Direct for insert_method=cgevent).</summary>
@@ -43,8 +61,8 @@ public sealed class PortableConfig
     /// <summary>
     /// Repairs an unknown <see cref="ActiveProvider"/> by selecting the first
     /// configured provider. An omitted active provider stays empty so the
-    /// environment key remains available to every provider for compatibility;
-    /// routing already treats an empty id as the first provider. A
+    /// shared parity contract remains intact; routing and environment-key
+    /// resolution already treat an empty id as the first provider. A
     /// provider-less config is left as-is so startup can still surface an
     /// unconfigured HUD and settings.
     /// </summary>
@@ -88,16 +106,22 @@ public sealed class PortableConfig
         var prompt = string.Empty;
         var realtimeModel = "gpt-live-transcribe";
         var providers = new List<ProviderEntry>();
+        var providersOrder = new List<string>();
         string? currentProvider = null;
         string name = string.Empty, baseUrl = string.Empty, model = string.Empty;
+        string apiKey = string.Empty;
+        string? apiKeyFile = null;
 
         void FlushProvider()
         {
             if (currentProvider is not null)
             {
-                providers.Add(new ProviderEntry(currentProvider, name, baseUrl, model));
+                providers.Add(new ProviderEntry(
+                    currentProvider, name, baseUrl, model, apiKey, apiKeyFile));
                 currentProvider = null;
                 name = baseUrl = model = string.Empty;
+                apiKey = string.Empty;
+                apiKeyFile = null;
             }
         }
 
@@ -133,6 +157,10 @@ public sealed class PortableConfig
                     case "name": name = value; break;
                     case "base_url": baseUrl = value; break;
                     case "model": model = value; break;
+                    case "api_key": apiKey = value; break;
+                    case "api_key_file":
+                        apiKeyFile = string.IsNullOrEmpty(value) ? null : value;
+                        break;
                 }
             }
             else if (section == "routing")
@@ -150,6 +178,9 @@ public sealed class PortableConfig
                     case "active_provider": active = value; break;
                     case "language": language = value; break;
                     case "prompt": prompt = value; break;
+                    case "providers":
+                        providersOrder = ParseStringArray(value);
+                        break;
                     case "realtime_model": realtimeModel = value; break;
                     case "transport":
                         transportMode = TransportConfig.ParseMode(value.ToLowerInvariant());
@@ -207,6 +238,7 @@ public sealed class PortableConfig
             ActiveProvider = active,
             Language = language,
             Providers = providers,
+            ProvidersOrder = providersOrder,
             SegmentProvider = segment,
             FinalProvider = final,
             InsertMethod = insertMethod,
@@ -223,6 +255,128 @@ public sealed class PortableConfig
             RealtimeModel = realtimeModel,
         };
     }
+
+    /// <summary>
+    /// Parses a TOML string array (<c>providers = ["groq", "local"]</c>).
+    /// Commas inside quoted entries stay part of the entry; malformed arrays
+    /// are treated as absent so existing configs keep loading.
+    /// </summary>
+    private static List<string> ParseStringArray(string value)
+    {
+        var result = new List<string>();
+        var trimmed = value.Trim();
+        if (trimmed.Length < 2 || !trimmed.StartsWith('[') || !trimmed.EndsWith(']'))
+        {
+            return result;
+        }
+        var current = new System.Text.StringBuilder();
+        var inQuotes = false;
+        void Add()
+        {
+            var item = Unquote(current.ToString().Trim());
+            if (item.Length > 0)
+            {
+                result.Add(item);
+            }
+            current.Clear();
+        }
+        for (var i = 1; i < trimmed.Length - 1; i++)
+        {
+            var c = trimmed[i];
+            if (c == '"')
+            {
+                inQuotes = !inQuotes;
+                current.Append(c);
+            }
+            else if (c == ',' && !inQuotes)
+            {
+                Add();
+            }
+            else
+            {
+                current.Append(c);
+            }
+        }
+        Add();
+        return result;
+    }
+
+    /// <summary>
+    /// Reads a provider key from an <c>api_key_file</c> path: the first
+    /// non-empty, non-comment line, with surrounding double quotes removed
+    /// (same contract as macOS Config.readAPIKeyFile). Home and environment
+    /// variables are expanded; unreadable or missing files yield an empty
+    /// key rather than failing the host. The content is never logged.
+    /// </summary>
+    public static string ReadApiKeyFile(string path)
+    {
+        try
+        {
+            var expanded = ExpandKeyFilePath(path);
+            if (string.IsNullOrEmpty(expanded))
+            {
+                return string.Empty;
+            }
+            foreach (var raw in File.ReadLines(expanded))
+            {
+                var line = raw.Trim();
+                if (line.Length == 0 || line.StartsWith('#'))
+                {
+                    continue;
+                }
+                if (line.Length >= 2 && line.StartsWith('"') && line.EndsWith('"'))
+                {
+                    return line.Substring(1, line.Length - 2);
+                }
+                return line;
+            }
+        }
+        catch (Exception ex) when (IsExpectedFileError(ex))
+        {
+            // Missing/unreadable key files are a normal keyless configuration.
+        }
+        return string.Empty;
+    }
+
+    /// <summary>
+    /// Expands <c>~</c>, environment variables, and normalizes the key path.
+    /// Returns an empty string for invalid paths so callers never partially
+    /// resolve a secret path.
+    /// </summary>
+    public static string ExpandKeyFilePath(string path)
+    {
+        var trimmed = path.Trim();
+        if (trimmed.Length == 0)
+        {
+            return string.Empty;
+        }
+        if (trimmed == "~" || trimmed.StartsWith("~/", StringComparison.Ordinal)
+            || trimmed.StartsWith("~\\", StringComparison.Ordinal))
+        {
+            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            if (string.IsNullOrEmpty(home))
+            {
+                return string.Empty;
+            }
+            trimmed = trimmed.Length == 1 ? home : Path.Combine(home, trimmed.Substring(2));
+        }
+        trimmed = Environment.ExpandEnvironmentVariables(trimmed);
+        try
+        {
+            return Path.GetFullPath(trimmed);
+        }
+        catch (Exception ex) when (IsExpectedFileError(ex))
+        {
+            return string.Empty;
+        }
+    }
+
+    private static bool IsExpectedFileError(Exception ex) =>
+        ex is IOException
+            or UnauthorizedAccessException
+            or ArgumentException
+            or NotSupportedException
+            or System.Security.SecurityException;
 
     /// <summary>
     /// Persists the two user-editable selection settings without reserializing
@@ -398,6 +552,31 @@ public sealed class PortableConfig
         Providers.FirstOrDefault(p => p.Id == id);
 
     /// <summary>
+    /// Effective failover id order: the explicit top-level <c>providers</c>
+    /// list when present, otherwise section order. Unknown ids are skipped and
+    /// duplicates collapse (macOS failoverProviders contract).
+    /// </summary>
+    public IReadOnlyList<string> FailoverOrderIds
+    {
+        get
+        {
+            var source = ProvidersOrder.Count == 0
+                ? Providers.Select(p => p.Id)
+                : ProvidersOrder;
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            var result = new List<string>();
+            foreach (var id in source)
+            {
+                if (Find(id) is not null && seen.Add(id))
+                {
+                    result.Add(id);
+                }
+            }
+            return result;
+        }
+    }
+
+    /// <summary>
     /// Resolves the active provider model profile through Rust. Unknown ids
     /// use the engine conservative fallback; this method never branches on
     /// provider names itself.
@@ -407,6 +586,10 @@ public sealed class PortableConfig
         var entry = Find(ActiveProvider);
         var adapter = entry?.Id ?? ActiveProvider;
         var model = entry?.Model ?? string.Empty;
+        if (string.IsNullOrEmpty(model))
+        {
+            model = NanoEngine.SttDefaultModel(adapter);
+        }
         return NanoEngine.SttResolve(adapter, model);
     }
 
@@ -416,7 +599,6 @@ public sealed class PortableConfig
     /// </summary>
     public string ResolveFailoverOrder(string? failedId, bool autoFailover)
     {
-        var ids = Providers.Select(p => p.Id).ToList();
-        return NanoEngine.FailoverOrder(ids, failedId, autoFailover);
+        return NanoEngine.FailoverOrder(FailoverOrderIds, failedId, autoFailover);
     }
 }

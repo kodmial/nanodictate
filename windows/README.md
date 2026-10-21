@@ -232,7 +232,11 @@ no Rust algorithm is forked in C#.
   takes over an active recording.
 - **Config** (`PortableConfig`): carries `insert_method` (`cgevent` maps to
   Direct on Windows), `double_alt_max_interval`, `undo_max_interval`, and
-  `review_before_insert`; every policy still resolves through Rust.
+  `review_before_insert`; every policy still resolves through Rust. Provider
+  credentials use the shared contract: per-provider `api_key` /
+  `api_key_file`, with `NANODICTATE_API_KEY` overriding only the effective
+  active provider. See `docs/config-parity.md` for the shared key matrix and
+  explicit platform differences.
 
 ## Realtime bounds and measurements
 

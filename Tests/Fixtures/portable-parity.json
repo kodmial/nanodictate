@@ -1,0 +1,346 @@
+{
+  "version": 1,
+  "config_cases": [
+    {
+      "name": "airubiz-keyless",
+      "env": {},
+      "config": [
+        "active_provider = \"airubiz\"",
+        "language = \"ru\"",
+        "[providers.airubiz]",
+        "name = \"Airubiz\"",
+        "base_url = \"https://api.airubiz.site/v1/audio/transcriptions\"",
+        "model = \"gigaam-v3-ctc-sherpa\"",
+        "api_key = \"\""
+      ],
+      "files": {},
+      "expected": {
+        "active_provider": "airubiz",
+        "language": "ru",
+        "segment_provider": "",
+        "final_provider": "",
+        "providers": [
+          {
+            "id": "airubiz",
+            "name": "Airubiz",
+            "base_url": "https://api.airubiz.site/v1/audio/transcriptions",
+            "model": "gigaam-v3-ctc-sherpa"
+          }
+        ],
+        "resolved_api_keys": {
+          "airubiz": ""
+        },
+        "failover_order": [
+          "airubiz"
+        ]
+      }
+    },
+    {
+      "name": "per-provider-key-file-and-routing",
+      "env": {},
+      "config": [
+        "active_provider = \"openai\"",
+        "language = \"en\"",
+        "providers = [\"local\", \"groq\", \"openai\", \"missing\"]",
+        "[routing]",
+        "segment_provider = \"groq\"",
+        "final_provider = \"local\"",
+        "[providers.openai]",
+        "name = \"OpenAI\"",
+        "base_url = \"\"",
+        "model = \"\"",
+        "api_key = \"openai-file-key\"",
+        "[providers.groq]",
+        "name = \"Groq\"",
+        "base_url = \"\"",
+        "model = \"\"",
+        "api_key_file = \"${KEY_DIR}/groq.key\"",
+        "[providers.local]",
+        "name = \"Local\"",
+        "base_url = \"https://local.test/v1/audio/transcriptions\"",
+        "model = \"custom-model\""
+      ],
+      "files": {
+        "groq.key": "# provider key\n\"groq-file-key\"\n"
+      },
+      "expected": {
+        "active_provider": "openai",
+        "language": "en",
+        "segment_provider": "groq",
+        "final_provider": "local",
+        "providers": [
+          {
+            "id": "openai",
+            "name": "OpenAI",
+            "base_url": "",
+            "model": ""
+          },
+          {
+            "id": "groq",
+            "name": "Groq",
+            "base_url": "",
+            "model": ""
+          },
+          {
+            "id": "local",
+            "name": "Local",
+            "base_url": "https://local.test/v1/audio/transcriptions",
+            "model": "custom-model"
+          }
+        ],
+        "resolved_api_keys": {
+          "openai": "openai-file-key",
+          "groq": "groq-file-key",
+          "local": ""
+        },
+        "failover_order": [
+          "local",
+          "groq",
+          "openai"
+        ]
+      }
+    },
+    {
+      "name": "active-env-key-scopes-to-active-provider",
+      "env": {
+        "NANODICTATE_API_KEY": "env-active-key"
+      },
+      "config": [
+        "active_provider = \"openai\"",
+        "[providers.openai]",
+        "api_key = \"openai-file-key\"",
+        "[providers.groq]",
+        "api_key = \"groq-file-key\"",
+        "[providers.cloudflare]",
+        "api_key_file = \"${KEY_DIR}/cloudflare.key\""
+      ],
+      "files": {
+        "cloudflare.key": "cloudflare-file-key\n"
+      },
+      "expected": {
+        "active_provider": "openai",
+        "language": "",
+        "segment_provider": "",
+        "final_provider": "",
+        "providers": [
+          {
+            "id": "openai",
+            "name": "",
+            "base_url": "",
+            "model": ""
+          },
+          {
+            "id": "groq",
+            "name": "",
+            "base_url": "",
+            "model": ""
+          },
+          {
+            "id": "cloudflare",
+            "name": "",
+            "base_url": "",
+            "model": ""
+          }
+        ],
+        "resolved_api_keys": {
+          "openai": "env-active-key",
+          "groq": "groq-file-key",
+          "cloudflare": "cloudflare-file-key"
+        },
+        "failover_order": [
+          "openai",
+          "groq",
+          "cloudflare"
+        ]
+      }
+    },
+    {
+      "name": "empty-active-env-applies-to-first-provider-only",
+      "env": {
+        "NANODICTATE_API_KEY": "env-first-key"
+      },
+      "config": [
+        "language = \"de\"",
+        "[providers.first]",
+        "api_key = \"first-file-key\"",
+        "[providers.second]",
+        "api_key = \"second-file-key\""
+      ],
+      "files": {},
+      "expected": {
+        "active_provider": "",
+        "language": "de",
+        "segment_provider": "",
+        "final_provider": "",
+        "providers": [
+          {
+            "id": "first",
+            "name": "",
+            "base_url": "",
+            "model": ""
+          },
+          {
+            "id": "second",
+            "name": "",
+            "base_url": "",
+            "model": ""
+          }
+        ],
+        "resolved_api_keys": {
+          "first": "env-first-key",
+          "second": "second-file-key"
+        },
+        "failover_order": [
+          "first",
+          "second"
+        ]
+      }
+    },
+    {
+      "name": "openai-compatible-unknown-options-ignored",
+      "env": {},
+      "config": [
+        "active_provider = \"custom\"",
+        "language = \"ru\"",
+        "frobnicate = \"ignored\"",
+        "[providers.custom]",
+        "name = \"Custom\"",
+        "base_url = \"https://custom.test/v1/audio/transcriptions\"",
+        "model = \"custom-model\"",
+        "api_key = \"custom-key\"",
+        "unknown_provider_option = \"ignored\""
+      ],
+      "files": {},
+      "expected": {
+        "active_provider": "custom",
+        "language": "ru",
+        "segment_provider": "",
+        "final_provider": "",
+        "providers": [
+          {
+            "id": "custom",
+            "name": "Custom",
+            "base_url": "https://custom.test/v1/audio/transcriptions",
+            "model": "custom-model"
+          }
+        ],
+        "resolved_api_keys": {
+          "custom": "custom-key"
+        },
+        "failover_order": [
+          "custom"
+        ]
+      }
+    }
+  ],
+  "request_cases": [
+    {
+      "name": "openai-default-model-multipart",
+      "provider": {
+        "id": "openai",
+        "base_url": "",
+        "model": "",
+        "api_key": "sk-test"
+      },
+      "language": "ru",
+      "prompt": "Kubernetes",
+      "needs_word_timestamps": false,
+      "expected": {
+        "url": "https://api.openai.com/v1/audio/transcriptions",
+        "authorization": "Bearer sk-test",
+        "fields": {
+          "model": "gpt-transcribe",
+          "languages[]": "ru",
+          "prompt": "Kubernetes"
+        },
+        "absent": [
+          "language",
+          "response_format",
+          "timestamp_granularities[]"
+        ],
+        "file_content_type": "audio/wav"
+      }
+    },
+    {
+      "name": "openai-whisper-segment-timestamps",
+      "provider": {
+        "id": "openai",
+        "base_url": "",
+        "model": "whisper-1",
+        "api_key": "sk-test"
+      },
+      "language": "ru",
+      "prompt": "Kubernetes",
+      "needs_word_timestamps": true,
+      "expected": {
+        "url": "https://api.openai.com/v1/audio/transcriptions",
+        "authorization": "Bearer sk-test",
+        "fields": {
+          "model": "whisper-1",
+          "language": "ru",
+          "prompt": "Kubernetes",
+          "response_format": "verbose_json",
+          "timestamp_granularities[]": "word"
+        },
+        "absent": [
+          "languages[]"
+        ],
+        "file_content_type": "audio/wav"
+      }
+    },
+    {
+      "name": "groq-default-model-single-language",
+      "provider": {
+        "id": "groq",
+        "base_url": "",
+        "model": "",
+        "api_key": "gsk-test"
+      },
+      "language": "ru",
+      "prompt": "term",
+      "needs_word_timestamps": false,
+      "expected": {
+        "url": "https://api.groq.com/openai/v1/audio/transcriptions",
+        "authorization": "Bearer gsk-test",
+        "fields": {
+          "model": "whisper-large-v3",
+          "language": "ru",
+          "prompt": "term"
+        },
+        "absent": [
+          "languages[]",
+          "response_format",
+          "timestamp_granularities[]"
+        ],
+        "file_content_type": "audio/wav"
+      }
+    },
+    {
+      "name": "openai-compatible-keyless-no-authorization",
+      "provider": {
+        "id": "custom",
+        "base_url": "https://custom.test/v1/audio/transcriptions",
+        "model": "custom-model",
+        "api_key": ""
+      },
+      "language": "en",
+      "prompt": "term",
+      "needs_word_timestamps": false,
+      "expected": {
+        "url": "https://custom.test/v1/audio/transcriptions",
+        "authorization": null,
+        "fields": {
+          "model": "custom-model",
+          "language": "en",
+          "prompt": "term"
+        },
+        "absent": [
+          "languages[]",
+          "response_format",
+          "timestamp_granularities[]"
+        ],
+        "file_content_type": "audio/wav"
+      }
+    }
+  ]
+}
