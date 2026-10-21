@@ -79,12 +79,20 @@ internal static class Program
     private static int Providers(string[] args)
     {
         var config = PortableConfig.Load(ConfigPath(args));
-        var catalog = new ProviderCatalog(config.Providers, config.ActiveProvider, config.SegmentProvider, config.FinalProvider);
+        var catalog = new ProviderCatalog(
+            config.Providers, config.ActiveProvider, config.SegmentProvider,
+            config.FinalProvider, config.FailoverOrderIds);
         var active = catalog.Active();
-        Console.WriteLine($"providers: active={active.Id} model={active.Model}");
+        var activeModel = string.IsNullOrEmpty(active.Model)
+            ? NanoEngine.SttDefaultModel(active.Id)
+            : active.Model;
+        Console.WriteLine($"providers: active={active.Id} model={activeModel}");
         foreach (var provider in config.Providers)
         {
-            var profile = SttProfile.Resolve(provider.Id, provider.Model);
+            var model = string.IsNullOrEmpty(provider.Model)
+                ? NanoEngine.SttDefaultModel(provider.Id)
+                : provider.Model;
+            var profile = SttProfile.Resolve(provider.Id, model);
             Console.WriteLine($"providers: id={provider.Id} name={provider.Name} model={profile.Model} transport={profile.Transport} audio={profile.SampleRate}/{profile.Channels}");
         }
         Console.WriteLine($"providers: segment={catalog.SegmentProvider().Id} final={catalog.FinalProvider().Id}");
@@ -121,7 +129,9 @@ internal static class Program
         var bytes = await File.ReadAllBytesAsync(wavPath).ConfigureAwait(false);
         var samples = NanoEngine.WavDecodeSamples(bytes);
         var info = NanoEngine.WavDecodeInfo(bytes);
-        var catalog = new ProviderCatalog(config.Providers, config.ActiveProvider, config.SegmentProvider, config.FinalProvider);
+        var catalog = new ProviderCatalog(
+            config.Providers, config.ActiveProvider, config.SegmentProvider,
+            config.FinalProvider, config.FailoverOrderIds);
         using var transport = new HttpSttTransport();
         var client = new SttClient(catalog, transport, id => HostApp.ResolveApiKey(id, config), TimeSpan.FromSeconds(config.TimeoutSeconds));
         var diagnostics = new SttDiagnostics();
