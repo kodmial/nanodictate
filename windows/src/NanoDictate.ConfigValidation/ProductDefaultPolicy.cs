@@ -22,7 +22,7 @@ public static class ProductDefaultPolicy
         if (config.ActiveProvider != ActiveProvider)
         {
             errors.Add(
-                $"product default policy: active_provider is '{config.ActiveProvider}', expected '{ActiveProvider}'");
+                "product default policy: active_provider does not match the approved provider");
         }
 
         var provider = config.Providers.FirstOrDefault(item => item.Id == ActiveProvider);

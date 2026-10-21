@@ -203,10 +203,10 @@ public static class WindowsConfigValidator
         {
             if (provider.Value is not TomlTable providerTable)
             {
-                errors.Add($"provider '{provider.Key}' must be a table");
+                errors.Add("provider entry must be a table");
                 continue;
             }
-            ValidateProviderFieldTypes(provider.Key, providerTable, errors);
+            ValidateProviderFieldTypes(providerTable, errors);
         }
 
         PortableConfig config;
@@ -241,20 +241,20 @@ public static class WindowsConfigValidator
 
         if (!providers.TryGetValue(activeProvider, out var selectedValue))
         {
-            errors.Add($"active_provider '{activeProvider}' has no [providers.{activeProvider}] table");
+            errors.Add("active_provider has no matching provider table");
             return new ConfigValidationResult(activeProvider, errors);
         }
         if (selectedValue is not TomlTable selectedTable)
         {
-            errors.Add($"active_provider '{activeProvider}' must refer to a provider table");
+            errors.Add("active_provider must refer to a provider table");
             return new ConfigValidationResult(activeProvider, errors);
         }
-        ValidateProviderFieldTypes(activeProvider, selectedTable, errors);
+        ValidateProviderFieldTypes(selectedTable, errors);
 
         var entry = config.Providers.FirstOrDefault(provider => provider.Id == activeProvider);
         if (entry is null)
         {
-            errors.Add($"active_provider '{activeProvider}' is not a provider section understood by the application");
+            errors.Add("active_provider is not a supported provider section");
             return new ConfigValidationResult(activeProvider, errors);
         }
 
@@ -263,12 +263,12 @@ public static class WindowsConfigValidator
             : entry.BaseUrl;
         if (string.IsNullOrWhiteSpace(effectiveBaseUrl))
         {
-            errors.Add($"provider '{entry.Id}' has no base_url and adapter '{entry.Id}' has no default endpoint");
+            errors.Add("selected provider has no base_url and no default endpoint");
         }
         else if (!Uri.TryCreate(effectiveBaseUrl, UriKind.Absolute, out var endpoint)
             || (endpoint.Scheme != Uri.UriSchemeHttp && endpoint.Scheme != Uri.UriSchemeHttps))
         {
-            errors.Add($"provider '{entry.Id}' has an invalid base_url");
+            errors.Add("selected provider has an invalid base_url");
         }
 
         var effectiveModel = string.IsNullOrWhiteSpace(entry.Model)
@@ -277,7 +277,7 @@ public static class WindowsConfigValidator
         if (string.IsNullOrWhiteSpace(effectiveModel)
             && !AdapterDefaults.ModelEmbeddedInEndpoint(entry.Id))
         {
-            errors.Add($"provider '{entry.Id}' has no model and adapter '{entry.Id}' has no default model");
+            errors.Add("selected provider has no model and no default model");
         }
 
         // Credentials are optional by contract: a keyless provider is valid,
@@ -323,7 +323,6 @@ public static class WindowsConfigValidator
     }
 
     private static void ValidateProviderFieldTypes(
-        string providerId,
         TomlTable table,
         ICollection<string> errors)
     {
@@ -335,12 +334,12 @@ public static class WindowsConfigValidator
             }
             if (field.Value is not string textValue)
             {
-                errors.Add($"provider '{providerId}' field '{field.Key}' must be a string");
+                errors.Add("provider field must be a string");
                 continue;
             }
             if (field.Key == "upload_format" && !UploadFormats.Contains(textValue.Trim()))
             {
-                errors.Add($"provider '{providerId}' field 'upload_format' has an unsupported value");
+                errors.Add("provider upload_format has an unsupported value");
             }
         }
     }

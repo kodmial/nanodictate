@@ -200,7 +200,7 @@ public sealed class WindowsConfigValidationTests
 
     [Theory]
     [InlineData("active_provider = \"missing\"\n[providers.a]\nbase_url = \"https://example.test\"\nmodel = \"m\"\n",
-        "has no [providers.missing]")]
+        "active_provider has no matching provider table")]
     [InlineData("active_provider = 42\n[providers.a]\nbase_url = \"https://example.test\"\nmodel = \"m\"\n",
         "top-level active_provider must be a string")]
     [InlineData("base_url = \"https://legacy.test\"\n[providers.a]\nbase_url = \"https://example.test\"\nmodel = \"m\"\n",
@@ -212,7 +212,7 @@ public sealed class WindowsConfigValidationTests
 
     [Theory]
     [InlineData("active_provider = \"a\"\nproviders = \"not-a-table\"\n", "missing top-level [providers.*] table")]
-    [InlineData("active_provider = \"a\"\n[providers]\na = \"not-a-table\"\n", "provider 'a' must be a table")]
+    [InlineData("active_provider = \"a\"\n[providers]\na = \"not-a-table\"\n", "provider entry must be a table")]
     [InlineData("active_provider = \"a\"\n[providers.a\n", "invalid TOML")]
     [InlineData("active_provider = \"a\"\nactive_provider = \"b\"\n[providers.a]\n", "invalid TOML")]
     [InlineData("active_provider = \"a\"\n[providers.a]\n[providers.a]\n", "invalid TOML")]
@@ -246,6 +246,47 @@ public sealed class WindowsConfigValidationTests
         }
     }
 
+    [Fact]
+    public void ConfigControlledIdentifiersAreNotEchoedInErrors()
+    {
+        const string secret = "super-secret-value";
+        var unresolved = WriteConfig($"""
+            active_provider = "{secret}"
+            [providers.a]
+            base_url = "https://example.test"
+            model = "m"
+            api_key = "{secret}"
+            """);
+        var policyMismatch = WriteConfig($"""
+            active_provider = "{secret}"
+            [providers.{secret}]
+            base_url = "https://example.test"
+            model = "m"
+            api_key = ""
+            """);
+        try
+        {
+            var result = WindowsConfigValidator.ValidateFile(unresolved);
+            Assert.False(result.IsValid);
+            Assert.Contains(result.Errors,
+                error => error.Contains("active_provider has no matching provider table", StringComparison.Ordinal));
+            Assert.DoesNotContain(result.Errors,
+                error => error.Contains(secret, StringComparison.OrdinalIgnoreCase));
+
+            Assert.True(WindowsConfigValidator.ValidateFile(policyMismatch).IsValid);
+            var policyErrors = ProductDefaultPolicy.ValidateFile(policyMismatch);
+            Assert.Contains(policyErrors,
+                error => error.Contains("active_provider", StringComparison.Ordinal));
+            Assert.DoesNotContain(policyErrors,
+                error => error.Contains(secret, StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            File.Delete(unresolved);
+            File.Delete(policyMismatch);
+        }
+    }
+
     [Theory]
     [InlineData("timeout_seconds = \"slow\"\nactive_provider = \"a\"\n[providers.a]\nbase_url = \"https://example.test\"\nmodel = \"m\"\n",
         "top-level timeout_seconds must be a number")]
@@ -254,7 +295,7 @@ public sealed class WindowsConfigValidationTests
     [InlineData("vocabulary = [1]\nactive_provider = \"a\"\n[providers.a]\nbase_url = \"https://example.test\"\nmodel = \"m\"\n",
         "top-level vocabulary must be an array of strings")]
     [InlineData("active_provider = \"a\"\n[providers.a]\nbase_url = \"https://example.test\"\nmodel = \"m\"\nupload_format = \"bogus\"\n",
-        "field 'upload_format' has an unsupported value")]
+        "provider upload_format has an unsupported value")]
     [InlineData("insert_method = \"bogus\"\nactive_provider = \"a\"\n[providers.a]\nbase_url = \"https://example.test\"\nmodel = \"m\"\n",
         "top-level insert_method has an unsupported value")]
     [InlineData("chunked_final_pass = \"bogus\"\nactive_provider = \"a\"\n[providers.a]\nbase_url = \"https://example.test\"\nmodel = \"m\"\n",
@@ -275,11 +316,11 @@ public sealed class WindowsConfigValidationTests
 
     [Theory]
     [InlineData("active_provider = \"a\"\n[providers.a]\nmodel = 42\n",
-        "field 'model' must be a string")]
+        "provider field must be a string")]
     [InlineData("active_provider = \"a\"\n[providers.a]\napi_key = 42\n",
-        "field 'api_key' must be a string")]
+        "provider field must be a string")]
     [InlineData("active_provider = \"a\"\n[providers.a]\napi_key_file = true\n",
-        "field 'api_key_file' must be a string")]
+        "provider field must be a string")]
     public void ProviderSchemaTypesAreEnforced(string config, string expected)
     {
         AssertInvalid(config, expected);
@@ -287,13 +328,13 @@ public sealed class WindowsConfigValidationTests
 
     [Theory]
     [InlineData("active_provider = \"custom\"\n[providers.custom]\nmodel = \"m\"\n",
-        "has no base_url and adapter 'custom' has no default endpoint")]
+        "selected provider has no base_url and no default endpoint")]
     [InlineData("active_provider = \"custom\"\n[providers.custom]\nbase_url = \"https://example.test/v1/audio/transcriptions\"\n",
-        "has no model and adapter 'custom' has no default model")]
+        "selected provider has no model and no default model")]
     [InlineData("active_provider = \"custom\"\n[providers.custom]\nbase_url = \"not a URL\"\nmodel = \"m\"\n",
         "invalid base_url")]
     [InlineData("active_provider = \"cloudflare\"\n[providers.cloudflare]\nbase_url = \"\"\nmodel = \"\"\n",
-        "has no base_url and adapter 'cloudflare' has no default endpoint")]
+        "selected provider has no base_url and no default endpoint")]
     public void EffectiveRequiredFieldsAreEnforced(string config, string expected)
     {
         AssertInvalid(config, expected);
