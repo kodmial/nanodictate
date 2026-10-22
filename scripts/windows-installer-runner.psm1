@@ -85,6 +85,21 @@ function Get-ProcessTraceEventValue {
     return $null
 }
 
+function ConvertFrom-ProcessTraceExitStatus {
+    param($ExitStatus)
+
+    if ($null -eq $ExitStatus) { return $null }
+    try {
+        $value = [int64]$ExitStatus
+    } catch {
+        return $null
+    }
+    # Win32_ProcessStopTrace reports UInt32.MaxValue when Windows cannot
+    # confirm the status. Keep it unknown so the caller fails closed.
+    if ($value -eq [int64][uint32]::MaxValue) { return $null }
+    return $value
+}
+
 function Start-ProcessTrace {
     param([string]$Phase)
 
@@ -161,8 +176,9 @@ function Read-ProcessTraceEvents {
                 $ProcessEvents[$processId] = $entry
             }
             if ($subscription.IsStop) {
-                $exitCode = Get-ProcessTraceEventValue $newEvent 'ExitStatus'
-                if ($null -ne $exitCode) { $entry.ExitCode = [int]$exitCode }
+                $exitCode = ConvertFrom-ProcessTraceExitStatus `
+                    (Get-ProcessTraceEventValue $newEvent 'ExitStatus')
+                if ($null -ne $exitCode) { $entry.ExitCode = $exitCode }
                 $entry.Ended = $true
             }
             $read++

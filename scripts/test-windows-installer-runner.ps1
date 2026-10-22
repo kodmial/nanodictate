@@ -110,6 +110,17 @@ Assert-True 'durable completion events attach workers that never appeared in a s
 Assert-Equal 'durable completion events keep a late failure exit code' 7 $durable.New.ExitCode
 Assert-Equal 'durable completion events override an unverified snapshot exit code' 9 $durable.Existing.ExitCode
 
+$unconfirmedStatus = & $runnerModule {
+    ConvertFrom-ProcessTraceExitStatus ([uint32]::MaxValue)
+}
+$confirmedStatus = & $runnerModule {
+    param($value)
+    ConvertFrom-ProcessTraceExitStatus $value
+} 9
+Assert-True 'unconfirmed process trace status stays unknown and fails closed' `
+    ($null -eq $unconfirmedStatus) "status was '$unconfirmedStatus'"
+Assert-Equal 'confirmed process trace status keeps its exit code' 9 $confirmedStatus
+
 $tempRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [IO.Path]::GetTempPath() }
 $work = Join-Path $tempRoot ('nd-runner-tests-' + [guid]::NewGuid().ToString('N'))
 $logDir = Join-Path $work 'logs'
