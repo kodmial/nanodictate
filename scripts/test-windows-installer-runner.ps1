@@ -387,7 +387,7 @@ function Invoke-NonElevatedInstallerChild {
     foreach ($candidate in $executables) {
         Remove-Item -LiteralPath $ResultPath -Force -ErrorAction SilentlyContinue
         $exitCode = [NanoDictate.InstallerRunner.Tests.NonElevatedProcess]::Run(
-            $candidate, $arguments, $WorkDirectory, 120000)
+            $candidate, $arguments, $WorkDirectory, 240000)
         if (Test-Path -LiteralPath $ResultPath) {
             $result = Get-Content -LiteralPath $ResultPath -Raw | ConvertFrom-Json
             return [pscustomobject]@{ ExitCode = $exitCode; Result = $result }
@@ -763,6 +763,11 @@ try {
                         $_ -ne 0
                     }).Count -eq 0)) `
                 "worker exit codes: $($childResult.success_exit_codes -join ', ')"
+            Assert-True 'actual non-elevated install-windows path fails on a zero-delay failing worker' `
+                ($childResult.install_windows_failure_error -match 'exited with code 9') `
+                "install-windows failure was: $($childResult.install_windows_failure_error)"
+            Assert-Equal 'actual non-elevated install-windows path completes a zero-delay worker' `
+                0 $childResult.install_windows_success_exit_code
         }
 
         $untrackedMessage = & $runnerModule {

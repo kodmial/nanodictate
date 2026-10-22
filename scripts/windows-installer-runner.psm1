@@ -1317,7 +1317,12 @@ function Invoke-BoundedInstallerProcess {
 
     try {
         $processTrace = Start-ProcessTrace -Phase $Phase
-        $processJob = New-ProcessJob
+        $processJob = $null
+        if ($null -eq $processTrace) {
+            # Trace events are the primary completion source when available.
+            # Only a non-elevated session needs the job-object launch path.
+            $processJob = New-ProcessJob
+        }
         if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and
             $null -eq $processTrace -and $null -eq $processJob) {
             throw "Installer phase '$Phase' has no reliable non-elevated process completion source because process traces are unavailable and the tracking job could not be created."

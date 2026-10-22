@@ -62,6 +62,7 @@ Assert-Contains 'installer delegates /DIR quoting to the shared runner' $install
 Assert-NotContains 'installer never uses an uncapped tree wait' $install 'Start-Process -Wait'
 Assert-NotContains 'installer never unconditionally re-launches a duplicate agent' $install "Start-Process -FilePath `$exe -ArgumentList '--background'"
 Assert-Contains 'installer exposes a testable verified install function' $install 'function Install-NanoDictateVerified'
+Assert-Contains 'installer exposes a testable bounded user-install function' $install 'function Invoke-NanoDictateInstaller'
 Assert-Contains 'installer falls back to the shared runner source for irm | iex' $install 'windows-installer-runner.psm1'
 Assert-Contains 'installer retains per-user installer diagnostics' $install "Join-Path `$env:LOCALAPPDATA 'NanoDictate\installer-logs'"
 Assert-Contains 'installer records the diagnostic location' $install 'Installer diagnostics: {0}'
@@ -165,6 +166,8 @@ Assert-Contains 'runner tests cover workers missing from every snapshot' $runner
 Assert-Contains 'runner tests require durable trace availability on Windows' $runnerTests 'durable process trace events are available'
 Assert-Contains 'runner tests cover non-elevated user installs' $runnerTests 'non-elevated user-install'
 Assert-Contains 'runner tests lower privileges for non-elevated installs' $runnerTests 'CreateRestrictedToken'
+$nonElevatedFixture = Read-Text 'scripts/fixtures/non-elevated-user-install.ps1'
+Assert-Contains 'non-elevated tests exercise the install-windows helper' $nonElevatedFixture 'Invoke-NanoDictateInstaller'
 Assert-Contains 'runner tests fail closed on missing job evidence' $runnerTests 'missing job snapshot fails closed'
 Assert-Contains 'runner tests cover missing payload failures' $runnerTests 'missing payload file is rejected'
 Assert-Contains 'runner tests cover leftover startup registration' $runnerTests 'leftover startup registration is rejected'

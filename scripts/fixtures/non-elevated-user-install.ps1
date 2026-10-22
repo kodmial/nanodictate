@@ -16,11 +16,13 @@ function Save-Result {
 }
 
 $result = [ordered]@{
-    is_elevated        = $null
-    trace_available    = $null
-    failure_errors     = @()
-    success_exit_codes = @()
-    error              = $null
+    is_elevated                       = $null
+    trace_available                   = $null
+    failure_errors                    = @()
+    success_exit_codes                = @()
+    install_windows_failure_error     = $null
+    install_windows_success_exit_code = $null
+    error                             = $null
 }
 
 try {
@@ -32,6 +34,8 @@ try {
     Import-Module $RunnerModulePath -Force
     $runnerModule = Get-Module windows-installer-runner
     $pwshPath = (Get-Process -Id $PID).Path
+    $scriptsDirectory = Split-Path -Parent $RunnerModulePath
+    . (Join-Path $scriptsDirectory 'install-windows.ps1')
 
     $trace = & $runnerModule {
         param($phase)
@@ -105,6 +109,64 @@ try {
             "non-elevated-ok-$run"
         $result.success_exit_codes += $exitCode
     }
+
+    # Exercise the same user-install helper that scripts/install-windows.ps1
+    # invokes, so the qualification covers the documented per-user entry point
+    # rather than only the shared runner module.
+    $installLogDirectory = Join-Path $WorkDirectory 'install-windows-logs'
+    New-Item -ItemType Directory -Force -Path $installLogDirectory | Out-Null
+
+    & $runnerModule {
+        function script:Register-CimIndicationEvent {
+            throw 'simulated non-elevated trace registration failure'
+        }
+    }
+    try {
+        try {
+            Invoke-NanoDictateInstaller -InstallerPath $pwshPath -Target $WorkDirectory `
+                -ArgumentList @(
+                    '-NoProfile', '-File', $FixtureScript, '-Mode', 'bootstrap',
+                    '-WorkerScript', $FixtureScript,
+                    '-WorkerSleepMilliseconds', '0', '-WorkerExitCode', '9',
+                    '-BootstrapDelayMilliseconds', '0',
+                    '-PidFile', (Join-Path $WorkDirectory 'install-windows-fail.pid')
+                ) -Phase 'non-elevated-install-windows-fail' -TimeoutSeconds 15 `
+                -LogDirectory $installLogDirectory | Out-Null
+            $result.install_windows_failure_error = 'the bootstrap worker failure was masked'
+        } catch {
+            $result.install_windows_failure_error = $_.Exception.Message
+        }
+    } finally {
+        & $runnerModule {
+            Remove-Item -Path Function:Register-CimIndicationEvent -ErrorAction SilentlyContinue
+        }
+    }
+
+    & $runnerModule {
+        function script:Register-CimIndicationEvent {
+            throw 'simulated non-elevated trace registration failure'
+        }
+    }
+    try {
+        try {
+            $install = Invoke-NanoDictateInstaller -InstallerPath $pwshPath -Target $WorkDirectory `
+                -ArgumentList @(
+                    '-NoProfile', '-File', $FixtureScript, '-Mode', 'bootstrap',
+                    '-WorkerScript', $FixtureScript,
+                    '-WorkerSleepMilliseconds', '0', '-WorkerExitCode', '0',
+                    '-BootstrapDelayMilliseconds', '0',
+                    '-PidFile', (Join-Path $WorkDirectory 'install-windows-ok.pid')
+                ) -Phase 'non-elevated-install-windows-ok' -TimeoutSeconds 15 `
+                -LogDirectory $installLogDirectory
+            $result.install_windows_success_exit_code = [int]$install.ExitCode
+        } catch {
+            $result.install_windows_success_exit_code = "error: $($_.Exception.Message)"
+        }
+    } finally {
+        & $runnerModule {
+            Remove-Item -Path Function:Register-CimIndicationEvent -ErrorAction SilentlyContinue
+        }
+    }
 } catch {
     $result.error = $_.Exception.Message
 } finally {
@@ -117,4 +179,6 @@ if (@($result.failure_errors).Count -ne 5) { exit 1 }
 if (@($result.failure_errors | Where-Object { $_ -notmatch 'exited with code 9' }).Count -ne 0) { exit 1 }
 if (@($result.success_exit_codes).Count -ne 3) { exit 1 }
 if (@($result.success_exit_codes | Where-Object { $_ -ne 0 }).Count -ne 0) { exit 1 }
+if ($result.install_windows_failure_error -notmatch 'exited with code 9') { exit 1 }
+if ($result.install_windows_success_exit_code -ne 0) { exit 1 }
 exit 0
