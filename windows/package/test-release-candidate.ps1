@@ -84,6 +84,11 @@ try {
   } catch {
     throw "Bundled config.example.toml failed shared structured validation: $($_.Exception.Message)"
   }
+  $repoConfig = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'config.example.toml'
+  if ((Get-FileHash -LiteralPath $repoConfig -Algorithm SHA256).Hash -cne
+      (Get-FileHash -LiteralPath (Join-Path $unpacked 'config.example.toml') -Algorithm SHA256).Hash) {
+    throw 'Candidate ZIP config.example.toml differs from the policy-validated repository file'
+  }
   $auth = Get-AuthenticodeSignature -LiteralPath $setup
   if ($auth.Status -eq 'NotSigned') {
     Write-Warning 'Candidate installer is unsigned: trusted code signing is a separate publisher prerequisite'

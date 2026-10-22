@@ -282,8 +282,7 @@ public static class WindowsConfigValidator
 
         if (usesDefaultBaseUrl
             && AdapterDefaults.DefaultEndpointRequiresCredential(entry.Id)
-            && string.IsNullOrEmpty(entry.ApiKey)
-            && string.IsNullOrEmpty(entry.ApiKeyFile))
+            && !HasDeclaredCredential(entry))
         {
             errors.Add("selected provider requires a declared api_key or api_key_file");
         }
@@ -329,8 +328,7 @@ public static class WindowsConfigValidator
 
                 if (fallbackUsesDefaultBaseUrl
                     && AdapterDefaults.DefaultEndpointRequiresCredential(fallback.Id)
-                    && string.IsNullOrEmpty(fallback.ApiKey)
-                    && string.IsNullOrEmpty(fallback.ApiKeyFile))
+                    && !HasDeclaredCredential(fallback))
                 {
                     errors.Add("failover provider requires a declared api_key or api_key_file");
                 }
@@ -339,6 +337,10 @@ public static class WindowsConfigValidator
 
         return new ConfigValidationResult(activeProvider, errors);
     }
+
+    private static bool HasDeclaredCredential(ProviderEntry provider) =>
+        !string.IsNullOrWhiteSpace(provider.ApiKey)
+        || !string.IsNullOrWhiteSpace(provider.ApiKeyFile);
 
     private static string PreparePortableDialect(string text)
     {

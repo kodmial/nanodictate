@@ -88,6 +88,21 @@ public sealed class WindowsConfigValidationTests
         AssertInvalid(config, "selected provider requires a declared api_key or api_key_file");
     }
 
+    [Theory]
+    [InlineData("api_key = \"  \"")]
+    [InlineData("api_key_file = \"   \"")]
+    public void OfficialEndpointRejectsWhitespaceOnlyCredential(string credential)
+    {
+        var config = $"""
+            active_provider = "openai"
+            [providers.openai]
+            base_url = ""
+            model = ""
+            {credential}
+            """;
+        AssertInvalid(config, "selected provider requires a declared api_key or api_key_file");
+    }
+
     [Fact]
     public void CredentialAcceptingProviderPassesWithCrlfAndBom()
     {
@@ -203,6 +218,25 @@ public sealed class WindowsConfigValidationTests
             base_url = ""
             model = ""
             api_key = ""
+            """;
+        AssertInvalid(config, "failover provider requires a declared api_key or api_key_file");
+    }
+
+    [Theory]
+    [InlineData("api_key = \"  \"")]
+    [InlineData("api_key_file = \"   \"")]
+    public void AutoFailoverRejectsWhitespaceOnlyFallbackCredential(string credential)
+    {
+        var config = $"""
+            auto_failover = true
+            active_provider = "selected"
+            [providers.selected]
+            base_url = "https://example.test/v1/audio/transcriptions"
+            model = "m"
+            [providers.groq]
+            base_url = ""
+            model = ""
+            {credential}
             """;
         AssertInvalid(config, "failover provider requires a declared api_key or api_key_file");
     }
