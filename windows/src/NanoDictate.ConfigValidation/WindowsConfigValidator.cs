@@ -288,6 +288,55 @@ public static class WindowsConfigValidator
             errors.Add("selected provider requires a declared api_key or api_key_file");
         }
 
+        if (config.AutoFailover)
+        {
+            foreach (var providerId in config.FailoverOrderIds)
+            {
+                if (providerId == entry.Id)
+                {
+                    continue;
+                }
+
+                var fallback = config.Providers.FirstOrDefault(provider => provider.Id == providerId);
+                if (fallback is null)
+                {
+                    continue;
+                }
+
+                var fallbackUsesDefaultBaseUrl = string.IsNullOrWhiteSpace(fallback.BaseUrl);
+                var fallbackBaseUrl = fallbackUsesDefaultBaseUrl
+                    ? AdapterDefaults.BaseUrl(fallback.Id)
+                    : fallback.BaseUrl;
+                if (string.IsNullOrWhiteSpace(fallbackBaseUrl))
+                {
+                    errors.Add("failover provider has no base_url and no default endpoint");
+                }
+                else if (!Uri.TryCreate(fallbackBaseUrl, UriKind.Absolute, out var fallbackEndpoint)
+                    || (fallbackEndpoint.Scheme != Uri.UriSchemeHttp
+                        && fallbackEndpoint.Scheme != Uri.UriSchemeHttps))
+                {
+                    errors.Add("failover provider has an invalid base_url");
+                }
+
+                var fallbackModel = string.IsNullOrWhiteSpace(fallback.Model)
+                    ? AdapterDefaults.Model(fallback.Id)
+                    : fallback.Model;
+                if (string.IsNullOrWhiteSpace(fallbackModel)
+                    && !AdapterDefaults.ModelEmbeddedInEndpoint(fallback.Id))
+                {
+                    errors.Add("failover provider has no model and no default model");
+                }
+
+                if (fallbackUsesDefaultBaseUrl
+                    && AdapterDefaults.DefaultEndpointRequiresCredential(fallback.Id)
+                    && string.IsNullOrEmpty(fallback.ApiKey)
+                    && string.IsNullOrEmpty(fallback.ApiKeyFile))
+                {
+                    errors.Add("failover provider requires a declared api_key or api_key_file");
+                }
+            }
+        }
+
         return new ConfigValidationResult(activeProvider, errors);
     }
 

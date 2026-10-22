@@ -178,6 +178,70 @@ public sealed class WindowsConfigValidationTests
         AssertValid(config);
     }
 
+    [Theory]
+    [InlineData("auto_failover = true\nactive_provider = \"selected\"\n[providers.selected]\nbase_url = \"https://example.test/v1/audio/transcriptions\"\nmodel = \"m\"\n[providers.fallback]\nbase_url = \"\"\nmodel = \"\"\n",
+        "failover provider has no base_url and no default endpoint")]
+    [InlineData("auto_failover = true\nactive_provider = \"selected\"\n[providers.selected]\nbase_url = \"https://example.test/v1/audio/transcriptions\"\nmodel = \"m\"\n[providers.fallback]\nbase_url = \"not a URL\"\nmodel = \"m\"\n",
+        "failover provider has an invalid base_url")]
+    [InlineData("auto_failover = true\nactive_provider = \"selected\"\n[providers.selected]\nbase_url = \"https://example.test/v1/audio/transcriptions\"\nmodel = \"m\"\n[providers.fallback]\nbase_url = \"https://example.test/v1/audio/transcriptions\"\n",
+        "failover provider has no model and no default model")]
+    public void AutoFailoverValidatesFallbackEndpointAndModel(string config, string expected)
+    {
+        AssertInvalid(config, expected);
+    }
+
+    [Fact]
+    public void AutoFailoverValidatesFallbackCredential()
+    {
+        const string config = """
+            auto_failover = true
+            active_provider = "selected"
+            [providers.selected]
+            base_url = "https://example.test/v1/audio/transcriptions"
+            model = "m"
+            [providers.groq]
+            base_url = ""
+            model = ""
+            api_key = ""
+            """;
+        AssertInvalid(config, "failover provider requires a declared api_key or api_key_file");
+    }
+
+    [Fact]
+    public void AutoFailoverAcceptsConfiguredFallbacks()
+    {
+        const string config = """
+            auto_failover = true
+            active_provider = "selected"
+            providers = ["selected", "groq", "cloudflare"]
+            [providers.selected]
+            base_url = "https://example.test/v1/audio/transcriptions"
+            model = "m"
+            [providers.groq]
+            base_url = ""
+            model = ""
+            api_key = "dummy-key"
+            [providers.cloudflare]
+            base_url = "https://api.cloudflare.com/client/v4/accounts/example/ai/run/@cf/openai/whisper-large-v3-turbo"
+            model = ""
+            api_key = ""
+            """;
+        AssertValid(config);
+    }
+
+    [Fact]
+    public void AutoFailoverWithOnlySelectedProviderIsValid()
+    {
+        const string config = """
+            auto_failover = true
+            active_provider = "selected"
+            [providers.selected]
+            base_url = "https://example.test/v1/audio/transcriptions"
+            model = "m"
+            """;
+        AssertValid(config);
+    }
+
     [Fact]
     public void ProviderHeaderCommentsAreAcceptedLikeTheApplicationParser()
     {
