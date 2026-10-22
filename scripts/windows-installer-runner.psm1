@@ -178,8 +178,12 @@ namespace NanoDictate.InstallerRunner
             startup.cb = (uint)Marshal.SizeOf(typeof(STARTUPINFO));
             PROCESS_INFORMATION info;
             StringBuilder mutableCommandLine = new StringBuilder(commandLine);
+            // PowerShell passes $null string arguments to .NET methods as an
+            // empty string. CreateProcessW treats that as an invalid current
+            // directory, so map empty values back to NULL (inherit).
+            string currentDirectory = string.IsNullOrEmpty(workingDirectory) ? null : workingDirectory;
             if (!CreateProcessW(applicationPath, mutableCommandLine, IntPtr.Zero, IntPtr.Zero, false,
-                CreateSuspended, IntPtr.Zero, workingDirectory, ref startup, out info))
+                CreateSuspended, IntPtr.Zero, currentDirectory, ref startup, out info))
             {
                 throw new Win32Exception(Marshal.GetLastWin32Error());
             }
@@ -1463,7 +1467,10 @@ function Invoke-BoundedInstallerProcess {
             throw "Installer phase '$Phase' exited with code $rootExitCode."
         }
 
-        if ($null -eq $processTrace -and $null -ne $jobSnapshot) {
+        if ($null -eq $processTrace -and $null -ne $processJob) {
+            if ($null -eq $jobSnapshot) {
+                throw "Installer phase '$Phase' could not read the tracking job snapshot. Fail closed."
+            }
             if (-not [bool]$jobSnapshot.AccountingAvailable) {
                 throw "Installer phase '$Phase' could not verify job completion accounting. Fail closed."
             }

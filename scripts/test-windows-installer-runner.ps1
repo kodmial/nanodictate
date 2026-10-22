@@ -365,8 +365,10 @@ try {
         }
 
         # A non-elevated user session cannot register Win32 process trace
-        # events. The job object must still track zero-delay bootstrap workers
-        # and preserve their exit status for the normal per-user install path.
+        # events. CI runs elevated, so force the same trace-registration
+        # failure here: the job fallback itself does not use elevation. It must
+        # still track zero-delay bootstrap workers and preserve their exit
+        # status for the normal per-user install path.
         for ($run = 1; $run -le 5; $run++) {
             $nonElevatedFailure = Invoke-NonElevatedInstallerFixture `
                 -Executable $pwshPath -FixtureScript $fixture `
@@ -388,6 +390,8 @@ try {
 
         $untrackedMessage = & $runnerModule {
             param($executable)
+            $originalNewProcessJob = [scriptblock]::Create(
+                (Get-Command -Name New-ProcessJob -CommandType Function).Definition)
             function script:Register-CimIndicationEvent {
                 throw 'simulated trace registration failure'
             }
@@ -403,12 +407,55 @@ try {
                 return $_.Exception.Message
             } finally {
                 Remove-Item -Path Function:Register-CimIndicationEvent -ErrorAction SilentlyContinue
-                Remove-Item -Path Function:New-ProcessJob -ErrorAction SilentlyContinue
+                Set-Item -Path Function:script:New-ProcessJob -Value $originalNewProcessJob
             }
         } $pwshPath
         Assert-True 'missing trace and job tracking fails closed' `
             ($untrackedMessage -match 'no reliable non-elevated process completion source') `
             "runner did not fail closed: $untrackedMessage"
+
+        $snapshotFailureMessage = & $runnerModule {
+            param($executable)
+            $originalNewProcessJob = [scriptblock]::Create(
+                (Get-Command -Name New-ProcessJob -CommandType Function).Definition)
+            function script:Register-CimIndicationEvent {
+                throw 'simulated trace registration failure'
+            }
+            function script:New-ProcessJob {
+                $job = [pscustomobject]@{}
+                $job | Add-Member -MemberType ScriptMethod -Name StartSuspended -Value {
+                    param($applicationPath, $commandLine, $workingDirectory)
+                    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+                    $startInfo.FileName = $applicationPath
+                    $startInfo.UseShellExecute = $false
+                    $startInfo.Arguments = '-NoProfile -Command "Start-Sleep -Milliseconds 300; exit 0"'
+                    $process = [Diagnostics.Process]::Start($startInfo)
+                    $suspended = [pscustomobject]@{ ProcessId = $process.Id }
+                    $suspended | Add-Member -MemberType ScriptMethod -Name Resume -Value { }
+                    $suspended | Add-Member -MemberType ScriptMethod -Name Dispose -Value { }
+                    $process.Dispose()
+                    return $suspended
+                }
+                $job | Add-Member -MemberType ScriptMethod -Name GetProcessIds -Value { return @() }
+                $job | Add-Member -MemberType ScriptMethod -Name GetSnapshot -Value { return $null }
+                $job | Add-Member -MemberType ScriptMethod -Name Dispose -Value { }
+                return $job
+            }
+            try {
+                Invoke-BoundedInstallerProcess -FilePath $executable -ArgumentList @(
+                    '-NoProfile', '-Command', 'exit 0'
+                ) -Phase 'user-install-snapshot-failure' -TimeoutSeconds 5 | Out-Null
+                return $null
+            } catch {
+                return $_.Exception.Message
+            } finally {
+                Remove-Item -Path Function:Register-CimIndicationEvent -ErrorAction SilentlyContinue
+                Set-Item -Path Function:script:New-ProcessJob -Value $originalNewProcessJob
+            }
+        } $pwshPath
+        Assert-True 'missing job snapshot fails closed' `
+            ($snapshotFailureMessage -match 'could not read the tracking job snapshot') `
+            "runner did not fail closed on missing job evidence: $snapshotFailureMessage"
 
         $failingWorkerPidFile = Join-Path $work 'bootstrap-fail.pid'
         Assert-Throws 'failing bootstrap worker fails the phase' {
