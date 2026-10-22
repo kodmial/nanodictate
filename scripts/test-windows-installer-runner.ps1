@@ -60,6 +60,37 @@ function Stop-ProcessByIdOrNull([int]$ProcessId) {
         try { $process.Dispose() } catch { }
     }
 }
+function Invoke-NonElevatedInstallerFixture {
+    param(
+        [string]$Executable,
+        [string]$FixtureScript,
+        [string]$PidFile,
+        [int]$WorkerExitCode,
+        [string]$Phase
+    )
+    & $runnerModule {
+        param($executable, $fixture, $pidFile, $workerExitCode, $phase)
+        function script:Register-CimIndicationEvent {
+            throw 'simulated non-elevated trace registration failure'
+        }
+        try {
+            try {
+                $result = Invoke-BoundedInstallerProcess -FilePath $executable -ArgumentList @(
+                    '-NoProfile', '-File', $fixture, '-Mode', 'bootstrap',
+                    '-WorkerScript', $fixture,
+                    '-WorkerSleepMilliseconds', '0', '-WorkerExitCode', [string]$workerExitCode,
+                    '-BootstrapDelayMilliseconds', '0',
+                    '-PidFile', $pidFile
+                ) -Phase $phase -TimeoutSeconds 15
+                return [pscustomobject]@{ ExitCode = $result.ExitCode; Error = $null }
+            } catch {
+                return [pscustomobject]@{ ExitCode = $null; Error = $_.Exception.Message }
+            }
+        } finally {
+            Remove-Item -Path Function:Register-CimIndicationEvent -ErrorAction SilentlyContinue
+        }
+    } $Executable $FixtureScript $PidFile $WorkerExitCode $Phase
+}
 
 $modulePath = Join-Path $PSScriptRoot 'windows-installer-runner.psm1'
 $fixture = Join-Path $PSScriptRoot 'fixtures/installer-runner-fixture.ps1'
@@ -109,6 +140,33 @@ Assert-True 'durable completion events attach workers that never appeared in a s
     "worker entry was $($durable.New)"
 Assert-Equal 'durable completion events keep a late failure exit code' 7 $durable.New.ExitCode
 Assert-Equal 'durable completion events override an unverified snapshot exit code' 9 $durable.Existing.ExitCode
+
+$jobCompletion = & $runnerModule {
+    $tracked = @{
+        100 = [pscustomobject]@{
+            Id = 100; ParentId = 0; Name = 'setup'; Detached = $false
+            Process = $null; ExitCode = $null; Ended = $false
+        }
+    }
+    $snapshot = [pscustomobject]@{
+        Processes = @(
+            [pscustomobject]@{ Id = 200; Name = 'setup'; Ended = $true; HasExitCode = $true; ExitCode = 9 }
+            [pscustomobject]@{ Id = 300; Name = 'setup'; Ended = $true; HasExitCode = $false; ExitCode = 0 }
+        )
+        AccountingAvailable = $true
+        TotalProcesses      = 3
+        ActiveProcesses     = 0
+        AccountingComplete  = $true
+    }
+    [void](Update-TrackedProcessJob -Tracked $tracked -DetachedProcessNames @() `
+        -RootId 100 -Snapshot $snapshot)
+    [pscustomobject]@{ Failed = $tracked[200]; Unknown = $tracked[300] }
+}
+Assert-Equal 'job completion records a worker exit between snapshots' 9 $jobCompletion.Failed.ExitCode
+Assert-True 'job completion marks an exit-code-less worker ended' $jobCompletion.Unknown.Ended `
+    'worker entry was not marked ended'
+Assert-True 'job completion leaves an unverified exit code unknown' `
+    ($null -eq $jobCompletion.Unknown.ExitCode) "exit code was '$($jobCompletion.Unknown.ExitCode)'"
 
 $traceName = & $runnerModule {
     $events = @{}
@@ -307,51 +365,26 @@ try {
         }
 
         # A non-elevated user session cannot register Win32 process trace
-        # events. The job object must still track the bootstrap worker and
-        # preserve its exit status for the normal per-user install path.
-        $nonElevatedFailure = & $runnerModule {
-            param($executable, $fixture, $pidFile)
-            function script:Register-CimIndicationEvent {
-                throw 'simulated non-elevated trace registration failure'
-            }
-            try {
-                try {
-                    Invoke-BoundedInstallerProcess -FilePath $executable -ArgumentList @(
-                        '-NoProfile', '-File', $fixture, '-Mode', 'bootstrap',
-                        '-WorkerScript', $fixture,
-                        '-WorkerSleepMilliseconds', '1500', '-WorkerExitCode', '9',
-                        '-PidFile', $pidFile
-                    ) -Phase 'user-install' -TimeoutSeconds 15 | Out-Null
-                    return $null
-                } catch {
-                    return $_.Exception.Message
-                }
-            } finally {
-                Remove-Item -Path Function:Register-CimIndicationEvent -ErrorAction SilentlyContinue
-            }
-        } $pwshPath $fixture (Join-Path $work 'non-elevated-fail.pid')
-        Assert-True 'non-elevated user-install still fails on a failing worker' `
-            ($nonElevatedFailure -match 'exited with code 9') `
-            "job fallback did not preserve the worker failure: $nonElevatedFailure"
+        # events. The job object must still track zero-delay bootstrap workers
+        # and preserve their exit status for the normal per-user install path.
+        for ($run = 1; $run -le 5; $run++) {
+            $nonElevatedFailure = Invoke-NonElevatedInstallerFixture `
+                -Executable $pwshPath -FixtureScript $fixture `
+                -PidFile (Join-Path $work "non-elevated-fail-$run.pid") `
+                -WorkerExitCode 9 -Phase "user-install-fail-$run"
+            Assert-True "non-elevated user-install fails on a zero-delay failing worker (run $run)" `
+                ($nonElevatedFailure.Error -match 'exited with code 9') `
+                "job fallback did not preserve the worker failure: $($nonElevatedFailure.Error)"
+        }
 
-        $nonElevatedSuccess = & $runnerModule {
-            param($executable, $fixture, $pidFile)
-            function script:Register-CimIndicationEvent {
-                throw 'simulated non-elevated trace registration failure'
-            }
-            try {
-                $result = Invoke-BoundedInstallerProcess -FilePath $executable -ArgumentList @(
-                    '-NoProfile', '-File', $fixture, '-Mode', 'bootstrap',
-                    '-WorkerScript', $fixture,
-                    '-WorkerSleepMilliseconds', '1500', '-WorkerExitCode', '0',
-                    '-PidFile', $pidFile
-                ) -Phase 'user-install' -TimeoutSeconds 15
-                return $result.ExitCode
-            } finally {
-                Remove-Item -Path Function:Register-CimIndicationEvent -ErrorAction SilentlyContinue
-            }
-        } $pwshPath $fixture (Join-Path $work 'non-elevated-ok.pid')
-        Assert-Equal 'non-elevated user-install completes with job tracking' 0 $nonElevatedSuccess
+        for ($run = 1; $run -le 3; $run++) {
+            $nonElevatedSuccess = Invoke-NonElevatedInstallerFixture `
+                -Executable $pwshPath -FixtureScript $fixture `
+                -PidFile (Join-Path $work "non-elevated-ok-$run.pid") `
+                -WorkerExitCode 0 -Phase "user-install-ok-$run"
+            Assert-Equal "non-elevated user-install completes with a zero-delay worker (run $run)" `
+                0 $nonElevatedSuccess.ExitCode
+        }
 
         $untrackedMessage = & $runnerModule {
             param($executable)

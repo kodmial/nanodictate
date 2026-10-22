@@ -8,8 +8,9 @@
   starts the persistent NanoDictate background agent with a nowait [Run] entry,
   so a tree wait can remain blocked long after Setup itself succeeded.
 
-  This runner starts the installer directly with System.Diagnostics.Process,
-  waits for the installer root (and any Inno bootstrap/worker process) with a
+  This runner starts the installer directly without a whole-tree wait, using
+  System.Diagnostics.Process or a suspended Windows job-tracked launch. It
+  tracks the installer root and any Inno bootstrap/worker process with a
   per-operation deadline, and never waits for the independent product agent.
   Every phase writes bounded diagnostics, including the safe process tree and
   the Inno /LOG file when one is requested.
@@ -28,34 +29,170 @@ $script:NanoDictatePayloadNames = @(
 )
 $script:ProcessJobSource = @'
 using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
 
 namespace NanoDictate.InstallerRunner
 {
+    public sealed class JobProcessRecord
+    {
+        public int Id { get; set; }
+        public string Name { get; set; }
+        public bool Ended { get; set; }
+        public bool HasExitCode { get; set; }
+        public int ExitCode { get; set; }
+    }
+
+    public sealed class JobProcessSnapshot
+    {
+        public JobProcessRecord[] Processes { get; set; }
+        public bool AccountingAvailable { get; set; }
+        public int TotalProcesses { get; set; }
+        public int ActiveProcesses { get; set; }
+        public int TotalTerminatedProcesses { get; set; }
+        public bool AccountingComplete { get; set; }
+    }
+
+    public sealed class SuspendedProcess : IDisposable
+    {
+        private IntPtr processHandle;
+        private IntPtr threadHandle;
+        private int disposed;
+        private bool resumed;
+
+        public int ProcessId { get; private set; }
+
+        internal SuspendedProcess(int processId, IntPtr process, IntPtr thread)
+        {
+            ProcessId = processId;
+            processHandle = process;
+            threadHandle = thread;
+        }
+
+        public void Resume()
+        {
+            if (threadHandle == IntPtr.Zero) { return; }
+            uint result = ResumeThread(threadHandle);
+            if (result == uint.MaxValue)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            resumed = true;
+            CloseHandle(threadHandle);
+            threadHandle = IntPtr.Zero;
+        }
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref disposed, 1) != 0) { return; }
+            if (!resumed && processHandle != IntPtr.Zero)
+            {
+                TerminateProcess(processHandle, 1);
+            }
+            if (threadHandle != IntPtr.Zero)
+            {
+                CloseHandle(threadHandle);
+                threadHandle = IntPtr.Zero;
+            }
+            if (processHandle != IntPtr.Zero)
+            {
+                CloseHandle(processHandle);
+                processHandle = IntPtr.Zero;
+            }
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint ResumeThread(IntPtr hThread);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool TerminateProcess(IntPtr hProcess, uint exitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+    }
+
     public sealed class ProcessJob : IDisposable
     {
+        private const int JobObjectBasicAccountingInformation = 1;
         private const int JobObjectBasicProcessIdList = 3;
-        private IntPtr handle;
+        private const int JobObjectAssociateCompletionPortInformation = 7;
+        private const uint JobObjectMsgNewProcess = 6;
+        private const uint JobObjectMsgExitProcess = 7;
+        private const uint JobObjectMsgAbnormalExitProcess = 8;
+        private const uint CreateSuspended = 0x00000004;
+        private const int CaptureIntervalMilliseconds = 250;
 
-        private ProcessJob(IntPtr value)
+        private readonly object gate = new object();
+        private readonly Dictionary<int, JobProcessRecord> records = new Dictionary<int, JobProcessRecord>();
+        private readonly Dictionary<int, Process> liveProcesses = new Dictionary<int, Process>();
+        private IntPtr handle;
+        private IntPtr completionPort;
+        private Thread monitorThread;
+        private int disposed;
+        private volatile bool stopping;
+        private int captureMilliseconds;
+
+        private ProcessJob(IntPtr job, IntPtr port)
         {
-            handle = value;
+            handle = job;
+            completionPort = port;
         }
 
         public static ProcessJob Create()
         {
-            IntPtr value = CreateJobObjectW(IntPtr.Zero, null);
-            if (value == IntPtr.Zero)
+            IntPtr job = CreateJobObjectW(IntPtr.Zero, null);
+            if (job == IntPtr.Zero)
             {
-                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                throw new Win32Exception(Marshal.GetLastWin32Error());
             }
-            return new ProcessJob(value);
+            IntPtr port = CreateIoCompletionPort(new IntPtr(-1), IntPtr.Zero, UIntPtr.Zero, 1);
+            if (port == IntPtr.Zero)
+            {
+                int error = Marshal.GetLastWin32Error();
+                CloseHandle(job);
+                throw new Win32Exception(error);
+            }
+
+            ProcessJob result = new ProcessJob(job, port);
+            try
+            {
+                result.AssociateCompletionPort();
+                result.StartMonitor();
+                return result;
+            }
+            catch
+            {
+                result.Dispose();
+                throw;
+            }
         }
 
-        public bool Assign(IntPtr processHandle)
+        public SuspendedProcess StartSuspended(string applicationPath, string commandLine, string workingDirectory)
         {
-            if (handle == IntPtr.Zero || processHandle == IntPtr.Zero) { return false; }
-            return AssignProcessToJobObject(handle, processHandle);
+            if (handle == IntPtr.Zero) { throw new InvalidOperationException("The process job is closed."); }
+            STARTUPINFO startup = new STARTUPINFO();
+            startup.cb = (uint)Marshal.SizeOf(typeof(STARTUPINFO));
+            PROCESS_INFORMATION info;
+            StringBuilder mutableCommandLine = new StringBuilder(commandLine);
+            if (!CreateProcessW(applicationPath, mutableCommandLine, IntPtr.Zero, IntPtr.Zero, false,
+                CreateSuspended, IntPtr.Zero, workingDirectory, ref startup, out info))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            if (!AssignProcessToJobObject(handle, info.hProcess))
+            {
+                int error = Marshal.GetLastWin32Error();
+                TerminateProcess(info.hProcess, 1);
+                CloseHandle(info.hThread);
+                CloseHandle(info.hProcess);
+                throw new Win32Exception(error);
+            }
+            return new SuspendedProcess(info.dwProcessId, info.hProcess, info.hThread);
         }
 
         public int[] GetProcessIds()
@@ -73,7 +210,7 @@ namespace NanoDictate.InstallerRunner
                     Marshal.WriteInt32(buffer, 4, 0);
                     if (!QueryInformationJobObject(handle, JobObjectBasicProcessIdList, buffer, (uint)size, IntPtr.Zero))
                     {
-                        throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                        throw new Win32Exception(Marshal.GetLastWin32Error());
                     }
 
                     int assigned = Marshal.ReadInt32(buffer, 0);
@@ -98,13 +235,418 @@ namespace NanoDictate.InstallerRunner
             }
         }
 
+        public JobProcessSnapshot GetSnapshot()
+        {
+            CaptureActiveProcesses();
+            CheckLiveProcesses();
+
+            JobProcessRecord[] copies;
+            lock (gate)
+            {
+                copies = new JobProcessRecord[records.Count];
+                int index = 0;
+                foreach (JobProcessRecord record in records.Values)
+                {
+                    JobProcessRecord copy = new JobProcessRecord();
+                    copy.Id = record.Id;
+                    copy.Name = record.Name;
+                    copy.Ended = record.Ended;
+                    copy.HasExitCode = record.HasExitCode;
+                    copy.ExitCode = record.ExitCode;
+                    copies[index++] = copy;
+                }
+            }
+
+            bool accountingAvailable = false;
+            int totalProcesses = 0;
+            int activeProcesses = 0;
+            int terminatedProcesses = 0;
+            try
+            {
+                JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting =
+                    new JOBOBJECT_BASIC_ACCOUNTING_INFORMATION();
+                int size = Marshal.SizeOf(typeof(JOBOBJECT_BASIC_ACCOUNTING_INFORMATION));
+                IntPtr buffer = Marshal.AllocHGlobal(size);
+                try
+                {
+                    if (!QueryInformationJobObject(handle, JobObjectBasicAccountingInformation,
+                        buffer, (uint)size, IntPtr.Zero))
+                    {
+                        throw new Win32Exception(Marshal.GetLastWin32Error());
+                    }
+                    accounting = (JOBOBJECT_BASIC_ACCOUNTING_INFORMATION)Marshal.PtrToStructure(
+                        buffer, typeof(JOBOBJECT_BASIC_ACCOUNTING_INFORMATION));
+                    accountingAvailable = true;
+                    totalProcesses = (int)accounting.TotalProcesses;
+                    activeProcesses = (int)accounting.ActiveProcesses;
+                    terminatedProcesses = (int)accounting.TotalTerminatedProcesses;
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(buffer);
+                }
+            }
+            catch { }
+
+            JobProcessSnapshot snapshot = new JobProcessSnapshot();
+            snapshot.Processes = copies;
+            snapshot.AccountingAvailable = accountingAvailable;
+            snapshot.TotalProcesses = totalProcesses;
+            snapshot.ActiveProcesses = activeProcesses;
+            snapshot.TotalTerminatedProcesses = terminatedProcesses;
+            snapshot.AccountingComplete = accountingAvailable && copies.Length >= totalProcesses;
+            return snapshot;
+        }
+
         public void Dispose()
         {
+            if (Interlocked.Exchange(ref disposed, 1) != 0) { return; }
+            stopping = true;
+            if (completionPort != IntPtr.Zero)
+            {
+                PostQueuedCompletionStatus(completionPort, 0, UIntPtr.Zero, new IntPtr(-1));
+            }
+            Thread thread = monitorThread;
+            if (thread != null)
+            {
+                try { thread.Join(5000); } catch { }
+            }
+            lock (gate)
+            {
+                foreach (Process process in liveProcesses.Values)
+                {
+                    try { process.Dispose(); } catch { }
+                }
+                liveProcesses.Clear();
+            }
+            if (completionPort != IntPtr.Zero)
+            {
+                CloseHandle(completionPort);
+                completionPort = IntPtr.Zero;
+            }
             if (handle != IntPtr.Zero)
             {
                 CloseHandle(handle);
                 handle = IntPtr.Zero;
             }
+        }
+
+        private void AssociateCompletionPort()
+        {
+            JOBOBJECT_ASSOCIATE_COMPLETION_PORT info = new JOBOBJECT_ASSOCIATE_COMPLETION_PORT();
+            info.CompletionKey = new IntPtr(1);
+            info.CompletionPort = completionPort;
+            int size = Marshal.SizeOf(typeof(JOBOBJECT_ASSOCIATE_COMPLETION_PORT));
+            IntPtr buffer = Marshal.AllocHGlobal(size);
+            try
+            {
+                Marshal.StructureToPtr(info, buffer, false);
+                if (!SetInformationJobObject(handle, JobObjectAssociateCompletionPortInformation,
+                    buffer, (uint)size))
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+
+        private void StartMonitor()
+        {
+            monitorThread = new Thread(Monitor);
+            monitorThread.IsBackground = true;
+            monitorThread.Name = "NanoDictate installer job monitor";
+            monitorThread.Start();
+        }
+
+        private void Monitor()
+        {
+            while (!stopping)
+            {
+                uint message;
+                UIntPtr completionKey;
+                IntPtr overlapped;
+                bool ok = GetQueuedCompletionStatus(completionPort, out message, out completionKey,
+                    out overlapped, 50);
+                if (ok)
+                {
+                    int processId = (int)overlapped.ToInt64();
+                    if (processId > 0)
+                    {
+                        HandleMessage(message, processId);
+                    }
+                }
+
+                captureMilliseconds += 50;
+                if (captureMilliseconds >= CaptureIntervalMilliseconds)
+                {
+                    captureMilliseconds = 0;
+                    CaptureActiveProcesses();
+                }
+                CheckLiveProcesses();
+            }
+        }
+
+        private void HandleMessage(uint message, int processId)
+        {
+            if (message == JobObjectMsgNewProcess)
+            {
+                HandleNewProcess(processId);
+            }
+            else if (message == JobObjectMsgExitProcess || message == JobObjectMsgAbnormalExitProcess)
+            {
+                HandleExitProcess(processId);
+            }
+        }
+
+        private void HandleNewProcess(int processId)
+        {
+            Process process = null;
+            string name = null;
+            try
+            {
+                process = Process.GetProcessById(processId);
+                if (process.Handle == IntPtr.Zero) { throw new InvalidOperationException(); }
+                name = process.ProcessName;
+            }
+            catch
+            {
+                if (process != null)
+                {
+                    try { process.Dispose(); } catch { }
+                }
+                process = null;
+            }
+
+            lock (gate)
+            {
+                JobProcessRecord record = EnsureRecord(processId);
+                if (!string.IsNullOrEmpty(name) &&
+                    (string.IsNullOrEmpty(record.Name) || name.Length > record.Name.Length))
+                {
+                    record.Name = name;
+                }
+                if (process != null)
+                {
+                    Process previous;
+                    if (liveProcesses.TryGetValue(processId, out previous) &&
+                        !object.ReferenceEquals(previous, process))
+                    {
+                        try { previous.Dispose(); } catch { }
+                    }
+                    liveProcesses[processId] = process;
+                }
+            }
+            CheckLiveProcess(processId, process);
+        }
+
+        private void HandleExitProcess(int processId)
+        {
+            Process process = null;
+            lock (gate)
+            {
+                JobProcessRecord record = EnsureRecord(processId);
+                record.Ended = true;
+                Process live;
+                if (liveProcesses.TryGetValue(processId, out live))
+                {
+                    liveProcesses.Remove(processId);
+                    process = live;
+                }
+            }
+            if (process == null) { return; }
+
+            int exitCode = 0;
+            bool hasExitCode = false;
+            try
+            {
+                process.WaitForExit(1000);
+                exitCode = process.ExitCode;
+                hasExitCode = true;
+            }
+            catch { }
+
+            lock (gate)
+            {
+                JobProcessRecord record = EnsureRecord(processId);
+                record.Ended = true;
+                if (hasExitCode)
+                {
+                    record.ExitCode = exitCode;
+                    record.HasExitCode = true;
+                }
+            }
+            try { process.Dispose(); } catch { }
+        }
+
+        private void CheckLiveProcesses()
+        {
+            List<KeyValuePair<int, Process>> copy = new List<KeyValuePair<int, Process>>();
+            lock (gate)
+            {
+                foreach (KeyValuePair<int, Process> entry in liveProcesses)
+                {
+                    copy.Add(entry);
+                }
+            }
+            foreach (KeyValuePair<int, Process> entry in copy)
+            {
+                CheckLiveProcess(entry.Key, entry.Value);
+            }
+        }
+
+        private void CheckLiveProcess(int processId, Process process)
+        {
+            if (process == null) { return; }
+            bool exited;
+            try { exited = process.HasExited; } catch { return; }
+            if (!exited) { return; }
+
+            int exitCode = 0;
+            bool hasExitCode = false;
+            try
+            {
+                exitCode = process.ExitCode;
+                hasExitCode = true;
+            }
+            catch { }
+
+            lock (gate)
+            {
+                JobProcessRecord record = EnsureRecord(processId);
+                record.Ended = true;
+                if (hasExitCode)
+                {
+                    record.ExitCode = exitCode;
+                    record.HasExitCode = true;
+                }
+                Process live;
+                if (liveProcesses.TryGetValue(processId, out live) &&
+                    object.ReferenceEquals(live, process))
+                {
+                    liveProcesses.Remove(processId);
+                }
+            }
+            try { process.Dispose(); } catch { }
+        }
+
+        private void CaptureActiveProcesses()
+        {
+            int[] ids;
+            try { ids = GetProcessIds(); } catch { return; }
+
+            foreach (int processId in ids)
+            {
+                if (processId <= 0) { continue; }
+                bool known;
+                lock (gate)
+                {
+                    known = records.ContainsKey(processId) && liveProcesses.ContainsKey(processId);
+                }
+                if (known) { continue; }
+
+                Process process = null;
+                string name = null;
+                try
+                {
+                    process = Process.GetProcessById(processId);
+                    if (process.Handle == IntPtr.Zero) { throw new InvalidOperationException(); }
+                    name = process.ProcessName;
+                }
+                catch
+                {
+                    if (process != null)
+                    {
+                        try { process.Dispose(); } catch { }
+                    }
+                    process = null;
+                }
+                if (process == null) { continue; }
+
+                lock (gate)
+                {
+                    JobProcessRecord record = EnsureRecord(processId);
+                    if (!string.IsNullOrEmpty(name) &&
+                        (string.IsNullOrEmpty(record.Name) || name.Length > record.Name.Length))
+                    {
+                        record.Name = name;
+                    }
+                    Process previous;
+                    if (liveProcesses.TryGetValue(processId, out previous) &&
+                        !object.ReferenceEquals(previous, process))
+                    {
+                        try { previous.Dispose(); } catch { }
+                    }
+                    liveProcesses[processId] = process;
+                }
+                CheckLiveProcess(processId, process);
+            }
+        }
+
+        private JobProcessRecord EnsureRecord(int processId)
+        {
+            JobProcessRecord record;
+            if (!records.TryGetValue(processId, out record))
+            {
+                record = new JobProcessRecord();
+                record.Id = processId;
+                records[processId] = record;
+            }
+            return record;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JOBOBJECT_BASIC_ACCOUNTING_INFORMATION
+        {
+            public long TotalUserTime;
+            public long TotalKernelTime;
+            public long ThisPeriodTotalUserTime;
+            public long ThisPeriodTotalKernelTime;
+            public uint TotalPageFaultCount;
+            public uint TotalProcesses;
+            public uint ActiveProcesses;
+            public uint TotalTerminatedProcesses;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JOBOBJECT_ASSOCIATE_COMPLETION_PORT
+        {
+            public IntPtr CompletionKey;
+            public IntPtr CompletionPort;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct STARTUPINFO
+        {
+            public uint cb;
+            public string lpReserved;
+            public string lpDesktop;
+            public string lpTitle;
+            public uint dwX;
+            public uint dwY;
+            public uint dwXSize;
+            public uint dwYSize;
+            public uint dwXCountChars;
+            public uint dwYCountChars;
+            public uint dwFillAttribute;
+            public uint dwFlags;
+            public ushort wShowWindow;
+            public ushort cbReserved2;
+            public IntPtr lpReserved2;
+            public IntPtr hStdInput;
+            public IntPtr hStdOutput;
+            public IntPtr hStdError;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PROCESS_INFORMATION
+        {
+            public IntPtr hProcess;
+            public IntPtr hThread;
+            public int dwProcessId;
+            public int dwThreadId;
         }
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -114,11 +656,36 @@ namespace NanoDictate.InstallerRunner
         private static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
 
         [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool TerminateProcess(IntPtr hProcess, uint exitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool QueryInformationJobObject(IntPtr hJob, int jobObjectInformationClass,
             IntPtr lpJobObjectInformation, uint cbJobObjectInformationLength, IntPtr lpReturnLength);
 
         [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetInformationJobObject(IntPtr hJob, int jobObjectInformationClass,
+            IntPtr lpJobObjectInformation, uint cbJobObjectInformationLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool CloseHandle(IntPtr handle);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr CreateIoCompletionPort(IntPtr fileHandle, IntPtr existingCompletionPort,
+            UIntPtr completionKey, uint numberOfConcurrentThreads);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetQueuedCompletionStatus(IntPtr completionPort, out uint numberOfBytes,
+            out UIntPtr completionKey, out IntPtr overlapped, uint milliseconds);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool PostQueuedCompletionStatus(IntPtr completionPort, uint numberOfBytes,
+            UIntPtr completionKey, IntPtr overlapped);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool CreateProcessW(string lpApplicationName, StringBuilder lpCommandLine,
+            IntPtr lpProcessAttributes, IntPtr lpThreadAttributes, bool bInheritHandles,
+            uint dwCreationFlags, IntPtr lpEnvironment, string lpCurrentDirectory,
+            ref STARTUPINFO lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
     }
 }
 '@
@@ -179,18 +746,6 @@ function New-ProcessJob {
     }
 }
 
-function Add-TrackedProcessToJob {
-    param($ProcessJob, [Diagnostics.Process]$Process)
-
-    if ($null -eq $ProcessJob -or $null -eq $Process) { return $false }
-    try {
-        return [bool]$ProcessJob.Assign($Process.Handle)
-    } catch {
-        Write-Verbose "Could not assign installer root to the tracking job: $_"
-        return $false
-    }
-}
-
 function Get-ProcessJobIds {
     param($ProcessJob)
 
@@ -200,6 +755,18 @@ function Get-ProcessJobIds {
     } catch {
         Write-Verbose "Could not enumerate the installer tracking job: $_"
         return @()
+    }
+}
+
+function Get-ProcessJobSnapshot {
+    param($ProcessJob)
+
+    if ($null -eq $ProcessJob) { return $null }
+    try {
+        return $ProcessJob.GetSnapshot()
+    } catch {
+        Write-Verbose "Could not read the installer tracking job snapshot: $_"
+        return $null
     }
 }
 
@@ -411,6 +978,71 @@ function Update-TrackedProcessEvents {
     return $changes
 }
 
+function Update-TrackedProcessJob {
+    param(
+        [hashtable]$Tracked,
+        [string[]]$DetachedProcessNames,
+        $ProcessJob,
+        [int]$RootId = 0,
+        $Snapshot
+    )
+
+    if ($null -eq $Snapshot) {
+        if ($null -eq $ProcessJob) { return 0 }
+        $Snapshot = Get-ProcessJobSnapshot -ProcessJob $ProcessJob
+    }
+    if ($null -eq $Snapshot) { return 0 }
+
+    $changes = 0
+    foreach ($record in @($Snapshot.Processes)) {
+        $id = [int]$record.Id
+        if ($id -le 0) { continue }
+        $name = [string]$record.Name
+        $ended = [bool]$record.Ended
+        $exitCode = if ([bool]$record.HasExitCode) { [int]$record.ExitCode } else { $null }
+        $existing = $Tracked[$id]
+        if ($null -eq $existing) {
+            $process = $null
+            if (-not $ended) {
+                try {
+                    $process = Open-TrackedProcess ([Diagnostics.Process]::GetProcessById($id))
+                } catch { }
+            }
+            $parentId = if ($RootId -gt 0) { $RootId } else { 0 }
+            $Tracked[$id] = [pscustomobject]@{
+                Id       = $id
+                ParentId = $parentId
+                Name     = $name
+                Detached = [bool]($DetachedProcessNames -contains $name)
+                Process  = $process
+                ExitCode = $exitCode
+                Ended    = $ended
+            }
+            $changes++
+            continue
+        }
+
+        if ($name.Length -gt ([string]$existing.Name).Length) {
+            $existing.Name = $name
+            $changes++
+        }
+        $detached = [bool]$existing.Detached -or ($DetachedProcessNames -contains $name)
+        if ($detached -and -not $existing.Detached) {
+            $existing.Detached = $true
+            $changes++
+        }
+        if ($ended -and -not $existing.Ended) {
+            $existing.Ended = $true
+            $changes++
+        }
+        if ($null -ne $exitCode -and $existing.ExitCode -ne $exitCode) {
+            $existing.ExitCode = $exitCode
+            $changes++
+        }
+    }
+    return $changes
+}
+
 function Update-TrackedState {
     param(
         [hashtable]$Tracked,
@@ -426,6 +1058,8 @@ function Update-TrackedState {
         -ProcessJob $ProcessJob -RootId $RootId
     $changes = Update-TrackedProcessEvents -Tracked $Tracked -ProcessEvents $ProcessEvents `
         -DetachedProcessNames $DetachedProcessNames
+    $changes += Update-TrackedProcessJob -Tracked $Tracked `
+        -DetachedProcessNames $DetachedProcessNames -ProcessJob $ProcessJob -RootId $RootId
     return ($read + $changes)
 }
 
@@ -680,31 +1314,71 @@ function Invoke-BoundedInstallerProcess {
     try {
         $processTrace = Start-ProcessTrace -Phase $Phase
         $processJob = New-ProcessJob
-        $process = [Diagnostics.Process]::Start($startInfo)
-        if ($null -eq $process) { throw "Failed to start installer for phase '$Phase'." }
-        $rootPid = [int]$process.Id
-        $jobAssigned = Add-TrackedProcessToJob -ProcessJob $processJob -Process $process
         if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and
-            $null -eq $processTrace -and -not $jobAssigned) {
-            try { if (-not $process.HasExited) { $process.Kill() } } catch {
-                Write-Verbose "Could not terminate the untracked installer root: $_"
-            }
-            try { $process.Dispose() } catch {
-                Write-Verbose "Could not dispose the untracked installer root: $_"
-            }
-            throw "Installer phase '$Phase' has no reliable non-elevated process completion source because process traces are unavailable and the tracking job could not be assigned."
+            $null -eq $processTrace -and $null -eq $processJob) {
+            throw "Installer phase '$Phase' has no reliable non-elevated process completion source because process traces are unavailable and the tracking job could not be created."
         }
-        try { $rootName = [string]$process.ProcessName } catch {
-            $rootName = [IO.Path]::GetFileNameWithoutExtension($resolved)
+
+        $process = $null
+        $suspended = $null
+        if ($null -ne $processJob) {
+            try {
+                $commandLine = '"' + $resolved + '"'
+                if (-not [string]::IsNullOrWhiteSpace([string]$startInfo.Arguments)) {
+                    $commandLine += ' ' + [string]$startInfo.Arguments
+                }
+                $suspended = $processJob.StartSuspended($resolved, $commandLine, $null)
+                $rootPid = [int]$suspended.ProcessId
+                $process = [Diagnostics.Process]::GetProcessById($rootPid)
+                $rootTrackedProcess = Open-TrackedProcess $process
+                if ($null -eq $rootTrackedProcess) {
+                    throw "Could not open a durable handle for installer root pid $rootPid."
+                }
+                try { $rootName = [string]$process.ProcessName } catch {
+                    $rootName = [IO.Path]::GetFileNameWithoutExtension($resolved)
+                }
+                $tracked[$rootPid] = [pscustomobject]@{
+                    Id       = $rootPid
+                    ParentId = 0
+                    Name     = $rootName
+                    Detached = $false
+                    Process  = $rootTrackedProcess
+                    ExitCode = $null
+                    Ended    = $false
+                }
+                $suspended.Resume()
+            } catch {
+                $startFailure = $_
+                if ($null -ne $suspended) { try { $suspended.Dispose() } catch { } }
+                if ($null -ne $process) { try { $process.Dispose() } catch { } }
+                $process = $null
+                $suspended = $null
+                if ($null -eq $processTrace) { throw $startFailure }
+                Write-Verbose "Could not start installer under job tracking; falling back to process traces: $($startFailure.Exception.Message)"
+                Close-ProcessJob -ProcessJob $processJob
+                $processJob = $null
+                $tracked.Clear()
+                $rootPid = 0
+            } finally {
+                if ($null -ne $suspended) { try { $suspended.Dispose() } catch { } }
+            }
         }
-        $tracked[$rootPid] = [pscustomobject]@{
-            Id       = $rootPid
-            ParentId = 0
-            Name     = $rootName
-            Detached = $false
-            Process  = (Open-TrackedProcess $process)
-            ExitCode = $null
-            Ended    = $false
+        if ($null -eq $process) {
+            $process = [Diagnostics.Process]::Start($startInfo)
+            if ($null -eq $process) { throw "Failed to start installer for phase '$Phase'." }
+            $rootPid = [int]$process.Id
+            try { $rootName = [string]$process.ProcessName } catch {
+                $rootName = [IO.Path]::GetFileNameWithoutExtension($resolved)
+            }
+            $tracked[$rootPid] = [pscustomobject]@{
+                Id       = $rootPid
+                ParentId = 0
+                Name     = $rootName
+                Detached = $false
+                Process  = (Open-TrackedProcess $process)
+                ExitCode = $null
+                Ended    = $false
+            }
         }
 
         $pollInterval = 50
@@ -743,7 +1417,8 @@ function Invoke-BoundedInstallerProcess {
                 -ProcessJob $processJob -RootId $rootPid)
             $remaining = @($tracked.Values | Where-Object {
                 $_.Id -ne $rootPid -and -not $_.Detached -and -not $_.Ended -and
-                ($_.Name -eq $rootName -or $_.Name -match $InstallerProcessNamePattern)
+                ([string]::IsNullOrWhiteSpace([string]$_.Name) -or
+                    $_.Name -eq $rootName -or $_.Name -match $InstallerProcessNamePattern)
             })
             if ($remaining.Count -eq 0) {
                 if ($null -eq $processTrace -and $null -eq $processJob) { break }
@@ -756,7 +1431,8 @@ function Invoke-BoundedInstallerProcess {
                         -ProcessJob $processJob -RootId $rootPid)
                     $remaining = @($tracked.Values | Where-Object {
                         $_.Id -ne $rootPid -and -not $_.Detached -and -not $_.Ended -and
-                        ($_.Name -eq $rootName -or $_.Name -match $InstallerProcessNamePattern)
+                        ([string]::IsNullOrWhiteSpace([string]$_.Name) -or
+                            $_.Name -eq $rootName -or $_.Name -match $InstallerProcessNamePattern)
                     })
                     if ($remaining.Count -gt 0) { break }
                 }
@@ -776,15 +1452,31 @@ function Invoke-BoundedInstallerProcess {
             -DetachedProcessNames $DetachedProcessNames `
             -ProcessEvents $processEvents -ProcessTrace $processTrace `
             -ProcessJob $processJob -RootId $rootPid)
+        $jobSnapshot = Get-ProcessJobSnapshot -ProcessJob $processJob
+        if ($null -ne $jobSnapshot) {
+            [void](Update-TrackedProcessJob -Tracked $tracked `
+                -DetachedProcessNames $DetachedProcessNames -ProcessJob $processJob `
+                -RootId $rootPid -Snapshot $jobSnapshot)
+        }
 
         if ($rootExitCode -ne 0) {
             throw "Installer phase '$Phase' exited with code $rootExitCode."
         }
 
+        if ($null -eq $processTrace -and $null -ne $jobSnapshot) {
+            if (-not [bool]$jobSnapshot.AccountingAvailable) {
+                throw "Installer phase '$Phase' could not verify job completion accounting. Fail closed."
+            }
+            if (-not [bool]$jobSnapshot.AccountingComplete) {
+                throw "Installer phase '$Phase' observed $(@($jobSnapshot.Processes).Count) tracked job process(es) but Windows reported $($jobSnapshot.TotalProcesses). Completion evidence is incomplete. Fail closed."
+            }
+        }
+
         $workerFailures = @($tracked.Values | Where-Object {
             $_.Id -ne $rootPid -and -not $_.Detached -and $_.Ended -and
             $null -ne $_.ExitCode -and $_.ExitCode -ne 0 -and
-            ($_.Name -eq $rootName -or $_.Name -match $InstallerProcessNamePattern)
+            ([string]::IsNullOrWhiteSpace([string]$_.Name) -or
+                $_.Name -eq $rootName -or $_.Name -match $InstallerProcessNamePattern)
         })
         if ($workerFailures.Count -gt 0) {
             $first = $workerFailures[0]
@@ -794,7 +1486,8 @@ function Invoke-BoundedInstallerProcess {
         $unknownExitWorkers = @($tracked.Values | Where-Object {
             $_.Id -ne $rootPid -and -not $_.Detached -and $_.Ended -and
             $null -eq $_.ExitCode -and
-            ($_.Name -eq $rootName -or $_.Name -match $InstallerProcessNamePattern)
+            ([string]::IsNullOrWhiteSpace([string]$_.Name) -or
+                $_.Name -eq $rootName -or $_.Name -match $InstallerProcessNamePattern)
         })
         if ($unknownExitWorkers.Count -gt 0) {
             $first = $unknownExitWorkers[0]
