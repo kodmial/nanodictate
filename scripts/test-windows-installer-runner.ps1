@@ -222,7 +222,7 @@ try {
             } catch {
                 return $_.Exception.Message
             } finally {
-                Remove-Item -Path Function:script:Register-CimIndicationEvent -ErrorAction SilentlyContinue
+                Remove-Item -Path Function:Register-CimIndicationEvent -ErrorAction SilentlyContinue
             }
         } $pwshPath
         Assert-True 'trace registration failure fails closed' `
