@@ -44,6 +44,8 @@ $result = [ordered]@{
     install_windows_failure_error     = $null
     install_windows_success_exit_code = $null
     worker_runs                       = 0
+    job_created                       = $null
+    process_table_count               = $null
     error                             = $null
 }
 
@@ -58,6 +60,18 @@ try {
     $pwshPath = (Get-Process -Id $PID).Path
     $scriptsDirectory = Split-Path -Parent $RunnerModulePath
     . (Join-Path $scriptsDirectory 'install-windows.ps1')
+
+    $jobProbe = & $runnerModule { New-ProcessJob }
+    $result.job_created = $null -ne $jobProbe
+    & $runnerModule {
+        param($job)
+        Close-ProcessJob -ProcessJob $job
+    } $jobProbe
+    try {
+        $result.process_table_count = @(& $runnerModule { Get-ProcessTable }).Count
+    } catch {
+        $result.process_table_count = "error: $($_.Exception.Message)"
+    }
 
     if ($result.is_elevated) {
         $trace = & $runnerModule {

@@ -445,6 +445,13 @@ Import-Module $modulePath -Force
 # Inno Setup strips quotes without backslash escaping, so the runner quotes
 # whole arguments and never uses MSVCRT-style escaped quotes.
 $runnerModule = Get-Module windows-installer-runner
+$processTableType = & $runnerModule {
+    if (-not ('NanoDictate.InstallerRunner.ProcessTable' -as [type])) {
+        Add-Type -TypeDefinition $script:ProcessJobSource -Language CSharp -ErrorAction Stop
+    }
+    [NanoDictate.InstallerRunner.ProcessTable].FullName
+}
+Assert-Equal 'native process table source compiles' 'NanoDictate.InstallerRunner.ProcessTable' $processTableType
 $quoted = & $runnerModule {
     param($value)
     ConvertTo-InnoSetupCommandLineArgument $value
@@ -758,7 +765,7 @@ try {
                     (@($childResult.failure_errors | Where-Object {
                         $_ -notmatch 'exited with code 9'
                     }).Count -eq 0)) `
-                "worker failures: $($childResult.failure_errors -join '; ')"
+                "worker failures: $($childResult.failure_errors -join '; '); job_created=$($childResult.job_created); process_table_count=$($childResult.process_table_count)"
             Assert-True 'actual non-elevated user-install completes all zero-delay workers' `
                 ((@($childResult.success_exit_codes).Count -eq 3) -and
                     (@($childResult.success_exit_codes | Where-Object {

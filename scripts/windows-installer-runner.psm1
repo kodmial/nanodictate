@@ -57,6 +57,81 @@ namespace NanoDictate.InstallerRunner
         public bool AccountingComplete { get; set; }
     }
 
+    public sealed class ProcessTableRecord
+    {
+        public int Id { get; set; }
+        public int ParentId { get; set; }
+        public string Name { get; set; }
+    }
+
+    public static class ProcessTable
+    {
+        private const uint SnapshotProcesses = 0x00000002;
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct PROCESSENTRY32W
+        {
+            public uint dwSize;
+            public uint cntUsage;
+            public uint th32ProcessID;
+            public IntPtr th32DefaultHeapID;
+            public uint th32ModuleID;
+            public uint cntThreads;
+            public uint th32ParentProcessID;
+            public int pcPriClassBase;
+            public uint dwFlags;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+            public string szExeFile;
+        }
+
+        public static ProcessTableRecord[] GetProcesses()
+        {
+            IntPtr snapshot = CreateToolhelp32Snapshot(SnapshotProcesses, 0);
+            if (snapshot == new IntPtr(-1))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            try
+            {
+                List<ProcessTableRecord> result = new List<ProcessTableRecord>();
+                PROCESSENTRY32W entry = new PROCESSENTRY32W();
+                entry.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32W));
+                if (Process32FirstW(snapshot, ref entry))
+                {
+                    do
+                    {
+                        ProcessTableRecord record = new ProcessTableRecord();
+                        record.Id = unchecked((int)entry.th32ProcessID);
+                        record.ParentId = unchecked((int)entry.th32ParentProcessID);
+                        record.Name = System.IO.Path.GetFileNameWithoutExtension(
+                            entry.szExeFile ?? string.Empty);
+                        result.Add(record);
+                        entry.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32W));
+                    }
+                    while (Process32NextW(snapshot, ref entry));
+                }
+                return result.ToArray();
+            }
+            finally
+            {
+                CloseHandle(snapshot);
+            }
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr CreateToolhelp32Snapshot(uint dwFlags, uint th32ProcessID);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool Process32FirstW(IntPtr hSnapshot, ref PROCESSENTRY32W lppe);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool Process32NextW(IntPtr hSnapshot, ref PROCESSENTRY32W lppe);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+    }
+
     public sealed class SuspendedProcess : IDisposable
     {
         private IntPtr processHandle;
@@ -696,6 +771,30 @@ namespace NanoDictate.InstallerRunner
 
 function Get-ProcessTable {
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        # Toolhelp32 is a fast, non-elevated process snapshot. The WMI
+        # Win32_Process provider can be slow and can omit short-lived
+        # descendants in a restricted-token session, which would let a
+        # bootstrap worker exit unnoticed.
+        try {
+            if (-not ('NanoDictate.InstallerRunner.ProcessTable' -as [type])) {
+                Add-Type -TypeDefinition $script:ProcessJobSource -Language CSharp -ErrorAction Stop
+            }
+            $nativeRows = [NanoDictate.InstallerRunner.ProcessTable]::GetProcesses()
+            if (@($nativeRows).Count -eq 0) {
+                throw 'The native Windows process table returned no processes.'
+            }
+            foreach ($row in $nativeRows) {
+                [pscustomobject]@{
+                    Id       = [int]$row.Id
+                    ParentId = [int]$row.ParentId
+                    Name     = [string]$row.Name
+                }
+            }
+            return
+        } catch {
+            Write-Verbose "Could not read the native Windows process table; falling back to Win32_Process: $_"
+        }
+
         $rows = Get-CimInstance -Query "SELECT ProcessId, ParentProcessId, Name FROM Win32_Process" -ErrorAction Stop
         foreach ($row in $rows) {
             [pscustomobject]@{
@@ -1399,8 +1498,9 @@ function Invoke-BoundedInstallerProcess {
         # the caller's deadline and turn a valid install into a false timeout.
         $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
 
-        $pollInterval = 50
-        $maxFastPolls = 40
+        $isWindowsPlatform = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+        $pollInterval = if ($isWindowsPlatform) { 20 } else { 50 }
+        $maxFastPolls = if ($isWindowsPlatform) { 100 } else { 40 }
         $pollCount = 0
 
         while (-not $process.HasExited) {
@@ -1423,8 +1523,8 @@ function Invoke-BoundedInstallerProcess {
         # A bootstrap can exit before the real setup worker. Wait only for
         # installer-like descendants; never for the persistent product agent.
         # Poll aggressively at first to catch short-lived workers before they exit.
-        $workerPollInterval = 50
-        $workerFastPolls = 40
+        $workerPollInterval = if ($isWindowsPlatform) { 20 } else { 50 }
+        $workerFastPolls = if ($isWindowsPlatform) { 100 } else { 40 }
         $workerPollCount = 0
         $processTraceSettleMilliseconds = 500
 
