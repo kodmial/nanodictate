@@ -110,9 +110,17 @@ function Invoke-NanoDictateInstaller {
             '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', ('/DIR=' + $Target)
         )
     }
-    return Invoke-BoundedInstallerProcess -FilePath $installer -ArgumentList $ArgumentList `
-        -Phase $Phase -TimeoutSeconds $TimeoutSeconds -LogDirectory $LogDirectory `
-        -InnoLogFileName "$Phase.log"
+    $runnerArgs = @{
+        FilePath       = $installer
+        ArgumentList   = $ArgumentList
+        Phase          = $Phase
+        TimeoutSeconds = $TimeoutSeconds
+    }
+    if (-not [string]::IsNullOrWhiteSpace($LogDirectory)) {
+        $runnerArgs.LogDirectory = $LogDirectory
+        $runnerArgs.InnoLogFileName = "$Phase.log"
+    }
+    return Invoke-BoundedInstallerProcess @runnerArgs
 }
 
 function Install-NanoDictateVerified {

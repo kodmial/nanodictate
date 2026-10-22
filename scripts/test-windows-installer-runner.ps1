@@ -1015,6 +1015,60 @@ try {
             }
         }
 
+        # A job-tracked root is only safe to trust when its handle was cached
+        # while the process was alive. Open-TrackedProcess returns the process
+        # even when caching fails, so the runner must reject an uncached root
+        # rather than read .NET's possible false-zero exit code later.
+        $uncachedRootMessage = & $runnerModule {
+            param($executable)
+            $originalNewProcessJob = [scriptblock]::Create(
+                (Get-Command -Name New-ProcessJob -CommandType Function).Definition)
+            $originalOpenTrackedProcess = [scriptblock]::Create(
+                (Get-Command -Name Open-TrackedProcess -CommandType Function).Definition)
+            function script:Register-CimIndicationEvent {
+                throw 'simulated trace registration failure'
+            }
+            function script:New-ProcessJob {
+                $job = [pscustomobject]@{}
+                $job | Add-Member -MemberType ScriptMethod -Name StartSuspended -Value {
+                    param($applicationPath, $commandLine, $workingDirectory)
+                    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+                    $startInfo.FileName = $applicationPath
+                    $startInfo.UseShellExecute = $false
+                    $startInfo.Arguments = '-NoProfile -Command "Start-Sleep -Milliseconds 300; exit 0"'
+                    $process = [Diagnostics.Process]::Start($startInfo)
+                    $suspended = [pscustomobject]@{ ProcessId = $process.Id }
+                    $suspended | Add-Member -MemberType ScriptMethod -Name Resume -Value { }
+                    $suspended | Add-Member -MemberType ScriptMethod -Name Dispose -Value { }
+                    $process.Dispose()
+                    return $suspended
+                }
+                $job | Add-Member -MemberType ScriptMethod -Name GetProcessIds -Value { return @() }
+                $job | Add-Member -MemberType ScriptMethod -Name GetSnapshot -Value { return $null }
+                $job | Add-Member -MemberType ScriptMethod -Name Dispose -Value { }
+                return $job
+            }
+            function script:Open-TrackedProcess {
+                param([Diagnostics.Process]$Process)
+                return $Process
+            }
+            try {
+                Invoke-BoundedInstallerProcess -FilePath $executable -ArgumentList @(
+                    '-NoProfile', '-Command', 'exit 0'
+                ) -Phase 'user-install-uncached-root' -TimeoutSeconds 5 | Out-Null
+                return $null
+            } catch {
+                return $_.Exception.Message
+            } finally {
+                Remove-Item -Path Function:Register-CimIndicationEvent -ErrorAction SilentlyContinue
+                Set-Item -Path Function:script:New-ProcessJob -Value $originalNewProcessJob
+                Set-Item -Path Function:script:Open-TrackedProcess -Value $originalOpenTrackedProcess
+            }
+        } $pwshPath
+        Assert-True 'uncached root handle fails closed' `
+            ($uncachedRootMessage -match 'Could not open a durable handle') `
+            "runner did not fail closed on an uncached root handle: $uncachedRootMessage"
+
         for ($run = 1; $run -le 5; $run++) {
             Assert-Throws "short-lived failing bootstrap worker fails the phase (run $run)" {
                 Invoke-BoundedInstallerProcess -FilePath $pwshPath -ArgumentList @(

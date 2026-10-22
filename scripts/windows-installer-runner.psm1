@@ -1588,7 +1588,9 @@ function Invoke-BoundedInstallerProcess {
                 $rootPid = [int]$suspended.ProcessId
                 $process = [Diagnostics.Process]::GetProcessById($rootPid)
                 $rootTrackedProcess = Open-TrackedProcess $process
-                if ($null -eq $rootTrackedProcess) {
+                if ($null -eq $rootTrackedProcess -or
+                    -not ($rootTrackedProcess.PSObject.Properties['HandleCached'] -and
+                        $rootTrackedProcess.HandleCached)) {
                     throw "Could not open a durable handle for installer root pid $rootPid."
                 }
                 try { $rootName = [string]$process.ProcessName } catch {
