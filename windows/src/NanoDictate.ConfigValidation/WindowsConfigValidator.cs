@@ -227,16 +227,11 @@ public static class WindowsConfigValidator
                 errors.Add(
                     "ambiguous config: top-level legacy STT keys and provider sections require active_provider");
             }
-            // The application treats an omitted/empty active provider as the
-            // first declared [providers.*] section. Keep that documented
-            // fallback instead of demanding a redundant explicit key.
-            var first = config.Providers.FirstOrDefault();
-            if (first is null)
+            else
             {
-                errors.Add("no provider sections are configured");
-                return new ConfigValidationResult(activeProvider, errors);
+                errors.Add("active_provider is required");
             }
-            activeProvider = first.Id;
+            return new ConfigValidationResult(activeProvider, errors);
         }
 
         if (!providers.TryGetValue(activeProvider, out var selectedValue))

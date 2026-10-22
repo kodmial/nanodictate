@@ -315,19 +315,9 @@ public sealed class WindowsConfigValidationTests
     [InlineData("language = \"en\"\n[providers.a]\nbase_url = \"https://example.test\"\nmodel = \"m\"\n")]
     [InlineData("active_provider = \"\"\n[providers.a]\nbase_url = \"https://example.test\"\nmodel = \"m\"\n")]
     [InlineData("# active_provider = \"airubiz\"\n[providers.airubiz]\nbase_url = \"https://api.airubiz.site/v1/audio/transcriptions\"\nmodel = \"gigaam-v3-ctc-sherpa\"\n")]
-    public void OmittedOrEmptyActiveProviderUsesFirstProviderSection(string config)
+    public void OmittedOrEmptyActiveProviderFails(string config)
     {
-        var path = WriteConfig(config);
-        try
-        {
-            var result = WindowsConfigValidator.ValidateFile(path);
-            Assert.True(result.IsValid, string.Join("; ", result.Errors));
-            Assert.False(string.IsNullOrEmpty(result.ActiveProvider));
-        }
-        finally
-        {
-            File.Delete(path);
-        }
+        AssertInvalid(config, "active_provider is required");
     }
 
     [Theory]
