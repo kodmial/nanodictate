@@ -42,6 +42,10 @@ function Assert-Match([string]$Name, [string]$Text, [string]$Pattern) {
     if ([regex]::IsMatch($Text, $Pattern, [Text.RegularExpressions.RegexOptions]::Multiline)) { Pass $Name }
     else { Fail $Name "expected to match: $Pattern" }
 }
+function Assert-NotMatch([string]$Name, [string]$Text, [string]$Pattern) {
+    if (-not [regex]::IsMatch($Text, $Pattern, [Text.RegularExpressions.RegexOptions]::Multiline)) { Pass $Name }
+    else { Fail $Name "must not match: $Pattern" }
+}
 
 $install = Read-Text 'scripts/install-windows.ps1'
 Assert-Contains 'installer reads the first-party Scoop manifest' $install 'bucket/nanodictate.json'
@@ -49,11 +53,18 @@ Assert-Contains 'installer also resolves the latest stable release' $install 're
 Assert-Contains 'installer verifies the published SHA256SUMS entry' $install 'SHA256SUMS.txt'
 Assert-Contains 'installer refuses a checksum mismatch' $install 'Download SHA-256 verification failed'
 Assert-Contains 'installer has a no-install chain audit mode' $install '[switch]$VerifyOnly'
-Assert-Contains 'installer starts the first run in the background' $install "Start-Process -FilePath `$exe -ArgumentList '--background'"
-Assert-NotContains 'installer never forces settings on first run' $install "Start-Process -FilePath `$exe -ArgumentList '--settings'"
-Assert-Contains 'installer repairs the per-user Run entry' $install "Run'"
-Assert-Contains 'installer stops the previous background process before upgrade' $install "Stop-Process -Force"
-Assert-Contains 'installer quotes the per-user install directory' $install '(''/DIR="'' + $target + ''"'')'
+Assert-Contains 'installer uses the shared bounded runner' $install 'Invoke-BoundedInstallerProcess'
+Assert-Contains 'installer starts the first run in the background exactly once' $install 'Start-NanoDictateBackgroundIfNeeded'
+Assert-NotContains 'installer never forces settings on first run' $install "-ArgumentList '--settings'"
+Assert-Contains 'installer repairs the per-user Run entry' $install 'Assert-NanoDictateStartup'
+Assert-Contains 'installer stops only the exact installed background agent before upgrade' $install 'Stop-NanoDictateProcessesUnderPath'
+Assert-Contains 'installer delegates /DIR quoting to the shared runner' $install '(''/DIR='' + $Target)'
+Assert-NotContains 'installer never uses an uncapped tree wait' $install 'Start-Process -Wait'
+Assert-NotContains 'installer never unconditionally re-launches a duplicate agent' $install "Start-Process -FilePath `$exe -ArgumentList '--background'"
+Assert-Contains 'installer exposes a testable verified install function' $install 'function Install-NanoDictateVerified'
+Assert-Contains 'installer falls back to the shared runner source for irm | iex' $install 'windows-installer-runner.psm1'
+Assert-Contains 'installer retains per-user installer diagnostics' $install "Join-Path `$env:LOCALAPPDATA 'NanoDictate\installer-logs'"
+Assert-Contains 'installer records the diagnostic location' $install 'Installer diagnostics: {0}'
 
 $iss = Read-Text 'windows/package/NanoDictate.iss'
 $runSection = [regex]::Match($iss, '(?ms)^\[Run\](.*?)(?=^\[|\z)').Groups[1].Value
@@ -91,11 +102,18 @@ Assert-Contains 'bundled default documents both config locations' $config '%APPD
 $candidate = Read-Text 'windows/package/test-release-candidate.ps1'
 Assert-Contains 'candidate smoke checks bundled first-use defaults' $candidate 'does not select the keyless Airubiz default'
 Assert-Contains 'candidate smoke records installer measurements' $candidate 'windows-candidate-measurements.json'
-Assert-Contains 'candidate smoke exercises reinstall' $candidate 'Reinstall changed the stable per-user autostart entry'
-Assert-Contains 'candidate smoke checks startup registration' $candidate 'did not register stable per-user auto-start'
+Assert-Contains 'candidate smoke exercises reinstall' $candidate "Invoke-Silent 'reinstall'"
+Assert-Contains 'candidate smoke checks startup registration' $candidate 'Assert-NanoDictateStartup'
+Assert-Contains 'candidate smoke checks the persistent background agent' $candidate 'Assert-BackgroundAgent'
+Assert-Contains 'candidate smoke uses the shared bounded runner' $candidate 'Invoke-BoundedInstallerProcess'
+Assert-Contains 'candidate smoke persists failure evidence' $candidate "outcome = 'failed'"
+Assert-NotContains 'candidate smoke never uses an uncapped tree wait' $candidate 'Start-Process -Wait'
 
 $smoke = Read-Text 'scripts/windows-release-smoke.ps1'
 Assert-Match 'published smoke serializes timing measurements on failure' $smoke '(?s)\}\s*finally\s*\{.*?\$report\.download_seconds\s*=.*?\$report\.setup_seconds\s*=.*?\$report\.uninstall_seconds\s*=.*?\$report\s*\|\s*ConvertTo-Json'
+Assert-Contains 'published smoke uses the shared bounded runner' $smoke 'Invoke-BoundedInstallerProcess'
+Assert-Contains 'published smoke checks the persistent background agent' $smoke 'Assert-BackgroundAgent'
+Assert-NotContains 'published smoke never uses an uncapped tree wait' $smoke 'Start-Process -Wait'
 
 $chainTest = Read-Text 'scripts/test-windows-install-chain.ps1'
 Assert-Contains 'offline chain test exercises a lagging manifest' $chainTest 'newer GitHub release wins over a lagging manifest'
@@ -106,6 +124,44 @@ Assert-Contains 'published smoke verifies installer checksum' $verify 'VerifyHas
 Assert-Contains 'published smoke verifies coreclr payload' $verify "'coreclr.dll'"
 Assert-Contains 'published smoke verifies hostfxr payload' $verify "'hostfxr.dll'"
 Assert-Contains 'published smoke reports signing separately from smoke' $verify 'WINDOWS_SIGNING=UNVERIFIED'
+Assert-Contains 'published distribution uses the shared bounded runner' $verify 'Invoke-BoundedInstallerProcess'
+Assert-NotContains 'published distribution never uses an uncapped tree wait' $verify 'Start-Process -Wait'
+
+$runner = Read-Text 'scripts/windows-installer-runner.psm1'
+Assert-Contains 'shared runner prevents whole-tree waits' $runner 'System.Diagnostics.Process'
+Assert-Contains 'shared runner has a per-operation deadline' $runner 'TimeoutSeconds'
+Assert-Contains 'shared runner ignores the persistent product agent' $runner 'DetachedProcessNames'
+Assert-Contains 'shared runner waits for Inno bootstrap workers' $runner 'InstallerProcessNamePattern'
+Assert-Contains 'shared runner retains Inno logs' $runner 'InnoLogFileName'
+Assert-Contains 'shared runner normalizes the log directory' $runner '$LogDirectory = [IO.Path]::GetFullPath($LogDirectory)'
+Assert-Contains 'shared runner supports Windows PowerShell 5.1' $runner '#Requires -Version 5.1'
+Assert-NotContains 'shared runner does not use ProcessStartInfo.ArgumentList' $runner "PSObject.Properties['ArgumentList']"
+Assert-Contains 'shared runner builds Inno-compatible command lines' $runner 'ConvertTo-InnoSetupCommandLineArgument'
+Assert-Contains 'shared runner rejects embedded installer quotes' $runner 'Installer argument must not contain quotes'
+Assert-Contains 'shared runner writes process-tree evidence' $runner 'Write-InstallerPhaseEvidence'
+Assert-Contains 'shared runner terminates only owned processes on timeout' $runner 'Kill()'
+$runnerTests = Read-Text 'scripts/test-windows-installer-runner.ps1'
+Assert-Contains 'runner tests prove the legacy tree-wait hang' $runnerTests 'legacy Start-Process -Wait hang'
+Assert-Contains 'runner tests cover stubborn child timeouts' $runnerTests 'stuck bootstrap worker times out'
+Assert-Contains 'runner tests cover premature bootstrap exit' $runnerTests 'bootstrap waits for the installer worker'
+Assert-Contains 'runner tests cover missing payload failures' $runnerTests 'missing payload file is rejected'
+Assert-Contains 'runner tests cover leftover startup registration' $runnerTests 'leftover startup registration is rejected'
+Assert-Contains 'runner tests cover user-data mutation' $runnerTests 'changed user data is rejected'
+$ciLifecycle = Read-Text 'windows/package/test-ci-installer-lifecycle.ps1'
+Assert-Contains 'CI lifecycle exercises the user-facing install function' $ciLifecycle 'Install-NanoDictateVerified'
+Assert-Contains 'CI lifecycle runs a versioned upgrade' $ciLifecycle "Invoke-Setup 'ci-upgrade'"
+Assert-Contains 'CI lifecycle checks one background agent' $ciLifecycle 'Assert-BackgroundAgent'
+Assert-Contains 'CI lifecycle preserves user configuration' $ciLifecycle 'Assert-NanoDictateUserDataPreserved'
+Assert-Contains 'CI lifecycle persists failure evidence' $ciLifecycle "outcome = 'failed'"
+$windowsWorkflow = Read-Text '.github/workflows/windows.yml'
+Assert-Contains 'Windows host job uses the 45-minute budget' $windowsWorkflow 'timeout-minutes: 45'
+Assert-Contains 'Windows workflow retains installer diagnostics on failure' $windowsWorkflow 'if: always()'
+Assert-Contains 'Windows workflow uploads Inno logs' $windowsWorkflow 'windows/artifacts/installer-logs/**'
+Assert-Contains 'Windows workflow runs the runner regression harness' $windowsWorkflow 'scripts/test-windows-installer-runner.ps1'
+Assert-Contains 'Windows CI lifecycle runs before the candidate smoke' $windowsWorkflow 'test-ci-installer-lifecycle.ps1 -Version 0.0.0'
+$releaseEngine = Read-Text '.github/workflows/nanodictate-release-engine.yml'
+Assert-Contains 'release candidate host job uses the 45-minute budget' $releaseEngine 'timeout-minutes: 45'
+Assert-Contains 'release candidate job retains installer diagnostics on failure' $releaseEngine 'windows/artifacts/installer-logs/**'
 
 $makeRelease = Read-Text 'windows/package/make-release.ps1'
 foreach ($required in @('NanoDictate.App.exe', 'NanoDictate.App.dll', 'nanodictate_core.dll', 'config.example.toml', 'coreclr.dll', 'hostfxr.dll')) {

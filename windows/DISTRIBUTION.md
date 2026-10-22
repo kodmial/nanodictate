@@ -42,11 +42,13 @@ In a **regular non-admin PowerShell window**, run:
 irm https://raw.githubusercontent.com/kodmial/nanodictate/main/scripts/install-windows.ps1 | iex
 ```
 
-The bootstrap considers both the first-party Scoop manifest version and the
-latest stable GitHub Release, so a temporarily stale bucket cannot pin users
-to an older build. It selects only a release whose EXE asset and matching
-`SHA256SUMS.txt` entry both exist, downloads that EXE, verifies its SHA-256,
-silently installs it per user, repairs the persistent
+The bootstrap and its bounded installer runner support the built-in Windows
+PowerShell 5.1 as well as PowerShell 7. The bootstrap considers both the
+first-party Scoop manifest version and the latest stable GitHub Release, so a
+temporarily stale bucket cannot pin users to an older build. It selects only a
+release whose EXE asset and matching `SHA256SUMS.txt` entry both exist,
+downloads that EXE, verifies its SHA-256, silently installs it per user,
+repairs the persistent
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` entry and starts one
 background agent. The same command upgrades the installation in place without
 overwriting configuration. A release that is still uploading is skipped until
@@ -111,11 +113,16 @@ are not available release channels.
 Headless CI verifies exact candidate and published bytes, the ZIP/EXE payload
 (`NanoDictate.App.exe`, `NanoDictate.App.dll`, the Rust DLL, self-contained
 `coreclr.dll`/`hostfxr.dll` and `config.example.toml`), install, same-version
-reinstall, a versioned upgrade, startup registration, config preservation and
-uninstall. The candidate smoke reports the actual installer/ZIP size and
-install/reinstall/uninstall durations to the workflow summary and a
-`windows-candidate-measurements.json` artifact; it does not assert unsupported
-performance targets or claim that a hosted runner proved interactive UI.
+reinstall, a versioned upgrade, exactly one persistent background agent,
+startup registration, config preservation and uninstall. Install, upgrade and
+uninstall run through `scripts/windows-installer-runner.psm1`, which has a
+per-operation deadline and waits for setup completion without waiting for the
+independent `--background` agent. Inno `/LOG` files and process-tree evidence
+are uploaded even when validation fails. The candidate smoke reports the actual
+installer/ZIP size and install/reinstall/uninstall durations to the workflow
+summary and a `windows-candidate-measurements.json` artifact; it does not
+assert unsupported performance targets or claim that a hosted runner proved
+interactive UI.
 
 Real microphone privacy prompts, Double-Alt keyboard hooks, HUD placement and
 caret focus, Russian/emoji insertion and Windows 10 versus Windows 11 desktop

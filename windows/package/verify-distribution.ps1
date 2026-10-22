@@ -11,10 +11,17 @@
 #>
 param(
   [ValidateSet('inno','scoop')][string]$Channel = 'inno',
-  [string]$Repository = 'kodmial/nanodictate'
+  [string]$Repository = 'kodmial/nanodictate',
+  [ValidateRange(1, 3600)][int]$InstallTimeoutSeconds = 240,
+  [ValidateRange(1, 3600)][int]$UninstallTimeoutSeconds = 120,
+  [string]$LogDirectory = ''
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+$repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+Import-Module (Join-Path $repoRoot 'scripts/windows-installer-runner.psm1') -Force
+if (-not $LogDirectory) { $LogDirectory = Join-Path $repoRoot 'windows/artifacts/installer-logs' }
+New-Item -ItemType Directory -Force -Path $LogDirectory | Out-Null
 
 function Require([bool]$Condition, [string]$Message) {
   if (-not $Condition) { throw $Message }
@@ -38,7 +45,8 @@ function VerifyHash([string]$File, [string]$Expected) {
   Require ($actual -eq $Expected) "SHA256 mismatch for ${File}: expected $Expected, got $actual"
 }
 function VerifyPayload([string]$Dir) {
-  foreach ($name in @('NanoDictate.App.exe','NanoDictate.App.dll','nanodictate_core.dll',
+  foreach ($name in @('NanoDictate.App.exe','NanoDictate.App.dll',
+                       'NanoDictate.App.runtimeconfig.json','nanodictate_core.dll',
                        'hostfxr.dll','coreclr.dll','config.example.toml')) {
     Require (Test-Path -LiteralPath (Join-Path $Dir $name)) "Installed distribution missing $name"
   }
@@ -79,6 +87,7 @@ $version = [string]$release.tag_name
 Require ($version -match '^v\d+\.\d+\.\d+$') "Unexpected stable release tag: $version"
 $version = $version.Substring(1)
 $root = Join-Path $env:RUNNER_TEMP ('nd-production-' + [guid]::NewGuid().ToString('N'))
+$innoInstalled = $null
 New-Item -ItemType Directory -Path $root -Force | Out-Null
 try {
   $sumsAsset = $release.assets | Where-Object name -eq 'SHA256SUMS.txt' | Select-Object -First 1
@@ -113,22 +122,36 @@ try {
   try {
     if ($Channel -eq 'inno') {
       $installed = Join-Path $env:LOCALAPPDATA 'Programs\NanoDictate'
+      $innoInstalled = $installed
       $app = Join-Path $installed 'NanoDictate.App.exe'
       $args = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-')
-      $p = Start-Process -FilePath $files[$exeName] -ArgumentList $args -Wait -PassThru
-      Require ($p.ExitCode -eq 0) "Published Inno install failed: $($p.ExitCode)"
+      [void](Stop-NanoDictateProcessesUnderPath -InstallDirectory $installed)
+      Invoke-BoundedInstallerProcess -FilePath $files[$exeName] -ArgumentList $args `
+        -Phase 'published-install' -TimeoutSeconds $InstallTimeoutSeconds `
+        -LogDirectory $LogDirectory -InnoLogFileName 'published-install.log' | Out-Null
       VerifyPayload $installed
       VerifyAutoStart $app
-      $p = Start-Process -FilePath $files[$exeName] -ArgumentList $args -Wait -PassThru
-      Require ($p.ExitCode -eq 0) "Published Inno reinstall failed: $($p.ExitCode)"
+      $agents = @(Wait-NanoDictateBackgroundProcess -InstallDirectory $installed -TimeoutSeconds 30)
+      Require ($agents.Count -eq 1) "Expected exactly one background NanoDictate agent, found $($agents.Count)"
+
+      [void](Stop-NanoDictateProcessesUnderPath -InstallDirectory $installed)
+      Invoke-BoundedInstallerProcess -FilePath $files[$exeName] -ArgumentList $args `
+        -Phase 'published-reinstall' -TimeoutSeconds $InstallTimeoutSeconds `
+        -LogDirectory $LogDirectory -InnoLogFileName 'published-reinstall.log' | Out-Null
       VerifyAutoStart $app
       Require ((Get-Content $marker -Raw) -eq 'preserve') 'Inno reinstall changed user configuration'
+      $agents = @(Wait-NanoDictateBackgroundProcess -InstallDirectory $installed -TimeoutSeconds 30)
+      Require ($agents.Count -eq 1) "Expected exactly one background NanoDictate agent after reinstall, found $($agents.Count)"
+
       $uninstaller = Join-Path $installed 'unins000.exe'
       Require (Test-Path $uninstaller) 'Inno uninstaller not installed'
-      $p = Start-Process -FilePath $uninstaller -ArgumentList $args -Wait -PassThru
-      Require ($p.ExitCode -eq 0) "Published Inno uninstall failed: $($p.ExitCode)"
+      [void](Stop-NanoDictateProcessesUnderPath -InstallDirectory $installed)
+      Invoke-BoundedInstallerProcess -FilePath $uninstaller -ArgumentList $args `
+        -Phase 'published-uninstall' -TimeoutSeconds $UninstallTimeoutSeconds `
+        -LogDirectory $LogDirectory -InnoLogFileName 'published-uninstall.log' | Out-Null
       Require (-not (Test-Path $app)) 'Inno uninstall left application installed'
       VerifyClearedAutoStart
+      Require (@(Get-NanoDictateProcessesUnderPath -InstallDirectory $installed).Count -eq 0) 'Inno uninstall left the background agent running'
     } else {
       $manifestUrl = "https://raw.githubusercontent.com/$Repository/main/bucket/nanodictate.json"
       $manifest = $null
@@ -170,5 +193,16 @@ try {
     Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
   }
 } finally {
+  if ($innoInstalled -and (Test-Path -LiteralPath (Join-Path $innoInstalled 'unins000.exe'))) {
+    try {
+      [void](Stop-NanoDictateProcessesUnderPath -InstallDirectory $innoInstalled)
+      Invoke-BoundedInstallerProcess -FilePath (Join-Path $innoInstalled 'unins000.exe') `
+        -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART') `
+        -Phase 'published-cleanup' -TimeoutSeconds $UninstallTimeoutSeconds `
+        -LogDirectory $LogDirectory -InnoLogFileName 'published-cleanup.log' | Out-Null
+    } catch {
+      Write-Warning "Published distribution cleanup failed: $_"
+    }
+  }
   Remove-Item -LiteralPath $root -Force -Recurse -ErrorAction SilentlyContinue
 }
