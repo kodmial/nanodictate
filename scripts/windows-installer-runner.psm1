@@ -199,11 +199,16 @@ namespace NanoDictate.InstallerRunner
         private const uint JobObjectMsgExitProcess = 7;
         private const uint JobObjectMsgAbnormalExitProcess = 8;
         private const uint CreateSuspended = 0x00000004;
+        private const uint Synchronize = 0x00100000;
+        private const uint ProcessQueryLimitedInformation = 0x1000;
+        private const uint WaitObject0 = 0;
+        private const uint WaitTimeout = 258;
         private const int CaptureIntervalMilliseconds = 250;
 
         private readonly object gate = new object();
         private readonly Dictionary<int, JobProcessRecord> records = new Dictionary<int, JobProcessRecord>();
         private readonly Dictionary<int, Process> liveProcesses = new Dictionary<int, Process>();
+        private readonly Dictionary<int, IntPtr> processHandles = new Dictionary<int, IntPtr>();
         private IntPtr handle;
         private IntPtr completionPort;
         private Thread monitorThread;
@@ -414,6 +419,11 @@ namespace NanoDictate.InstallerRunner
                     try { process.Dispose(); } catch { }
                 }
                 liveProcesses.Clear();
+                foreach (IntPtr processHandle in processHandles.Values)
+                {
+                    if (processHandle != IntPtr.Zero) { CloseHandle(processHandle); }
+                }
+                processHandles.Clear();
             }
             if (completionPort != IntPtr.Zero)
             {
@@ -513,8 +523,7 @@ namespace NanoDictate.InstallerRunner
             try
             {
                 process = Process.GetProcessById(processId);
-                if (process.Handle == IntPtr.Zero) { throw new InvalidOperationException(); }
-                name = process.ProcessName;
+                try { name = process.ProcessName; } catch { }
             }
             catch
             {
@@ -524,6 +533,8 @@ namespace NanoDictate.InstallerRunner
                 }
                 process = null;
             }
+
+            GetOrOpenProcessHandle(processId);
 
             lock (gate)
             {
@@ -561,24 +572,9 @@ namespace NanoDictate.InstallerRunner
                     process = live;
                 }
             }
-            if (process == null)
-            {
-                // The new-process notification may have arrived after the
-                // worker exited. The process object can still be briefly
-                // available by pid, so try once more for its real exit code.
-                try { process = Process.GetProcessById(processId); }
-                catch { return; }
-            }
-
-            int exitCode = 0;
-            bool hasExitCode = false;
-            try
-            {
-                process.WaitForExit(1000);
-                exitCode = process.ExitCode;
-                hasExitCode = true;
-            }
-            catch { }
+            int exitCode;
+            bool exited;
+            bool hasExitCode = TryReadExitCode(processId, 1000, out exitCode, out exited) && exited;
 
             lock (gate)
             {
@@ -590,7 +586,10 @@ namespace NanoDictate.InstallerRunner
                     record.HasExitCode = true;
                 }
             }
-            try { process.Dispose(); } catch { }
+            if (process != null)
+            {
+                try { process.Dispose(); } catch { }
+            }
         }
 
         private void CheckLiveProcesses()
@@ -598,9 +597,19 @@ namespace NanoDictate.InstallerRunner
             List<KeyValuePair<int, Process>> copy = new List<KeyValuePair<int, Process>>();
             lock (gate)
             {
+                Dictionary<int, bool> ids = new Dictionary<int, bool>();
                 foreach (KeyValuePair<int, Process> entry in liveProcesses)
                 {
+                    ids[entry.Key] = true;
                     copy.Add(entry);
+                }
+                foreach (int processId in processHandles.Keys)
+                {
+                    if (!ids.ContainsKey(processId))
+                    {
+                        ids[processId] = true;
+                        copy.Add(new KeyValuePair<int, Process>(processId, null));
+                    }
                 }
             }
             foreach (KeyValuePair<int, Process> entry in copy)
@@ -611,19 +620,23 @@ namespace NanoDictate.InstallerRunner
 
         private void CheckLiveProcess(int processId, Process process)
         {
-            if (process == null) { return; }
-            bool exited;
-            try { exited = process.HasExited; } catch { return; }
-            if (!exited) { return; }
-
-            int exitCode = 0;
-            bool hasExitCode = false;
-            try
+            lock (gate)
             {
-                exitCode = process.ExitCode;
-                hasExitCode = true;
+                JobProcessRecord existing;
+                if (records.TryGetValue(processId, out existing) && existing.HasExitCode) { return; }
             }
-            catch { }
+
+            int exitCode;
+            bool exited;
+            bool known = TryReadExitCode(processId, 0, out exitCode, out exited);
+            if (known && !exited) { return; }
+            if (!known)
+            {
+                if (process == null) { return; }
+                try { exited = process.HasExited; } catch { return; }
+                if (!exited) { return; }
+            }
+            bool hasExitCode = known;
 
             lock (gate)
             {
@@ -641,7 +654,10 @@ namespace NanoDictate.InstallerRunner
                     liveProcesses.Remove(processId);
                 }
             }
-            try { process.Dispose(); } catch { }
+            if (process != null)
+            {
+                try { process.Dispose(); } catch { }
+            }
         }
 
         private void CaptureActiveProcesses()
@@ -657,7 +673,8 @@ namespace NanoDictate.InstallerRunner
                 bool known;
                 lock (gate)
                 {
-                    known = records.ContainsKey(processId) && liveProcesses.ContainsKey(processId);
+                    known = records.ContainsKey(processId) &&
+                        (processHandles.ContainsKey(processId) || liveProcesses.ContainsKey(processId));
                 }
                 if (known) { continue; }
 
@@ -666,8 +683,7 @@ namespace NanoDictate.InstallerRunner
                 try
                 {
                     process = Process.GetProcessById(processId);
-                    if (process.Handle == IntPtr.Zero) { throw new InvalidOperationException(); }
-                    name = process.ProcessName;
+                    try { name = process.ProcessName; } catch { }
                 }
                 catch
                 {
@@ -677,7 +693,8 @@ namespace NanoDictate.InstallerRunner
                     }
                     process = null;
                 }
-                if (process == null) { continue; }
+                IntPtr processHandle = GetOrOpenProcessHandle(processId);
+                if (process == null && processHandle == IntPtr.Zero) { continue; }
 
                 lock (gate)
                 {
@@ -687,16 +704,62 @@ namespace NanoDictate.InstallerRunner
                     {
                         record.Name = name;
                     }
-                    Process previous;
-                    if (liveProcesses.TryGetValue(processId, out previous) &&
-                        !object.ReferenceEquals(previous, process))
+                    if (process != null)
                     {
-                        try { previous.Dispose(); } catch { }
+                        Process previous;
+                        if (liveProcesses.TryGetValue(processId, out previous) &&
+                            !object.ReferenceEquals(previous, process))
+                        {
+                            try { previous.Dispose(); } catch { }
+                        }
+                        liveProcesses[processId] = process;
                     }
-                    liveProcesses[processId] = process;
                 }
                 CheckLiveProcess(processId, process);
             }
+        }
+
+        private IntPtr GetOrOpenProcessHandle(int processId)
+        {
+            lock (gate)
+            {
+                IntPtr existing;
+                if (processHandles.TryGetValue(processId, out existing)) { return existing; }
+            }
+
+            IntPtr opened = OpenProcess(ProcessQueryLimitedInformation | Synchronize, false, processId);
+            if (opened == IntPtr.Zero) { return IntPtr.Zero; }
+
+            lock (gate)
+            {
+                IntPtr existing;
+                if (processHandles.TryGetValue(processId, out existing))
+                {
+                    CloseHandle(opened);
+                    return existing;
+                }
+                processHandles[processId] = opened;
+                return opened;
+            }
+        }
+
+        private bool TryReadExitCode(int processId, uint waitMilliseconds, out int exitCode,
+            out bool exited)
+        {
+            exitCode = 0;
+            exited = false;
+            IntPtr processHandle = GetOrOpenProcessHandle(processId);
+            if (processHandle == IntPtr.Zero) { return false; }
+
+            uint waitResult = WaitForSingleObject(processHandle, waitMilliseconds);
+            if (waitResult == WaitTimeout) { return true; }
+            if (waitResult != WaitObject0) { return false; }
+
+            uint nativeExitCode;
+            if (!GetExitCodeProcess(processHandle, out nativeExitCode)) { return false; }
+            exitCode = unchecked((int)nativeExitCode);
+            exited = true;
+            return true;
         }
 
         private JobProcessRecord EnsureRecord(int processId)
@@ -762,6 +825,15 @@ namespace NanoDictate.InstallerRunner
             public int dwProcessId;
             public int dwThreadId;
         }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr CreateJobObjectW(IntPtr lpJobAttributes, string lpName);
