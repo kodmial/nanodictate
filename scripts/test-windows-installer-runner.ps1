@@ -338,6 +338,25 @@ namespace NanoDictate.InstallerRunner.Tests
 }
 '@
 
+function Grant-NonElevatedWorkDirectoryAccess {
+    param([string]$Path)
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return }
+    # The restricted token disables the Administrators group. Hosted runner
+    # temp directories can grant access only through that group, so give the
+    # filtered child's remaining user identity explicit access to its scratch
+    # files instead of relying on inherited elevation.
+    $user = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $acl = Get-Acl -LiteralPath $Path
+    $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+        $user,
+        [Security.AccessControl.FileSystemRights]::FullControl,
+        [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
+        [Security.AccessControl.PropagationFlags]::None,
+        [Security.AccessControl.AccessControlType]::Allow)
+    $acl.SetAccessRule($rule)
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
 function Invoke-NonElevatedInstallerChild {
     param(
         [string]$Executable,
@@ -348,6 +367,7 @@ function Invoke-NonElevatedInstallerChild {
     if (-not ('NanoDictate.InstallerRunner.Tests.NonElevatedProcess' -as [type])) {
         Add-Type -TypeDefinition $nonElevatedLauncherSource -Language CSharp -ErrorAction Stop
     }
+    Grant-NonElevatedWorkDirectoryAccess -Path $WorkDirectory
     $childScript = Join-Path $PSScriptRoot 'fixtures/non-elevated-user-install.ps1'
     $modulePath = Join-Path $PSScriptRoot 'windows-installer-runner.psm1'
     $arguments = [string[]]@(

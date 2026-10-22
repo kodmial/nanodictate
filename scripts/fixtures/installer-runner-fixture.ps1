@@ -45,7 +45,7 @@ switch ($Mode) {
     'bootstrap' {
         if (-not $WorkerScript) { throw 'WorkerScript is required for bootstrap mode.' }
         $child = Start-Process -FilePath $pwshPath -ArgumentList @(
-            '-NoProfile', '-File', $WorkerScript,
+            '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $WorkerScript,
             '-Mode', 'sleep',
             '-SleepMilliseconds', [string]$WorkerSleepMilliseconds,
             '-ExitCode', [string]$WorkerExitCode
