@@ -29,7 +29,7 @@ $script:NanoDictatePayloadNames = @(
 
 function Get-ProcessTable {
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
-        $rows = Get-CimInstance -ClassName Win32_Process -ErrorAction Stop
+        $rows = Get-CimInstance -Query "SELECT ProcessId, ParentProcessId, Name FROM Win32_Process" -ErrorAction Stop
         foreach ($row in $rows) {
             [pscustomobject]@{
                 Id       = [int]$row.ProcessId
@@ -271,6 +271,10 @@ function Invoke-BoundedInstallerProcess {
             Ended    = $false
         }
 
+        $pollInterval = 50
+        $maxFastPolls = 40
+        $pollCount = 0
+
         while (-not $process.HasExited) {
             Update-TrackedProcesses -Tracked $tracked `
                 -DetachedProcessNames $DetachedProcessNames
@@ -279,13 +283,20 @@ function Invoke-BoundedInstallerProcess {
                 throw [TimeoutException]::new(
                     "Installer phase '$Phase' timed out after $TimeoutSeconds seconds while the installer root was still running.")
             }
-            [void]$process.WaitForExit(200)
+            [void]$process.WaitForExit($pollInterval)
+            $pollCount++
+            if ($pollCount -ge $maxFastPolls) { $pollInterval = 200 }
         }
 
         $rootExitCode = [int]$process.ExitCode
 
         # A bootstrap can exit before the real setup worker. Wait only for
         # installer-like descendants; never for the persistent product agent.
+        # Poll aggressively at first to catch short-lived workers before they exit.
+        $workerPollInterval = 50
+        $workerFastPolls = 40
+        $workerPollCount = 0
+
         while ($true) {
             Update-TrackedProcesses -Tracked $tracked `
                 -DetachedProcessNames $DetachedProcessNames
@@ -299,7 +310,9 @@ function Invoke-BoundedInstallerProcess {
                 throw [TimeoutException]::new(
                     "Installer phase '$Phase' timed out after $TimeoutSeconds seconds waiting for installer worker process(es): $((($remaining | ForEach-Object { "$($_.Name)[$($_.Id)]" }) -join ', ')).")
             }
-            Start-Sleep -Milliseconds 150
+            Start-Sleep -Milliseconds $workerPollInterval
+            $workerPollCount++
+            if ($workerPollCount -ge $workerFastPolls) { $workerPollInterval = 150 }
         }
 
         Update-TrackedProcesses -Tracked $tracked `
@@ -317,6 +330,16 @@ function Invoke-BoundedInstallerProcess {
         if ($workerFailures.Count -gt 0) {
             $first = $workerFailures[0]
             throw "Installer worker '$($first.Name)' (pid $($first.Id)) exited with code $($first.ExitCode)."
+        }
+
+        $unknownExitWorkers = @($tracked.Values | Where-Object {
+            $_.Id -ne $rootPid -and -not $_.Detached -and $_.Ended -and
+            $null -eq $_.ExitCode -and
+            ($_.Name -eq $rootName -or $_.Name -match $InstallerProcessNamePattern)
+        })
+        if ($unknownExitWorkers.Count -gt 0) {
+            $first = $unknownExitWorkers[0]
+            throw "Installer worker '$($first.Name)' (pid $($first.Id)) exited but its exit code could not be determined (process handle lost). Fail closed."
         }
 
         $outcome = 'success'
