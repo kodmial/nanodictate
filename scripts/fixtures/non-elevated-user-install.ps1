@@ -40,9 +40,15 @@ $result = [ordered]@{
     is_elevated                       = $null
     trace_available                   = $null
     failure_errors                    = @()
+    failure_completion_sources        = @()
+    masked_process_tree               = @()
     success_exit_codes                = @()
+    success_completion_sources        = @()
     install_windows_failure_error     = $null
+    install_windows_failure_source    = $null
+    install_windows_masked_tree       = @()
     install_windows_success_exit_code = $null
+    install_windows_success_source    = $null
     worker_runs                       = 0
     job_created                       = $null
     process_table_count               = $null
@@ -100,29 +106,41 @@ try {
 
     for ($run = 1; $run -le 5; $run++) {
         $pidFile = Join-Path $WorkDirectory "non-elevated-fail-$run.pid"
-        $errorMessage = & $runnerModule {
+        $failure = & $runnerModule {
             param($executable, $fixture, $pidFile, $phase)
             function script:Register-CimIndicationEvent {
                 throw 'simulated non-elevated trace registration failure'
             }
             try {
                 try {
-                    Invoke-BoundedInstallerProcess -FilePath $executable -ArgumentList @(
+                    $bounded = Invoke-BoundedInstallerProcess -FilePath $executable -ArgumentList @(
                         '-NoProfile', '-File', $fixture, '-Mode', 'bootstrap',
                         '-WorkerScript', $fixture,
                         '-WorkerSleepMilliseconds', '0', '-WorkerExitCode', '9',
                         '-BootstrapDelayMilliseconds', '0',
                         '-PidFile', $pidFile
-                    ) -Phase $phase -TimeoutSeconds 15 | Out-Null
-                    return 'the bootstrap worker failure was masked'
+                    ) -Phase $phase -TimeoutSeconds 15
+                    return [pscustomobject]@{
+                        Error            = 'the bootstrap worker failure was masked'
+                        CompletionSource = [string]$bounded.CompletionSource
+                        ProcessTree      = @($bounded.ProcessTree)
+                    }
                 } catch {
-                    return $_.Exception.Message
+                    return [pscustomobject]@{
+                        Error            = $_.Exception.Message
+                        CompletionSource = $null
+                        ProcessTree      = @()
+                    }
                 }
             } finally {
                 Remove-Item -Path Function:Register-CimIndicationEvent -ErrorAction SilentlyContinue
             }
         } $pwshPath $FixtureScript $pidFile "non-elevated-fail-$run"
-        $result.failure_errors += $errorMessage
+        $result.failure_errors += $failure.Error
+        if ($failure.CompletionSource) {
+            $result.failure_completion_sources += $failure.CompletionSource
+            $result.masked_process_tree = @($failure.ProcessTree)
+        }
         $workerError = Get-WorkerStartError -PidFile $pidFile -Label "non-elevated-fail-$run"
         if ($workerError) { $result.failure_errors += $workerError }
         else { $result.worker_runs++ }
@@ -130,7 +148,7 @@ try {
 
     for ($run = 1; $run -le 3; $run++) {
         $pidFile = Join-Path $WorkDirectory "non-elevated-ok-$run.pid"
-        $exitCode = & $runnerModule {
+        $success = & $runnerModule {
             param($executable, $fixture, $pidFile, $phase)
             function script:Register-CimIndicationEvent {
                 throw 'simulated non-elevated trace registration failure'
@@ -144,15 +162,24 @@ try {
                         '-BootstrapDelayMilliseconds', '0',
                         '-PidFile', $pidFile
                     ) -Phase $phase -TimeoutSeconds 15
-                    return [int]$bounded.ExitCode
+                    return [pscustomobject]@{
+                        ExitCode         = [int]$bounded.ExitCode
+                        CompletionSource = [string]$bounded.CompletionSource
+                    }
                 } catch {
-                    return "error: $($_.Exception.Message)"
+                    return [pscustomobject]@{
+                        ExitCode         = "error: $($_.Exception.Message)"
+                        CompletionSource = $null
+                    }
                 }
             } finally {
                 Remove-Item -Path Function:Register-CimIndicationEvent -ErrorAction SilentlyContinue
             }
         } $pwshPath $FixtureScript $pidFile "non-elevated-ok-$run"
-        $result.success_exit_codes += $exitCode
+        $result.success_exit_codes += $success.ExitCode
+        if ($success.CompletionSource) {
+            $result.success_completion_sources += $success.CompletionSource
+        }
         $workerError = Get-WorkerStartError -PidFile $pidFile -Label "non-elevated-ok-$run"
         if ($workerError) { $result.success_exit_codes += "error: $workerError" }
         else { $result.worker_runs++ }
@@ -172,7 +199,7 @@ try {
     }
     try {
         try {
-            Invoke-NanoDictateInstaller -InstallerPath $pwshPath -Target $WorkDirectory `
+            $install = Invoke-NanoDictateInstaller -InstallerPath $pwshPath -Target $WorkDirectory `
                 -ArgumentList @(
                     '-NoProfile', '-File', $FixtureScript, '-Mode', 'bootstrap',
                     '-WorkerScript', $FixtureScript,
@@ -180,8 +207,10 @@ try {
                     '-BootstrapDelayMilliseconds', '0',
                     '-PidFile', $installFailurePidFile
                 ) -Phase 'non-elevated-install-windows-fail' -TimeoutSeconds 15 `
-                -LogDirectory $installLogDirectory | Out-Null
+                -LogDirectory $installLogDirectory
             $result.install_windows_failure_error = 'the bootstrap worker failure was masked'
+            $result.install_windows_failure_source = [string]$install.CompletionSource
+            $result.install_windows_masked_tree = @($install.ProcessTree)
         } catch {
             $result.install_windows_failure_error = $_.Exception.Message
         }
@@ -213,6 +242,7 @@ try {
                 ) -Phase 'non-elevated-install-windows-ok' -TimeoutSeconds 15 `
                 -LogDirectory $installLogDirectory
             $result.install_windows_success_exit_code = [int]$install.ExitCode
+            $result.install_windows_success_source = [string]$install.CompletionSource
         } catch {
             $result.install_windows_success_exit_code = "error: $($_.Exception.Message)"
         }
@@ -240,7 +270,12 @@ if (@($result.failure_errors).Count -ne 5) { exit 1 }
 if (@($result.failure_errors | Where-Object { $_ -notmatch 'exited with code 9' }).Count -ne 0) { exit 1 }
 if (@($result.success_exit_codes).Count -ne 3) { exit 1 }
 if (@($result.success_exit_codes | Where-Object { $_ -ne 0 }).Count -ne 0) { exit 1 }
+if (@($result.failure_completion_sources | Where-Object { $_ -ne 'job' }).Count -ne 0) { exit 1 }
+if (@($result.success_completion_sources).Count -ne 3) { exit 1 }
+if (@($result.success_completion_sources | Where-Object { $_ -ne 'job' }).Count -ne 0) { exit 1 }
 if ($result.install_windows_failure_error -notmatch 'exited with code 9') { exit 1 }
+if ($result.install_windows_failure_source -and $result.install_windows_failure_source -ne 'job') { exit 1 }
 if ($result.install_windows_success_exit_code -ne 0) { exit 1 }
+if ($result.install_windows_success_source -ne 'job') { exit 1 }
 if ($result.worker_runs -ne 10) { exit 1 }
 exit 0

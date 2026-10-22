@@ -631,6 +631,42 @@ $pwshPath = (Get-Process -Id $PID).Path
 $spawnedPids = [Collections.Generic.List[int]]::new()
 
 try {
+    if ($IsWindows) {
+        # The job process-id list is pointer-sized on 64-bit Windows. Enumerate
+        # a live root so a bad layout cannot silently disable job snapshots.
+        $jobIds = & $runnerModule {
+            param($executable)
+            $job = New-ProcessJob
+            if ($null -eq $job) { return $null }
+            try {
+                $suspended = $null
+                try {
+                    $suspended = $job.StartSuspended(
+                        $executable,
+                        '"' + $executable + '" -NoProfile -Command "Start-Sleep -Milliseconds 1500"',
+                        $null)
+                    $suspended.Resume()
+                    Start-Sleep -Milliseconds 300
+                    return [pscustomobject]@{
+                        Root = [int]$suspended.ProcessId
+                        Ids  = @($job.GetProcessIds() | ForEach-Object { [int]$_ })
+                    }
+                } finally {
+                    if ($null -ne $suspended) { $suspended.Dispose() }
+                }
+            } finally {
+                Close-ProcessJob -ProcessJob $job
+            }
+        } $pwshPath
+        if ($null -eq $jobIds) {
+            Fail 'job process id enumeration includes the live root' 'job tracking was unavailable'
+        } else {
+            Assert-True 'job process id enumeration includes the live root' `
+                (@($jobIds.Ids) -contains [int]$jobIds.Root) `
+                "root=$($jobIds.Root); ids=$($jobIds.Ids -join ',')"
+        }
+    }
+
     # 1. Slow but successful installer.
     $slow = Invoke-BoundedInstallerProcess -FilePath $pwshPath -ArgumentList @(
         '-NoProfile', '-File', $fixture, '-Mode', 'sleep', '-SleepMilliseconds', '1500'
@@ -765,16 +801,24 @@ try {
                     (@($childResult.failure_errors | Where-Object {
                         $_ -notmatch 'exited with code 9'
                     }).Count -eq 0)) `
-                "worker failures: $($childResult.failure_errors -join '; '); job_created=$($childResult.job_created); process_table_count=$($childResult.process_table_count)"
+                "worker failures: $($childResult.failure_errors -join '; '); job_created=$($childResult.job_created); process_table_count=$($childResult.process_table_count); completion_sources=$($childResult.failure_completion_sources -join ', '); tree=$(@($childResult.masked_process_tree | ForEach-Object { "pid=$($_.pid) name=$($_.name) parent=$($_.parent_pid) ended=$($_.ended) exit=$($_.exit_code)" }) -join '; ')"
             Assert-True 'actual non-elevated user-install completes all zero-delay workers' `
                 ((@($childResult.success_exit_codes).Count -eq 3) -and
                     (@($childResult.success_exit_codes | Where-Object {
                         $_ -ne 0
                     }).Count -eq 0)) `
-                "worker exit codes: $($childResult.success_exit_codes -join ', ')"
+                "worker exit codes: $($childResult.success_exit_codes -join ', '); completion_sources=$($childResult.success_completion_sources -join ', ')"
+            Assert-True 'actual non-elevated child used job completion tracking' `
+                ((@($childResult.failure_completion_sources | Where-Object { $_ -ne 'job' }).Count -eq 0) -and
+                    (@($childResult.success_completion_sources).Count -eq 3) -and
+                    (@($childResult.success_completion_sources | Where-Object { $_ -ne 'job' }).Count -eq 0) -and
+                    ($null -eq $childResult.install_windows_failure_source -or
+                        $childResult.install_windows_failure_source -eq 'job') -and
+                    ($childResult.install_windows_success_source -eq 'job')) `
+                "completion sources: failure=$($childResult.failure_completion_sources -join ', '); success=$($childResult.success_completion_sources -join ', '); install_failure=$($childResult.install_windows_failure_source); install_success=$($childResult.install_windows_success_source)"
             Assert-True 'actual non-elevated install-windows path fails on a zero-delay failing worker' `
                 ($childResult.install_windows_failure_error -match 'exited with code 9') `
-                "install-windows failure was: $($childResult.install_windows_failure_error)"
+                "install-windows failure was: $($childResult.install_windows_failure_error); tree=$(@($childResult.install_windows_masked_tree | ForEach-Object { "pid=$($_.pid) name=$($_.name) parent=$($_.parent_pid) ended=$($_.ended) exit=$($_.exit_code)" }) -join '; ')"
             Assert-Equal 'actual non-elevated install-windows path completes a zero-delay worker' `
                 0 $childResult.install_windows_success_exit_code
         }

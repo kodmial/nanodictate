@@ -210,6 +210,11 @@ namespace NanoDictate.InstallerRunner
         private int disposed;
         private volatile bool stopping;
         private int captureMilliseconds;
+        private int newProcessMessages;
+        private int exitProcessMessages;
+        private int abnormalExitMessages;
+        private int capturePasses;
+        private int capturedProcessIds;
 
         private ProcessJob(IntPtr job, IntPtr port)
         {
@@ -312,6 +317,18 @@ namespace NanoDictate.InstallerRunner
                     Marshal.FreeHGlobal(buffer);
                 }
             }
+        }
+
+        public int[] GetDiagnostics()
+        {
+            return new int[]
+            {
+                Interlocked.CompareExchange(ref newProcessMessages, 0, 0),
+                Interlocked.CompareExchange(ref exitProcessMessages, 0, 0),
+                Interlocked.CompareExchange(ref abnormalExitMessages, 0, 0),
+                Interlocked.CompareExchange(ref capturePasses, 0, 0),
+                Interlocked.CompareExchange(ref capturedProcessIds, 0, 0)
+            };
         }
 
         public JobProcessSnapshot GetSnapshot()
@@ -472,10 +489,19 @@ namespace NanoDictate.InstallerRunner
         {
             if (message == JobObjectMsgNewProcess)
             {
+                Interlocked.Increment(ref newProcessMessages);
                 HandleNewProcess(processId);
             }
             else if (message == JobObjectMsgExitProcess || message == JobObjectMsgAbnormalExitProcess)
             {
+                if (message == JobObjectMsgAbnormalExitProcess)
+                {
+                    Interlocked.Increment(ref abnormalExitMessages);
+                }
+                else
+                {
+                    Interlocked.Increment(ref exitProcessMessages);
+                }
                 HandleExitProcess(processId);
             }
         }
@@ -535,7 +561,14 @@ namespace NanoDictate.InstallerRunner
                     process = live;
                 }
             }
-            if (process == null) { return; }
+            if (process == null)
+            {
+                // The new-process notification may have arrived after the
+                // worker exited. The process object can still be briefly
+                // available by pid, so try once more for its real exit code.
+                try { process = Process.GetProcessById(processId); }
+                catch { return; }
+            }
 
             int exitCode = 0;
             bool hasExitCode = false;
@@ -615,6 +648,8 @@ namespace NanoDictate.InstallerRunner
         {
             int[] ids;
             try { ids = GetProcessIds(); } catch { return; }
+            Interlocked.Increment(ref capturePasses);
+            Interlocked.Add(ref capturedProcessIds, ids.Length);
 
             foreach (int processId in ids)
             {
@@ -870,6 +905,20 @@ function Get-ProcessJobSnapshot {
     } catch {
         Write-Verbose "Could not read the installer tracking job snapshot: $_"
         return $null
+    }
+}
+
+function Write-ProcessJobDiagnostics {
+    param($ProcessJob, [string]$Phase)
+
+    if ($null -eq $ProcessJob) { return }
+    try {
+        $values = @($ProcessJob.GetDiagnostics())
+        if ($values.Count -lt 5) { return }
+        Write-Host ("[installer:{0}] job new={1} exit={2} abnormal={3} captures={4} captured_ids={5}" -f
+            $Phase, $values[0], $values[1], $values[2], $values[3], $values[4])
+    } catch {
+        Write-Verbose "Could not read installer job diagnostics: $_"
     }
 }
 
@@ -1219,6 +1268,8 @@ function Update-TrackedProcesses {
             $knownIds[$id] = $true
         }
     }
+    $tableIds = @{}
+    foreach ($row in $table) { $tableIds[[int]$row.Id] = $true }
     $children = @{}
     foreach ($row in $table) {
         if (-not $children.ContainsKey($row.ParentId)) {
@@ -1269,7 +1320,11 @@ function Update-TrackedProcesses {
                 $entry.Process = $process
                 if ($null -eq $process) { $entry.Ended = $true }
             } catch {
-                if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+                # A tracked pid that is no longer in the process table has
+                # exited. Mark it ended so a lost exit code fails closed
+                # instead of silently looking like success.
+                if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or
+                    -not $tableIds.ContainsKey([int]$entry.Id)) {
                     $entry.Ended = $true
                 }
             }
@@ -1320,25 +1375,27 @@ function Write-InstallerPhaseEvidence {
         $ExitCode,
         [bool]$TimedOut,
         [string]$Outcome,
-        [string]$InnoLogPath
+        [string]$InnoLogPath,
+        [string]$CompletionSource
     )
 
     if ([string]::IsNullOrWhiteSpace($LogDirectory)) { return }
     New-Item -ItemType Directory -Force -Path $LogDirectory | Out-Null
     $safePhase = $Phase -replace '[^A-Za-z0-9._-]', '-'
     $evidence = [ordered]@{
-        phase           = $Phase
-        outcome         = $Outcome
-        started_utc     = $StartedUtc.ToString('o')
-        finished_utc    = [DateTime]::UtcNow.ToString('o')
-        elapsed_seconds = [Math]::Round($ElapsedSeconds, 2)
-        timeout_seconds = $TimeoutSeconds
-        timed_out       = $TimedOut
-        executable      = [IO.Path]::GetFileName($Executable)
-        process_id      = $ProcessId
-        exit_code       = $ExitCode
-        inno_log        = if ($InnoLogPath) { [IO.Path]::GetFileName($InnoLogPath) } else { $null }
-        processes       = @(Get-TrackedSnapshot -Tracked $Tracked)
+        phase             = $Phase
+        outcome           = $Outcome
+        started_utc       = $StartedUtc.ToString('o')
+        finished_utc      = [DateTime]::UtcNow.ToString('o')
+        elapsed_seconds   = [Math]::Round($ElapsedSeconds, 2)
+        timeout_seconds   = $TimeoutSeconds
+        timed_out         = $TimedOut
+        executable        = [IO.Path]::GetFileName($Executable)
+        process_id        = $ProcessId
+        exit_code         = $ExitCode
+        completion_source = $CompletionSource
+        inno_log          = if ($InnoLogPath) { [IO.Path]::GetFileName($InnoLogPath) } else { $null }
+        processes         = @(Get-TrackedSnapshot -Tracked $Tracked)
     }
     $evidence | ConvertTo-Json -Depth 6 |
         Set-Content -LiteralPath (Join-Path $LogDirectory "$safePhase.json") -Encoding utf8
@@ -1412,6 +1469,7 @@ function Invoke-BoundedInstallerProcess {
     $snapshot = @()
     $outcome = 'unknown'
     $timedOut = $false
+    $completionSource = 'process'
 
     try {
         # The job object is the primary completion source: it works without an
@@ -1422,10 +1480,28 @@ function Invoke-BoundedInstallerProcess {
             # Trace events are only a fallback when the tracking job cannot be
             # created, so a normal per-user install never requires elevation.
             $processTrace = Start-ProcessTrace -Phase $Phase
+            if ($null -ne $processTrace) { $completionSource = 'trace' }
+        } else {
+            $completionSource = 'job'
         }
         if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and
             $null -eq $processTrace -and $null -eq $processJob) {
             throw "Installer phase '$Phase' has no reliable non-elevated process completion source because process traces are unavailable and the tracking job could not be created."
+        }
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and
+            $null -eq $processJob) {
+            $isElevated = $false
+            try {
+                $principal = [Security.Principal.WindowsPrincipal]::new(
+                    [Security.Principal.WindowsIdentity]::GetCurrent())
+                $isElevated = [bool]$principal.IsInRole(
+                    [Security.Principal.WindowsBuiltInRole]::Administrator)
+            } catch {
+                $isElevated = $false
+            }
+            if (-not $isElevated) {
+                throw "Installer phase '$Phase' has no reliable non-elevated process completion source because the tracking job could not be created. Process trace events require an elevated session and cannot verify worker completion here."
+            }
         }
 
         $process = $null
@@ -1462,15 +1538,11 @@ function Invoke-BoundedInstallerProcess {
                 if ($null -ne $process) { try { $process.Dispose() } catch { } }
                 $process = $null
                 $suspended = $null
-                if ($null -eq $processTrace) {
-                    $processTrace = Start-ProcessTrace -Phase $Phase
-                }
-                if ($null -eq $processTrace) { throw $startFailure }
-                Write-Verbose "Could not start installer under job tracking; falling back to process traces: $($startFailure.Exception.Message)"
-                Close-ProcessJob -ProcessJob $processJob
-                $processJob = $null
-                $tracked.Clear()
-                $rootPid = 0
+                # A job was available, so never replace it with elevation-only
+                # trace events after a launch or assignment failure. Falling
+                # back here could hide worker failures in a normal per-user
+                # session. Fail closed instead.
+                throw $startFailure
             } finally {
                 if ($null -ne $suspended) { try { $suspended.Dispose() } catch { } }
             }
@@ -1526,7 +1598,7 @@ function Invoke-BoundedInstallerProcess {
         $workerPollInterval = if ($isWindowsPlatform) { 20 } else { 50 }
         $workerFastPolls = if ($isWindowsPlatform) { 100 } else { 40 }
         $workerPollCount = 0
-        $processTraceSettleMilliseconds = 500
+        $processTraceSettleMilliseconds = 1000
 
         while ($true) {
             [void](Update-TrackedState -Tracked $tracked `
@@ -1542,7 +1614,6 @@ function Invoke-BoundedInstallerProcess {
                 if ($null -eq $processTrace -and $null -eq $processJob) { break }
                 $settleUntil = [DateTime]::UtcNow.AddMilliseconds($processTraceSettleMilliseconds)
                 while ([DateTime]::UtcNow -lt $settleUntil) {
-                    Start-Sleep -Milliseconds 50
                     [void](Update-TrackedState -Tracked $tracked `
                         -DetachedProcessNames $DetachedProcessNames `
                         -ProcessEvents $processEvents -ProcessTrace $processTrace `
@@ -1553,6 +1624,7 @@ function Invoke-BoundedInstallerProcess {
                             $_.Name -eq $rootName -or $_.Name -match $InstallerProcessNamePattern)
                     })
                     if ($remaining.Count -gt 0) { break }
+                    Start-Sleep -Milliseconds $workerPollInterval
                 }
                 if ($remaining.Count -eq 0) { break }
             }
@@ -1620,20 +1692,23 @@ function Invoke-BoundedInstallerProcess {
         $timer.Stop()
         Write-Host ("[installer:{0}] finish exit={1} elapsed={2:N1}s" -f
             $Phase, $rootExitCode, $timer.Elapsed.TotalSeconds)
+        Write-ProcessJobDiagnostics -ProcessJob $processJob -Phase $Phase
         Write-InstallerPhaseEvidence -LogDirectory $LogDirectory -Phase $Phase `
             -Tracked $tracked -ElapsedSeconds $timer.Elapsed.TotalSeconds `
             -StartedUtc $startedUtc -Executable $resolved -ProcessId $rootPid `
             -TimeoutSeconds $TimeoutSeconds -ExitCode $rootExitCode `
-            -TimedOut $false -Outcome $outcome -InnoLogPath $innoLogPath
+            -TimedOut $false -Outcome $outcome -InnoLogPath $innoLogPath `
+            -CompletionSource $completionSource
 
         return [pscustomobject]@{
-            Phase          = $Phase
-            ExitCode       = $rootExitCode
-            ElapsedSeconds = [Math]::Round($timer.Elapsed.TotalSeconds, 2)
-            TimedOut       = $false
-            InnoLogPath    = $innoLogPath
-            ProcessId      = $rootPid
-            ProcessTree    = $snapshot
+            Phase            = $Phase
+            ExitCode         = $rootExitCode
+            ElapsedSeconds   = [Math]::Round($timer.Elapsed.TotalSeconds, 2)
+            TimedOut         = $false
+            InnoLogPath      = $innoLogPath
+            ProcessId        = $rootPid
+            ProcessTree      = $snapshot
+            CompletionSource = $completionSource
         }
     } catch {
         $timer.Stop()
@@ -1651,6 +1726,7 @@ function Invoke-BoundedInstallerProcess {
         $snapshot = @(Get-TrackedSnapshot -Tracked $tracked)
         Write-Warning ("[installer:{0}] {1} after {2:N1}s. {3}" -f
             $Phase, $outcome, $timer.Elapsed.TotalSeconds, (Format-TrackedSummary -Tracked $tracked))
+        Write-ProcessJobDiagnostics -ProcessJob $processJob -Phase $Phase
 
         # Fail closed, but terminate only processes this phase started. The
         # detached product agent is intentionally left to the caller's cleanup.
@@ -1669,7 +1745,8 @@ function Invoke-BoundedInstallerProcess {
             -Tracked $tracked -ElapsedSeconds $timer.Elapsed.TotalSeconds `
             -StartedUtc $startedUtc -Executable $resolved -ProcessId $rootPid `
             -TimeoutSeconds $TimeoutSeconds -ExitCode $rootExitCode `
-            -TimedOut $timedOut -Outcome $outcome -InnoLogPath $innoLogPath
+            -TimedOut $timedOut -Outcome $outcome -InnoLogPath $innoLogPath `
+            -CompletionSource $completionSource
         throw
     } finally {
         Stop-ProcessTrace -ProcessTrace $processTrace
