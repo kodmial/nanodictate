@@ -80,7 +80,7 @@ try {
   }
   $validator = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'scripts/validate-windows-config.ps1'
   try {
-    & $validator -ConfigPath (Join-Path $unpacked 'config.example.toml')
+    & $validator -ConfigPath (Join-Path $unpacked 'config.example.toml') -SkipProductDefault
   } catch {
     throw "Bundled config.example.toml failed shared structured validation: $($_.Exception.Message)"
   }

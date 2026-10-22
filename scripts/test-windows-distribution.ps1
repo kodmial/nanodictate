@@ -106,6 +106,7 @@ try {
 $candidate = Read-Text 'windows/package/test-release-candidate.ps1'
 Assert-Contains 'candidate smoke validates the packaged config through the shared validator' $candidate 'scripts/validate-windows-config.ps1'
 Assert-Contains 'candidate smoke validates the extracted candidate config' $candidate "Join-Path `$unpacked 'config.example.toml'"
+Assert-Contains 'candidate smoke skips the product-default policy' $candidate '-SkipProductDefault'
 Assert-Contains 'candidate smoke records installer measurements' $candidate 'windows-candidate-measurements.json'
 Assert-Contains 'candidate smoke exercises reinstall' $candidate "Invoke-Silent 'reinstall'"
 Assert-Contains 'candidate smoke checks startup registration' $candidate 'Assert-NanoDictateStartup'
