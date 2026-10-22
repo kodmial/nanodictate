@@ -65,8 +65,7 @@ function Open-TrackedProcess {
         $null = $Process.Handle
         return $Process
     } catch {
-        try { $Process.Dispose() } catch { }
-        return $null
+        return $Process
     }
 }
 
@@ -167,13 +166,21 @@ function Read-ProcessTraceEvents {
             $entry = $ProcessEvents[$processId]
             if ($null -eq $entry) {
                 $entry = [pscustomobject]@{
-                    Id       = $processId
-                    ParentId = $parentId
-                    Name     = $name
-                    ExitCode = $null
-                    Ended    = $false
+                    Id            = $processId
+                    ParentId      = $parentId
+                    Name          = $name
+                    NameFromStart = -not $subscription.IsStop
+                    ExitCode      = $null
+                    Ended         = $false
                 }
                 $ProcessEvents[$processId] = $entry
+            } elseif (-not $subscription.IsStop -and -not $entry.NameFromStart) {
+                # Win32_ProcessStopTrace truncates ProcessName. Prefer the full
+                # name from the process start event even if the stop arrived first.
+                if ($name.Length -ge ([string]$entry.Name).Length) {
+                    $entry.Name = $name
+                }
+                $entry.NameFromStart = $true
             }
             if ($subscription.IsStop) {
                 $exitCode = ConvertFrom-ProcessTraceExitStatus `
@@ -237,6 +244,10 @@ function Update-TrackedProcessEvents {
                 $queue.Enqueue([int]$eventEntry.Id)
                 $changes++
             } else {
+                if ($eventEntry.Name.Length -gt ([string]$existing.Name).Length) {
+                    $existing.Name = [string]$eventEntry.Name
+                    $changes++
+                }
                 if ($detached -and -not $existing.Detached) {
                     $existing.Detached = $true
                     $queue.Enqueue([int]$existing.Id)
@@ -342,7 +353,9 @@ function Update-TrackedProcesses {
                 $entry.Process = $process
                 if ($null -eq $process) { $entry.Ended = $true }
             } catch {
-                $entry.Ended = $true
+                if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+                    $entry.Ended = $true
+                }
             }
         }
         if ($null -ne $process) {
@@ -352,7 +365,9 @@ function Update-TrackedProcesses {
                     if ($null -eq $entry.ExitCode) { $entry.ExitCode = [int]$process.ExitCode }
                 }
             } catch {
-                $entry.Ended = $true
+                if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+                    $entry.Ended = $true
+                }
             }
         }
     }

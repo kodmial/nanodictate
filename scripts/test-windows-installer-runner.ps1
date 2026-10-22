@@ -110,6 +110,98 @@ Assert-True 'durable completion events attach workers that never appeared in a s
 Assert-Equal 'durable completion events keep a late failure exit code' 7 $durable.New.ExitCode
 Assert-Equal 'durable completion events override an unverified snapshot exit code' 9 $durable.Existing.ExitCode
 
+$traceName = & $runnerModule {
+    $events = @{}
+    $trace = [pscustomobject]@{
+        StartIdentifier = 'fake-trace-start'
+        StopIdentifier  = 'fake-trace-stop'
+    }
+    $script:fakeTraceEvents = @{
+        'fake-trace-start' = @()
+        'fake-trace-stop'  = @([pscustomobject]@{
+            EventIdentifier = 1
+            SourceEventArgs = [pscustomobject]@{
+                NewEvent = [pscustomobject]@{
+                    ProcessID       = 200
+                    ParentProcessID = 100
+                    ProcessName     = 'NanoDictate-Set'
+                    ExitStatus      = 9
+                }
+            }
+        })
+    }
+    function script:Get-Event {
+        param([string]$SourceIdentifier)
+        if ($script:fakeTraceEvents.ContainsKey($SourceIdentifier)) {
+            return $script:fakeTraceEvents[$SourceIdentifier]
+        }
+        return @()
+    }
+    try {
+        [void](Read-ProcessTraceEvents -ProcessEvents $events -ProcessTrace $trace)
+        $afterStop = [string]$events[200].Name
+        $endedAfterStop = [bool]$events[200].Ended
+
+        $script:fakeTraceEvents['fake-trace-stop'] = @()
+        $script:fakeTraceEvents['fake-trace-start'] = @([pscustomobject]@{
+            EventIdentifier = 2
+            SourceEventArgs = [pscustomobject]@{
+                NewEvent = [pscustomobject]@{
+                    ProcessID       = 200
+                    ParentProcessID = 100
+                    ProcessName     = 'NanoDictate-Setup.tmp'
+                }
+            }
+        })
+        [void](Read-ProcessTraceEvents -ProcessEvents $events -ProcessTrace $trace)
+        [pscustomobject]@{
+            AfterStop      = $afterStop
+            EndedAfterStop = $endedAfterStop
+            AfterStart     = [string]$events[200].Name
+            NameFromStart  = [bool]$events[200].NameFromStart
+            ExitCode       = $events[200].ExitCode
+        }
+    } finally {
+        Remove-Item -Path Function:Get-Event -ErrorAction SilentlyContinue
+        Remove-Variable -Name fakeTraceEvents -Scope Script -ErrorAction SilentlyContinue
+    }
+}
+Assert-Equal 'stop trace name is retained until a start trace is seen' `
+    'NanoDictate-Set' $traceName.AfterStop
+Assert-True 'stop trace still establishes completion' $traceName.EndedAfterStop `
+    'stop event did not mark the process ended'
+Assert-Equal 'start trace replaces a truncated stop-trace name' `
+    'NanoDictate-Setup' $traceName.AfterStart
+Assert-True 'start trace name is marked as authoritative' $traceName.NameFromStart `
+    'start trace name was not retained'
+Assert-Equal 'preferred start trace name preserves the stop exit code' 9 $traceName.ExitCode
+
+$traceNamePropagation = & $runnerModule {
+    $tracked = @{
+        100 = [pscustomobject]@{
+            Id = 100; ParentId = 0; Name = 'setup'; Detached = $false
+            Process = $null; ExitCode = $null; Ended = $false
+        }
+        200 = [pscustomobject]@{
+            Id = 200; ParentId = 100; Name = 'NanoDictate-Set'; Detached = $false
+            Process = $null; ExitCode = $null; Ended = $true
+        }
+    }
+    $events = @{
+        200 = [pscustomobject]@{
+            Id = 200; ParentId = 100; Name = 'NanoDictate-Setup'
+            ExitCode = 9; Ended = $true
+        }
+    }
+    [void](Update-TrackedProcessEvents -Tracked $tracked -ProcessEvents $events `
+        -DetachedProcessNames @())
+    $tracked[200]
+}
+Assert-Equal 'improved trace name propagates to an existing tracked worker' `
+    'NanoDictate-Setup' $traceNamePropagation.Name
+Assert-Equal 'propagated trace name keeps the worker failure exit code' `
+    9 $traceNamePropagation.ExitCode
+
 $unconfirmedStatus = & $runnerModule {
     ConvertFrom-ProcessTraceExitStatus ([uint32]::MaxValue)
 }
@@ -270,6 +362,51 @@ try {
         } finally {
             try { if (-not $handleStarter.HasExited) { $handleStarter.Kill() } } catch { }
             try { $handleStarter.Dispose() } catch { }
+        }
+
+        # A process whose handle cannot be opened must stay tracked. Marking it
+        # ended would let a still-running worker escape the wait and fail-closed
+        # checks because completion must come from HasExited or a stop event.
+        $unavailableStartInfo = [Diagnostics.ProcessStartInfo]::new()
+        $unavailableStartInfo.FileName = $pwshPath
+        $unavailableStartInfo.UseShellExecute = $false
+        $unavailableStartInfo.CreateNoWindow = $true
+        $unavailableStartInfo.Arguments = (@(
+            '-NoProfile', '-File', $fixture, '-Mode', 'sleep', '-SleepMilliseconds', '5000'
+        ) | ForEach-Object {
+            & $runnerModule { param($value) ConvertTo-InnoSetupCommandLineArgument $value } $_
+        }) -join ' '
+        $unavailableStarter = [Diagnostics.Process]::Start($unavailableStartInfo)
+        $unavailableProcess = $null
+        try {
+            $unavailableProcess = [Diagnostics.Process]::GetProcessById($unavailableStarter.Id)
+            $unavailableProcess.Dispose()
+            $preservedProcess = & $runnerModule {
+                param($process)
+                Open-TrackedProcess $process
+            } $unavailableProcess
+            Assert-True 'unavailable process handle is not discarded' `
+                ($null -ne $preservedProcess) 'Open-TrackedProcess returned null'
+
+            $unavailableTracked = & $runnerModule {
+                param($process)
+                $tracked = @{
+                    65535 = [pscustomobject]@{
+                        Id = 65535; ParentId = 0; Name = 'setup'; Detached = $false
+                        Process = $process; ExitCode = $null; Ended = $false
+                    }
+                }
+                Update-TrackedProcesses -Tracked $tracked -DetachedProcessNames @()
+                $tracked[65535]
+            } $unavailableProcess
+            Assert-True 'unavailable HasExited check does not mark an entry ended' `
+                (-not $unavailableTracked.Ended) 'entry was marked ended without completion evidence'
+        } finally {
+            try { if (-not $unavailableStarter.HasExited) { $unavailableStarter.Kill() } } catch { }
+            try { $unavailableStarter.Dispose() } catch { }
+            if ($null -ne $unavailableProcess) {
+                try { $unavailableProcess.Dispose() } catch { }
+            }
         }
 
         for ($run = 1; $run -le 5; $run++) {
