@@ -227,6 +227,8 @@ try {
     ) -Phase 'slow-install' -TimeoutSeconds 15 -LogDirectory $logDir
     Assert-Equal 'slow installer returns root exit code' 0 $slow.ExitCode
     Assert-True 'slow installer measures actual completion' ($slow.ElapsedSeconds -ge 1) "elapsed was $($slow.ElapsedSeconds)s"
+    $slowRoot = @($slow.ProcessTree | Where-Object { $_.pid -eq $slow.ProcessId })[0]
+    Assert-Equal 'root tracked process records its trusted exit code' 0 $slowRoot.exit_code
     Assert-True 'successful phase writes evidence' (Test-Path -LiteralPath (Join-Path $logDir 'slow-install.json')) 'missing slow-install evidence'
 
     # 1b. Inno /LOG requests are passed through and recorded in evidence.
@@ -285,12 +287,18 @@ try {
     # read a non-child exit code on Windows; Unix reaps the orphan itself, so the
     # assertion is Windows-only while the fixture remains shared.
     if ($IsWindows) {
+        $isElevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator)
         $trace = & $runnerModule {
             param($phase)
             Start-ProcessTrace -Phase $phase
         } 'trace-availability'
         try {
-            Assert-True 'durable process trace events are available' ($null -ne $trace) 'Register-CimIndicationEvent failed'
+            if ($isElevated) {
+                Assert-True 'durable process trace events are available' ($null -ne $trace) 'Register-CimIndicationEvent failed'
+            } else {
+                Write-Host 'skip - durable process trace events require an elevated session'
+            }
         } finally {
             & $runnerModule {
                 param($processTrace)
@@ -298,28 +306,76 @@ try {
             } $trace
         }
 
-        # Without durable trace events a short-lived worker can exit between
-        # snapshots, so an unavailable trace must fail the phase instead of
-        # allowing a successful root exit code to mask the worker result.
-        $traceFailureMessage = & $runnerModule {
+        # A non-elevated user session cannot register Win32 process trace
+        # events. The job object must still track the bootstrap worker and
+        # preserve its exit status for the normal per-user install path.
+        $nonElevatedFailure = & $runnerModule {
+            param($executable, $fixture, $pidFile)
+            function script:Register-CimIndicationEvent {
+                throw 'simulated non-elevated trace registration failure'
+            }
+            try {
+                try {
+                    Invoke-BoundedInstallerProcess -FilePath $executable -ArgumentList @(
+                        '-NoProfile', '-File', $fixture, '-Mode', 'bootstrap',
+                        '-WorkerScript', $fixture,
+                        '-WorkerSleepMilliseconds', '1500', '-WorkerExitCode', '9',
+                        '-PidFile', $pidFile
+                    ) -Phase 'user-install' -TimeoutSeconds 15 | Out-Null
+                    return $null
+                } catch {
+                    return $_.Exception.Message
+                }
+            } finally {
+                Remove-Item -Path Function:Register-CimIndicationEvent -ErrorAction SilentlyContinue
+            }
+        } $pwshPath $fixture (Join-Path $work 'non-elevated-fail.pid')
+        Assert-True 'non-elevated user-install still fails on a failing worker' `
+            ($nonElevatedFailure -match 'exited with code 9') `
+            "job fallback did not preserve the worker failure: $nonElevatedFailure"
+
+        $nonElevatedSuccess = & $runnerModule {
+            param($executable, $fixture, $pidFile)
+            function script:Register-CimIndicationEvent {
+                throw 'simulated non-elevated trace registration failure'
+            }
+            try {
+                $result = Invoke-BoundedInstallerProcess -FilePath $executable -ArgumentList @(
+                    '-NoProfile', '-File', $fixture, '-Mode', 'bootstrap',
+                    '-WorkerScript', $fixture,
+                    '-WorkerSleepMilliseconds', '1500', '-WorkerExitCode', '0',
+                    '-PidFile', $pidFile
+                ) -Phase 'user-install' -TimeoutSeconds 15
+                return $result.ExitCode
+            } finally {
+                Remove-Item -Path Function:Register-CimIndicationEvent -ErrorAction SilentlyContinue
+            }
+        } $pwshPath $fixture (Join-Path $work 'non-elevated-ok.pid')
+        Assert-Equal 'non-elevated user-install completes with job tracking' 0 $nonElevatedSuccess
+
+        $untrackedMessage = & $runnerModule {
             param($executable)
             function script:Register-CimIndicationEvent {
                 throw 'simulated trace registration failure'
             }
+            function script:New-ProcessJob {
+                return $null
+            }
             try {
                 Invoke-BoundedInstallerProcess -FilePath $executable -ArgumentList @(
                     '-NoProfile', '-Command', 'exit 0'
-                ) -Phase 'trace-registration-failure' -TimeoutSeconds 5 | Out-Null
+                ) -Phase 'user-install' -TimeoutSeconds 5 | Out-Null
                 return $null
             } catch {
                 return $_.Exception.Message
             } finally {
                 Remove-Item -Path Function:Register-CimIndicationEvent -ErrorAction SilentlyContinue
+                Remove-Item -Path Function:New-ProcessJob -ErrorAction SilentlyContinue
             }
         } $pwshPath
-        Assert-True 'trace registration failure fails closed' `
-            ($traceFailureMessage -match 'Durable process trace events are required') `
-            "runner did not fail closed: $traceFailureMessage"
+        Assert-True 'missing trace and job tracking fails closed' `
+            ($untrackedMessage -match 'no reliable non-elevated process completion source') `
+            "runner did not fail closed: $untrackedMessage"
 
         $failingWorkerPidFile = Join-Path $work 'bootstrap-fail.pid'
         Assert-Throws 'failing bootstrap worker fails the phase' {
@@ -353,8 +409,9 @@ try {
             try {
                 Assert-True 'tracked process handle is opened before exit' ($null -ne $handleObserved) 'could not open a durable process handle'
                 if ($null -ne $handleObserved) {
-                    Assert-True 'tracked process records a cached handle' `
-                        [bool]$handleObserved.HandleCached 'HandleCached was not set'
+                    Assert-True -Name 'tracked process records a cached handle' `
+                        -Condition ([bool]$handleObserved.HandleCached) `
+                        -Detail 'HandleCached was not set'
                     [void]$handleObserved.WaitForExit(10000)
                     Assert-Equal 'durable process handle preserves a short-lived exit code' 9 $handleObserved.ExitCode
                 }

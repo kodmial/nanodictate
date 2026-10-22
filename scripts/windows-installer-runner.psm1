@@ -26,6 +26,102 @@ $script:NanoDictatePayloadNames = @(
     'hostfxr.dll'
     'config.example.toml'
 )
+$script:ProcessJobSource = @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace NanoDictate.InstallerRunner
+{
+    public sealed class ProcessJob : IDisposable
+    {
+        private const int JobObjectBasicProcessIdList = 3;
+        private IntPtr handle;
+
+        private ProcessJob(IntPtr value)
+        {
+            handle = value;
+        }
+
+        public static ProcessJob Create()
+        {
+            IntPtr value = CreateJobObjectW(IntPtr.Zero, null);
+            if (value == IntPtr.Zero)
+            {
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            }
+            return new ProcessJob(value);
+        }
+
+        public bool Assign(IntPtr processHandle)
+        {
+            if (handle == IntPtr.Zero || processHandle == IntPtr.Zero) { return false; }
+            return AssignProcessToJobObject(handle, processHandle);
+        }
+
+        public int[] GetProcessIds()
+        {
+            if (handle == IntPtr.Zero) { return new int[0]; }
+
+            int capacity = 1024;
+            while (true)
+            {
+                int size = 8 + (IntPtr.Size * capacity);
+                IntPtr buffer = Marshal.AllocHGlobal(size);
+                try
+                {
+                    Marshal.WriteInt32(buffer, 0, capacity);
+                    Marshal.WriteInt32(buffer, 4, 0);
+                    if (!QueryInformationJobObject(handle, JobObjectBasicProcessIdList, buffer, (uint)size, IntPtr.Zero))
+                    {
+                        throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                    }
+
+                    int assigned = Marshal.ReadInt32(buffer, 0);
+                    int count = Marshal.ReadInt32(buffer, 4);
+                    if (count >= capacity)
+                    {
+                        capacity = Math.Max(capacity * 2, assigned);
+                        continue;
+                    }
+
+                    int[] ids = new int[count];
+                    for (int index = 0; index < count; index++)
+                    {
+                        ids[index] = Marshal.ReadIntPtr(buffer, 8 + (index * IntPtr.Size)).ToInt32();
+                    }
+                    return ids;
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(buffer);
+                }
+            }
+        }
+
+        public void Dispose()
+        {
+            if (handle != IntPtr.Zero)
+            {
+                CloseHandle(handle);
+                handle = IntPtr.Zero;
+            }
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr CreateJobObjectW(IntPtr lpJobAttributes, string lpName);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool QueryInformationJobObject(IntPtr hJob, int jobObjectInformationClass,
+            IntPtr lpJobObjectInformation, uint cbJobObjectInformationLength, IntPtr lpReturnLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+    }
+}
+'@
 
 function Get-ProcessTable {
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
@@ -67,6 +163,52 @@ function Open-TrackedProcess {
         return $Process
     } catch {
         return $Process
+    }
+}
+
+function New-ProcessJob {
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return $null }
+    try {
+        if (-not ('NanoDictate.InstallerRunner.ProcessJob' -as [type])) {
+            Add-Type -TypeDefinition $script:ProcessJobSource -Language CSharp -ErrorAction Stop
+        }
+        return [NanoDictate.InstallerRunner.ProcessJob]::Create()
+    } catch {
+        Write-Verbose "Could not create a Windows job object for installer tracking: $_"
+        return $null
+    }
+}
+
+function Add-TrackedProcessToJob {
+    param($ProcessJob, [Diagnostics.Process]$Process)
+
+    if ($null -eq $ProcessJob -or $null -eq $Process) { return $false }
+    try {
+        return [bool]$ProcessJob.Assign($Process.Handle)
+    } catch {
+        Write-Verbose "Could not assign installer root to the tracking job: $_"
+        return $false
+    }
+}
+
+function Get-ProcessJobIds {
+    param($ProcessJob)
+
+    if ($null -eq $ProcessJob) { return @() }
+    try {
+        return @($ProcessJob.GetProcessIds())
+    } catch {
+        Write-Verbose "Could not enumerate the installer tracking job: $_"
+        return @()
+    }
+}
+
+function Close-ProcessJob {
+    param($ProcessJob)
+
+    if ($null -eq $ProcessJob) { return }
+    try { $ProcessJob.Dispose() } catch {
+        Write-Verbose "Could not close the installer tracking job: $_"
     }
 }
 
@@ -123,10 +265,11 @@ function Start-ProcessTrace {
             StopIdentifier  = $stopIdentifier
         }
     } catch {
-        # A worker can start and exit between Get-ProcessTable snapshots, so on
-        # Windows durable trace events are the only reliable completion source.
-        # Fail closed instead of allowing a zero root exit code to mask a failure.
-        throw "Durable process trace events are required for installer phase '$Phase' but could not be registered: $($_.Exception.Message)"
+        # Win32 process trace events require an elevated session on Windows.
+        # The caller falls back to a non-elevated job object so a normal
+        # per-user install can still track its worker processes.
+        Write-Verbose "Durable process trace events are unavailable for installer phase '$Phase': $($_.Exception.Message)"
+        return $null
     }
 }
 
@@ -273,11 +416,14 @@ function Update-TrackedState {
         [hashtable]$Tracked,
         [string[]]$DetachedProcessNames,
         [hashtable]$ProcessEvents,
-        $ProcessTrace
+        $ProcessTrace,
+        $ProcessJob,
+        [int]$RootId = 0
     )
 
     $read = Read-ProcessTraceEvents -ProcessEvents $ProcessEvents -ProcessTrace $ProcessTrace
-    Update-TrackedProcesses -Tracked $Tracked -DetachedProcessNames $DetachedProcessNames
+    Update-TrackedProcesses -Tracked $Tracked -DetachedProcessNames $DetachedProcessNames `
+        -ProcessJob $ProcessJob -RootId $RootId
     $changes = Update-TrackedProcessEvents -Tracked $Tracked -ProcessEvents $ProcessEvents `
         -DetachedProcessNames $DetachedProcessNames
     return ($read + $changes)
@@ -300,10 +446,42 @@ function ConvertTo-InnoSetupCommandLineArgument {
 function Update-TrackedProcesses {
     param(
         [hashtable]$Tracked,
-        [string[]]$DetachedProcessNames
+        [string[]]$DetachedProcessNames,
+        $ProcessJob,
+        [int]$RootId = 0
     )
 
     $table = @(Get-ProcessTable)
+    if ($null -ne $ProcessJob) {
+        $knownIds = @{}
+        foreach ($row in $table) { $knownIds[[int]$row.Id] = $true }
+        foreach ($jobId in @(Get-ProcessJobIds -ProcessJob $ProcessJob)) {
+            $id = [int]$jobId
+            if ($id -le 0 -or $knownIds.ContainsKey($id)) { continue }
+            $name = ''
+            $jobProcess = $null
+            try {
+                $jobProcess = [Diagnostics.Process]::GetProcessById($id)
+                $name = [string]$jobProcess.ProcessName
+            } catch {
+                Write-Verbose "Could not inspect job process $id`: $_"
+            } finally {
+                if ($null -ne $jobProcess) {
+                    try { $jobProcess.Dispose() } catch {
+                        Write-Verbose "Could not dispose job process $id`: $_"
+                    }
+                }
+            }
+            if ([string]::IsNullOrWhiteSpace($name)) { continue }
+            $parentId = if ($RootId -gt 0) { $RootId } else { 0 }
+            $table += [pscustomobject]@{
+                Id       = $id
+                ParentId = $parentId
+                Name     = $name
+            }
+            $knownIds[$id] = $true
+        }
+    }
     $children = @{}
     foreach ($row in $table) {
         if (-not $children.ContainsKey($row.ParentId)) {
@@ -492,6 +670,7 @@ function Invoke-BoundedInstallerProcess {
     $tracked = @{}
     $processEvents = @{}
     $processTrace = $null
+    $processJob = $null
     $rootExitCode = $null
     $snapshot = @()
     $outcome = 'unknown'
@@ -500,9 +679,21 @@ function Invoke-BoundedInstallerProcess {
 
     try {
         $processTrace = Start-ProcessTrace -Phase $Phase
+        $processJob = New-ProcessJob
         $process = [Diagnostics.Process]::Start($startInfo)
         if ($null -eq $process) { throw "Failed to start installer for phase '$Phase'." }
         $rootPid = [int]$process.Id
+        $jobAssigned = Add-TrackedProcessToJob -ProcessJob $processJob -Process $process
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and
+            $null -eq $processTrace -and -not $jobAssigned) {
+            try { if (-not $process.HasExited) { $process.Kill() } } catch {
+                Write-Verbose "Could not terminate the untracked installer root: $_"
+            }
+            try { $process.Dispose() } catch {
+                Write-Verbose "Could not dispose the untracked installer root: $_"
+            }
+            throw "Installer phase '$Phase' has no reliable non-elevated process completion source because process traces are unavailable and the tracking job could not be assigned."
+        }
         try { $rootName = [string]$process.ProcessName } catch {
             $rootName = [IO.Path]::GetFileNameWithoutExtension($resolved)
         }
@@ -511,7 +702,7 @@ function Invoke-BoundedInstallerProcess {
             ParentId = 0
             Name     = $rootName
             Detached = $false
-            Process  = $process
+            Process  = (Open-TrackedProcess $process)
             ExitCode = $null
             Ended    = $false
         }
@@ -523,7 +714,8 @@ function Invoke-BoundedInstallerProcess {
         while (-not $process.HasExited) {
             [void](Update-TrackedState -Tracked $tracked `
                 -DetachedProcessNames $DetachedProcessNames `
-                -ProcessEvents $processEvents -ProcessTrace $processTrace)
+                -ProcessEvents $processEvents -ProcessTrace $processTrace `
+                -ProcessJob $processJob -RootId $rootPid)
             if ([DateTime]::UtcNow -ge $deadline) {
                 $timedOut = $true
                 throw [TimeoutException]::new(
@@ -547,19 +739,21 @@ function Invoke-BoundedInstallerProcess {
         while ($true) {
             [void](Update-TrackedState -Tracked $tracked `
                 -DetachedProcessNames $DetachedProcessNames `
-                -ProcessEvents $processEvents -ProcessTrace $processTrace)
+                -ProcessEvents $processEvents -ProcessTrace $processTrace `
+                -ProcessJob $processJob -RootId $rootPid)
             $remaining = @($tracked.Values | Where-Object {
                 $_.Id -ne $rootPid -and -not $_.Detached -and -not $_.Ended -and
                 ($_.Name -eq $rootName -or $_.Name -match $InstallerProcessNamePattern)
             })
             if ($remaining.Count -eq 0) {
-                if ($null -eq $processTrace) { break }
+                if ($null -eq $processTrace -and $null -eq $processJob) { break }
                 $settleUntil = [DateTime]::UtcNow.AddMilliseconds($processTraceSettleMilliseconds)
                 while ([DateTime]::UtcNow -lt $settleUntil) {
                     Start-Sleep -Milliseconds 50
                     [void](Update-TrackedState -Tracked $tracked `
                         -DetachedProcessNames $DetachedProcessNames `
-                        -ProcessEvents $processEvents -ProcessTrace $processTrace)
+                        -ProcessEvents $processEvents -ProcessTrace $processTrace `
+                        -ProcessJob $processJob -RootId $rootPid)
                     $remaining = @($tracked.Values | Where-Object {
                         $_.Id -ne $rootPid -and -not $_.Detached -and -not $_.Ended -and
                         ($_.Name -eq $rootName -or $_.Name -match $InstallerProcessNamePattern)
@@ -580,7 +774,8 @@ function Invoke-BoundedInstallerProcess {
 
         [void](Update-TrackedState -Tracked $tracked `
             -DetachedProcessNames $DetachedProcessNames `
-            -ProcessEvents $processEvents -ProcessTrace $processTrace)
+            -ProcessEvents $processEvents -ProcessTrace $processTrace `
+            -ProcessJob $processJob -RootId $rootPid)
 
         if ($rootExitCode -ne 0) {
             throw "Installer phase '$Phase' exited with code $rootExitCode."
@@ -634,7 +829,8 @@ function Invoke-BoundedInstallerProcess {
         try {
             [void](Update-TrackedState -Tracked $tracked `
                 -DetachedProcessNames $DetachedProcessNames `
-                -ProcessEvents $processEvents -ProcessTrace $processTrace)
+                -ProcessEvents $processEvents -ProcessTrace $processTrace `
+                -ProcessJob $processJob -RootId $rootPid)
         } catch {
             Write-Verbose "Could not refresh the process tree after failure: $_"
         }
@@ -663,6 +859,7 @@ function Invoke-BoundedInstallerProcess {
         throw
     } finally {
         Stop-ProcessTrace -ProcessTrace $processTrace
+        Close-ProcessJob -ProcessJob $processJob
         foreach ($entry in @($tracked.Values)) {
             if ($null -ne $entry.Process) {
                 try { $entry.Process.Dispose() } catch { }
