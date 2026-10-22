@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 5.1
 <#
   Deterministic lifecycle fixture used by test-windows-installer-runner.ps1.
   It is deliberately a plain console process, not a product binary.
@@ -32,7 +32,7 @@ switch ($Mode) {
         exit $ExitCode
     }
     'detached' {
-        $child = if ($IsWindows) {
+        $child = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
             Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\ping.exe') `
                 -ArgumentList @('-n', '120', '127.0.0.1') -PassThru
         } else {

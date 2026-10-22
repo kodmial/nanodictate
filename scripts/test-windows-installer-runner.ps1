@@ -74,8 +74,11 @@ namespace NanoDictate.InstallerRunner.Tests
         private const uint TokenQuery = 0x0008;
         private const uint TokenDuplicate = 0x0002;
         private const uint DisableMaxPrivilege = 0x0001;
+        private const uint CreateNewConsole = 0x00000010;
         private const uint CreateNoWindow = 0x08000000;
         private const uint WaitObject0 = 0;
+        private const int ErrorDllInitFailed = 1114;
+        private const int StatusDllInitFailed = unchecked((int)0xC0000142);
 
         [StructLayout(LayoutKind.Sequential)]
         private struct SidAndAttributes
@@ -198,51 +201,24 @@ namespace NanoDictate.InstallerRunner.Tests
             return result.ToString();
         }
 
-        public static int Run(
+        private static int StartAndWait(
+            IntPtr token,
             string application,
-            string[] arguments,
+            string commandLine,
             string workingDirectory,
+            uint creationFlags,
+            string desktop,
             int timeoutMilliseconds)
         {
-            IntPtr token = IntPtr.Zero;
-            IntPtr restrictedToken = IntPtr.Zero;
-            IntPtr administratorsSid = IntPtr.Zero;
             ProcessInformation processInformation = new ProcessInformation();
             try
             {
-                if (!OpenProcessToken(GetCurrentProcess(),
-                    TokenAssignPrimary | TokenQuery | TokenDuplicate, out token))
-                {
-                    throw new Win32Exception(
-                        Marshal.GetLastWin32Error(), "Could not open the current process token.");
-                }
-                if (!ConvertStringSidToSid("S-1-5-32-544", out administratorsSid))
-                {
-                    throw new Win32Exception(
-                        Marshal.GetLastWin32Error(), "Could not resolve the Administrators SID.");
-                }
-
-                SidAndAttributes[] disabledSids = new SidAndAttributes[1];
-                disabledSids[0].Sid = administratorsSid;
-                if (!CreateRestrictedToken(token, DisableMaxPrivilege, 1, disabledSids, 0, IntPtr.Zero,
-                    0, IntPtr.Zero, out restrictedToken))
-                {
-                    throw new Win32Exception(
-                        Marshal.GetLastWin32Error(), "Could not create a non-elevated token.");
-                }
-
-                StringBuilder commandLine = new StringBuilder();
-                commandLine.Append(Quote(application));
-                foreach (string argument in arguments)
-                {
-                    commandLine.Append(' ');
-                    commandLine.Append(Quote(argument));
-                }
-
                 StartupInfo startupInfo = new StartupInfo();
                 startupInfo.cb = Marshal.SizeOf(typeof(StartupInfo));
-                if (!CreateProcessAsUser(restrictedToken, application, commandLine, IntPtr.Zero,
-                    IntPtr.Zero, false, CreateNoWindow, IntPtr.Zero, workingDirectory,
+                startupInfo.lpDesktop = desktop;
+                StringBuilder mutableCommandLine = new StringBuilder(commandLine);
+                if (!CreateProcessAsUser(token, application, mutableCommandLine, IntPtr.Zero,
+                    IntPtr.Zero, false, creationFlags, IntPtr.Zero, workingDirectory,
                     ref startupInfo, out processInformation))
                 {
                     throw new Win32Exception(
@@ -275,6 +251,84 @@ namespace NanoDictate.InstallerRunner.Tests
                 if (processInformation.hProcess != IntPtr.Zero) {
                     CloseHandle(processInformation.hProcess);
                 }
+            }
+        }
+
+        public static int Run(
+            string application,
+            string[] arguments,
+            string workingDirectory,
+            int timeoutMilliseconds)
+        {
+            IntPtr token = IntPtr.Zero;
+            IntPtr restrictedToken = IntPtr.Zero;
+            IntPtr administratorsSid = IntPtr.Zero;
+            try
+            {
+                if (!OpenProcessToken(GetCurrentProcess(),
+                    TokenAssignPrimary | TokenQuery | TokenDuplicate, out token))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(), "Could not open the current process token.");
+                }
+                if (!ConvertStringSidToSid("S-1-5-32-544", out administratorsSid))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(), "Could not resolve the Administrators SID.");
+                }
+
+                SidAndAttributes[] disabledSids = new SidAndAttributes[1];
+                disabledSids[0].Sid = administratorsSid;
+                if (!CreateRestrictedToken(token, DisableMaxPrivilege, 1, disabledSids, 0, IntPtr.Zero,
+                    0, IntPtr.Zero, out restrictedToken))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(), "Could not create a non-elevated token.");
+                }
+
+                StringBuilder commandLine = new StringBuilder();
+                commandLine.Append(Quote(application));
+                foreach (string argument in arguments)
+                {
+                    commandLine.Append(' ');
+                    commandLine.Append(Quote(argument));
+                }
+
+                uint[] creationFlags = new uint[]
+                {
+                    CreateNewConsole,
+                    0,
+                    CreateNewConsole,
+                    CreateNoWindow
+                };
+                string[] desktops = new string[]
+                {
+                    null,
+                    null,
+                    "winsta0\\default",
+                    null
+                };
+
+                int exitCode = StatusDllInitFailed;
+                for (int attempt = 0; attempt < creationFlags.Length; attempt++)
+                {
+                    try
+                    {
+                        exitCode = StartAndWait(restrictedToken, application, commandLine.ToString(),
+                            workingDirectory, creationFlags[attempt], desktops[attempt],
+                            timeoutMilliseconds);
+                    }
+                    catch (Win32Exception exception)
+                    {
+                        if (exception.NativeErrorCode != ErrorDllInitFailed) { throw; }
+                        exitCode = StatusDllInitFailed;
+                    }
+                    if (exitCode != StatusDllInitFailed) { return exitCode; }
+                }
+                return exitCode;
+            }
+            finally
+            {
                 if (restrictedToken != IntPtr.Zero) { CloseHandle(restrictedToken); }
                 if (token != IntPtr.Zero) { CloseHandle(token); }
                 if (administratorsSid != IntPtr.Zero) { LocalFree(administratorsSid); }
@@ -296,21 +350,34 @@ function Invoke-NonElevatedInstallerChild {
     }
     $childScript = Join-Path $PSScriptRoot 'fixtures/non-elevated-user-install.ps1'
     $modulePath = Join-Path $PSScriptRoot 'windows-installer-runner.psm1'
-    Remove-Item -LiteralPath $ResultPath -Force -ErrorAction SilentlyContinue
     $arguments = [string[]]@(
-        '-NoProfile', '-NonInteractive', '-File', $childScript,
+        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $childScript,
         '-RunnerModulePath', $modulePath,
         '-FixtureScript', $FixtureScript,
         '-ResultPath', $ResultPath,
         '-WorkDirectory', $WorkDirectory
     )
-    $exitCode = [NanoDictate.InstallerRunner.Tests.NonElevatedProcess]::Run(
-        $Executable, $arguments, $WorkDirectory, 120000)
-    if (-not (Test-Path -LiteralPath $ResultPath)) {
-        throw "The non-elevated installer fixture exited with code $exitCode without writing a result."
+    $executables = @($Executable)
+    $windowsPowerShell = [IO.Path]::Combine($env:SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    if ((Test-Path -LiteralPath $windowsPowerShell) -and
+        ([IO.Path]::GetFullPath($windowsPowerShell) -ne [IO.Path]::GetFullPath($Executable))) {
+        $executables += $windowsPowerShell
     }
-    $result = Get-Content -LiteralPath $ResultPath -Raw | ConvertFrom-Json
-    [pscustomobject]@{ ExitCode = $exitCode; Result = $result }
+    $exitCode = $null
+    foreach ($candidate in $executables) {
+        Remove-Item -LiteralPath $ResultPath -Force -ErrorAction SilentlyContinue
+        $exitCode = [NanoDictate.InstallerRunner.Tests.NonElevatedProcess]::Run(
+            $candidate, $arguments, $WorkDirectory, 120000)
+        if (Test-Path -LiteralPath $ResultPath) {
+            $result = Get-Content -LiteralPath $ResultPath -Raw | ConvertFrom-Json
+            return [pscustomobject]@{ ExitCode = $exitCode; Result = $result }
+        }
+        # Hosted runners have UAC disabled, so the restricted process can fail
+        # before PowerShell starts. Retry with Windows PowerShell, which has a
+        # smaller .NET startup surface, before reporting the launch failure.
+        if ($exitCode -ne -1073741502) { break }
+    }
+    throw "The non-elevated installer fixture exited with code $exitCode without writing a result."
 }
 
 function Invoke-NonElevatedInstallerFixture {
