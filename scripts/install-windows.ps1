@@ -93,6 +93,36 @@ function Get-VerifiedRelease([string]$ManifestVersion) {
     throw "No complete published Windows release found. $($errors -join '; ')"
 }
 
+function Invoke-NanoDictateInstaller {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallerPath,
+        [Parameter(Mandatory = $true)][string]$Target,
+        [ValidateRange(1, 3600)][int]$TimeoutSeconds = 240,
+        [string]$LogDirectory,
+        [string]$Phase = 'user-install',
+        [string[]]$ArgumentList
+    )
+    Import-NanoDictateRunner
+    $installer = (Resolve-Path -LiteralPath $InstallerPath).Path
+    if (-not $PSBoundParameters.ContainsKey('ArgumentList')) {
+        $ArgumentList = @(
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', ('/DIR=' + $Target)
+        )
+    }
+    $runnerArgs = @{
+        FilePath       = $installer
+        ArgumentList   = $ArgumentList
+        Phase          = $Phase
+        TimeoutSeconds = $TimeoutSeconds
+    }
+    if (-not [string]::IsNullOrWhiteSpace($LogDirectory)) {
+        $runnerArgs.LogDirectory = $LogDirectory
+        $runnerArgs.InnoLogFileName = "$Phase.log"
+    }
+    return Invoke-BoundedInstallerProcess @runnerArgs
+}
+
 function Install-NanoDictateVerified {
     param(
         [Parameter(Mandatory = $true)][string]$InstallerPath,
@@ -114,10 +144,8 @@ function Install-NanoDictateVerified {
         # The bounded runner quotes /DIR for profile paths containing spaces and
         # waits for the real Inno phase, not the persistent --background app
         # that the installer intentionally leaves running.
-        $setup = Invoke-BoundedInstallerProcess -FilePath $installer -ArgumentList @(
-            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', ('/DIR=' + $Target)
-        ) -Phase 'user-install' -TimeoutSeconds $TimeoutSeconds `
-            -LogDirectory $LogDirectory -InnoLogFileName 'user-install.log'
+        $setup = Invoke-NanoDictateInstaller -InstallerPath $installer -Target $Target `
+            -TimeoutSeconds $TimeoutSeconds -LogDirectory $LogDirectory -Phase 'user-install'
         $install.Stop()
 
         Assert-NanoDictatePayload -InstallDirectory $Target
