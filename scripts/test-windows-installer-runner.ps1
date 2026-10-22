@@ -60,6 +60,259 @@ function Stop-ProcessByIdOrNull([int]$ProcessId) {
         try { $process.Dispose() } catch { }
     }
 }
+$nonElevatedLauncherSource = @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace NanoDictate.InstallerRunner.Tests
+{
+    public static class NonElevatedProcess
+    {
+        private const uint TokenAssignPrimary = 0x0001;
+        private const uint TokenQuery = 0x0008;
+        private const uint TokenDuplicate = 0x0002;
+        private const uint DisableMaxPrivilege = 0x0001;
+        private const uint CreateNoWindow = 0x08000000;
+        private const uint WaitObject0 = 0;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SidAndAttributes
+        {
+            public IntPtr Sid;
+            public uint Attributes;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct StartupInfo
+        {
+            public int cb;
+            public string lpReserved;
+            public string lpDesktop;
+            public string lpTitle;
+            public int dwX;
+            public int dwY;
+            public int dwXSize;
+            public int dwYSize;
+            public int dwXCountChars;
+            public int dwYCountChars;
+            public int dwFillAttribute;
+            public int dwFlags;
+            public short wShowWindow;
+            public short cbReserved2;
+            public IntPtr lpReserved2;
+            public IntPtr hStdInput;
+            public IntPtr hStdOutput;
+            public IntPtr hStdError;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ProcessInformation
+        {
+            public IntPtr hProcess;
+            public IntPtr hThread;
+            public int dwProcessId;
+            public int dwThreadId;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr GetCurrentProcess();
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool OpenProcessToken(
+            IntPtr processHandle, uint desiredAccess, out IntPtr tokenHandle);
+
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern bool ConvertStringSidToSid(string stringSid, out IntPtr sid);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool CreateRestrictedToken(
+            IntPtr existingTokenHandle,
+            uint flags,
+            uint disableSidCount,
+            SidAndAttributes[] sidsToDisable,
+            uint deletePrivilegeCount,
+            IntPtr privilegesToDelete,
+            uint restrictedSidCount,
+            IntPtr sidsToRestrict,
+            out IntPtr newTokenHandle);
+
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern bool CreateProcessAsUser(
+            IntPtr token,
+            string applicationName,
+            StringBuilder commandLine,
+            IntPtr processAttributes,
+            IntPtr threadAttributes,
+            bool inheritHandles,
+            uint creationFlags,
+            IntPtr environment,
+            string currentDirectory,
+            ref StartupInfo startupInfo,
+            out ProcessInformation processInformation);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool TerminateProcess(IntPtr process, uint exitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr LocalFree(IntPtr memory);
+
+        private static string Quote(string value)
+        {
+            if (value.Length == 0) { return "\"\""; }
+            if (value.IndexOfAny(new char[] { ' ', '\t', '"' }) < 0) { return value; }
+
+            StringBuilder result = new StringBuilder("\"");
+            int backslashes = 0;
+            foreach (char character in value)
+            {
+                if (character == '\\')
+                {
+                    backslashes++;
+                }
+                else if (character == '"')
+                {
+                    result.Append('\\', (backslashes * 2) + 1);
+                    result.Append('"');
+                    backslashes = 0;
+                }
+                else
+                {
+                    result.Append('\\', backslashes);
+                    result.Append(character);
+                    backslashes = 0;
+                }
+            }
+            result.Append('\\', backslashes * 2);
+            result.Append('"');
+            return result.ToString();
+        }
+
+        public static int Run(
+            string application,
+            string[] arguments,
+            string workingDirectory,
+            int timeoutMilliseconds)
+        {
+            IntPtr token = IntPtr.Zero;
+            IntPtr restrictedToken = IntPtr.Zero;
+            IntPtr administratorsSid = IntPtr.Zero;
+            ProcessInformation processInformation = new ProcessInformation();
+            try
+            {
+                if (!OpenProcessToken(GetCurrentProcess(),
+                    TokenAssignPrimary | TokenQuery | TokenDuplicate, out token))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(), "Could not open the current process token.");
+                }
+                if (!ConvertStringSidToSid("S-1-5-32-544", out administratorsSid))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(), "Could not resolve the Administrators SID.");
+                }
+
+                SidAndAttributes[] disabledSids = new SidAndAttributes[1];
+                disabledSids[0].Sid = administratorsSid;
+                if (!CreateRestrictedToken(token, DisableMaxPrivilege, 1, disabledSids, 0, IntPtr.Zero,
+                    0, IntPtr.Zero, out restrictedToken))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(), "Could not create a non-elevated token.");
+                }
+
+                StringBuilder commandLine = new StringBuilder();
+                commandLine.Append(Quote(application));
+                foreach (string argument in arguments)
+                {
+                    commandLine.Append(' ');
+                    commandLine.Append(Quote(argument));
+                }
+
+                StartupInfo startupInfo = new StartupInfo();
+                startupInfo.cb = Marshal.SizeOf(typeof(StartupInfo));
+                if (!CreateProcessAsUser(restrictedToken, application, commandLine, IntPtr.Zero,
+                    IntPtr.Zero, false, CreateNoWindow, IntPtr.Zero, workingDirectory,
+                    ref startupInfo, out processInformation))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(), "Could not start the non-elevated process.");
+                }
+
+                uint waitResult = WaitForSingleObject(
+                    processInformation.hProcess, (uint)timeoutMilliseconds);
+                if (waitResult != WaitObject0)
+                {
+                    TerminateProcess(processInformation.hProcess, 1);
+                    throw new TimeoutException(
+                        "The non-elevated process did not exit within the timeout.");
+                }
+
+                uint exitCode;
+                if (!GetExitCodeProcess(processInformation.hProcess, out exitCode))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "Could not read the non-elevated process exit code.");
+                }
+                return unchecked((int)exitCode);
+            }
+            finally
+            {
+                if (processInformation.hThread != IntPtr.Zero) {
+                    CloseHandle(processInformation.hThread);
+                }
+                if (processInformation.hProcess != IntPtr.Zero) {
+                    CloseHandle(processInformation.hProcess);
+                }
+                if (restrictedToken != IntPtr.Zero) { CloseHandle(restrictedToken); }
+                if (token != IntPtr.Zero) { CloseHandle(token); }
+                if (administratorsSid != IntPtr.Zero) { LocalFree(administratorsSid); }
+            }
+        }
+    }
+}
+'@
+
+function Invoke-NonElevatedInstallerChild {
+    param(
+        [string]$Executable,
+        [string]$FixtureScript,
+        [string]$ResultPath,
+        [string]$WorkDirectory
+    )
+    if (-not ('NanoDictate.InstallerRunner.Tests.NonElevatedProcess' -as [type])) {
+        Add-Type -TypeDefinition $nonElevatedLauncherSource -Language CSharp -ErrorAction Stop
+    }
+    $childScript = Join-Path $PSScriptRoot 'fixtures/non-elevated-user-install.ps1'
+    $modulePath = Join-Path $PSScriptRoot 'windows-installer-runner.psm1'
+    Remove-Item -LiteralPath $ResultPath -Force -ErrorAction SilentlyContinue
+    $arguments = [string[]]@(
+        '-NoProfile', '-NonInteractive', '-File', $childScript,
+        '-RunnerModulePath', $modulePath,
+        '-FixtureScript', $FixtureScript,
+        '-ResultPath', $ResultPath,
+        '-WorkDirectory', $WorkDirectory
+    )
+    $exitCode = [NanoDictate.InstallerRunner.Tests.NonElevatedProcess]::Run(
+        $Executable, $arguments, $WorkDirectory, 120000)
+    if (-not (Test-Path -LiteralPath $ResultPath)) {
+        throw "The non-elevated installer fixture exited with code $exitCode without writing a result."
+    }
+    $result = Get-Content -LiteralPath $ResultPath -Raw | ConvertFrom-Json
+    [pscustomobject]@{ ExitCode = $exitCode; Result = $result }
+}
+
 function Invoke-NonElevatedInstallerFixture {
     param(
         [string]$Executable,
@@ -399,6 +652,30 @@ try {
                 -SimulateTraceFailure $simulateTraceFailure
             Assert-Equal "non-elevated user-install completes with a zero-delay worker (run $run)" `
                 0 $nonElevatedSuccess.ExitCode
+        }
+
+        if ($isElevated) {
+            $nonElevatedChild = Invoke-NonElevatedInstallerChild `
+                -Executable $pwshPath -FixtureScript $fixture `
+                -ResultPath (Join-Path $work 'non-elevated-actual.json') `
+                -WorkDirectory $work
+            Assert-Equal 'actual non-elevated child exits successfully' `
+                0 $nonElevatedChild.ExitCode
+            $childResult = $nonElevatedChild.Result
+            Assert-True 'actual non-elevated child token has no administrator role' `
+                (-not [bool]$childResult.is_elevated) 'child process is still elevated'
+            Assert-True 'actual non-elevated user-install fails on all zero-delay failing workers' `
+                ((@($childResult.failure_errors).Count -eq 5) -and
+                    (@($childResult.failure_errors | Where-Object {
+                        $_ -notmatch 'exited with code 9'
+                    }).Count -eq 0)) `
+                "worker failures: $($childResult.failure_errors -join '; ')"
+            Assert-True 'actual non-elevated user-install completes all zero-delay workers' `
+                ((@($childResult.success_exit_codes).Count -eq 3) -and
+                    (@($childResult.success_exit_codes | Where-Object {
+                        $_ -ne 0
+                    }).Count -eq 0)) `
+                "worker exit codes: $($childResult.success_exit_codes -join ', ')"
         }
 
         $untrackedMessage = & $runnerModule {
