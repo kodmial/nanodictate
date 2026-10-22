@@ -52,6 +52,207 @@ function Get-ProcessTable {
     }
 }
 
+function Open-TrackedProcess {
+    param([Diagnostics.Process]$Process)
+
+    if ($null -eq $Process) { return $null }
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return $Process }
+
+    # Process.ExitCode returns 0 when .NET could not open a handle before the
+    # process exited. Open and cache the handle while the process is alive so
+    # the real exit code survives a short-lived worker.
+    try {
+        $null = $Process.Handle
+        return $Process
+    } catch {
+        try { $Process.Dispose() } catch { }
+        return $null
+    }
+}
+
+function Get-ProcessTraceEventValue {
+    param($EventInstance, [string]$Name)
+
+    if ($null -eq $EventInstance) { return $null }
+    try {
+        $property = $EventInstance.CimInstanceProperties[$Name]
+        if ($null -ne $property) { return $property.Value }
+    } catch { }
+    try {
+        $property = $EventInstance.PSObject.Properties[$Name]
+        if ($null -ne $property) { return $property.Value }
+    } catch { }
+    return $null
+}
+
+function Start-ProcessTrace {
+    param([string]$Phase)
+
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return $null }
+    $safePhase = $Phase -replace '[^A-Za-z0-9]', ''
+    $prefix = "NanoDictateRunner-$safePhase-$([guid]::NewGuid().ToString('N'))"
+    $startIdentifier = "$prefix-start"
+    $stopIdentifier = "$prefix-stop"
+    try {
+        Register-CimIndicationEvent -ClassName Win32_ProcessStartTrace `
+            -SourceIdentifier $startIdentifier -ErrorAction Stop | Out-Null
+        try {
+            Register-CimIndicationEvent -ClassName Win32_ProcessStopTrace `
+                -SourceIdentifier $stopIdentifier -ErrorAction Stop | Out-Null
+        } catch {
+            Unregister-Event -SourceIdentifier $startIdentifier -ErrorAction SilentlyContinue
+            throw
+        }
+        return [pscustomobject]@{
+            StartIdentifier = $startIdentifier
+            StopIdentifier  = $stopIdentifier
+        }
+    } catch {
+        Write-Verbose "Durable process trace events are unavailable for phase '$Phase': $_"
+        return $null
+    }
+}
+
+function Stop-ProcessTrace {
+    param($ProcessTrace)
+
+    if ($null -eq $ProcessTrace) { return }
+    foreach ($identifier in @($ProcessTrace.StartIdentifier, $ProcessTrace.StopIdentifier)) {
+        if ([string]::IsNullOrWhiteSpace($identifier)) { continue }
+        Unregister-Event -SourceIdentifier $identifier -ErrorAction SilentlyContinue
+        Get-Event -SourceIdentifier $identifier -ErrorAction SilentlyContinue |
+            Remove-Event -ErrorAction SilentlyContinue
+    }
+}
+
+function Read-ProcessTraceEvents {
+    param(
+        [hashtable]$ProcessEvents,
+        $ProcessTrace
+    )
+
+    if ($null -eq $ProcessTrace) { return 0 }
+    $read = 0
+    $subscriptions = @(
+        [pscustomobject]@{ Identifier = $ProcessTrace.StartIdentifier; IsStop = $false }
+        [pscustomobject]@{ Identifier = $ProcessTrace.StopIdentifier; IsStop = $true }
+    )
+    foreach ($subscription in $subscriptions) {
+        foreach ($event in @(Get-Event -SourceIdentifier $subscription.Identifier -ErrorAction SilentlyContinue)) {
+            Remove-Event -EventIdentifier $event.EventIdentifier -ErrorAction SilentlyContinue
+            $newEvent = $event.SourceEventArgs.NewEvent
+            if ($null -eq $newEvent) { continue }
+            $processId = [int](Get-ProcessTraceEventValue $newEvent 'ProcessID')
+            if ($processId -le 0) { continue }
+            $parentId = [int](Get-ProcessTraceEventValue $newEvent 'ParentProcessID')
+            $name = [IO.Path]::GetFileNameWithoutExtension(
+                [string](Get-ProcessTraceEventValue $newEvent 'ProcessName'))
+            $entry = $ProcessEvents[$processId]
+            if ($null -eq $entry) {
+                $entry = [pscustomobject]@{
+                    Id       = $processId
+                    ParentId = $parentId
+                    Name     = $name
+                    ExitCode = $null
+                    Ended    = $false
+                }
+                $ProcessEvents[$processId] = $entry
+            }
+            if ($subscription.IsStop) {
+                $exitCode = Get-ProcessTraceEventValue $newEvent 'ExitStatus'
+                if ($null -ne $exitCode) { $entry.ExitCode = [int]$exitCode }
+                $entry.Ended = $true
+            }
+            $read++
+        }
+    }
+    return $read
+}
+
+function Update-TrackedProcessEvents {
+    param(
+        [hashtable]$Tracked,
+        [hashtable]$ProcessEvents,
+        [string[]]$DetachedProcessNames
+    )
+
+    if ($ProcessEvents.Count -eq 0) { return 0 }
+
+    $children = @{}
+    foreach ($eventEntry in $ProcessEvents.Values) {
+        if (-not $children.ContainsKey($eventEntry.ParentId)) {
+            $children[$eventEntry.ParentId] = [Collections.Generic.List[object]]::new()
+        }
+        $children[$eventEntry.ParentId].Add($eventEntry)
+    }
+
+    $changes = 0
+    $queue = [Collections.Generic.Queue[int]]::new()
+    foreach ($id in @($Tracked.Keys)) { $queue.Enqueue([int]$id) }
+
+    while ($queue.Count -gt 0) {
+        $parentId = $queue.Dequeue()
+        if (-not $children.ContainsKey($parentId)) { continue }
+        $parentEntry = $Tracked[$parentId]
+        if ($null -eq $parentEntry) { continue }
+
+        foreach ($eventEntry in $children[$parentId]) {
+            $detached = [bool]$parentEntry.Detached -or
+                ($DetachedProcessNames -contains [string]$eventEntry.Name)
+            $existing = $Tracked[$eventEntry.Id]
+            if ($null -eq $existing) {
+                $process = $null
+                if (-not $eventEntry.Ended) {
+                    try {
+                        $process = Open-TrackedProcess ([Diagnostics.Process]::GetProcessById([int]$eventEntry.Id))
+                    } catch { }
+                }
+                $Tracked[$eventEntry.Id] = [pscustomobject]@{
+                    Id       = [int]$eventEntry.Id
+                    ParentId = [int]$parentId
+                    Name     = [string]$eventEntry.Name
+                    Detached = [bool]$detached
+                    Process  = $process
+                    ExitCode = $eventEntry.ExitCode
+                    Ended    = [bool]$eventEntry.Ended
+                }
+                $queue.Enqueue([int]$eventEntry.Id)
+                $changes++
+            } else {
+                if ($detached -and -not $existing.Detached) {
+                    $existing.Detached = $true
+                    $queue.Enqueue([int]$existing.Id)
+                    $changes++
+                }
+                if ($eventEntry.Ended -and -not $existing.Ended) {
+                    $existing.Ended = $true
+                    $changes++
+                }
+                if ($null -ne $eventEntry.ExitCode -and $existing.ExitCode -ne $eventEntry.ExitCode) {
+                    $existing.ExitCode = $eventEntry.ExitCode
+                    $changes++
+                }
+            }
+        }
+    }
+    return $changes
+}
+
+function Update-TrackedState {
+    param(
+        [hashtable]$Tracked,
+        [string[]]$DetachedProcessNames,
+        [hashtable]$ProcessEvents,
+        $ProcessTrace
+    )
+
+    $read = Read-ProcessTraceEvents -ProcessEvents $ProcessEvents -ProcessTrace $ProcessTrace
+    Update-TrackedProcesses -Tracked $Tracked -DetachedProcessNames $DetachedProcessNames
+    $changes = Update-TrackedProcessEvents -Tracked $Tracked -ProcessEvents $ProcessEvents `
+        -DetachedProcessNames $DetachedProcessNames
+    return ($read + $changes)
+}
+
 function ConvertTo-InnoSetupCommandLineArgument {
     param([string]$Argument)
 
@@ -95,7 +296,9 @@ function Update-TrackedProcesses {
             $existing = $Tracked[$child.Id]
             if ($null -eq $existing) {
                 $process = $null
-                try { $process = [Diagnostics.Process]::GetProcessById([int]$child.Id) } catch { }
+                try {
+                    $process = Open-TrackedProcess ([Diagnostics.Process]::GetProcessById([int]$child.Id))
+                } catch { }
                 $Tracked[$child.Id] = [pscustomobject]@{
                     Id       = [int]$child.Id
                     ParentId = [int]$parentId
@@ -115,10 +318,11 @@ function Update-TrackedProcesses {
 
     foreach ($entry in @($Tracked.Values)) {
         $process = $entry.Process
-        if ($null -eq $process) {
+        if ($null -eq $process -and -not $entry.Ended) {
             try {
-                $process = [Diagnostics.Process]::GetProcessById([int]$entry.Id)
+                $process = Open-TrackedProcess ([Diagnostics.Process]::GetProcessById([int]$entry.Id))
                 $entry.Process = $process
+                if ($null -eq $process) { $entry.Ended = $true }
             } catch {
                 $entry.Ended = $true
             }
@@ -248,6 +452,8 @@ function Invoke-BoundedInstallerProcess {
     $rootPid = 0
     $rootName = ''
     $tracked = @{}
+    $processEvents = @{}
+    $processTrace = $null
     $rootExitCode = $null
     $snapshot = @()
     $outcome = 'unknown'
@@ -255,6 +461,7 @@ function Invoke-BoundedInstallerProcess {
     $deadline = $startedUtc.AddSeconds($TimeoutSeconds)
 
     try {
+        $processTrace = Start-ProcessTrace -Phase $Phase
         $process = [Diagnostics.Process]::Start($startInfo)
         if ($null -eq $process) { throw "Failed to start installer for phase '$Phase'." }
         $rootPid = [int]$process.Id
@@ -276,8 +483,9 @@ function Invoke-BoundedInstallerProcess {
         $pollCount = 0
 
         while (-not $process.HasExited) {
-            Update-TrackedProcesses -Tracked $tracked `
-                -DetachedProcessNames $DetachedProcessNames
+            [void](Update-TrackedState -Tracked $tracked `
+                -DetachedProcessNames $DetachedProcessNames `
+                -ProcessEvents $processEvents -ProcessTrace $processTrace)
             if ([DateTime]::UtcNow -ge $deadline) {
                 $timedOut = $true
                 throw [TimeoutException]::new(
@@ -296,15 +504,32 @@ function Invoke-BoundedInstallerProcess {
         $workerPollInterval = 50
         $workerFastPolls = 40
         $workerPollCount = 0
+        $processTraceSettleMilliseconds = 500
 
         while ($true) {
-            Update-TrackedProcesses -Tracked $tracked `
-                -DetachedProcessNames $DetachedProcessNames
+            [void](Update-TrackedState -Tracked $tracked `
+                -DetachedProcessNames $DetachedProcessNames `
+                -ProcessEvents $processEvents -ProcessTrace $processTrace)
             $remaining = @($tracked.Values | Where-Object {
                 $_.Id -ne $rootPid -and -not $_.Detached -and -not $_.Ended -and
                 ($_.Name -eq $rootName -or $_.Name -match $InstallerProcessNamePattern)
             })
-            if ($remaining.Count -eq 0) { break }
+            if ($remaining.Count -eq 0) {
+                if ($null -eq $processTrace) { break }
+                $settleUntil = [DateTime]::UtcNow.AddMilliseconds($processTraceSettleMilliseconds)
+                while ([DateTime]::UtcNow -lt $settleUntil) {
+                    Start-Sleep -Milliseconds 50
+                    [void](Update-TrackedState -Tracked $tracked `
+                        -DetachedProcessNames $DetachedProcessNames `
+                        -ProcessEvents $processEvents -ProcessTrace $processTrace)
+                    $remaining = @($tracked.Values | Where-Object {
+                        $_.Id -ne $rootPid -and -not $_.Detached -and -not $_.Ended -and
+                        ($_.Name -eq $rootName -or $_.Name -match $InstallerProcessNamePattern)
+                    })
+                    if ($remaining.Count -gt 0) { break }
+                }
+                if ($remaining.Count -eq 0) { break }
+            }
             if ([DateTime]::UtcNow -ge $deadline) {
                 $timedOut = $true
                 throw [TimeoutException]::new(
@@ -315,8 +540,9 @@ function Invoke-BoundedInstallerProcess {
             if ($workerPollCount -ge $workerFastPolls) { $workerPollInterval = 150 }
         }
 
-        Update-TrackedProcesses -Tracked $tracked `
-            -DetachedProcessNames $DetachedProcessNames
+        [void](Update-TrackedState -Tracked $tracked `
+            -DetachedProcessNames $DetachedProcessNames `
+            -ProcessEvents $processEvents -ProcessTrace $processTrace)
 
         if ($rootExitCode -ne 0) {
             throw "Installer phase '$Phase' exited with code $rootExitCode."
@@ -368,8 +594,9 @@ function Invoke-BoundedInstallerProcess {
         # Capture any installer worker that started since the last poll so the
         # timeout cleanup does not orphan it.
         try {
-            Update-TrackedProcesses -Tracked $tracked `
-                -DetachedProcessNames $DetachedProcessNames
+            [void](Update-TrackedState -Tracked $tracked `
+                -DetachedProcessNames $DetachedProcessNames `
+                -ProcessEvents $processEvents -ProcessTrace $processTrace)
         } catch {
             Write-Verbose "Could not refresh the process tree after failure: $_"
         }
@@ -397,6 +624,7 @@ function Invoke-BoundedInstallerProcess {
             -TimedOut $timedOut -Outcome $outcome -InnoLogPath $innoLogPath
         throw
     } finally {
+        Stop-ProcessTrace -ProcessTrace $processTrace
         foreach ($entry in @($tracked.Values)) {
             if ($null -ne $entry.Process) {
                 try { $entry.Process.Dispose() } catch { }

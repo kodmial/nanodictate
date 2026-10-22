@@ -12,6 +12,7 @@ param(
     [int]$ExitCode = 0,
     [int]$WorkerSleepMilliseconds = 0,
     [int]$WorkerExitCode = 0,
+    [int]$BootstrapDelayMilliseconds = 500,
     [string]$PidFile = '',
     [string]$WorkerScript = '',
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$IgnoredArguments = @()
@@ -50,7 +51,7 @@ switch ($Mode) {
             '-ExitCode', [string]$WorkerExitCode
         ) -PassThru
         Save-Pid $child.Id
-        Start-Sleep -Milliseconds ([Math]::Max(500, $SleepMilliseconds))
+        Start-Sleep -Milliseconds ([Math]::Max(0, $BootstrapDelayMilliseconds))
         exit $ExitCode
     }
 }

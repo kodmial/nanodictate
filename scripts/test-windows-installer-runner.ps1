@@ -81,6 +81,35 @@ Assert-Throws 'installer arguments reject embedded quotes' {
     } '/DIR="C:\Users\A B\NanoDictate"'
 } 'must not contain quotes'
 
+$durable = & $runnerModule {
+    $tracked = @{
+        100 = [pscustomobject]@{
+            Id = 100; ParentId = 0; Name = 'setup'; Detached = $false
+            Process = $null; ExitCode = $null; Ended = $false
+        }
+        200 = [pscustomobject]@{
+            Id = 200; ParentId = 100; Name = 'setup'; Detached = $false
+            Process = $null; ExitCode = 0; Ended = $true
+        }
+    }
+    $events = @{
+        200 = [pscustomobject]@{
+            Id = 200; ParentId = 100; Name = 'setup'; ExitCode = 9; Ended = $true
+        }
+        300 = [pscustomobject]@{
+            Id = 300; ParentId = 100; Name = 'setup'; ExitCode = 7; Ended = $true
+        }
+    }
+    [void](Update-TrackedProcessEvents -Tracked $tracked -ProcessEvents $events `
+        -DetachedProcessNames @())
+    [pscustomobject]@{ Existing = $tracked[200]; New = $tracked[300] }
+}
+Assert-True 'durable completion events attach workers that never appeared in a snapshot' `
+    ($null -ne $durable.New -and $durable.New.ParentId -eq 100 -and $durable.New.Ended) `
+    "worker entry was $($durable.New)"
+Assert-Equal 'durable completion events keep a late failure exit code' 7 $durable.New.ExitCode
+Assert-Equal 'durable completion events override an unverified snapshot exit code' 9 $durable.Existing.ExitCode
+
 $tempRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [IO.Path]::GetTempPath() }
 $work = Join-Path $tempRoot ('nd-runner-tests-' + [guid]::NewGuid().ToString('N'))
 $logDir = Join-Path $work 'logs'
@@ -153,6 +182,19 @@ try {
     # read a non-child exit code on Windows; Unix reaps the orphan itself, so the
     # assertion is Windows-only while the fixture remains shared.
     if ($IsWindows) {
+        $trace = & $runnerModule {
+            param($phase)
+            Start-ProcessTrace -Phase $phase
+        } 'trace-availability'
+        try {
+            Assert-True 'durable process trace events are available' ($null -ne $trace) 'Register-CimIndicationEvent failed'
+        } finally {
+            & $runnerModule {
+                param($processTrace)
+                Stop-ProcessTrace -ProcessTrace $processTrace
+            } $trace
+        }
+
         $failingWorkerPidFile = Join-Path $work 'bootstrap-fail.pid'
         Assert-Throws 'failing bootstrap worker fails the phase' {
             Invoke-BoundedInstallerProcess -FilePath $pwshPath -ArgumentList @(
@@ -162,6 +204,62 @@ try {
                 '-PidFile', $failingWorkerPidFile
             ) -Phase 'bootstrap-failure' -TimeoutSeconds 15 -LogDirectory $logDir
         } 'exited with code 9'
+
+        # .NET reports exit code 0 when it only opens a process handle after the
+        # process has already exited. Verify the runner's durable handle keeps
+        # the real code even when the process is observed by PID first.
+        $handleStartInfo = [Diagnostics.ProcessStartInfo]::new()
+        $handleStartInfo.FileName = $pwshPath
+        $handleStartInfo.UseShellExecute = $false
+        $handleStartInfo.CreateNoWindow = $true
+        $handleStartInfo.Arguments = (@(
+            '-NoProfile', '-File', $fixture, '-Mode', 'sleep',
+            '-SleepMilliseconds', '2000', '-ExitCode', '9'
+        ) | ForEach-Object {
+            & $runnerModule { param($value) ConvertTo-InnoSetupCommandLineArgument $value } $_
+        }) -join ' '
+        $handleStarter = [Diagnostics.Process]::Start($handleStartInfo)
+        try {
+            $handleObserved = & $runnerModule {
+                param($process)
+                Open-TrackedProcess $process
+            } ([Diagnostics.Process]::GetProcessById($handleStarter.Id))
+            try {
+                Assert-True 'tracked process handle is opened before exit' ($null -ne $handleObserved) 'could not open a durable process handle'
+                if ($null -ne $handleObserved) {
+                    [void]$handleObserved.WaitForExit(10000)
+                    Assert-Equal 'durable process handle preserves a short-lived exit code' 9 $handleObserved.ExitCode
+                }
+            } finally {
+                if ($null -ne $handleObserved) { $handleObserved.Dispose() }
+            }
+        } finally {
+            try { if (-not $handleStarter.HasExited) { $handleStarter.Kill() } } catch { }
+            try { $handleStarter.Dispose() } catch { }
+        }
+
+        for ($run = 1; $run -le 5; $run++) {
+            Assert-Throws "short-lived failing bootstrap worker fails the phase (run $run)" {
+                Invoke-BoundedInstallerProcess -FilePath $pwshPath -ArgumentList @(
+                    '-NoProfile', '-File', $fixture, '-Mode', 'bootstrap',
+                    '-WorkerScript', $fixture,
+                    '-WorkerSleepMilliseconds', '0', '-WorkerExitCode', '9',
+                    '-BootstrapDelayMilliseconds', '0',
+                    '-PidFile', (Join-Path $work "bootstrap-fast-fail-$run.pid")
+                ) -Phase "bootstrap-fast-fail-$run" -TimeoutSeconds 15 -LogDirectory $logDir
+            } 'exited with code 9'
+        }
+
+        for ($run = 1; $run -le 3; $run++) {
+            $fastSuccess = Invoke-BoundedInstallerProcess -FilePath $pwshPath -ArgumentList @(
+                '-NoProfile', '-File', $fixture, '-Mode', 'bootstrap',
+                '-WorkerScript', $fixture,
+                '-WorkerSleepMilliseconds', '0', '-WorkerExitCode', '0',
+                '-BootstrapDelayMilliseconds', '0',
+                '-PidFile', (Join-Path $work "bootstrap-fast-ok-$run.pid")
+            ) -Phase "bootstrap-fast-ok-$run" -TimeoutSeconds 15 -LogDirectory $logDir
+            Assert-Equal "short-lived successful bootstrap worker succeeds (run $run)" 0 $fastSuccess.ExitCode
+        }
     } else {
         Write-Host 'skip - bootstrap worker exit-code propagation is Windows-only'
     }
