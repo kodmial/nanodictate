@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.44] - 2026-10-22
+
+
+
+### Fixed
+
+* P0 Windows main CI regression: fail closed on nonzero Inno bootstrap worker exit ([0515937](https://github.com/kodmial/nanodictate/commit/0515937d0e02bca820ae98949ef62a1ceb564127))
+
 ## [0.1.43] - 2026-10-21
 
 
@@ -636,7 +644,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.43...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.44...HEAD
+[0.1.44]: https://github.com/kodmial/nanodictate/compare/v0.1.43...v0.1.44
 [0.1.43]: https://github.com/kodmial/nanodictate/compare/v0.1.42...v0.1.43
 [0.1.42]: https://github.com/kodmial/nanodictate/compare/v0.1.41...v0.1.42
 [0.1.41]: https://github.com/kodmial/nanodictate/compare/v0.1.40...v0.1.41
