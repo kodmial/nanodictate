@@ -66,12 +66,15 @@ function Invoke-NonElevatedInstallerFixture {
         [string]$FixtureScript,
         [string]$PidFile,
         [int]$WorkerExitCode,
-        [string]$Phase
+        [string]$Phase,
+        [bool]$SimulateTraceFailure = $true
     )
     & $runnerModule {
-        param($executable, $fixture, $pidFile, $workerExitCode, $phase)
-        function script:Register-CimIndicationEvent {
-            throw 'simulated non-elevated trace registration failure'
+        param($executable, $fixture, $pidFile, $workerExitCode, $phase, $simulateTraceFailure)
+        if ($simulateTraceFailure) {
+            function script:Register-CimIndicationEvent {
+                throw 'simulated non-elevated trace registration failure'
+            }
         }
         try {
             try {
@@ -87,9 +90,11 @@ function Invoke-NonElevatedInstallerFixture {
                 return [pscustomobject]@{ ExitCode = $null; Error = $_.Exception.Message }
             }
         } finally {
-            Remove-Item -Path Function:Register-CimIndicationEvent -ErrorAction SilentlyContinue
+            if ($simulateTraceFailure) {
+                Remove-Item -Path Function:Register-CimIndicationEvent -ErrorAction SilentlyContinue
+            }
         }
-    } $Executable $FixtureScript $PidFile $WorkerExitCode $Phase
+    } $Executable $FixtureScript $PidFile $WorkerExitCode $Phase $SimulateTraceFailure
 }
 
 $modulePath = Join-Path $PSScriptRoot 'windows-installer-runner.psm1'
@@ -355,7 +360,7 @@ try {
             if ($isElevated) {
                 Assert-True 'durable process trace events are available' ($null -ne $trace) 'Register-CimIndicationEvent failed'
             } else {
-                Write-Host 'skip - durable process trace events require an elevated session'
+                Write-Host ("non-elevated session: durable process trace available={0}" -f ($null -ne $trace))
             }
         } finally {
             & $runnerModule {
@@ -364,16 +369,23 @@ try {
             } $trace
         }
 
-        # A non-elevated user session cannot register Win32 process trace
-        # events. CI runs elevated, so force the same trace-registration
-        # failure here: the job fallback itself does not use elevation. It must
-        # still track zero-delay bootstrap workers and preserve their exit
-        # status for the normal per-user install path.
+        # A non-elevated user session cannot normally register Win32 process
+        # trace events. When the suite itself runs in a non-elevated session,
+        # exercise the job fallback with that real token. Hosted CI runs
+        # elevated, so force the same trace-registration failure there; the job
+        # fallback itself does not use elevation. Either way it must track
+        # zero-delay bootstrap workers and preserve their exit status for the
+        # normal per-user install path.
+        $simulateTraceFailure = $isElevated -or ($null -ne $trace)
+        if (-not $simulateTraceFailure) {
+            Write-Host 'using the actual non-elevated process token for job-fallback tests'
+        }
         for ($run = 1; $run -le 5; $run++) {
             $nonElevatedFailure = Invoke-NonElevatedInstallerFixture `
                 -Executable $pwshPath -FixtureScript $fixture `
                 -PidFile (Join-Path $work "non-elevated-fail-$run.pid") `
-                -WorkerExitCode 9 -Phase "user-install-fail-$run"
+                -WorkerExitCode 9 -Phase "user-install-fail-$run" `
+                -SimulateTraceFailure $simulateTraceFailure
             Assert-True "non-elevated user-install fails on a zero-delay failing worker (run $run)" `
                 ($nonElevatedFailure.Error -match 'exited with code 9') `
                 "job fallback did not preserve the worker failure: $($nonElevatedFailure.Error)"
@@ -383,7 +395,8 @@ try {
             $nonElevatedSuccess = Invoke-NonElevatedInstallerFixture `
                 -Executable $pwshPath -FixtureScript $fixture `
                 -PidFile (Join-Path $work "non-elevated-ok-$run.pid") `
-                -WorkerExitCode 0 -Phase "user-install-ok-$run"
+                -WorkerExitCode 0 -Phase "user-install-ok-$run" `
+                -SimulateTraceFailure $simulateTraceFailure
             Assert-Equal "non-elevated user-install completes with a zero-delay worker (run $run)" `
                 0 $nonElevatedSuccess.ExitCode
         }
