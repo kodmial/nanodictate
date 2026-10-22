@@ -9,10 +9,14 @@
 [CmdletBinding()]
 param(
   [string]$Version = "",
-  [string]$Repository = $env:GITHUB_REPOSITORY
+  [string]$Repository = $env:GITHUB_REPOSITORY,
+  [ValidateRange(1, 3600)][int]$InstallTimeoutSeconds = 240,
+  [ValidateRange(1, 3600)][int]$UninstallTimeoutSeconds = 120,
+  [string]$LogDirectory = ''
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSScriptRoot 'windows-installer-runner.psm1') -Force
 
 if ($Repository -notmatch '^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$') {
   throw "Pass -Repository owner/name or set GITHUB_REPOSITORY"
@@ -27,6 +31,8 @@ $work = Join-Path $root ("nanodictate-release-smoke-" + [guid]::NewGuid().ToStri
 $installDir = Join-Path $work 'installed'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $reportFile = Join-Path $repoRoot 'windows/artifacts/windows-published-smoke.json'
+if (-not $LogDirectory) { $LogDirectory = Join-Path $repoRoot 'windows/artifacts/installer-logs' }
+New-Item -ItemType Directory -Force -Path $LogDirectory | Out-Null
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $configFile = Join-Path $env:APPDATA 'NanoDictate\config.toml'
 $configSentinel = 'keep-config-' + [guid]::NewGuid().ToString('N')
@@ -50,8 +56,11 @@ $report = [ordered]@{
   upgrade_or_reinstall = $false
   uninstall = $false
   user_data_preserved = $false
+  background_agent = 'NOT_TESTED'
   first_launch = 'NOT_TESTED_HEADLESS'
   interactive_hardware = 'NOT_TESTED'
+  outcome = 'incomplete'
+  failure = $null
 }
 $script:setupDurations = @()
 $script:uninstallDurations = @()
@@ -98,13 +107,22 @@ function Get-VerifiedAssets([object]$release, [string]$folder, [string[]]$names)
   }
   return $expected
 }
-function Invoke-Setup([string]$path) {
-  $arguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$installDir`"")
+function Invoke-Setup([string]$path, [string]$phase = 'install') {
+  $arguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',('/DIR=' + $installDir))
   $timer = [Diagnostics.Stopwatch]::StartNew()
-  $proc = Start-Process -FilePath $path -ArgumentList $arguments -Wait -PassThru
+  Invoke-BoundedInstallerProcess -FilePath $path -ArgumentList $arguments -Phase $phase `
+    -TimeoutSeconds $script:InstallTimeoutSeconds -LogDirectory $LogDirectory `
+    -InnoLogFileName "$phase.log" | Out-Null
   $timer.Stop()
   $script:setupDurations += [Math]::Round($timer.Elapsed.TotalSeconds, 2)
-  if ($proc.ExitCode -ne 0) { throw "Installer $path exited $($proc.ExitCode)" }
+}
+function Assert-BackgroundAgent {
+  $agents = @(Wait-NanoDictateBackgroundProcess -InstallDirectory $installDir -TimeoutSeconds 30)
+  if ($agents.Count -ne 1) {
+    throw "Expected exactly one persistent NanoDictate background agent, found $($agents.Count)"
+  }
+  $script:report.background_agent = 'RUNNING'
+  Write-Host ("Background agent pid {0} is running." -f $agents[0].Id)
 }
 function Get-RunValue {
   $properties = Get-ItemProperty -Path $runKey -ErrorAction SilentlyContinue
@@ -124,20 +142,25 @@ function Assert-Installed([bool]$RequireStartup = $true) {
   if ($RequireStartup) {
     $expectedRun = '"' + (Join-Path $installDir 'NanoDictate.App.exe') + '" --background'
     $actualRun = Get-RunValue
-    if ($actualRun -cne $expectedRun) { throw "Run-key registration mismatch: $actualRun" }
+    if ($actualRun -ne $expectedRun) { throw "Run-key registration mismatch: $actualRun" }
   }
 }
-function Uninstall {
+function Uninstall([string]$phase = 'uninstall') {
   $uninstaller = Join-Path $installDir 'unins000.exe'
   if (-not (Test-Path -LiteralPath $uninstaller)) { throw "Inno uninstaller missing" }
+  [void](Stop-NanoDictateProcessesUnderPath -InstallDirectory $installDir)
   $timer = [Diagnostics.Stopwatch]::StartNew()
-  $proc = Start-Process -FilePath $uninstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART') -Wait -PassThru
+  Invoke-BoundedInstallerProcess -FilePath $uninstaller `
+    -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART') -Phase $phase `
+    -TimeoutSeconds $script:UninstallTimeoutSeconds -LogDirectory $LogDirectory `
+    -InnoLogFileName "$phase.log" | Out-Null
   $timer.Stop()
   $script:uninstallDurations += [Math]::Round($timer.Elapsed.TotalSeconds, 2)
-  if ($proc.ExitCode -ne 0) { throw "Uninstaller exited $($proc.ExitCode)" }
   if (Test-Path -LiteralPath (Join-Path $installDir 'NanoDictate.App.exe')) { throw 'Uninstall left the application executable' }
-  $run = Get-RunValue
-  if ($run) { throw 'Uninstall left the application auto-start registry entry' }
+  Assert-NanoDictateStartupCleared
+  if (@(Get-NanoDictateProcessesUnderPath -InstallDirectory $installDir).Count -ne 0) {
+    throw 'Uninstall left the background agent running'
+  }
 }
 
 try {
@@ -196,10 +219,10 @@ try {
     $oldName = "nanodictate-$oldVersion-windows-x64-setup.exe"
     $oldDir = Join-Path $work 'previous'
     [void](Get-VerifiedAssets $previous $oldDir @($oldName))
-    Invoke-Setup (Join-Path $oldDir $oldName)
+    Invoke-Setup (Join-Path $oldDir $oldName) 'previous-install'
     Write-Host "Installed actual previous Windows release $oldVersion"
   } else {
-    Invoke-Setup $setup
+    Invoke-Setup $setup 'install'
     Write-Warning 'No previous Windows installer found: exercising same-version reinstall rather than versioned upgrade'
   }
   # v0.1.33 predates the persistent Run-key registration. Assert the
@@ -214,14 +237,16 @@ try {
   }
   Set-Content -LiteralPath $configFile -Value $configSentinel -NoNewline
 
-  Invoke-Setup $setup
+  [void](Stop-NanoDictateProcessesUnderPath -InstallDirectory $installDir)
+  Invoke-Setup $setup 'upgrade'
   Assert-Installed
+  Assert-BackgroundAgent
   if ((Get-Content -LiteralPath $configFile -Raw) -cne $configSentinel) { throw 'Upgrade destroyed user configuration' }
   $report.upgrade_or_reinstall = $true
 
   # Installing published binaries on a hosted service account does not prove
   # a WinUI desktop launches, captures microphone input or handles Alt keys.
-  Uninstall
+  Uninstall 'uninstall-after-upgrade'
   $report.uninstall = $true
   if ((Get-Content -LiteralPath $configFile -Raw) -cne $configSentinel) { throw 'Uninstall deleted user configuration' }
   $report.user_data_preserved = $true
@@ -231,9 +256,10 @@ try {
   # upgrade-time Assert-Installed above cannot prove the new EXE creates it.
   # Uninstall removes the value marked uninsdeletevalue, so reinstalling now
   # verifies first-time registration before leaving the runner clean again.
-  Invoke-Setup $setup
+  Invoke-Setup $setup 'install'
   Assert-Installed
-  Uninstall
+  Assert-BackgroundAgent
+  Uninstall 'uninstall-after-clean-install'
   if ((Get-Content -LiteralPath $configFile -Raw) -cne $configSentinel) { throw 'Uninstall deleted user configuration' }
 
   $bucketPath = Join-Path $repoRoot 'bucket/nanodictate.json'
@@ -257,7 +283,12 @@ try {
   Write-Host ("MEASURED: published installer={0:N1} MB download={1:N1}s setup={2}s uninstall={3}s" -f (
     $report.installer_bytes / 1MB), $report.download_seconds,
     ($report.setup_seconds -join ','), ($report.uninstall_seconds -join ','))
+  $report.outcome = 'passed'
   Write-Host "::notice::Published Windows $($release.tag_name) passed checksum, portable, install, upgrade/reinstall, uninstall and data-retention smoke."
+} catch {
+  $report.outcome = 'failed'
+  $report.failure = $_.Exception.Message
+  throw
 } finally {
   $report.download_seconds = if ($null -eq $script:downloadSeconds) { $null } else { [Math]::Round($script:downloadSeconds, 2) }
   $report.setup_seconds = @($script:setupDurations)
@@ -266,7 +297,7 @@ try {
   try {
     if ((Test-Path -LiteralPath (Join-Path $installDir 'unins000.exe'))) {
       Write-Warning 'Cleaning up installed application after an incomplete smoke'
-      try { Uninstall } catch { Write-Warning "Cleanup failed: $_" }
+      try { Uninstall 'cleanup' } catch { Write-Warning "Cleanup failed: $_" }
     }
   } finally {
     if ($hadPriorConfig) {
@@ -278,4 +309,5 @@ try {
       if ($current -ceq $configSentinel) { Remove-Item -LiteralPath $configFile -Force }
     }
   }
+  Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }

@@ -11,9 +11,12 @@ after a successful Release workflow (and daily or on demand). It downloads
 the **already published** installer and ZIP, checks both against the release's
 `SHA256SUMS.txt`, expands and checks the portable app, installs the last
 published Windows version when available, upgrades using the new public EXE,
-checks installed files and HKCU Run startup, then silently uninstalls and
-verifies per-user configuration survived. The JSON evidence records the
-published installer/ZIP size, download time and install/uninstall durations.
+checks installed files, HKCU Run startup and exactly one persistent background
+agent, then silently uninstalls and verifies per-user configuration survived.
+Install and uninstall use the shared bounded runner with per-phase timeouts and
+retained Inno `/LOG` files; diagnostics are uploaded even on failure. The JSON
+evidence records the published installer/ZIP size, download time and
+install/uninstall durations.
 This catches releases whose real public assets differ from the CI-tested
 build. It also verifies the current Scoop bucket's pinned URL and ZIP hash
 when its version matches the release, and warns instead of failing while the

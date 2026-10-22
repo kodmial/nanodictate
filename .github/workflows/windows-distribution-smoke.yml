@@ -16,6 +16,7 @@ on:
     paths:
       - '.github/workflows/windows-distribution-smoke.yml'
       - 'windows/package/verify-distribution.ps1'
+      - 'scripts/windows-installer-runner.psm1'
 
 permissions:
   contents: read
@@ -30,7 +31,7 @@ jobs:
     name: Published Windows lifecycle (${{ matrix.channel }})
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: windows-latest
-    timeout-minutes: 55
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -43,3 +44,11 @@ jobs:
       - name: Install and uninstall real published Windows distribution
         shell: pwsh
         run: pwsh windows/package/verify-distribution.ps1 -Channel '${{ matrix.channel }}'
+
+      - name: Upload distribution smoke diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-distribution-diagnostics-${{ matrix.channel }}-${{ github.run_id }}
+          path: windows/artifacts/installer-logs/**
+          if-no-files-found: warn

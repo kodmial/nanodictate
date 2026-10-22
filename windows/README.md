@@ -35,6 +35,8 @@ place, repairs per-user logon startup, and starts it:
 irm https://raw.githubusercontent.com/kodmial/nanodictate/main/scripts/install-windows.ps1 | iex
 ```
 
+The bootstrap works in the built-in Windows PowerShell 5.1 and in PowerShell 7.
+
 With Scoop already installed, the first-party bucket is also available:
 
 ```powershell
