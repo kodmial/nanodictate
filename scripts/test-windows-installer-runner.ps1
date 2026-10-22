@@ -353,6 +353,8 @@ try {
             try {
                 Assert-True 'tracked process handle is opened before exit' ($null -ne $handleObserved) 'could not open a durable process handle'
                 if ($null -ne $handleObserved) {
+                    Assert-True 'tracked process records a cached handle' `
+                        [bool]$handleObserved.HandleCached 'HandleCached was not set'
                     [void]$handleObserved.WaitForExit(10000)
                     Assert-Equal 'durable process handle preserves a short-lived exit code' 9 $handleObserved.ExitCode
                 }
@@ -363,6 +365,38 @@ try {
             try { if (-not $handleStarter.HasExited) { $handleStarter.Kill() } } catch { }
             try { $handleStarter.Dispose() } catch { }
         }
+
+        # An exit code is only trustworthy when the handle was cached while the
+        # process was alive. Without that evidence .NET can report a false zero.
+        $uncachedTracked = & $runnerModule {
+            $process = [pscustomobject]@{
+                HasExited = $true
+                ExitCode = 9
+                HandleCached = $false
+            }
+            $tracked = @{
+                999999 = [pscustomobject]@{
+                    Id = 999999; ParentId = 0; Name = 'setup'; Detached = $false
+                    Process = $process; ExitCode = $null; Ended = $false
+                }
+            }
+            Update-TrackedProcesses -Tracked $tracked -DetachedProcessNames @()
+            $endedAfterUncached = [bool]$tracked[999999].Ended
+            $exitAfterUncached = $tracked[999999].ExitCode
+
+            $process.HandleCached = $true
+            Update-TrackedProcesses -Tracked $tracked -DetachedProcessNames @()
+            [pscustomobject]@{
+                Ended = $endedAfterUncached
+                UncachedExitCode = $exitAfterUncached
+                CachedExitCode = $tracked[999999].ExitCode
+            }
+        }
+        Assert-True 'uncached process completion still marks the entry ended' `
+            $uncachedTracked.Ended 'entry was not marked ended'
+        Assert-True 'uncached process exit code stays unknown' `
+            ($null -eq $uncachedTracked.UncachedExitCode) "exit code was '$($uncachedTracked.UncachedExitCode)'"
+        Assert-Equal 'cached process exit code is trusted' 9 $uncachedTracked.CachedExitCode
 
         # A process whose handle cannot be opened must stay tracked. Marking it
         # ended would let a still-running worker escape the wait and fail-closed

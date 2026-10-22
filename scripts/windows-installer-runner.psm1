@@ -63,6 +63,7 @@ function Open-TrackedProcess {
     # the real exit code survives a short-lived worker.
     try {
         $null = $Process.Handle
+        $Process | Add-Member -NotePropertyName HandleCached -NotePropertyValue $true -Force | Out-Null
         return $Process
     } catch {
         return $Process
@@ -362,7 +363,11 @@ function Update-TrackedProcesses {
             try {
                 if ($process.HasExited) {
                     $entry.Ended = $true
-                    if ($null -eq $entry.ExitCode) { $entry.ExitCode = [int]$process.ExitCode }
+                    $canTrustExit = [Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or
+                        ($process.PSObject.Properties['HandleCached'] -and $process.HandleCached)
+                    if ($null -eq $entry.ExitCode -and $canTrustExit) {
+                        $entry.ExitCode = [int]$process.ExitCode
+                    }
                 }
             } catch {
                 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {

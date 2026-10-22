@@ -150,6 +150,7 @@ Assert-Contains 'shared runner writes process-tree evidence' $runner 'Write-Inst
 Assert-Contains 'shared runner captures durable process completion events' $runner 'Win32_ProcessStopTrace'
 Assert-Contains 'shared runner records workers that exit between snapshots' $runner 'Read-ProcessTraceEvents'
 Assert-Contains 'shared runner opens durable process handles' $runner 'Open-TrackedProcess'
+Assert-Contains 'shared runner trusts only cached process handles' $runner 'HandleCached'
 Assert-Contains 'shared runner terminates only owned processes on timeout' $runner 'Kill()'
 $runnerTests = Read-Text 'scripts/test-windows-installer-runner.ps1'
 Assert-Contains 'runner tests prove the legacy tree-wait hang' $runnerTests 'legacy Start-Process -Wait hang'
