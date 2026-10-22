@@ -751,6 +751,8 @@ try {
             $childResult = $nonElevatedChild.Result
             Assert-True 'actual non-elevated child token has no administrator role' `
                 (-not [bool]$childResult.is_elevated) 'child process is still elevated'
+            Assert-Equal 'actual non-elevated child ran every bootstrap worker' `
+                10 $childResult.worker_runs
             Assert-True 'actual non-elevated user-install fails on all zero-delay failing workers' `
                 ((@($childResult.failure_errors).Count -eq 5) -and
                     (@($childResult.failure_errors | Where-Object {

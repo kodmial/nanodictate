@@ -15,6 +15,27 @@ function Save-Result {
     $Result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $ResultPath -Encoding utf8
 }
 
+function Get-WorkerStartError {
+    param([string]$PidFile, [string]$Label)
+
+    if ([string]::IsNullOrWhiteSpace($PidFile)) {
+        return "$Label did not provide a worker pid file"
+    }
+    $workerPidFile = "$PidFile.worker"
+    if (-not (Test-Path -LiteralPath $PidFile -PathType Leaf)) {
+        return "$Label did not record the bootstrap worker pid"
+    }
+    if (-not (Test-Path -LiteralPath $workerPidFile -PathType Leaf)) {
+        return "$Label worker did not run"
+    }
+    $launchedPid = (Get-Content -LiteralPath $PidFile -Raw).Trim()
+    $workerPid = (Get-Content -LiteralPath $workerPidFile -Raw).Trim()
+    if ([string]::IsNullOrWhiteSpace($launchedPid) -or $launchedPid -ne $workerPid) {
+        return "$Label worker pid mismatch (launched '$launchedPid', ran '$workerPid')"
+    }
+    return $null
+}
+
 $result = [ordered]@{
     is_elevated                       = $null
     trace_available                   = $null
@@ -22,6 +43,7 @@ $result = [ordered]@{
     success_exit_codes                = @()
     install_windows_failure_error     = $null
     install_windows_success_exit_code = $null
+    worker_runs                       = 0
     error                             = $null
 }
 
@@ -63,6 +85,7 @@ try {
     $env:TMP = $WorkDirectory
 
     for ($run = 1; $run -le 5; $run++) {
+        $pidFile = Join-Path $WorkDirectory "non-elevated-fail-$run.pid"
         $errorMessage = & $runnerModule {
             param($executable, $fixture, $pidFile, $phase)
             function script:Register-CimIndicationEvent {
@@ -84,12 +107,15 @@ try {
             } finally {
                 Remove-Item -Path Function:Register-CimIndicationEvent -ErrorAction SilentlyContinue
             }
-        } $pwshPath $FixtureScript (Join-Path $WorkDirectory "non-elevated-fail-$run.pid") `
-            "non-elevated-fail-$run"
+        } $pwshPath $FixtureScript $pidFile "non-elevated-fail-$run"
         $result.failure_errors += $errorMessage
+        $workerError = Get-WorkerStartError -PidFile $pidFile -Label "non-elevated-fail-$run"
+        if ($workerError) { $result.failure_errors += $workerError }
+        else { $result.worker_runs++ }
     }
 
     for ($run = 1; $run -le 3; $run++) {
+        $pidFile = Join-Path $WorkDirectory "non-elevated-ok-$run.pid"
         $exitCode = & $runnerModule {
             param($executable, $fixture, $pidFile, $phase)
             function script:Register-CimIndicationEvent {
@@ -111,9 +137,11 @@ try {
             } finally {
                 Remove-Item -Path Function:Register-CimIndicationEvent -ErrorAction SilentlyContinue
             }
-        } $pwshPath $FixtureScript (Join-Path $WorkDirectory "non-elevated-ok-$run.pid") `
-            "non-elevated-ok-$run"
+        } $pwshPath $FixtureScript $pidFile "non-elevated-ok-$run"
         $result.success_exit_codes += $exitCode
+        $workerError = Get-WorkerStartError -PidFile $pidFile -Label "non-elevated-ok-$run"
+        if ($workerError) { $result.success_exit_codes += "error: $workerError" }
+        else { $result.worker_runs++ }
     }
 
     # Exercise the same user-install helper that scripts/install-windows.ps1
@@ -122,6 +150,7 @@ try {
     $installLogDirectory = Join-Path $WorkDirectory 'install-windows-logs'
     New-Item -ItemType Directory -Force -Path $installLogDirectory | Out-Null
 
+    $installFailurePidFile = Join-Path $WorkDirectory 'install-windows-fail.pid'
     & $runnerModule {
         function script:Register-CimIndicationEvent {
             throw 'simulated non-elevated trace registration failure'
@@ -135,7 +164,7 @@ try {
                     '-WorkerScript', $FixtureScript,
                     '-WorkerSleepMilliseconds', '0', '-WorkerExitCode', '9',
                     '-BootstrapDelayMilliseconds', '0',
-                    '-PidFile', (Join-Path $WorkDirectory 'install-windows-fail.pid')
+                    '-PidFile', $installFailurePidFile
                 ) -Phase 'non-elevated-install-windows-fail' -TimeoutSeconds 15 `
                 -LogDirectory $installLogDirectory | Out-Null
             $result.install_windows_failure_error = 'the bootstrap worker failure was masked'
@@ -147,7 +176,12 @@ try {
             Remove-Item -Path Function:Register-CimIndicationEvent -ErrorAction SilentlyContinue
         }
     }
+    $workerError = Get-WorkerStartError -PidFile $installFailurePidFile `
+        -Label 'non-elevated-install-windows-fail'
+    if ($workerError) { $result.failure_errors += $workerError }
+    else { $result.worker_runs++ }
 
+    $installSuccessPidFile = Join-Path $WorkDirectory 'install-windows-ok.pid'
     & $runnerModule {
         function script:Register-CimIndicationEvent {
             throw 'simulated non-elevated trace registration failure'
@@ -161,7 +195,7 @@ try {
                     '-WorkerScript', $FixtureScript,
                     '-WorkerSleepMilliseconds', '0', '-WorkerExitCode', '0',
                     '-BootstrapDelayMilliseconds', '0',
-                    '-PidFile', (Join-Path $WorkDirectory 'install-windows-ok.pid')
+                    '-PidFile', $installSuccessPidFile
                 ) -Phase 'non-elevated-install-windows-ok' -TimeoutSeconds 15 `
                 -LogDirectory $installLogDirectory
             $result.install_windows_success_exit_code = [int]$install.ExitCode
@@ -172,6 +206,13 @@ try {
         & $runnerModule {
             Remove-Item -Path Function:Register-CimIndicationEvent -ErrorAction SilentlyContinue
         }
+    }
+    $workerError = Get-WorkerStartError -PidFile $installSuccessPidFile `
+        -Label 'non-elevated-install-windows-ok'
+    if ($workerError) {
+        $result.install_windows_success_exit_code = "error: $workerError"
+    } else {
+        $result.worker_runs++
     }
 } catch {
     $result.error = $_.Exception.Message
@@ -187,4 +228,5 @@ if (@($result.success_exit_codes).Count -ne 3) { exit 1 }
 if (@($result.success_exit_codes | Where-Object { $_ -ne 0 }).Count -ne 0) { exit 1 }
 if ($result.install_windows_failure_error -notmatch 'exited with code 9') { exit 1 }
 if ($result.install_windows_success_exit_code -ne 0) { exit 1 }
+if ($result.worker_runs -ne 10) { exit 1 }
 exit 0
