@@ -25,6 +25,11 @@ function Save-Pid([int]$ProcessId) {
     if ($PidFile) { Set-Content -LiteralPath $PidFile -Value $ProcessId -NoNewline }
 }
 
+function Quote-ProcessArgument([string]$Value) {
+    if ($Value -notmatch '[\s"]') { return $Value }
+    return '"' + ($Value -replace '"', '\"') + '"'
+}
+
 switch ($Mode) {
     'sleep' {
         Save-Pid $PID
@@ -44,12 +49,27 @@ switch ($Mode) {
     }
     'bootstrap' {
         if (-not $WorkerScript) { throw 'WorkerScript is required for bootstrap mode.' }
-        $child = Start-Process -FilePath $pwshPath -ArgumentList @(
+        # UseShellExecute (the Start-Process default) can block under a
+        # restricted token on a noninteractive window station. Create the
+        # worker directly so qualification also works for a genuine
+        # non-elevated child process.
+        $workerArguments = @(
             '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $WorkerScript,
             '-Mode', 'sleep',
             '-SleepMilliseconds', [string]$WorkerSleepMilliseconds,
             '-ExitCode', [string]$WorkerExitCode
-        ) -PassThru
+        )
+        $startInfo = [Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = $pwshPath
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardInput = $true
+        $startInfo.Arguments = (@($workerArguments | ForEach-Object {
+            Quote-ProcessArgument ([string]$_)
+        }) -join ' ')
+        $child = [Diagnostics.Process]::Start($startInfo)
+        # A closed stdin keeps a mis-bound worker from blocking on a prompt.
+        $child.StandardInput.Close()
         Save-Pid $child.Id
         Start-Sleep -Milliseconds ([Math]::Max(0, $BootstrapDelayMilliseconds))
         exit $ExitCode

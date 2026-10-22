@@ -47,6 +47,10 @@ try {
     }
 
     New-Item -ItemType Directory -Force -Path $WorkDirectory | Out-Null
+    # Keep transient files inside the dedicated directory whose ACL was opened
+    # to the filtered token instead of the elevated runner's temp directory.
+    $env:TEMP = $WorkDirectory
+    $env:TMP = $WorkDirectory
 
     for ($run = 1; $run -le 5; $run++) {
         $errorMessage = & $runnerModule {
