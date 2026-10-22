@@ -91,7 +91,7 @@ try {
   } elseif ($auth.Status -ne 'Valid') { throw "Invalid candidate installer signature: $($auth.Status)" }
   $cleanupNeeded = $true
   $installTimer = [Diagnostics.Stopwatch]::StartNew()
-  Invoke-Silent 'install' (Resolve-Path $setup).Path @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$dir`"") $InstallTimeoutSeconds
+  Invoke-Silent 'install' (Resolve-Path $setup).Path @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',('/DIR=' + $dir)) $InstallTimeoutSeconds
   $installTimer.Stop()
   $measurements.install_seconds = [Math]::Round($installTimer.Elapsed.TotalSeconds, 2)
   $zipFiles = @(Get-ChildItem -LiteralPath $unpacked -Recurse -File)
@@ -113,7 +113,7 @@ try {
   # installed EXE, and preserve user files exactly like a versioned upgrade.
   [void](Stop-NanoDictateProcessesUnderPath -InstallDirectory $dir)
   $reinstallTimer = [Diagnostics.Stopwatch]::StartNew()
-  Invoke-Silent 'reinstall' (Resolve-Path $setup).Path @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$dir`"") $InstallTimeoutSeconds
+  Invoke-Silent 'reinstall' (Resolve-Path $setup).Path @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',('/DIR=' + $dir)) $InstallTimeoutSeconds
   $reinstallTimer.Stop()
   $measurements.reinstall_seconds = [Math]::Round($reinstallTimer.Elapsed.TotalSeconds, 2)
   Assert-NanoDictateStartup -InstallDirectory $dir

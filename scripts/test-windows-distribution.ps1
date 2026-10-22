@@ -58,7 +58,7 @@ Assert-Contains 'installer starts the first run in the background exactly once' 
 Assert-NotContains 'installer never forces settings on first run' $install "-ArgumentList '--settings'"
 Assert-Contains 'installer repairs the per-user Run entry' $install 'Assert-NanoDictateStartup'
 Assert-Contains 'installer stops only the exact installed background agent before upgrade' $install 'Stop-NanoDictateProcessesUnderPath'
-Assert-Contains 'installer quotes the per-user install directory' $install '(''/DIR="'' + $Target + ''"'')'
+Assert-Contains 'installer delegates /DIR quoting to the shared runner' $install '(''/DIR='' + $Target)'
 Assert-NotContains 'installer never uses an uncapped tree wait' $install 'Start-Process -Wait'
 Assert-NotContains 'installer never unconditionally re-launches a duplicate agent' $install "Start-Process -FilePath `$exe -ArgumentList '--background'"
 Assert-Contains 'installer exposes a testable verified install function' $install 'function Install-NanoDictateVerified'
@@ -135,8 +135,9 @@ Assert-Contains 'shared runner waits for Inno bootstrap workers' $runner 'Instal
 Assert-Contains 'shared runner retains Inno logs' $runner 'InnoLogFileName'
 Assert-Contains 'shared runner normalizes the log directory' $runner '$LogDirectory = [IO.Path]::GetFullPath($LogDirectory)'
 Assert-Contains 'shared runner supports Windows PowerShell 5.1' $runner '#Requires -Version 5.1'
-Assert-Contains 'shared runner falls back without ProcessStartInfo.ArgumentList' $runner "PSObject.Properties['ArgumentList']"
-Assert-Contains 'shared runner quotes fallback command-line arguments' $runner 'ConvertTo-WindowsCommandLineArgument'
+Assert-NotContains 'shared runner does not use ProcessStartInfo.ArgumentList' $runner "PSObject.Properties['ArgumentList']"
+Assert-Contains 'shared runner builds Inno-compatible command lines' $runner 'ConvertTo-InnoSetupCommandLineArgument'
+Assert-Contains 'shared runner rejects embedded installer quotes' $runner 'Installer argument must not contain quotes'
 Assert-Contains 'shared runner writes process-tree evidence' $runner 'Write-InstallerPhaseEvidence'
 Assert-Contains 'shared runner terminates only owned processes on timeout' $runner 'Kill()'
 $runnerTests = Read-Text 'scripts/test-windows-installer-runner.ps1'

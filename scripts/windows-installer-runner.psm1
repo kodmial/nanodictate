@@ -52,37 +52,18 @@ function Get-ProcessTable {
     }
 }
 
-function ConvertTo-WindowsCommandLineArgument {
+function ConvertTo-InnoSetupCommandLineArgument {
     param([string]$Argument)
 
+    # Inno Setup parses its command line with Delphi ParamStr rules: quotes
+    # group text and are removed, while backslashes are literal. Do not use
+    # MSVCRT/.NET backslash escaping, which Inno would keep as path characters.
     if ([string]::IsNullOrEmpty($Argument)) { return '""' }
-    if ($Argument -notmatch '[\s"]') { return $Argument }
-
-    $builder = [Text.StringBuilder]::new()
-    [void]$builder.Append('"')
-    $backslashes = 0
-    foreach ($character in $Argument.ToCharArray()) {
-        if ($character -eq [char]'\') {
-            $backslashes++
-            continue
-        }
-        if ($character -eq [char]'"') {
-            [void]$builder.Append([char]'\', ($backslashes * 2) + 1)
-            [void]$builder.Append([char]'"')
-            $backslashes = 0
-            continue
-        }
-        if ($backslashes -gt 0) {
-            [void]$builder.Append([char]'\', $backslashes)
-            $backslashes = 0
-        }
-        [void]$builder.Append($character)
+    if ($Argument.Contains('"')) {
+        throw "Installer argument must not contain quotes: $Argument"
     }
-    if ($backslashes -gt 0) {
-        [void]$builder.Append([char]'\', $backslashes * 2)
-    }
-    [void]$builder.Append('"')
-    return $builder.ToString()
+    if ($Argument -match '\s') { return '"' + $Argument + '"' }
+    return $Argument
 }
 
 function Update-TrackedProcesses {
@@ -250,24 +231,15 @@ function Invoke-BoundedInstallerProcess {
             throw 'LogDirectory is required when InnoLogFileName is set.'
         }
         $innoLogPath = Join-Path $LogDirectory ([IO.Path]::GetFileName($InnoLogFileName))
-        $ArgumentList = @($ArgumentList) + @("/LOG=`"$innoLogPath`"")
+        $ArgumentList = @($ArgumentList) + @("/LOG=$innoLogPath")
     }
 
     $startInfo = [Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $resolved
     $startInfo.UseShellExecute = $false
-    if ($null -ne $startInfo.PSObject.Properties['ArgumentList']) {
-        foreach ($argument in @($ArgumentList)) {
-            if ($null -ne $argument) { $startInfo.ArgumentList.Add([string]$argument) }
-        }
-    } else {
-        # Windows PowerShell 5.1 runs on .NET Framework, which has no
-        # ProcessStartInfo.ArgumentList. Quote arguments with the standard
-        # Windows command-line rules instead of passing one unescaped string.
-        $startInfo.Arguments = (@($ArgumentList | ForEach-Object {
-            ConvertTo-WindowsCommandLineArgument ([string]$_)
-        }) -join ' ')
-    }
+    $startInfo.Arguments = (@($ArgumentList | Where-Object { $null -ne $_ } | ForEach-Object {
+        ConvertTo-InnoSetupCommandLineArgument ([string]$_)
+    }) -join ' ')
 
     $logLabel = if ($innoLogPath) { [IO.Path]::GetFileName($innoLogPath) } else { 'none' }
     Write-Host ("[installer:{0}] start exe={1} timeout={2}s log={3}" -f

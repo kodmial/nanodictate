@@ -56,9 +56,9 @@ alive.
 
 The repair is `scripts/windows-installer-runner.psm1`. It waits for the direct
 installer, then for Inno-style bootstrap/worker descendants, but never for
-`NanoDictate.App`. The module supports Windows PowerShell 5.1 and PowerShell 7;
-on 5.1 it uses explicit Windows command-line quoting because
-`ProcessStartInfo.ArgumentList` is unavailable there. Every
+`NanoDictate.App`. The module supports Windows PowerShell 5.1 and PowerShell 7
+by constructing Inno Setup-compatible command lines with whole-argument quoting
+instead of `ProcessStartInfo.ArgumentList` or MSVCRT backslash escaping. Every
 install/reinstall/upgrade/uninstall phase has a deadline, writes phase evidence
 and retains `/LOG` output; timeouts terminate only processes owned by that test
 phase. The workflows upload `windows/artifacts/installer-logs/**` with

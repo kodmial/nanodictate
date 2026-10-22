@@ -111,11 +111,11 @@ function Install-NanoDictateVerified {
         [void](Stop-NanoDictateProcessesUnderPath -InstallDirectory $Target)
 
         $install = [Diagnostics.Stopwatch]::StartNew()
-        # /DIR must stay quoted for profile paths containing spaces. The bounded
-        # runner waits for the real Inno phase, not the persistent --background app
+        # The bounded runner quotes /DIR for profile paths containing spaces and
+        # waits for the real Inno phase, not the persistent --background app
         # that the installer intentionally leaves running.
         $setup = Invoke-BoundedInstallerProcess -FilePath $installer -ArgumentList @(
-            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', ('/DIR="' + $Target + '"')
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', ('/DIR=' + $Target)
         ) -Phase 'user-install' -TimeoutSeconds $TimeoutSeconds `
             -LogDirectory $LogDirectory -InnoLogFileName 'user-install.log'
         $install.Stop()

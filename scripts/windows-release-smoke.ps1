@@ -108,7 +108,7 @@ function Get-VerifiedAssets([object]$release, [string]$folder, [string[]]$names)
   return $expected
 }
 function Invoke-Setup([string]$path, [string]$phase = 'install') {
-  $arguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$installDir`"")
+  $arguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',('/DIR=' + $installDir))
   $timer = [Diagnostics.Stopwatch]::StartNew()
   Invoke-BoundedInstallerProcess -FilePath $path -ArgumentList $arguments -Phase $phase `
     -TimeoutSeconds $script:InstallTimeoutSeconds -LogDirectory $LogDirectory `

@@ -66,14 +66,20 @@ $fixture = Join-Path $PSScriptRoot 'fixtures/installer-runner-fixture.ps1'
 $legacyWait = Join-Path $PSScriptRoot 'fixtures/legacy-start-process-wait.ps1'
 Import-Module $modulePath -Force
 
-# Windows PowerShell 5.1 lacks ProcessStartInfo.ArgumentList; keep the
-# fallback command-line quoting covered even when tests run on PowerShell 7.
+# Inno Setup strips quotes without backslash escaping, so the runner quotes
+# whole arguments and never uses MSVCRT-style escaped quotes.
 $runnerModule = Get-Module windows-installer-runner
 $quoted = & $runnerModule {
     param($value)
-    ConvertTo-WindowsCommandLineArgument $value
-} '/DIR="C:\Users\A B\NanoDictate"'
-Assert-Equal 'fallback argument quoting preserves /DIR quoting' '"/DIR=\"C:\Users\A B\NanoDictate\""' $quoted
+    ConvertTo-InnoSetupCommandLineArgument $value
+} '/DIR=C:\Users\A B\NanoDictate'
+Assert-Equal 'Inno argument quoting wraps values containing spaces' '"/DIR=C:\Users\A B\NanoDictate"' $quoted
+Assert-Throws 'installer arguments reject embedded quotes' {
+    & $runnerModule {
+        param($value)
+        ConvertTo-InnoSetupCommandLineArgument $value
+    } '/DIR="C:\Users\A B\NanoDictate"'
+} 'must not contain quotes'
 
 $tempRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [IO.Path]::GetTempPath() }
 $work = Join-Path $tempRoot ('nd-runner-tests-' + [guid]::NewGuid().ToString('N'))

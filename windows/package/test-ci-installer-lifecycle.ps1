@@ -64,7 +64,7 @@ New-Item -ItemType Directory -Force -Path $work, $unpacked | Out-Null
 
 function Invoke-Setup([string]$phase, [string]$path, [int]$timeoutSeconds) {
   Invoke-BoundedInstallerProcess -FilePath $path -ArgumentList @(
-    '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', ('/DIR="' + $installed + '"')
+    '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', ('/DIR=' + $installed)
   ) -Phase $phase -TimeoutSeconds $timeoutSeconds -LogDirectory $LogDirectory `
     -InnoLogFileName "$phase.log" | Out-Null
 }
