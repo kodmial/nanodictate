@@ -78,12 +78,16 @@ try {
       throw "Candidate ZIP missing $name"
     }
   }
-  $example = Get-Content -LiteralPath (Join-Path $unpacked 'config.example.toml') -Raw
-  if ($example -notmatch '(?m)^active_provider = "airubiz"$') {
-    throw 'Bundled config.example.toml does not select the keyless Airubiz default'
+  $validator = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'scripts/validate-windows-config.ps1'
+  try {
+    & $validator -ConfigPath (Join-Path $unpacked 'config.example.toml') -SkipProductDefault
+  } catch {
+    throw "Bundled config.example.toml failed shared structured validation: $($_.Exception.Message)"
   }
-  if ($example -notmatch '(?m)^\[providers\.airubiz\]$' -or $example -notmatch 'gigaam-v3-ctc-sherpa') {
-    throw 'Bundled config.example.toml lacks the Airubiz provider/model defaults'
+  $repoConfig = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'config.example.toml'
+  if ((Get-FileHash -LiteralPath $repoConfig -Algorithm SHA256).Hash -cne
+      (Get-FileHash -LiteralPath (Join-Path $unpacked 'config.example.toml') -Algorithm SHA256).Hash) {
+    throw 'Candidate ZIP config.example.toml differs from the policy-validated repository file'
   }
   $auth = Get-AuthenticodeSignature -LiteralPath $setup
   if ($auth.Status -eq 'NotSigned') {

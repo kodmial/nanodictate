@@ -133,10 +133,16 @@ public sealed class PortableConfig
             {
                 continue;
             }
-            if (line.StartsWith('[') && line.EndsWith(']'))
+            var headerLine = line;
+            var commentIndex = headerLine.IndexOf('#');
+            if (commentIndex >= 0)
+            {
+                headerLine = headerLine[..commentIndex].TrimEnd();
+            }
+            if (headerLine.StartsWith('[') && headerLine.EndsWith(']'))
             {
                 FlushProvider();
-                section = line.Substring(1, line.Length - 2).Trim();
+                section = headerLine.Substring(1, headerLine.Length - 2).Trim();
                 if (section.StartsWith("providers.", StringComparison.Ordinal))
                 {
                     currentProvider = section.Substring("providers.".Length);

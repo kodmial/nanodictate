@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\NanoDictate.Core\NanoDictate.Core.csproj" />
+    <ProjectReference Include="..\..\src\NanoDictate.ConfigValidation\NanoDictate.ConfigValidation.csproj" />
   </ItemGroup>
 
 </Project>

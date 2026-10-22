@@ -15,6 +15,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{0AB3BF05
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NanoDictate.Core.Tests", "tests\NanoDictate.Core.Tests\NanoDictate.Core.Tests.csproj", "{F4713F43-A9A0-4A4D-AA05-9C38BB6EEC32}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NanoDictate.ConfigValidation", "src\NanoDictate.ConfigValidation\NanoDictate.ConfigValidation.csproj", "{4B71B0BA-306C-42BE-9C43-6B420AC732B0}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -72,6 +74,18 @@ Global
 		{F4713F43-A9A0-4A4D-AA05-9C38BB6EEC32}.Release|x64.Build.0 = Release|Any CPU
 		{F4713F43-A9A0-4A4D-AA05-9C38BB6EEC32}.Release|x86.ActiveCfg = Release|Any CPU
 		{F4713F43-A9A0-4A4D-AA05-9C38BB6EEC32}.Release|x86.Build.0 = Release|Any CPU
+		{4B71B0BA-306C-42BE-9C43-6B420AC732B0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4B71B0BA-306C-42BE-9C43-6B420AC732B0}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4B71B0BA-306C-42BE-9C43-6B420AC732B0}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{4B71B0BA-306C-42BE-9C43-6B420AC732B0}.Debug|x64.Build.0 = Debug|Any CPU
+		{4B71B0BA-306C-42BE-9C43-6B420AC732B0}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{4B71B0BA-306C-42BE-9C43-6B420AC732B0}.Debug|x86.Build.0 = Debug|Any CPU
+		{4B71B0BA-306C-42BE-9C43-6B420AC732B0}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4B71B0BA-306C-42BE-9C43-6B420AC732B0}.Release|Any CPU.Build.0 = Release|Any CPU
+		{4B71B0BA-306C-42BE-9C43-6B420AC732B0}.Release|x64.ActiveCfg = Release|Any CPU
+		{4B71B0BA-306C-42BE-9C43-6B420AC732B0}.Release|x64.Build.0 = Release|Any CPU
+		{4B71B0BA-306C-42BE-9C43-6B420AC732B0}.Release|x86.ActiveCfg = Release|Any CPU
+		{4B71B0BA-306C-42BE-9C43-6B420AC732B0}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -81,5 +95,6 @@ Global
 		{2828B173-9BCF-499B-AA85-33716E6AA6B9} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{7A1B3C4D-1111-4222-8333-444455556666} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{F4713F43-A9A0-4A4D-AA05-9C38BB6EEC32} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
+		{4B71B0BA-306C-42BE-9C43-6B420AC732B0} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 	EndGlobalSection
 EndGlobal
