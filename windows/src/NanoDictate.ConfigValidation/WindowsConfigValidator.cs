@@ -257,7 +257,8 @@ public static class WindowsConfigValidator
             return new ConfigValidationResult(activeProvider, errors);
         }
 
-        var effectiveBaseUrl = string.IsNullOrWhiteSpace(entry.BaseUrl)
+        var usesDefaultBaseUrl = string.IsNullOrWhiteSpace(entry.BaseUrl);
+        var effectiveBaseUrl = usesDefaultBaseUrl
             ? AdapterDefaults.BaseUrl(entry.Id)
             : entry.BaseUrl;
         if (string.IsNullOrWhiteSpace(effectiveBaseUrl))
@@ -279,8 +280,14 @@ public static class WindowsConfigValidator
             errors.Add("selected provider has no model and no default model");
         }
 
-        // Credentials are optional by contract: a keyless provider is valid,
-        // and key material is never required for static validation.
+        if (usesDefaultBaseUrl
+            && AdapterDefaults.DefaultEndpointRequiresCredential(entry.Id)
+            && string.IsNullOrEmpty(entry.ApiKey)
+            && string.IsNullOrEmpty(entry.ApiKeyFile))
+        {
+            errors.Add("selected provider requires a declared api_key or api_key_file");
+        }
+
         return new ConfigValidationResult(activeProvider, errors);
     }
 

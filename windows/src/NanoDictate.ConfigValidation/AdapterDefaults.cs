@@ -14,15 +14,18 @@ public static class AdapterDefaults
             ["openai"] = new(
                 "https://api.openai.com/v1/audio/transcriptions",
                 "gpt-transcribe",
-                ModelEmbeddedInEndpoint: false),
+                ModelEmbeddedInEndpoint: false,
+                RequiresCredentialForDefaultEndpoint: true),
             ["groq"] = new(
                 "https://api.groq.com/openai/v1/audio/transcriptions",
                 "whisper-large-v3",
-                ModelEmbeddedInEndpoint: false),
+                ModelEmbeddedInEndpoint: false,
+                RequiresCredentialForDefaultEndpoint: true),
             ["cloudflare"] = new(
                 string.Empty,
                 string.Empty,
-                ModelEmbeddedInEndpoint: true),
+                ModelEmbeddedInEndpoint: true,
+                RequiresCredentialForDefaultEndpoint: false),
         };
 
     public static string BaseUrl(string adapterId) =>
@@ -38,5 +41,17 @@ public static class AdapterDefaults
     public static bool ModelEmbeddedInEndpoint(string adapterId) =>
         Known.TryGetValue(adapterId, out var value) && value.ModelEmbeddedInEndpoint;
 
-    private sealed record AdapterDefault(string BaseUrl, string Model, bool ModelEmbeddedInEndpoint);
+    /// <summary>
+    /// Whether the adapter's built-in endpoint requires an authentication
+    /// credential. Custom endpoints stay keyless even for these adapters.
+    /// </summary>
+    public static bool DefaultEndpointRequiresCredential(string adapterId) =>
+        Known.TryGetValue(adapterId, out var value)
+        && value.RequiresCredentialForDefaultEndpoint;
+
+    private sealed record AdapterDefault(
+        string BaseUrl,
+        string Model,
+        bool ModelEmbeddedInEndpoint,
+        bool RequiresCredentialForDefaultEndpoint);
 }

@@ -39,19 +39,53 @@ public sealed class WindowsConfigValidationTests
         """;
 
     [Fact]
-    public void KeylessProviderPassesWithLfAndNoFinalNewline()
+    public void OfficialEndpointWithoutCredentialFailsWithLfAndNoFinalNewline()
     {
         var path = WriteConfig(OpenAiKeyless.TrimEnd('\n'));
         try
         {
             var result = WindowsConfigValidator.ValidateFile(path);
-            Assert.True(result.IsValid, string.Join("; ", result.Errors));
+            Assert.False(result.IsValid);
+            Assert.Contains(
+                result.Errors,
+                error => error.Contains(
+                    "selected provider requires a declared api_key or api_key_file",
+                    StringComparison.Ordinal));
             Assert.Equal("openai", result.ActiveProvider);
         }
         finally
         {
             File.Delete(path);
         }
+    }
+
+    [Theory]
+    [InlineData("custom")]
+    [InlineData("openai")]
+    public void KeylessCustomEndpointRemainsValid(string adapter)
+    {
+        var config = $"""
+            active_provider = "{adapter}"
+            [providers.{adapter}]
+            name = "Custom"
+            base_url = "https://example.test/v1/audio/transcriptions"
+            model = "m"
+            api_key = ""
+            """;
+        AssertValid(config);
+    }
+
+    [Fact]
+    public void GroqOfficialEndpointWithoutCredentialFails()
+    {
+        const string config = """
+            active_provider = "groq"
+            [providers.groq]
+            base_url = ""
+            model = ""
+            api_key = ""
+            """;
+        AssertInvalid(config, "selected provider requires a declared api_key or api_key_file");
     }
 
     [Fact]
@@ -103,9 +137,9 @@ public sealed class WindowsConfigValidationTests
             active_provider = "openai" # deliberately OpenAI
             [providers.openai]
             name = "OpenAI"
-            base_url = ""   # adapter default
-            model = ""      # adapter default
-            api_key = ""    # keyless
+            base_url = ""       # adapter default
+            model = ""          # adapter default
+            api_key = "dummy-key" # official endpoint requires a declared credential
 
             [providers.airubiz]
             name = "Airubiz"
@@ -135,7 +169,7 @@ public sealed class WindowsConfigValidationTests
             [providers.openai]
             base_url = ""
             model = ""
-            api_key = ""
+            api_key = "dummy-key"
             [providers.groq]
             base_url = ""
             model = ""
@@ -373,7 +407,7 @@ public sealed class WindowsConfigValidationTests
     }
 
     [Fact]
-    public void MissingKeyFilesAreNotReadOrRequiredForStaticValidation()
+    public void DeclaredKeyFileSatisfiesOfficialEndpointWithoutReadingContents()
     {
         const string config = """
             active_provider = "groq"
@@ -468,6 +502,11 @@ public sealed class WindowsConfigValidationTests
             Assert.Equal(NanoEngine.SttDefaultBaseUrl(adapter), AdapterDefaults.BaseUrl(adapter));
             Assert.Equal(NanoEngine.SttDefaultModel(adapter), AdapterDefaults.Model(adapter));
         }
+
+        Assert.True(AdapterDefaults.DefaultEndpointRequiresCredential("openai"));
+        Assert.True(AdapterDefaults.DefaultEndpointRequiresCredential("groq"));
+        Assert.False(AdapterDefaults.DefaultEndpointRequiresCredential("cloudflare"));
+        Assert.False(AdapterDefaults.DefaultEndpointRequiresCredential("custom-provider"));
     }
 
     private static void AssertValid(string config)
