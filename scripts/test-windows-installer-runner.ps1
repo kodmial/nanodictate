@@ -195,6 +195,29 @@ try {
             } $trace
         }
 
+        # Without durable trace events a short-lived worker can exit between
+        # snapshots, so an unavailable trace must fail the phase instead of
+        # allowing a successful root exit code to mask the worker result.
+        $traceFailureMessage = & $runnerModule {
+            param($executable)
+            function script:Register-CimIndicationEvent {
+                throw 'simulated trace registration failure'
+            }
+            try {
+                Invoke-BoundedInstallerProcess -FilePath $executable -ArgumentList @(
+                    '-NoProfile', '-Command', 'exit 0'
+                ) -Phase 'trace-registration-failure' -TimeoutSeconds 5 | Out-Null
+                return $null
+            } catch {
+                return $_.Exception.Message
+            } finally {
+                Remove-Item -Path Function:script:Register-CimIndicationEvent -ErrorAction SilentlyContinue
+            }
+        } $pwshPath
+        Assert-True 'trace registration failure fails closed' `
+            ($traceFailureMessage -match 'Durable process trace events are required') `
+            "runner did not fail closed: $traceFailureMessage"
+
         $failingWorkerPidFile = Join-Path $work 'bootstrap-fail.pid'
         Assert-Throws 'failing bootstrap worker fails the phase' {
             Invoke-BoundedInstallerProcess -FilePath $pwshPath -ArgumentList @(

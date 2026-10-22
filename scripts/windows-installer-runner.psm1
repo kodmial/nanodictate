@@ -108,8 +108,10 @@ function Start-ProcessTrace {
             StopIdentifier  = $stopIdentifier
         }
     } catch {
-        Write-Verbose "Durable process trace events are unavailable for phase '$Phase': $_"
-        return $null
+        # A worker can start and exit between Get-ProcessTable snapshots, so on
+        # Windows durable trace events are the only reliable completion source.
+        # Fail closed instead of allowing a zero root exit code to mask a failure.
+        throw "Durable process trace events are required for installer phase '$Phase' but could not be registered: $($_.Exception.Message)"
     }
 }
 
