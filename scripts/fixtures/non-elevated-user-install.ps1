@@ -37,17 +37,23 @@ try {
     $scriptsDirectory = Split-Path -Parent $RunnerModulePath
     . (Join-Path $scriptsDirectory 'install-windows.ps1')
 
-    $trace = & $runnerModule {
-        param($phase)
-        Start-ProcessTrace -Phase $phase
-    } 'non-elevated-trace'
-    try {
-        $result.trace_available = $null -ne $trace
-    } finally {
-        & $runnerModule {
-            param($processTrace)
-            Stop-ProcessTrace -ProcessTrace $processTrace
-        } $trace
+    if ($result.is_elevated) {
+        $trace = & $runnerModule {
+            param($phase)
+            Start-ProcessTrace -Phase $phase
+        } 'elevated-trace'
+        try {
+            $result.trace_available = $null -ne $trace
+        } finally {
+            & $runnerModule {
+                param($processTrace)
+                Stop-ProcessTrace -ProcessTrace $processTrace
+            } $trace
+        }
+    } else {
+        # A normal per-user install must not depend on elevation-only trace
+        # registration; the shared runner tracks its workers with a job object.
+        $result.trace_available = $false
     }
 
     New-Item -ItemType Directory -Force -Path $WorkDirectory | Out-Null

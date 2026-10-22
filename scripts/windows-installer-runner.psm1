@@ -837,8 +837,8 @@ function Start-ProcessTrace {
         }
     } catch {
         # Win32 process trace events require an elevated session on Windows.
-        # The caller falls back to a non-elevated job object so a normal
-        # per-user install can still track its worker processes.
+        # The caller uses a non-elevated job object as its primary completion
+        # source and only falls back to these trace events.
         Write-Verbose "Durable process trace events are unavailable for installer phase '$Phase': $($_.Exception.Message)"
         return $null
     }
@@ -1313,15 +1313,16 @@ function Invoke-BoundedInstallerProcess {
     $snapshot = @()
     $outcome = 'unknown'
     $timedOut = $false
-    $deadline = $startedUtc.AddSeconds($TimeoutSeconds)
 
     try {
-        $processTrace = Start-ProcessTrace -Phase $Phase
-        $processJob = $null
-        if ($null -eq $processTrace) {
-            # Trace events are the primary completion source when available.
-            # Only a non-elevated session needs the job-object launch path.
-            $processJob = New-ProcessJob
+        # The job object is the primary completion source: it works without an
+        # elevated session and does not depend on machine-wide trace events.
+        $processJob = New-ProcessJob
+        $processTrace = $null
+        if ($null -eq $processJob) {
+            # Trace events are only a fallback when the tracking job cannot be
+            # created, so a normal per-user install never requires elevation.
+            $processTrace = Start-ProcessTrace -Phase $Phase
         }
         if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and
             $null -eq $processTrace -and $null -eq $processJob) {
@@ -1362,6 +1363,9 @@ function Invoke-BoundedInstallerProcess {
                 if ($null -ne $process) { try { $process.Dispose() } catch { } }
                 $process = $null
                 $suspended = $null
+                if ($null -eq $processTrace) {
+                    $processTrace = Start-ProcessTrace -Phase $Phase
+                }
                 if ($null -eq $processTrace) { throw $startFailure }
                 Write-Verbose "Could not start installer under job tracking; falling back to process traces: $($startFailure.Exception.Message)"
                 Close-ProcessJob -ProcessJob $processJob
@@ -1389,6 +1393,11 @@ function Invoke-BoundedInstallerProcess {
                 Ended    = $false
             }
         }
+
+        # Start the completion budget only after the installer is running so
+        # job/trace setup (including first-use C# compilation) cannot consume
+        # the caller's deadline and turn a valid install into a false timeout.
+        $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
 
         $pollInterval = 50
         $maxFastPolls = 40
