@@ -1264,6 +1264,8 @@ public sealed class WasapiFaultInjectionTests
 
             // Verify Session B is still running and was NOT aborted
             Assert.True(source.IsRunning, "Session B should still be running after stale DeviceChanged");
+            Assert.NotEqual(0UL, aSessionId);
+            Assert.NotEqual(aSessionId, source.SessionId);
             Assert.Null(bDeviceError);
             Assert.False(bWasAborted ?? false, "Session B should not have been aborted");
             lock (sessions)
@@ -1363,8 +1365,9 @@ public sealed class WasapiFaultInjectionTests
     /// 4. Session A's stale DeviceChanged is released
     /// 5. Session B must remain live and not be aborted by A's stale notification
     ///
-    /// The bug: DictationCaptureService.OnDeviceChanged calls _source.Stop() and
-    /// _pipeline.Abort() without verifying the error belongs to the current generation.
+    /// The guard: DictationCaptureService.OnDeviceChanged compares the notification's
+    /// session ID with _source.SessionId and ignores stale notifications, so only the
+    /// current session's error stops the source and aborts the pipeline.
     /// </summary>
     [Fact]
     public void DictationServiceStaleDeviceChangedDoesNotAbortNewerSession()
