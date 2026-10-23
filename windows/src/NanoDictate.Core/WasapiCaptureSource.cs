@@ -463,6 +463,9 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
             lock (_gate)
             {
                 wasRunning = _running;
+                // The worker has exited the capture loop; the session is no
+                // longer running even though no Stop was requested.
+                _running = false;
             }
             if (wasRunning)
             {

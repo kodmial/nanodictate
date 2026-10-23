@@ -890,10 +890,15 @@ public sealed class WasapiFaultInjectionTests
 
     private sealed class FakeSession
     {
+        public FakeSession(WasapiInterop.IAudioCaptureClient? capture = null)
+        {
+            Capture = capture ?? new FakeCaptureClient();
+        }
+
         public FakeEnumerator Enumerator { get; } = new();
         public FakeDevice Device { get; } = new();
         public FakeAudioClient Client { get; } = new();
-        public FakeCaptureClient Capture { get; } = new();
+        public WasapiInterop.IAudioCaptureClient Capture { get; }
     }
 
     private sealed class FakeEnumerator : WasapiInterop.IMMDeviceEnumerator
@@ -1004,6 +1009,86 @@ public sealed class WasapiFaultInjectionTests
         {
             framesInNextPacket = 0;
             return 0;
+        }
+    }
+
+    private sealed class ThrowingCaptureClient : WasapiInterop.IAudioCaptureClient
+    {
+        public int GetBuffer(
+            out IntPtr data, out uint framesToRead, out uint flags,
+            out ulong devicePosition, out ulong qpcPosition)
+            => throw new NotSupportedException();
+
+        public int ReleaseBuffer(uint framesRead) => 0;
+
+        public int GetNextPacketSize(out uint framesInNextPacket)
+            => throw new InvalidOperationException("injected capture-loop failure");
+    }
+
+    /// <summary>
+    /// Verifies that a capture-loop failure publishes the stopped state before
+    /// DeviceChanged subscribers run and leaves the source startable again.
+    /// </summary>
+    [Fact]
+    public void DeviceErrorClearsRunningBeforeDeviceChanged()
+    {
+        var sessions = new List<FakeSession>();
+        var released = new ConcurrentQueue<object>();
+        var notified = new ManualResetEventSlim(false);
+        Exception? changeError = null;
+        bool? runningInHandler = null;
+        Thread? failedWorker = null;
+        var attempts = 0;
+        WasapiCaptureSource source = null!;
+
+        Action acquire = () =>
+        {
+            var attempt = Interlocked.Increment(ref attempts);
+            var session = attempt == 1
+                ? new FakeSession(new ThrowingCaptureClient())
+                : new FakeSession();
+            lock (sessions)
+            {
+                sessions.Add(session);
+            }
+            if (attempt == 1)
+            {
+                failedWorker = Thread.CurrentThread;
+            }
+            source.SetTestStartupResources(
+                session.Enumerator, session.Device, session.Client, session.Capture);
+        };
+
+        source = new WasapiCaptureSource(acquire, released.Enqueue);
+        try
+        {
+            source.DeviceChanged += ex =>
+            {
+                changeError = ex;
+                runningInHandler = source.IsRunning;
+                notified.Set();
+            };
+
+            source.Start();
+            Assert.True(
+                notified.Wait(TimeSpan.FromSeconds(5)),
+                "DeviceChanged did not fire after the capture-loop failure");
+            Assert.False(runningInHandler);
+            Assert.IsType<InvalidOperationException>(changeError);
+            Assert.False(source.IsRunning);
+            Assert.True(
+                failedWorker?.Join(TimeSpan.FromSeconds(5)) ?? false,
+                "failed capture worker did not exit");
+
+            // Once the failed worker has exited, a new capture can start.
+            source.Start();
+            Assert.True(source.IsRunning);
+            source.Stop();
+        }
+        finally
+        {
+            source.Dispose();
+            failedWorker?.Join(TimeSpan.FromSeconds(5));
         }
     }
 
