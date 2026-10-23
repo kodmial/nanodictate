@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.45] - 2026-10-23
+
+
+
+### Fixed
+
+* P1 Windows: correct WASAPI COM ownership and bounded microphone teardown ([53cfc15](https://github.com/kodmial/nanodictate/commit/53cfc152888631f224e6e94c649275e4ff244dfe))
+
 ## [0.1.44] - 2026-10-22
 
 
@@ -644,7 +652,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS TCC grants (Microphone/Accessibility) across rebuilds.
 - `nanodictate --version` / `-v` prints the current version.
 
-[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.44...HEAD
+[Unreleased]: https://github.com/kodmial/nanodictate/compare/v0.1.45...HEAD
+[0.1.45]: https://github.com/kodmial/nanodictate/compare/v0.1.44...v0.1.45
 [0.1.44]: https://github.com/kodmial/nanodictate/compare/v0.1.43...v0.1.44
 [0.1.43]: https://github.com/kodmial/nanodictate/compare/v0.1.42...v0.1.43
 [0.1.42]: https://github.com/kodmial/nanodictate/compare/v0.1.41...v0.1.42
