@@ -39,6 +39,11 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
     private bool _disposed;
     private long _discontinuityCount;
 
+    // Session identifier incremented on each successful Start.
+    // Used to correlate DeviceChanged notifications with their originating session.
+    // Using Interlocked for thread-safe access since volatile doesn't support 64-bit types.
+    private long _sessionId;
+
     // COM objects owned exclusively by the capture worker thread.
     // Created in CaptureLoop, released in CaptureLoop finally block.
     private object? _enumerator;
@@ -132,7 +137,14 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
 
     public event Action<CapturedBlock>? BlockAvailable;
 
-    public event Action<Exception>? DeviceChanged;
+    public event Action<ulong, Exception>? DeviceChanged;
+
+    /// <summary>
+    /// Monotonically increasing session identifier. Incremented on each
+    /// successful <see cref="Start"/>. Used to correlate DeviceChanged
+    /// notifications with the session that generated them.
+    /// </summary>
+    public ulong SessionId => (ulong)Interlocked.Read(ref _sessionId);
 
     public void Start()
     {
@@ -216,6 +228,9 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
                 _startError = null;
                 throw error;
             }
+
+            // Increment session ID on successful start.
+            Interlocked.Increment(ref _sessionId);
         }
     }
 
@@ -331,6 +346,7 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
         Exception? deviceError = null;
         bool startSucceeded = false;
         AudioFormat format = AudioFormat.DefaultDevice;
+        ulong sessionId = 0;
 
         try
         {
@@ -341,6 +357,7 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
             {
                 format = _format;
                 startSucceeded = true;
+                sessionId = (ulong)Interlocked.Read(ref _sessionId);
             }
         }
         catch (Exception ex)
@@ -476,7 +493,7 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
             }
             if (wasRunning)
             {
-                DeviceChanged?.Invoke(deviceError);
+                DeviceChanged?.Invoke(sessionId, deviceError);
             }
         }
     }
@@ -700,16 +717,18 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
                 return;
             }
             bool running;
+            ulong sessionId;
             lock (_owner._gate)
             {
                 running = _owner._running;
+                sessionId = _owner.SessionId;
             }
             if (!running)
             {
                 return;
             }
             var error = new NanoException(-1, "Windows default capture device changed");
-            ThreadPool.QueueUserWorkItem(_ => _owner.DeviceChanged?.Invoke(error));
+            ThreadPool.QueueUserWorkItem(_ => _owner.DeviceChanged?.Invoke(sessionId, error));
         }
 
         public void OnPropertyValueChanged(string deviceId, Guid key) { }

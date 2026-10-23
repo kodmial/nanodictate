@@ -27,6 +27,11 @@ public sealed class DictationCaptureService : IDisposable
     private bool _disposed;
     private Exception? _deviceError;
 
+    // Tracks the capture source session ID at the time the source was
+    // successfully started. Used to ignore stale DeviceChanged notifications
+    // from a previous session that arrive after a new session has begun.
+    private ulong _sourceSessionId;
+
     public DictationCaptureService(IAudioCaptureSource source)
     {
         _source = source ?? throw new ArgumentNullException(nameof(source));
@@ -88,6 +93,11 @@ public sealed class DictationCaptureService : IDisposable
             _pipeline.FailStart();
             throw;
         }
+
+        // Record the source session ID at which the source successfully started.
+        // Any DeviceChanged notification with a different session ID is stale
+        // and will be ignored in OnDeviceChanged.
+        _sourceSessionId = _source.SessionId;
     }
 
     /// <summary>
@@ -155,8 +165,16 @@ public sealed class DictationCaptureService : IDisposable
         _pipeline.IngestDeviceBlock(block);
     }
 
-    private void OnDeviceChanged(Exception error)
+    private void OnDeviceChanged(ulong sessionId, Exception error)
     {
+        // Ignore stale DeviceChanged notifications from a previous session.
+        // If the source session ID has advanced since the source started,
+        // this error belongs to an older session and must not abort the current one.
+        if (sessionId != _sourceSessionId)
+        {
+            return;
+        }
+
         lock (_gate)
         {
             _deviceError = error;

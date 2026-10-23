@@ -474,7 +474,7 @@ public sealed class WasapiOwnershipAndTeardownTests
 
         var deviceChanged = false;
         Exception? changeError = null;
-        source.DeviceChanged += ex =>
+        source.DeviceChanged += (_, ex) =>
         {
             changeError = ex;
             deviceChanged = true;
@@ -1064,7 +1064,7 @@ public sealed class WasapiFaultInjectionTests
         source = new WasapiCaptureSource(acquire, released.Enqueue);
         try
         {
-            source.DeviceChanged += ex =>
+            source.DeviceChanged += (_, ex) =>
             {
                 changeError = ex;
                 runningInHandler = source.IsRunning;
@@ -1135,5 +1135,332 @@ public sealed class WasapiFaultInjectionTests
 
         workerShouldExit.Set();
         workerThread?.Join(TimeSpan.FromSeconds(5));
+    }
+
+    /// <summary>
+    /// Verifies that a stale DeviceChanged notification from an old worker
+    /// cannot abort a newer, independently restarted capture session.
+    ///
+    /// This test models the race where:
+    /// 1. Session A starts, then fails with a device error (capture loop exception)
+    /// 2. Session A's worker cleans up (ReleaseOnWorkerThread) and clears _worker/_running
+    /// 3. Session A's DeviceChanged notification is DELAYED (paused in the event handler)
+    /// 4. Session B starts as a distinct later capture session (from main test thread)
+    /// 5. Session A's delayed DeviceChanged is released
+    /// 6. Session B must remain live and not be aborted by A's stale notification
+    ///
+    /// Uses the production CaptureLoop with a ThrowingCaptureClient to trigger
+    /// a capture-loop failure, which causes DeviceChanged to fire on the worker thread
+    /// after cleanup. The test pauses in the DeviceChanged handler to control timing.
+    /// </summary>
+    [Fact]
+    public void StaleDeviceChangedDoesNotAbortNewerSession()
+    {
+        // Barriers to control the exact interleaving:
+        // - aInHandler: Session A's DeviceChanged handler has been entered (worker paused)
+        // - bStarted: Session B has successfully started.
+        // - releaseA: Signal to release Session A's paused handler.
+        var aInHandler = new ManualResetEventSlim(false);
+        var bStarted = new ManualResetEventSlim(false);
+        var releaseA = new ManualResetEventSlim(false);
+
+        Thread? aWorker = null;
+        Thread? bWorker = null;
+        Exception? aDeviceError = null;
+        Exception? bDeviceError = null;
+        bool? bWasAborted = null;
+        var attempts = 0;
+        var sessions = new List<FakeSession>();
+        var released = new ConcurrentQueue<object>();
+
+        WasapiCaptureSource source = null!;
+
+        // Runs inside the production CaptureLoop. The first attempt installs
+        // a ThrowingCaptureClient that fails on GetNextPacketSize, triggering
+        // the capture-loop error path. The second attempt uses a normal session.
+        Action acquire = () =>
+        {
+            var attempt = Interlocked.Increment(ref attempts);
+            var session = attempt == 1
+                ? new FakeSession(new ThrowingCaptureClient())
+                : new FakeSession();
+            lock (sessions)
+            {
+                sessions.Add(session);
+            }
+            if (attempt == 1)
+            {
+                aWorker = Thread.CurrentThread;
+            }
+            else
+            {
+                bWorker = Thread.CurrentThread;
+                bStarted.Set(); // Signal that Session B's acquire completed
+            }
+            source.SetTestStartupResources(
+                session.Enumerator, session.Device, session.Client, session.Capture);
+        };
+
+        source = new WasapiCaptureSource(acquire, released.Enqueue);
+        try
+        {
+            source.DeviceChanged += (_, ex) =>
+            {
+                var currentAttempt = Volatile.Read(ref attempts);
+                if (currentAttempt == 1)
+                {
+                    // Session A's DeviceChanged - PAUSE HERE on the worker thread
+                    aDeviceError = ex;
+                    aInHandler.Set(); // Signal that A's handler is paused
+                    releaseA.Wait();   // Wait for test to release
+                }
+                else
+                {
+                    // Session B's DeviceChanged - this should NOT happen
+                    bDeviceError = ex;
+                    bWasAborted = true;
+                }
+            };
+
+            // Start Session A
+            source.Start();
+            Assert.True(source.IsRunning);
+
+            // Wait for Session A to hit the error, complete cleanup,
+            // and enter the DeviceChanged handler (paused).
+            Assert.True(aInHandler.Wait(TimeSpan.FromSeconds(5)),
+                "Session A did not reach DeviceChanged handler pause point");
+
+            // At this point:
+            // - Session A's worker has cleaned up (ReleaseOnWorkerThread called in finally)
+            // - _running = false, _worker = null (cleared in CaptureLoop after cleanup)
+            // - Session A's DeviceChanged handler is PAUSED on the worker thread
+            // - The source is now startable again (_worker is null)
+
+            // Start Session B (new capture session) from the MAIN test thread
+            source.Start();
+            Assert.True(source.IsRunning);
+
+            // Wait for Session B to signal it started successfully
+            Assert.True(bStarted.Wait(TimeSpan.FromSeconds(5)),
+                "Session B did not start");
+
+            // Now release Session A's stale DeviceChanged notification
+            releaseA.Set();
+
+            // Give some time for any potential cross-talk
+            Thread.Sleep(100);
+
+            // Verify Session B is still running and was NOT aborted
+            Assert.True(source.IsRunning, "Session B should still be running after stale DeviceChanged");
+            Assert.Null(bDeviceError);
+            Assert.False(bWasAborted ?? false, "Session B should not have been aborted");
+
+            // Clean up Session B
+            source.Stop();
+            Assert.False(source.IsRunning);
+        }
+        finally
+        {
+            // Ensure barriers are released to avoid hanging threads
+            releaseA.Set();
+            source.Dispose();
+            aWorker?.Join(TimeSpan.FromSeconds(5));
+            bWorker?.Join(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    /// <summary>
+    /// Control test: Verifies that when there is NO newer session,
+    /// the DeviceChanged from a failed session is properly delivered
+    /// and the source is left in a clean, reusable state.
+    /// </summary>
+    [Fact]
+    public void DeviceChangedWithoutNewSessionIsDeliveredAndCleansUp()
+    {
+        var aInHandler = new ManualResetEventSlim(false);
+        var releaseA = new ManualResetEventSlim(false);
+        Thread? aWorker = null;
+        Exception? aDeviceError = null;
+        var attempts = 0;
+        var sessions = new List<FakeSession>();
+        var released = new ConcurrentQueue<object>();
+
+        WasapiCaptureSource source = null!;
+
+        Action acquire = () =>
+        {
+            var attempt = Interlocked.Increment(ref attempts);
+            var session = new FakeSession(new ThrowingCaptureClient());
+            lock (sessions)
+            {
+                sessions.Add(session);
+            }
+            aWorker = Thread.CurrentThread;
+            source.SetTestStartupResources(
+                session.Enumerator, session.Device, session.Client, session.Capture);
+        };
+
+        source = new WasapiCaptureSource(acquire, released.Enqueue);
+        try
+        {
+            source.DeviceChanged += (_, ex) =>
+            {
+                aDeviceError = ex;
+                aInHandler.Set();
+                releaseA.Wait();
+            };
+
+            source.Start();
+            Assert.True(source.IsRunning);
+
+            Assert.True(aInHandler.Wait(TimeSpan.FromSeconds(5)));
+
+            // No new session started - release the DeviceChanged
+            releaseA.Set();
+
+            // Wait for worker to exit
+            Assert.True(aWorker?.Join(TimeSpan.FromSeconds(5)) ?? false);
+
+            // Source should be clean and reusable
+            Assert.False(source.IsRunning);
+            Assert.NotNull(aDeviceError);
+            Assert.IsType<InvalidOperationException>(aDeviceError);
+            Assert.True(source.LastStopClean);
+        }
+        finally
+        {
+            releaseA.Set();
+            source.Dispose();
+            aWorker?.Join(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    /// <summary>
+    /// Verifies that a stale DeviceChanged notification from an old session
+    /// cannot abort a newer DictationCaptureService session.
+    ///
+    /// This test models the exact bug described in the issue:
+    /// 1. Session A (DictationCaptureService) starts, then fails with a device error
+    /// 2. Session A's WasapiCaptureSource worker cleans up and pauses in DeviceChanged handler
+    /// 3. Session B (new DictationCaptureService session) starts
+    /// 4. Session A's stale DeviceChanged is released
+    /// 5. Session B must remain live and not be aborted by A's stale notification
+    ///
+    /// The bug: DictationCaptureService.OnDeviceChanged calls _source.Stop() and
+    /// _pipeline.Abort() without verifying the error belongs to the current generation.
+    /// </summary>
+    [Fact]
+    public void DictationServiceStaleDeviceChangedDoesNotAbortNewerSession()
+    {
+        // Barriers to control the exact interleaving:
+        var aInHandler = new ManualResetEventSlim(false);
+        var releaseA = new ManualResetEventSlim(false);
+
+        Thread? aWorker = null;
+        Thread? bWorker = null;
+        var attempts = 0;
+        var sessions = new List<FakeSession>();
+        var released = new ConcurrentQueue<object>();
+        Exception? serviceDeviceError = null;
+        bool? serviceWasAborted = null;
+        ulong? generationAtAbort = null;
+
+        WasapiCaptureSource source = null!;
+
+        Action acquire = () =>
+        {
+            var attempt = Interlocked.Increment(ref attempts);
+            var session = attempt == 1
+                ? new FakeSession(new ThrowingCaptureClient())
+                : new FakeSession();
+            lock (sessions)
+            {
+                sessions.Add(session);
+            }
+            if (attempt == 1)
+            {
+                aWorker = Thread.CurrentThread;
+            }
+            else
+            {
+                bWorker = Thread.CurrentThread;
+            }
+            source.SetTestStartupResources(
+                session.Enumerator, session.Device, session.Client, session.Capture);
+        };
+
+        source = new WasapiCaptureSource(acquire, released.Enqueue);
+
+        // Subscribe to source.DeviceChanged FIRST to intercept and pause
+        // before DictationCaptureService.OnDeviceChanged runs.
+        source.DeviceChanged += (_, ex) =>
+        {
+            var currentAttempt = Volatile.Read(ref attempts);
+            if (currentAttempt == 1)
+            {
+                // Session A's DeviceChanged - PAUSE HERE on the worker thread
+                aInHandler.Set(); // Signal that A's handler is paused
+                releaseA.Wait();   // Wait for test to release
+            }
+        };
+
+        using var service = new DictationCaptureService(source);
+
+        // Track service-level DeviceChanged (which calls Stop/Abort)
+        service.DeviceChanged += ex =>
+        {
+            serviceDeviceError = ex;
+            serviceWasAborted = true;
+            generationAtAbort = service.Generation;
+        };
+
+        try
+        {
+            // Start Session A
+            service.Start();
+            Assert.True(service.IsRunning);
+
+            // Wait for Session A to hit the error, complete cleanup,
+            // and enter the DeviceChanged handler (paused).
+            Assert.True(aInHandler.Wait(TimeSpan.FromSeconds(5)),
+                "Session A did not reach DeviceChanged handler pause point");
+
+            // At this point:
+            // - Session A's WasapiCaptureSource worker has cleaned up
+            // - _running = false, _worker = null (cleared in CaptureLoop after cleanup)
+            // - Session A's DeviceChanged handler is PAUSED on the worker thread
+            // - The WasapiCaptureSource is now startable again
+            // - DictationCaptureService.OnDeviceChanged has NOT yet run (waiting behind our handler)
+
+            // Start Session B (new dictation session)
+            var genBeforeB = service.Generation;
+            service.Start();
+            Assert.True(service.IsRunning);
+            Assert.True(service.Generation > genBeforeB, "Generation should have incremented for new session");
+
+            // Session B is running (IsRunning = true). The fake capture client doesn't
+            // produce data so CaptureReady won't fire, but the session is live.
+            // Now release Session A's stale DeviceChanged notification.
+            // This will allow our handler to exit, then DictationCaptureService.OnDeviceChanged runs.
+            releaseA.Set();
+
+            // Give time for the stale notification to propagate through service handler
+            Thread.Sleep(200);
+
+            // Verify Session B is still running and was NOT aborted
+            Assert.True(service.IsRunning, "Session B should still be running after stale DeviceChanged");
+            Assert.False(serviceWasAborted ?? false, "Session B should not have been aborted by stale DeviceChanged");
+            Assert.Null(serviceDeviceError);
+            // Generation should be unchanged (still Session B's generation)
+            Assert.Equal(genBeforeB + 1, service.Generation);
+        }
+        finally
+        {
+            releaseA.Set();
+            service.Dispose();
+            aWorker?.Join(TimeSpan.FromSeconds(5));
+            bWorker?.Join(TimeSpan.FromSeconds(5));
+        }
     }
 }

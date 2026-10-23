@@ -16,6 +16,7 @@ public sealed class SyntheticCaptureSource : IAudioCaptureSource
     private bool _running;
     private bool _disposed;
     private bool _failNextStart;
+    private long _sessionId;
 
     public SyntheticCaptureSource(AudioFormat format, int framesPerBlock = 480)
     {
@@ -35,9 +36,15 @@ public sealed class SyntheticCaptureSource : IAudioCaptureSource
         get { lock (_gate) { return _running; } }
     }
 
+    /// <summary>
+    /// Monotonically increasing session identifier. Incremented on each
+    /// successful <see cref="Start"/>.
+    /// </summary>
+    public ulong SessionId => (ulong)Interlocked.Read(ref _sessionId);
+
     public event Action<CapturedBlock>? BlockAvailable;
 
-    public event Action<Exception>? DeviceChanged;
+    public event Action<ulong, Exception>? DeviceChanged;
 
     /// <summary>Queues one device-format block (interleaved Float32) for emission.</summary>
     public void EnqueueBlock(float[] interleavedFrames, int frameCount)
@@ -76,7 +83,7 @@ public sealed class SyntheticCaptureSource : IAudioCaptureSource
     /// <summary>Fires a device-change notification (device-change test).</summary>
     public void SimulateDeviceChange()
     {
-        DeviceChanged?.Invoke(new NanoException(-1, "synthetic device change"));
+        DeviceChanged?.Invoke(SessionId, new NanoException(-1, "synthetic device change"));
     }
 
     /// <summary>Number of scripted blocks still queued.</summary>
@@ -108,6 +115,7 @@ public sealed class SyntheticCaptureSource : IAudioCaptureSource
                 throw new NanoException(-1, "synthetic capture start failed");
             }
             _running = true;
+            Interlocked.Increment(ref _sessionId);
             _worker = new Thread(Worker) { IsBackground = true, Name = "nanodictate-synth-capture" };
             _worker.Start();
         }
