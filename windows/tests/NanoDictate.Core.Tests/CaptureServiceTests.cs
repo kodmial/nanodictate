@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using NanoDictate.Core;
 using Xunit;
 
@@ -746,49 +747,223 @@ public sealed class WasapiFaultInjectionTests
     internal static void AssertStartupFailureCleansUpAndLeavesSourceReusable()
     {
         var attempts = 0;
+        var sessions = new List<FakeSession>();
+        var released = new ConcurrentQueue<object>();
         var workerStarted = new ManualResetEventSlim(false);
-        Thread? failedWorkerThread = null;
+        Thread? acquireThread = null;
+        Thread? secondAcquireThread = null;
+        WasapiCaptureSource source = null!;
 
-        Action<ManualResetEventSlim> failOnceThenCapture = (startedEvent) =>
+        // Runs inside the production CaptureLoop. The first attempt installs
+        // the enumerator, device, and client, then fails before GetService
+        // (for example, IAudioClient.Initialize rejects the mix format), so
+        // the production startup catch and cleanup path execute.
+        Action acquire = () =>
         {
-            if (Interlocked.Increment(ref attempts) == 1)
+            var attempt = Interlocked.Increment(ref attempts);
+            var session = new FakeSession();
+            lock (sessions)
             {
-                failedWorkerThread = Thread.CurrentThread;
-                throw new InvalidOperationException("injected startup failure");
+                sessions.Add(session);
             }
 
-            startedEvent.Set();
+            if (attempt == 1)
+            {
+                acquireThread = Thread.CurrentThread;
+                source.SetTestStartupResources(
+                    session.Enumerator, session.Device, session.Client, null);
+                throw new InvalidOperationException("injected partial startup failure");
+            }
+
+            secondAcquireThread = Thread.CurrentThread;
+            source.SetTestStartupResources(
+                session.Enumerator, session.Device, session.Client, session.Capture);
             workerStarted.Set();
         };
 
-        WasapiCaptureSource source = null!;
-        source = new WasapiCaptureSource(failOnceThenCapture, () => source._cleanupComplete = true);
+        source = new WasapiCaptureSource(acquire, released.Enqueue);
         try
         {
             var error = Assert.Throws<InvalidOperationException>(() => source.Start());
-            Assert.Equal("injected startup failure", error.Message);
+            Assert.Equal("injected partial startup failure", error.Message);
             Assert.False(source.IsRunning);
             Assert.True(source.LastStopClean);
             Assert.True(source._cleanupComplete);
 
-            Assert.NotNull(failedWorkerThread);
+            Assert.Equal(1, Volatile.Read(ref attempts));
+            Assert.NotNull(acquireThread);
+            Assert.NotEqual(Environment.CurrentManagedThreadId, acquireThread!.ManagedThreadId);
+
+            // Partial COM state must be stopped, unregistered, and released
+            // on the same worker that acquired it, not on the Start caller.
+            var failed = sessions[0];
+            Assert.True(failed.Enumerator.Unregistered);
+            Assert.Equal(acquireThread.ManagedThreadId, failed.Enumerator.UnregisterThreadId);
+            Assert.True(failed.Client.Stopped);
+            Assert.Equal(acquireThread.ManagedThreadId, failed.Client.StopThreadId);
+
+            var releasedAfterFailure = released.ToArray();
+            Assert.Equal(3, releasedAfterFailure.Length);
+            Assert.Contains(failed.Enumerator, releasedAfterFailure);
+            Assert.Contains(failed.Device, releasedAfterFailure);
+            Assert.Contains(failed.Client, releasedAfterFailure);
+
             Assert.True(
-                failedWorkerThread!.Join(TimeSpan.FromSeconds(5)),
+                acquireThread.Join(TimeSpan.FromSeconds(5)),
                 "failed startup worker did not exit");
-            Assert.False(failedWorkerThread.IsAlive);
+            Assert.False(acquireThread.IsAlive);
 
             source.Start();
             Assert.True(source.IsRunning);
             Assert.True(workerStarted.Wait(TimeSpan.FromSeconds(5)));
+            Assert.Equal(2, Volatile.Read(ref attempts));
+            Assert.NotNull(secondAcquireThread);
+            Assert.NotEqual(
+                acquireThread.ManagedThreadId,
+                secondAcquireThread!.ManagedThreadId);
 
             source.Stop();
             Assert.False(source.IsRunning);
             Assert.True(source.LastStopClean);
+
+            var succeeded = sessions[1];
+            Assert.True(succeeded.Enumerator.Unregistered);
+            Assert.Equal(
+                secondAcquireThread.ManagedThreadId,
+                succeeded.Enumerator.UnregisterThreadId);
+            Assert.True(succeeded.Client.Stopped);
+            Assert.Equal(secondAcquireThread.ManagedThreadId, succeeded.Client.StopThreadId);
+
+            var releasedAfterSuccess = released.ToArray();
+            Assert.Equal(7, releasedAfterSuccess.Length);
+            Assert.Contains(succeeded.Enumerator, releasedAfterSuccess);
+            Assert.Contains(succeeded.Device, releasedAfterSuccess);
+            Assert.Contains(succeeded.Client, releasedAfterSuccess);
+            Assert.Contains(succeeded.Capture, releasedAfterSuccess);
         }
         finally
         {
             source.Dispose();
-            failedWorkerThread?.Join(TimeSpan.FromSeconds(5));
+            acquireThread?.Join(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    private sealed class FakeSession
+    {
+        public FakeEnumerator Enumerator { get; } = new();
+        public FakeDevice Device { get; } = new();
+        public FakeAudioClient Client { get; } = new();
+        public FakeCaptureClient Capture { get; } = new();
+    }
+
+    private sealed class FakeEnumerator : WasapiInterop.IMMDeviceEnumerator
+    {
+        public bool Unregistered { get; private set; }
+        public int UnregisterThreadId { get; private set; }
+
+        public int EnumAudioEndpoints(
+            WasapiInterop.DataFlow dataFlow, uint stateMask, out object devices)
+            => throw new NotSupportedException();
+
+        public int GetDefaultAudioEndpoint(
+            WasapiInterop.DataFlow dataFlow, WasapiInterop.Role role, out object device)
+            => throw new NotSupportedException();
+
+        public int GetDevice(string id, out object device)
+            => throw new NotSupportedException();
+
+        public int RegisterEndpointNotificationCallback(
+            WasapiInterop.IMMNotificationClient client)
+            => throw new NotSupportedException();
+
+        public int UnregisterEndpointNotificationCallback(
+            WasapiInterop.IMMNotificationClient client)
+        {
+            Unregistered = true;
+            UnregisterThreadId = Environment.CurrentManagedThreadId;
+            return 0;
+        }
+    }
+
+    private sealed class FakeDevice : WasapiInterop.IMMDevice
+    {
+        public int Activate(
+            ref Guid iid, uint clsCtx, IntPtr activationParams, out object instance)
+            => throw new NotSupportedException();
+
+        public int OpenPropertyStore(uint access, out object properties)
+            => throw new NotSupportedException();
+
+        public int GetId(out string id)
+            => throw new NotSupportedException();
+
+        public int GetState(out uint state)
+            => throw new NotSupportedException();
+    }
+
+    private sealed class FakeAudioClient : WasapiInterop.IAudioClient
+    {
+        public bool Stopped { get; private set; }
+        public int StopThreadId { get; private set; }
+
+        public int Initialize(
+            uint shareMode, uint streamFlags, long bufferDurationHns,
+            long periodicityHns, IntPtr format, IntPtr audioSessionGuid)
+            => throw new NotSupportedException();
+
+        public int GetBufferSize(out uint numBufferFrames)
+            => throw new NotSupportedException();
+
+        public int GetStreamLatency(out long latencyHns)
+            => throw new NotSupportedException();
+
+        public int GetCurrentPadding(out uint numPaddingFrames)
+            => throw new NotSupportedException();
+
+        public int IsFormatSupported(
+            uint shareMode, IntPtr format, out IntPtr closestMatch)
+            => throw new NotSupportedException();
+
+        public int GetMixFormat(out IntPtr deviceFormat)
+            => throw new NotSupportedException();
+
+        public int GetDevicePeriod(
+            out long defaultPeriodHns, out long minimumPeriodHns)
+            => throw new NotSupportedException();
+
+        public int Start()
+            => throw new NotSupportedException();
+
+        public int Stop()
+        {
+            Stopped = true;
+            StopThreadId = Environment.CurrentManagedThreadId;
+            return 0;
+        }
+
+        public int Reset()
+            => throw new NotSupportedException();
+
+        public int SetEventHandle(IntPtr eventHandle)
+            => throw new NotSupportedException();
+
+        public int GetService(ref Guid interfaceId, out object instance)
+            => throw new NotSupportedException();
+    }
+
+    private sealed class FakeCaptureClient : WasapiInterop.IAudioCaptureClient
+    {
+        public int GetBuffer(
+            out IntPtr data, out uint framesToRead, out uint flags,
+            out ulong devicePosition, out ulong qpcPosition)
+            => throw new NotSupportedException();
+
+        public int ReleaseBuffer(uint framesRead) => 0;
+
+        public int GetNextPacketSize(out uint framesInNextPacket)
+        {
+            framesInNextPacket = 0;
+            return 0;
         }
     }
 

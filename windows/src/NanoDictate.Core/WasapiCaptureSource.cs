@@ -63,6 +63,11 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
     // Test callback to signal cleanup completion from the test capture loop.
     private Action? _testCleanupCompleteCallback;
 
+    // Test seams for startup fault injection through the production capture
+    // loop and cleanup path. Null in production.
+    private readonly Action? _testStartupAcquireOverride;
+    private readonly Action<object>? _testReleaseComOverride;
+
     // Set to true when the worker has completed cleanup (set by CaptureLoop finally
     // or by test cleanup callback). Internal for test access.
     internal bool _cleanupComplete;
@@ -83,6 +88,18 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
         _notifier = new DeviceChangeForwarder(this);
         _testCaptureLoopOverride = testCaptureLoopOverride;
         _testCleanupCompleteCallback = testCleanupCompleteCallback;
+        _isTestMode = true;
+    }
+
+    // Internal test constructor for startup fault injection through the
+    // production CaptureLoop. The acquire action replaces WASAPI acquisition
+    // and may throw after installing fake COM resources; the release override
+    // stands in for Marshal.ReleaseComObject so cleanup runs with managed fakes.
+    internal WasapiCaptureSource(Action testStartupAcquireOverride, Action<object>? testReleaseComOverride = null)
+    {
+        _notifier = new DeviceChangeForwarder(this);
+        _testStartupAcquireOverride = testStartupAcquireOverride;
+        _testReleaseComOverride = testReleaseComOverride;
         _isTestMode = true;
     }
 
@@ -326,13 +343,13 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
             return;
         }
 
-        if (_client is null || _capture is null)
-        {
-            return;
-        }
-
         try
         {
+            if (_client is null || _capture is null)
+            {
+                return;
+            }
+
             var interleavedScratch = new float[4800 * Math.Max(1, format.Channels)];
             while (true)
             {
@@ -442,6 +459,12 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
 
     private void OpenClientOnWorkerThread()
     {
+        if (_testStartupAcquireOverride is not null)
+        {
+            _testStartupAcquireOverride();
+            return;
+        }
+
         Interlocked.Exchange(ref _discontinuityCount, 0);
         var clsid = ClsidMmDeviceEnumerator;
         var iid = IidIMMDeviceEnumerator;
@@ -483,6 +506,20 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
             "get capture client");
         _capture = (IAudioCaptureClient)captureObj;
         ThrowOnHResult(_client.Start(), "start audio client");
+    }
+
+    // Installs fake COM resources for startup fault-injection tests. Only
+    // valid together with the test startup acquire override.
+    internal void SetTestStartupResources(
+        object enumerator,
+        object device,
+        IAudioClient client,
+        IAudioCaptureClient? capture)
+    {
+        _enumerator = enumerator;
+        _device = device;
+        _client = client;
+        _capture = capture;
     }
 
     private void CleanupFailedStartup(Exception ex)
@@ -550,8 +587,13 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
     /// guard keeps the Windows-only <c>ReleaseComObject</c> unreachable on
     /// other platforms (release paths run on every OS).
     /// </summary>
-    private static void ReleaseCom(object instance)
+    private void ReleaseCom(object instance)
     {
+        if (_testReleaseComOverride is not null)
+        {
+            _testReleaseComOverride(instance);
+            return;
+        }
         if (OperatingSystem.IsWindows())
         {
             Marshal.ReleaseComObject(instance);
