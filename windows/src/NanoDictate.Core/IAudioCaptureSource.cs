@@ -23,6 +23,13 @@ public interface IAudioCaptureSource : IDisposable
     bool IsRunning { get; }
 
     /// <summary>
+    /// Monotonically increasing session identifier. Advances for each capture
+    /// session and is used to correlate DeviceChanged notifications with the
+    /// session that generated them.
+    /// </summary>
+    ulong SessionId { get; }
+
+    /// <summary>
     /// Fired on the capture thread for every captured block, starting
     /// with the first device packet (never dropped). Handlers must be
     /// light: copy or ingest synchronously, never block.
@@ -33,8 +40,9 @@ public interface IAudioCaptureSource : IDisposable
     /// Fired when the default device changed mid-capture. The pipeline
     /// must stop the session: continuing on the old format would yield
     /// silence or sample desync (mirrors the macOS device-change rule).
+    /// The session ID identifies which capture session the notification belongs to.
     /// </summary>
-    event Action<Exception>? DeviceChanged;
+    event Action<ulong, Exception>? DeviceChanged;
 
     /// <summary>
     /// Starts OS capture. Throws <see cref="NanoException"/> on start

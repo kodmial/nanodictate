@@ -155,8 +155,17 @@ public sealed class DictationCaptureService : IDisposable
         _pipeline.IngestDeviceBlock(block);
     }
 
-    private void OnDeviceChanged(Exception error)
+    private void OnDeviceChanged(ulong sessionId, Exception error)
     {
+        // Ignore stale DeviceChanged notifications from a previous session.
+        // The source's current session ID is authoritative: a notification
+        // from an older worker must not stop or abort a newer session. The
+        // failed session still reports its own error while it is current.
+        if (sessionId != _source.SessionId)
+        {
+            return;
+        }
+
         lock (_gate)
         {
             _deviceError = error;

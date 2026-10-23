@@ -40,8 +40,9 @@ public sealed class HostAppTests
     {
         public AudioFormat Format => new(16000, 1, 32, true);
         public bool IsRunning => false;
+        public ulong SessionId => 0;
         public event Action<CapturedBlock>? BlockAvailable;
-        public event Action<Exception>? DeviceChanged;
+        public event Action<ulong, Exception>? DeviceChanged;
         public void Start() { }
         public void Stop() { }
         public void Dispose() { }

@@ -647,11 +647,13 @@ public sealed class HudContractTests
 
         public bool IsRunning { get; private set; }
 
+        public ulong SessionId => 0;
+
         public event Action<CapturedBlock>? BlockAvailable;
 
-        public event Action<Exception>? DeviceChanged;
+        public event Action<ulong, Exception>? DeviceChanged;
 
-        public void RaiseDeviceChanged(Exception error) => DeviceChanged?.Invoke(error);
+        public void RaiseDeviceChanged(Exception error) => DeviceChanged?.Invoke(0, error);
 
         public void Start()
         {
