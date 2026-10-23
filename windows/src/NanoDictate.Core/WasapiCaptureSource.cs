@@ -34,24 +34,73 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
     private readonly object _gate = new();
     private readonly DeviceChangeForwarder _notifier;
     private AudioFormat _format = AudioFormat.DefaultDevice;
-    private bool _formatResolved;
     private Thread? _worker;
     private volatile bool _running;
     private bool _disposed;
     private long _discontinuityCount;
 
-    // COM objects owned by the capture thread; released on stop.
+    // COM objects owned exclusively by the capture worker thread.
+    // Created in CaptureLoop, released in CaptureLoop finally block.
     private object? _enumerator;
     private object? _device;
     private IAudioClient? _client;
     private IAudioCaptureClient? _capture;
-    // Set when Stop times out while the worker still uses the COM objects;
-    // the worker releases them on exit and Start is blocked until then.
-    private bool _releaseDeferred;
+
+    // Synchronization for Start/Stop coordination.
+    private readonly ManualResetEventSlim _startedEvent = new(false);
+    private readonly ManualResetEventSlim _stoppedEvent = new(false);
+    private Exception? _startError;
+    private bool _stopRequested;
+
+    // Result of the last Stop/Dispose: true = clean shutdown, false = incomplete (worker timed out).
+    private volatile bool _lastStopClean = true;
+
+    // Test seam: allows injecting a custom capture loop for deterministic
+    // fault injection (e.g., simulating a stalled worker). Null in production.
+    // The capture loop receives the startedEvent to signal startup completion.
+    private Action<ManualResetEventSlim>? _testCaptureLoopOverride;
+
+    // Test callback to signal cleanup completion from the test capture loop.
+    private Action? _testCleanupCompleteCallback;
+
+    // Test seams for startup fault injection through the production capture
+    // loop and cleanup path. Null in production.
+    private readonly Action? _testStartupAcquireOverride;
+    private readonly Action<object>? _testReleaseComOverride;
+
+    // Set to true when the worker has completed cleanup (set by CaptureLoop finally
+    // or by test cleanup callback). Internal for test access.
+    internal bool _cleanupComplete;
+
+    // True when constructed via the test constructor; bypasses platform check.
+    private readonly bool _isTestMode;
 
     public WasapiCaptureSource()
     {
         _notifier = new DeviceChangeForwarder(this);
+    }
+
+    // Internal test constructor for fault injection.
+    // The captureLoop receives the startedEvent to signal when startup is complete.
+    // The cleanupCallback is invoked when the test capture loop completes cleanup.
+    internal WasapiCaptureSource(Action<ManualResetEventSlim> testCaptureLoopOverride, Action? testCleanupCompleteCallback = null)
+    {
+        _notifier = new DeviceChangeForwarder(this);
+        _testCaptureLoopOverride = testCaptureLoopOverride;
+        _testCleanupCompleteCallback = testCleanupCompleteCallback;
+        _isTestMode = true;
+    }
+
+    // Internal test constructor for startup fault injection through the
+    // production CaptureLoop. The acquire action replaces WASAPI acquisition
+    // and may throw after installing fake COM resources; the release override
+    // stands in for Marshal.ReleaseComObject so cleanup runs with managed fakes.
+    internal WasapiCaptureSource(Action testStartupAcquireOverride, Action<object>? testReleaseComOverride = null)
+    {
+        _notifier = new DeviceChangeForwarder(this);
+        _testStartupAcquireOverride = testStartupAcquireOverride;
+        _testReleaseComOverride = testReleaseComOverride;
+        _isTestMode = true;
     }
 
     public AudioFormat Format
@@ -70,97 +119,155 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
     /// </summary>
     public long DiscontinuityCount => Interlocked.Read(ref _discontinuityCount);
 
+    /// <summary>
+    /// Returns true if the last Stop or Dispose completed a clean shutdown
+    /// (WASAPI client stopped and all COM objects released). False indicates
+    /// the worker did not exit within the bounded wait; the OS stream may
+    /// still be active and COM objects unreleased. While the previous capture
+    /// worker is still alive, <see cref="Start"/> throws <see
+    /// cref="NanoException"/>; once that worker exits, a later <see
+    /// cref="Start"/> can be retried.
+    /// </summary>
+    public bool LastStopClean => _lastStopClean;
+
     public event Action<CapturedBlock>? BlockAvailable;
 
     public event Action<Exception>? DeviceChanged;
 
     public void Start()
     {
-        if (!OperatingSystem.IsWindows())
+        if (!_isTestMode && !OperatingSystem.IsWindows())
         {
             throw new PlatformNotSupportedException("WASAPI capture requires Windows.");
         }
         lock (_gate)
         {
             ThrowIfDisposed();
-            if (_releaseDeferred)
-            {
-                throw new NanoException(-1, "capture worker is still stopping");
-            }
             if (_running)
             {
                 return;
             }
-            try
+            if (_worker is not null && _worker.IsAlive)
             {
-                OpenClientLocked();
-            }
-            catch
-            {
-                ReleaseLocked();
-                throw;
+                throw new NanoException(-1, "capture worker is still stopping");
             }
             _running = true;
-            _worker = new Thread(CaptureLoop)
+            _stopRequested = false;
+            _cleanupComplete = false;
+            _startError = null;
+            _startedEvent.Reset();
+            _stoppedEvent.Reset();
+            _worker = new Thread(_testCaptureLoopOverride is not null
+                ? () =>
+                {
+                    try
+                    {
+                        _testCaptureLoopOverride!(_startedEvent);
+                    }
+                    catch (Exception ex)
+                    {
+                        CleanupFailedStartup(ex);
+                        _startedEvent.Set();
+                    }
+                    finally
+                    {
+                        _testCleanupCompleteCallback?.Invoke();
+                    }
+                }
+                : CaptureLoop)
             {
                 IsBackground = true,
                 Name = "nanodictate-wasapi-capture",
             };
             _worker.Start();
         }
+
+        // Wait for worker to signal startup completion or failure.
+        // This preserves synchronous start failure reporting.
+        if (!_startedEvent.Wait(TimeSpan.FromSeconds(10)))
+        {
+            // Startup timed out - request stop and wait for cleanup.
+            Thread? worker;
+            lock (_gate)
+            {
+                _stopRequested = true;
+                _running = false;
+                worker = _worker;
+            }
+            var joined = worker?.Join(TimeSpan.FromSeconds(5)) ?? true;
+            lock (_gate)
+            {
+                _lastStopClean = joined && _cleanupComplete;
+                if (joined)
+                {
+                    _worker = null;
+                    _stopRequested = false;
+                }
+            }
+            throw new NanoException(-1, "WASAPI capture startup timed out");
+        }
+
+        lock (_gate)
+        {
+            if (_startError is not null)
+            {
+                _running = false;
+                var error = _startError;
+                _startError = null;
+                throw error;
+            }
+        }
     }
 
     public void Stop()
     {
+        bool cleanShutdown;
+        lock (_gate)
+        {
+            if (!_running && _worker is null)
+            {
+                _lastStopClean = true;
+                return;
+            }
+            _stopRequested = true;
+            _running = false;
+        }
+
+        // Bounded wait for worker to exit and release COM objects.
         Thread? worker;
         lock (_gate)
         {
-            _running = false;
             worker = _worker;
-            if (worker is null)
+            if (worker is not null && ReferenceEquals(worker, Thread.CurrentThread))
             {
-                // No worker active: safe to release idempotently. A deferred
-                // release without a worker means the worker already exited,
-                // so complete the pending cleanup here.
-                if (_releaseDeferred)
+                // Keep _stopRequested set so the packet loop exits through its
+                // finally block. The CaptureLoop device-error callback runs
+                // after cleanup and can clear the reference.
+                if (_cleanupComplete)
                 {
-                    _releaseDeferred = false;
+                    _worker = null;
+                    _stopRequested = false;
+                    _lastStopClean = true;
                 }
-                ReleaseLocked();
+                else
+                {
+                    _lastStopClean = false;
+                }
                 return;
             }
-            // Block Start throughout the join window and retain the worker
-            // reference until the worker stops using the COM objects.
-            _releaseDeferred = true;
         }
-        if (!ReferenceEquals(worker, Thread.CurrentThread))
-        {
-            worker.Join(TimeSpan.FromSeconds(5));
-        }
+        cleanShutdown = worker is null || worker.Join(TimeSpan.FromSeconds(5));
+
         lock (_gate)
         {
-            // Only the owner of the current worker may change lifecycle state
-            // or release COM objects. If the worker already released and a new
-            // Start created a new session, _worker no longer matches and the
-            // new session must be left untouched.
-            if (!ReferenceEquals(_worker, worker))
+            _lastStopClean = cleanShutdown && _cleanupComplete;
+            if (cleanShutdown)
             {
-                return;
-            }
-            if (!worker.IsAlive)
-            {
-                // Worker terminated: this thread owns the COM cleanup. The
-                // worker's finally block skips cleanup once the flag is
-                // cleared, so repeated stops cannot double-release while the
-                // worker is active.
                 _worker = null;
-                _releaseDeferred = false;
-                ReleaseLocked();
+                _stopRequested = false;
             }
-            // Else the join timed out: keep _worker retained and
-            // _releaseDeferred set so the worker releases the COM objects on
-            // exit, repeated stops rejoin the same worker, and Start stays
-            // blocked until cleanup completes.
+            // If not clean, _worker remains set and _stopRequested stays true,
+            // blocking a new Start until the worker finally exits.
         }
     }
 
@@ -219,79 +326,65 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
         }
     }
 
-    private void OpenClientLocked()
+    private void CaptureLoop()
     {
-        Interlocked.Exchange(ref _discontinuityCount, 0);
-        var clsid = ClsidMmDeviceEnumerator;
-        var iid = IidIMMDeviceEnumerator;
-        CoCreateInstance(ref clsid, null, ClsctxAll, ref iid, out _enumerator);
-        var enumIf = (IMMDeviceEnumerator)_enumerator;
-        ThrowOnHResult(
-            enumIf.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Console, out _device),
-            "get default capture endpoint");
-        ThrowOnHResult(
-            enumIf.RegisterEndpointNotificationCallback(_notifier),
-            "register device-change notifications");
+        Exception? deviceError = null;
+        bool startSucceeded = false;
+        AudioFormat format = AudioFormat.DefaultDevice;
 
-        var devIf = (IMMDevice)_device;
-        var audioIid = IidIAudioClient;
-        ThrowOnHResult(
-            devIf.Activate(ref audioIid, ClsctxAll, IntPtr.Zero, out var clientObj),
-            "activate audio client");
-        _client = (IAudioClient)clientObj;
-
-        ThrowOnHResult(_client.GetMixFormat(out var fmtPtr), "get mix format");
         try
         {
-            _format = ReadMixFormat(fmtPtr);
-            _formatResolved = true;
-            // 100 ms shared buffer (REFERENCE_TIME is 100 ns units);
-            // periodicity 0 lets the engine choose.
-            const long BufferDurationHns = 100 * 10_000;
-            ThrowOnHResult(
-                _client.Initialize(ShareModeShared, 0, BufferDurationHns, 0, fmtPtr, IntPtr.Zero),
-                "initialize audio client");
+            // All COM acquisition happens on this worker thread.
+            OpenClientOnWorkerThread();
+
+            lock (_gate)
+            {
+                format = _format;
+                startSucceeded = true;
+            }
+        }
+        catch (Exception ex)
+        {
+            CleanupFailedStartup(ex);
         }
         finally
         {
-            Marshal.FreeCoTaskMem(fmtPtr);
+            _startedEvent.Set();
         }
 
-        var captureIid = IidIAudioCaptureClient;
-        ThrowOnHResult(
-            _client.GetService(ref captureIid, out var captureObj),
-            "get capture client");
-        _capture = (IAudioCaptureClient)captureObj;
-        ThrowOnHResult(_client.Start(), "start audio client");
-    }
-
-    private void CaptureLoop()
-    {
-        var client = _client;
-        var capture = _capture;
-        AudioFormat format;
-        Exception? deviceError = null;
-        lock (_gate)
-        {
-            format = _format;
-        }
-        if (client is null || capture is null || !_formatResolved)
+        if (!startSucceeded)
         {
             return;
         }
+
         try
         {
-            var interleavedScratch = new float[4800 * Math.Max(1, format.Channels)];
-            while (_running)
+            if (_client is null || _capture is null)
             {
-                int hr = capture.GetNextPacketSize(out var packetFrames);
+                return;
+            }
+
+            var interleavedScratch = new float[4800 * Math.Max(1, format.Channels)];
+            while (true)
+            {
+                bool shouldStop;
+                lock (_gate)
+                {
+                    shouldStop = _stopRequested;
+                }
+                if (shouldStop)
+                {
+                    break;
+                }
+
+                int hr = _capture.GetNextPacketSize(out var packetFrames);
                 ThrowOnHResult(hr, "get next packet size");
                 if (packetFrames == 0)
                 {
                     Thread.Sleep(5);
                     continue;
                 }
-                hr = capture.GetBuffer(
+                hr = _capture.GetBuffer(
                     out var data, out var frames, out var flags,
                     out _, out _);
                 ThrowOnHResult(hr, "get capture buffer");
@@ -326,7 +419,7 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
                 }
                 finally
                 {
-                    var releaseHr = capture.ReleaseBuffer(frames);
+                    var releaseHr = _capture.ReleaseBuffer(frames);
                     if (releaseHr < 0)
                     {
                         var releaseError = new NanoException(
@@ -355,39 +448,113 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
         }
         finally
         {
-            // Complete a deferred Stop: release the COM objects the worker
-            // was still using when the join timed out. The flag is set before
-            // Stop waits, so a worker exit can never slip between the join
-            // timeout and the deferred mark.
-            lock (_gate)
-            {
-                if (_releaseDeferred)
-                {
-                    _releaseDeferred = false;
-                    if (ReferenceEquals(_worker, Thread.CurrentThread))
-                    {
-                        _worker = null;
-                    }
-                    ReleaseLocked();
-                }
-                else if (ReferenceEquals(_worker, Thread.CurrentThread))
-                {
-                    // Worker exited without a stop request: drop the stale
-                    // reference so a later Stop treats the source as stopped.
-                    _worker = null;
-                }
-            }
+            // Release all COM objects on the same worker thread that acquired them.
+            ReleaseOnWorkerThread();
+            _cleanupComplete = true;
+            _stoppedEvent.Set();
         }
+
         // Notify after cleanup so a subscriber can restart immediately, and
         // only while capture was active: failures surfacing after Stop or
         // Dispose began are shutdown races, not device failures.
-        if (deviceError is not null && _running)
+        if (deviceError is not null)
         {
-            DeviceChanged?.Invoke(deviceError);
+            bool wasRunning;
+            lock (_gate)
+            {
+                wasRunning = _running;
+                // The worker has exited the capture loop; the session is no
+                // longer running even though no Stop was requested. Detach the
+                // worker reference before notifying so a subscriber can
+                // restart synchronously from the handler.
+                _running = false;
+                if (wasRunning && ReferenceEquals(_worker, Thread.CurrentThread))
+                {
+                    _worker = null;
+                    _stopRequested = false;
+                }
+            }
+            if (wasRunning)
+            {
+                DeviceChanged?.Invoke(deviceError);
+            }
         }
     }
 
-    private void ReleaseLocked()
+    private void OpenClientOnWorkerThread()
+    {
+        if (_testStartupAcquireOverride is not null)
+        {
+            _testStartupAcquireOverride();
+            return;
+        }
+
+        Interlocked.Exchange(ref _discontinuityCount, 0);
+        var clsid = ClsidMmDeviceEnumerator;
+        var iid = IidIMMDeviceEnumerator;
+        CoCreateInstance(ref clsid, null, ClsctxAll, ref iid, out _enumerator);
+        var enumIf = (IMMDeviceEnumerator)_enumerator;
+        ThrowOnHResult(
+            enumIf.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Console, out _device),
+            "get default capture endpoint");
+        ThrowOnHResult(
+            enumIf.RegisterEndpointNotificationCallback(_notifier),
+            "register device-change notifications");
+
+        var devIf = (IMMDevice)_device;
+        var audioIid = IidIAudioClient;
+        ThrowOnHResult(
+            devIf.Activate(ref audioIid, ClsctxAll, IntPtr.Zero, out var clientObj),
+            "activate audio client");
+        _client = (IAudioClient)clientObj;
+
+        ThrowOnHResult(_client.GetMixFormat(out var fmtPtr), "get mix format");
+        try
+        {
+            _format = ReadMixFormat(fmtPtr);
+            // 100 ms shared buffer (REFERENCE_TIME is 100 ns units);
+            // periodicity 0 lets the engine choose.
+            const long BufferDurationHns = 100 * 10_000;
+            ThrowOnHResult(
+                _client.Initialize(ShareModeShared, 0, BufferDurationHns, 0, fmtPtr, IntPtr.Zero),
+                "initialize audio client");
+        }
+        finally
+        {
+            Marshal.FreeCoTaskMem(fmtPtr);
+        }
+
+        var captureIid = IidIAudioCaptureClient;
+        ThrowOnHResult(
+            _client.GetService(ref captureIid, out var captureObj),
+            "get capture client");
+        _capture = (IAudioCaptureClient)captureObj;
+        ThrowOnHResult(_client.Start(), "start audio client");
+    }
+
+    // Installs fake COM resources for startup fault-injection tests. Only
+    // valid together with the test startup acquire override.
+    internal void SetTestStartupResources(
+        object enumerator,
+        object device,
+        IAudioClient client,
+        IAudioCaptureClient? capture)
+    {
+        _enumerator = enumerator;
+        _device = device;
+        _client = client;
+        _capture = capture;
+    }
+
+    private void CleanupFailedStartup(Exception ex)
+    {
+        _startError = ex;
+        ReleaseOnWorkerThread();
+        _cleanupComplete = true;
+        _stoppedEvent.Set();
+    }
+
+    private void ReleaseOnWorkerThread()
     {
         try
         {
@@ -436,7 +603,6 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
                 ReleaseCom(_enumerator);
                 _enumerator = null;
             }
-            _formatResolved = false;
         }
     }
 
@@ -445,8 +611,13 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
     /// guard keeps the Windows-only <c>ReleaseComObject</c> unreachable on
     /// other platforms (release paths run on every OS).
     /// </summary>
-    private static void ReleaseCom(object instance)
+    private void ReleaseCom(object instance)
     {
+        if (_testReleaseComOverride is not null)
+        {
+            _testReleaseComOverride(instance);
+            return;
+        }
         if (OperatingSystem.IsWindows())
         {
             Marshal.ReleaseComObject(instance);
@@ -466,43 +637,42 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
         Thread? worker;
         lock (_gate)
         {
+            if (_disposed)
+            {
+                return;
+            }
             _disposed = true;
+            _stopRequested = true;
             _running = false;
             worker = _worker;
-            if (worker is not null)
-            {
-                _releaseDeferred = true;
-            }
         }
+
         if (worker is null)
         {
-            lock (_gate)
-            {
-                _releaseDeferred = false;
-                ReleaseLocked();
-            }
+            _lastStopClean = true;
             return;
         }
+
         if (ReferenceEquals(worker, Thread.CurrentThread))
         {
-            // Reentrant dispose from the worker thread: the finally block
-            // owns the deferred cleanup.
+            // Reentrant dispose from the worker thread: the worker's finally
+            // block owns the cleanup after the loop observes _stopRequested.
             return;
         }
-        // Blocking fallback (like SyntheticCaptureSource) guarantees no
-        // callback uses COM after disposal returns.
-        if (!worker.Join(TimeSpan.FromSeconds(5)))
-        {
-            worker.Join();
-        }
+
+        // Bounded wait for worker to exit and release COM objects.
+        bool cleanShutdown = worker.Join(TimeSpan.FromSeconds(5));
+
         lock (_gate)
         {
-            if (ReferenceEquals(_worker, worker))
+            _lastStopClean = cleanShutdown && _cleanupComplete;
+            if (cleanShutdown)
             {
                 _worker = null;
+                _stopRequested = false;
             }
-            _releaseDeferred = false;
-            ReleaseLocked();
+            // If not clean, _worker remains set and _stopRequested stays true,
+            // preventing a new Start until the worker finally exits.
         }
     }
 
@@ -529,7 +699,12 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
             {
                 return;
             }
-            if (!_owner._running)
+            bool running;
+            lock (_owner._gate)
+            {
+                running = _owner._running;
+            }
+            if (!running)
             {
                 return;
             }
