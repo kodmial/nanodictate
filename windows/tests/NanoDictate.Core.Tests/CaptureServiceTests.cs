@@ -1036,7 +1036,9 @@ public sealed class WasapiFaultInjectionTests
         var released = new ConcurrentQueue<object>();
         var notified = new ManualResetEventSlim(false);
         Exception? changeError = null;
+        Exception? restartError = null;
         bool? runningInHandler = null;
+        bool? runningAfterRestart = null;
         Thread? failedWorker = null;
         var attempts = 0;
         WasapiCaptureSource source = null!;
@@ -1066,6 +1068,17 @@ public sealed class WasapiFaultInjectionTests
             {
                 changeError = ex;
                 runningInHandler = source.IsRunning;
+                try
+                {
+                    // Restart from the handler while the failed worker that is
+                    // delivering this event is still alive.
+                    source.Start();
+                    runningAfterRestart = source.IsRunning;
+                }
+                catch (Exception restartEx)
+                {
+                    restartError = restartEx;
+                }
                 notified.Set();
             };
 
@@ -1075,14 +1088,13 @@ public sealed class WasapiFaultInjectionTests
                 "DeviceChanged did not fire after the capture-loop failure");
             Assert.False(runningInHandler);
             Assert.IsType<InvalidOperationException>(changeError);
-            Assert.False(source.IsRunning);
+            Assert.Null(restartError);
+            Assert.True(runningAfterRestart);
+            Assert.True(source.IsRunning);
             Assert.True(
                 failedWorker?.Join(TimeSpan.FromSeconds(5)) ?? false,
                 "failed capture worker did not exit");
 
-            // Once the failed worker has exited, a new capture can start.
-            source.Start();
-            Assert.True(source.IsRunning);
             source.Stop();
         }
         finally

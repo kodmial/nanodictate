@@ -464,8 +464,15 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
             {
                 wasRunning = _running;
                 // The worker has exited the capture loop; the session is no
-                // longer running even though no Stop was requested.
+                // longer running even though no Stop was requested. Detach the
+                // worker reference before notifying so a subscriber can
+                // restart synchronously from the handler.
                 _running = false;
+                if (wasRunning && ReferenceEquals(_worker, Thread.CurrentThread))
+                {
+                    _worker = null;
+                    _stopRequested = false;
+                }
             }
             if (wasRunning)
             {
