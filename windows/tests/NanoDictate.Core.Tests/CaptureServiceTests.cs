@@ -509,21 +509,12 @@ public sealed class WasapiOwnershipAndTeardownTests
         Assert.False(source.IsRunning);
         Assert.True(source.LastStopClean);
 
-        // Normal start should work if endpoint exists
-        try
-        {
-            EnsureCaptureEndpointOrSkip(source);
-            source.Start();
-            Assert.True(source.IsRunning);
-            source.Stop();
-            Assert.True(source.LastStopClean);
-        }
-        catch (NanoException)
-        {
-            // If no endpoint, that's a valid start failure
-            Assert.False(source.IsRunning);
-            Assert.True(source.LastStopClean);
-        }
+        // A missing endpoint skips; any other start failure is a regression.
+        EnsureCaptureEndpointOrSkip(source);
+        source.Start();
+        Assert.True(source.IsRunning);
+        source.Stop();
+        Assert.True(source.LastStopClean);
 
         // Deterministic fault injection: a failed startup must release partial
         // state and leave the source reusable.
@@ -730,6 +721,55 @@ public sealed class WasapiFaultInjectionTests
         }
         finally
         {
+            source.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Verifies that Stop called on the capture worker keeps the stop request
+    /// pending until cleanup finishes and blocks a new Start meanwhile.
+    /// </summary>
+    [Fact]
+    public void StopFromCaptureWorkerBlocksRestartUntilCleanup()
+    {
+        var workerShouldExit = new ManualResetEventSlim(false);
+        var stopReturned = new ManualResetEventSlim(false);
+        Thread? workerThread = null;
+        WasapiCaptureSource source = null!;
+
+        Action<ManualResetEventSlim> reentrantStopLoop = (startedEvent) =>
+        {
+            workerThread = Thread.CurrentThread;
+            startedEvent.Set(); // Signal startup complete
+            source.Stop(); // Must not clear the stop request before cleanup
+            stopReturned.Set();
+            workerShouldExit.Wait();
+        };
+
+        source = new WasapiCaptureSource(reentrantStopLoop, () => source._cleanupComplete = true);
+        try
+        {
+            source.Start();
+            Assert.True(stopReturned.Wait(TimeSpan.FromSeconds(5)), "worker Stop did not return");
+
+            Assert.False(source.IsRunning);
+            Assert.False(source.LastStopClean);
+            Assert.NotNull(workerThread);
+            Assert.True(workerThread.IsAlive);
+
+            // The worker has not cleaned up yet, so a new capture must wait.
+            Assert.Throws<NanoException>(() => source.Start());
+
+            workerShouldExit.Set();
+            Assert.True(workerThread.Join(TimeSpan.FromSeconds(5)), "worker did not exit");
+
+            // A later Stop observes the completed cleanup and clears the worker.
+            source.Stop();
+            Assert.True(source.LastStopClean);
+        }
+        finally
+        {
+            workerShouldExit.Set();
             source.Dispose();
         }
     }

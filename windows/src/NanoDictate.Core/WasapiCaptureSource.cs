@@ -234,15 +234,29 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
         }
 
         // Bounded wait for worker to exit and release COM objects.
-        var worker = _worker;
-        if (worker is not null && !ReferenceEquals(worker, Thread.CurrentThread))
+        Thread? worker;
+        lock (_gate)
         {
-            cleanShutdown = worker.Join(TimeSpan.FromSeconds(5));
+            worker = _worker;
+            if (worker is not null && ReferenceEquals(worker, Thread.CurrentThread))
+            {
+                // Keep _stopRequested set so the packet loop exits through its
+                // finally block. The CaptureLoop device-error callback runs
+                // after cleanup and can clear the reference.
+                if (_cleanupComplete)
+                {
+                    _worker = null;
+                    _stopRequested = false;
+                    _lastStopClean = true;
+                }
+                else
+                {
+                    _lastStopClean = false;
+                }
+                return;
+            }
         }
-        else
-        {
-            cleanShutdown = true;
-        }
+        cleanShutdown = worker is null || worker.Join(TimeSpan.FromSeconds(5));
 
         lock (_gate)
         {
