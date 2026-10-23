@@ -23,9 +23,9 @@ public interface IAudioCaptureSource : IDisposable
     bool IsRunning { get; }
 
     /// <summary>
-    /// Monotonically increasing session identifier. Incremented on each
-    /// successful <see cref="Start"/>. Used to correlate DeviceChanged
-    /// notifications with the session that generated them.
+    /// Monotonically increasing session identifier. Advances for each capture
+    /// session and is used to correlate DeviceChanged notifications with the
+    /// session that generated them.
     /// </summary>
     ulong SessionId { get; }
 

@@ -1160,15 +1160,18 @@ public sealed class WasapiFaultInjectionTests
         // - aInHandler: Session A's DeviceChanged handler has been entered (worker paused)
         // - bStarted: Session B has successfully started.
         // - releaseA: Signal to release Session A's paused handler.
+        // - aNotificationDelivered: A's notification has passed every handler.
         var aInHandler = new ManualResetEventSlim(false);
         var bStarted = new ManualResetEventSlim(false);
         var releaseA = new ManualResetEventSlim(false);
+        var aNotificationDelivered = new ManualResetEventSlim(false);
 
         Thread? aWorker = null;
         Thread? bWorker = null;
         Exception? aDeviceError = null;
         Exception? bDeviceError = null;
         bool? bWasAborted = null;
+        ulong aSessionId = 0;
         var attempts = 0;
         var sessions = new List<FakeSession>();
         var released = new ConcurrentQueue<object>();
@@ -1204,13 +1207,14 @@ public sealed class WasapiFaultInjectionTests
         source = new WasapiCaptureSource(acquire, released.Enqueue);
         try
         {
-            source.DeviceChanged += (_, ex) =>
+            source.DeviceChanged += (ulong sessionId, Exception ex) =>
             {
                 var currentAttempt = Volatile.Read(ref attempts);
                 if (currentAttempt == 1)
                 {
                     // Session A's DeviceChanged - PAUSE HERE on the worker thread
                     aDeviceError = ex;
+                    aSessionId = sessionId;
                     aInHandler.Set(); // Signal that A's handler is paused
                     releaseA.Wait();   // Wait for test to release
                 }
@@ -1221,10 +1225,17 @@ public sealed class WasapiFaultInjectionTests
                     bWasAborted = true;
                 }
             };
+            source.DeviceChanged += (ulong sessionId, Exception _) =>
+            {
+                if (sessionId == aSessionId)
+                {
+                    aNotificationDelivered.Set();
+                }
+            };
 
-            // Start Session A
+            // Start Session A. The injected failure can complete before
+            // Start returns, so do not assert IsRunning for the failing session.
             source.Start();
-            Assert.True(source.IsRunning);
 
             // Wait for Session A to hit the error, complete cleanup,
             // and enter the DeviceChanged handler (paused).
@@ -1245,16 +1256,21 @@ public sealed class WasapiFaultInjectionTests
             Assert.True(bStarted.Wait(TimeSpan.FromSeconds(5)),
                 "Session B did not start");
 
-            // Now release Session A's stale DeviceChanged notification
+            // Now release Session A's stale DeviceChanged notification and
+            // wait until it has traversed every subscriber.
             releaseA.Set();
-
-            // Give some time for any potential cross-talk
-            Thread.Sleep(100);
+            Assert.True(aNotificationDelivered.Wait(TimeSpan.FromSeconds(5)),
+                "Session A's DeviceChanged notification was not fully delivered");
 
             // Verify Session B is still running and was NOT aborted
             Assert.True(source.IsRunning, "Session B should still be running after stale DeviceChanged");
             Assert.Null(bDeviceError);
             Assert.False(bWasAborted ?? false, "Session B should not have been aborted");
+            lock (sessions)
+            {
+                Assert.True(sessions[0].Client.Stopped, "Session A should have stopped its own client");
+                Assert.False(sessions[1].Client.Stopped, "Session B's client must remain live");
+            }
 
             // Clean up Session B
             source.Stop();
@@ -1311,8 +1327,8 @@ public sealed class WasapiFaultInjectionTests
                 releaseA.Wait();
             };
 
+            // The injected failure can complete before Start returns.
             source.Start();
-            Assert.True(source.IsRunning);
 
             Assert.True(aInHandler.Wait(TimeSpan.FromSeconds(5)));
 
@@ -1356,6 +1372,7 @@ public sealed class WasapiFaultInjectionTests
         // Barriers to control the exact interleaving:
         var aInHandler = new ManualResetEventSlim(false);
         var releaseA = new ManualResetEventSlim(false);
+        var aNotificationDelivered = new ManualResetEventSlim(false);
 
         Thread? aWorker = null;
         Thread? bWorker = null;
@@ -1365,6 +1382,7 @@ public sealed class WasapiFaultInjectionTests
         Exception? serviceDeviceError = null;
         bool? serviceWasAborted = null;
         ulong? generationAtAbort = null;
+        ulong aSessionId = 0;
 
         WasapiCaptureSource source = null!;
 
@@ -1394,12 +1412,13 @@ public sealed class WasapiFaultInjectionTests
 
         // Subscribe to source.DeviceChanged FIRST to intercept and pause
         // before DictationCaptureService.OnDeviceChanged runs.
-        source.DeviceChanged += (_, ex) =>
+        source.DeviceChanged += (ulong sessionId, Exception _) =>
         {
             var currentAttempt = Volatile.Read(ref attempts);
             if (currentAttempt == 1)
             {
                 // Session A's DeviceChanged - PAUSE HERE on the worker thread
+                aSessionId = sessionId;
                 aInHandler.Set(); // Signal that A's handler is paused
                 releaseA.Wait();   // Wait for test to release
             }
@@ -1413,6 +1432,17 @@ public sealed class WasapiFaultInjectionTests
             serviceDeviceError = ex;
             serviceWasAborted = true;
             generationAtAbort = service.Generation;
+        };
+
+        // Runs after DictationCaptureService.OnDeviceChanged for every
+        // notification, so the test can wait deterministically instead of
+        // sleeping after releasing Session A's paused handler.
+        source.DeviceChanged += (ulong sessionId, Exception _) =>
+        {
+            if (sessionId == aSessionId)
+            {
+                aNotificationDelivered.Set();
+            }
         };
 
         try
@@ -1442,11 +1472,11 @@ public sealed class WasapiFaultInjectionTests
             // Session B is running (IsRunning = true). The fake capture client doesn't
             // produce data so CaptureReady won't fire, but the session is live.
             // Now release Session A's stale DeviceChanged notification.
-            // This will allow our handler to exit, then DictationCaptureService.OnDeviceChanged runs.
+            // This lets the pause handler exit, then the service handler runs
+            // and the trailing observer signals full delivery.
             releaseA.Set();
-
-            // Give time for the stale notification to propagate through service handler
-            Thread.Sleep(200);
+            Assert.True(aNotificationDelivered.Wait(TimeSpan.FromSeconds(5)),
+                "Session A's stale notification did not finish traversing the service handler");
 
             // Verify Session B is still running and was NOT aborted
             Assert.True(service.IsRunning, "Session B should still be running after stale DeviceChanged");
@@ -1454,6 +1484,11 @@ public sealed class WasapiFaultInjectionTests
             Assert.Null(serviceDeviceError);
             // Generation should be unchanged (still Session B's generation)
             Assert.Equal(genBeforeB + 1, service.Generation);
+            lock (sessions)
+            {
+                Assert.True(sessions[0].Client.Stopped, "Session A should have stopped its own client");
+                Assert.False(sessions[1].Client.Stopped, "Session B's client must remain live");
+            }
         }
         finally
         {
@@ -1461,6 +1496,89 @@ public sealed class WasapiFaultInjectionTests
             service.Dispose();
             aWorker?.Join(TimeSpan.FromSeconds(5));
             bWorker?.Join(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    /// <summary>
+    /// Control test: with no newer session, the failed session's own
+    /// DeviceChanged notification must still abort it and surface the error
+    /// through the service. Session correlation must reject only stale
+    /// notifications, never the current session's own failure.
+    /// </summary>
+    [Fact]
+    public void DictationServiceDeviceErrorWithoutNewerSessionAbortsOwnSession()
+    {
+        var aInHandler = new ManualResetEventSlim(false);
+        var releaseA = new ManualResetEventSlim(false);
+        var serviceNotified = new ManualResetEventSlim(false);
+        Thread? aWorker = null;
+        var attempts = 0;
+        var sessions = new List<FakeSession>();
+        var released = new ConcurrentQueue<object>();
+        Exception? serviceDeviceError = null;
+
+        WasapiCaptureSource source = null!;
+
+        Action acquire = () =>
+        {
+            Interlocked.Increment(ref attempts);
+            var session = new FakeSession(new ThrowingCaptureClient());
+            lock (sessions)
+            {
+                sessions.Add(session);
+            }
+            aWorker = Thread.CurrentThread;
+            source.SetTestStartupResources(
+                session.Enumerator, session.Device, session.Client, session.Capture);
+        };
+
+        source = new WasapiCaptureSource(acquire, released.Enqueue);
+
+        // Pause the notification before the service handler so the service's
+        // Start has definitely returned when the current-session error lands.
+        source.DeviceChanged += (_, _) =>
+        {
+            aInHandler.Set();
+            releaseA.Wait();
+        };
+
+        using var service = new DictationCaptureService(source);
+        service.DeviceChanged += ex =>
+        {
+            serviceDeviceError = ex;
+            serviceNotified.Set();
+        };
+
+        try
+        {
+            service.Start();
+            Assert.True(service.IsRunning);
+
+            Assert.True(aInHandler.Wait(TimeSpan.FromSeconds(5)),
+                "DeviceChanged did not fire after the capture-loop failure");
+
+            // The source has already cleaned up, but the service has not yet
+            // processed the error because its handler is paused behind ours.
+            Assert.False(source.IsRunning);
+            Assert.True(service.IsRunning);
+            Assert.Null(service.DeviceError);
+
+            releaseA.Set();
+            Assert.True(serviceNotified.Wait(TimeSpan.FromSeconds(5)),
+                "The failed session's own DeviceChanged must reach the service");
+
+            Assert.False(service.IsRunning);
+            Assert.NotNull(service.DeviceError);
+            Assert.Same(serviceDeviceError, service.DeviceError);
+            Assert.IsType<InvalidOperationException>(serviceDeviceError);
+            Assert.False(source.IsRunning);
+            Assert.True(source.LastStopClean);
+        }
+        finally
+        {
+            releaseA.Set();
+            service.Dispose();
+            aWorker?.Join(TimeSpan.FromSeconds(5));
         }
     }
 }

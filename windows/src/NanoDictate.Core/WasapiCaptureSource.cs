@@ -39,7 +39,7 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
     private bool _disposed;
     private long _discontinuityCount;
 
-    // Session identifier incremented on each successful Start.
+    // Session identifier assigned when each Start attempt begins the worker.
     // Used to correlate DeviceChanged notifications with their originating session.
     // Using Interlocked for thread-safe access since volatile doesn't support 64-bit types.
     private long _sessionId;
@@ -140,9 +140,10 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
     public event Action<ulong, Exception>? DeviceChanged;
 
     /// <summary>
-    /// Monotonically increasing session identifier. Incremented on each
-    /// successful <see cref="Start"/>. Used to correlate DeviceChanged
-    /// notifications with the session that generated them.
+    /// Monotonically increasing session identifier. A new value is assigned
+    /// when each <see cref="Start"/> attempt launches the capture worker.
+    /// Used to correlate DeviceChanged notifications with the session that
+    /// generated them.
     /// </summary>
     public ulong SessionId => (ulong)Interlocked.Read(ref _sessionId);
 
@@ -169,6 +170,11 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
             _startError = null;
             _startedEvent.Reset();
             _stoppedEvent.Reset();
+            // Assign the session ID before the worker starts so the capture
+            // loop and device-change callbacks report the ID of this attempt.
+            // A failed startup may consume an ID; IDs only need to be unique
+            // and monotonic, never contiguous.
+            Interlocked.Increment(ref _sessionId);
             _worker = new Thread(_testCaptureLoopOverride is not null
                 ? () =>
                 {
@@ -228,9 +234,6 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
                 _startError = null;
                 throw error;
             }
-
-            // Increment session ID on successful start.
-            Interlocked.Increment(ref _sessionId);
         }
     }
 
