@@ -413,7 +413,7 @@ public sealed class WasapiOwnershipAndTeardownTests
         var stop1 = Task.Run(() => source.Stop());
         var stop2 = Task.Run(() => source.Stop());
 
-        Task.WaitAll(new[] { stop1, stop2 }, TimeSpan.FromSeconds(10));
+        Assert.True(Task.WaitAll(new[] { stop1, stop2 }, TimeSpan.FromSeconds(10)), "Concurrent Stop timed out");
         Assert.False(source.IsRunning);
         Assert.True(source.LastStopClean);
     }
@@ -434,7 +434,7 @@ public sealed class WasapiOwnershipAndTeardownTests
         var stopTask = Task.Run(() => source.Stop());
         var disposeTask = Task.Run(() => source.Dispose());
 
-        Task.WaitAll(new[] { stopTask, disposeTask }, TimeSpan.FromSeconds(10));
+        Assert.True(Task.WaitAll(new[] { stopTask, disposeTask }, TimeSpan.FromSeconds(10)), "Concurrent Stop/Dispose timed out");
         Assert.False(source.IsRunning);
         Assert.True(source.LastStopClean);
     }
@@ -504,9 +504,7 @@ public sealed class WasapiOwnershipAndTeardownTests
         Skip.If(!OperatingSystem.IsWindows(), "Requires Windows WASAPI capture.");
         using var source = new WasapiCaptureSource();
 
-        // Force a failure by disposing during startup - not directly
-        // testable without fault injection, but we can verify the
-        // source is in a valid state after construction.
+        // A newly constructed source is already clean and not running.
         Assert.False(source.IsRunning);
         Assert.True(source.LastStopClean);
 
@@ -525,6 +523,10 @@ public sealed class WasapiOwnershipAndTeardownTests
             Assert.False(source.IsRunning);
             Assert.True(source.LastStopClean);
         }
+
+        // Deterministic fault injection: a failed startup must release partial
+        // state and leave the source reusable.
+        WasapiFaultInjectionTests.AssertStartupFailureCleansUpAndLeavesSourceReusable();
     }
 
     /// <summary>
@@ -728,6 +730,65 @@ public sealed class WasapiFaultInjectionTests
         finally
         {
             source.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Verifies that a startup failure releases partial state on the worker
+    /// thread, reports a clean cleanup, and leaves the source reusable.
+    /// </summary>
+    [Fact]
+    public void StartupFailureCleansUpAndLeavesSourceReusable()
+    {
+        AssertStartupFailureCleansUpAndLeavesSourceReusable();
+    }
+
+    internal static void AssertStartupFailureCleansUpAndLeavesSourceReusable()
+    {
+        var attempts = 0;
+        var workerStarted = new ManualResetEventSlim(false);
+        Thread? failedWorkerThread = null;
+
+        Action<ManualResetEventSlim> failOnceThenCapture = (startedEvent) =>
+        {
+            if (Interlocked.Increment(ref attempts) == 1)
+            {
+                failedWorkerThread = Thread.CurrentThread;
+                throw new InvalidOperationException("injected startup failure");
+            }
+
+            startedEvent.Set();
+            workerStarted.Set();
+        };
+
+        WasapiCaptureSource source = null!;
+        source = new WasapiCaptureSource(failOnceThenCapture, () => source._cleanupComplete = true);
+        try
+        {
+            var error = Assert.Throws<InvalidOperationException>(() => source.Start());
+            Assert.Equal("injected startup failure", error.Message);
+            Assert.False(source.IsRunning);
+            Assert.True(source.LastStopClean);
+            Assert.True(source._cleanupComplete);
+
+            Assert.NotNull(failedWorkerThread);
+            Assert.True(
+                failedWorkerThread!.Join(TimeSpan.FromSeconds(5)),
+                "failed startup worker did not exit");
+            Assert.False(failedWorkerThread.IsAlive);
+
+            source.Start();
+            Assert.True(source.IsRunning);
+            Assert.True(workerStarted.Wait(TimeSpan.FromSeconds(5)));
+
+            source.Stop();
+            Assert.False(source.IsRunning);
+            Assert.True(source.LastStopClean);
+        }
+        finally
+        {
+            source.Dispose();
+            failedWorkerThread?.Join(TimeSpan.FromSeconds(5));
         }
     }
 

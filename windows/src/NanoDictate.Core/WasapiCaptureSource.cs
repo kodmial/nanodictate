@@ -53,7 +53,7 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
     private bool _stopRequested;
 
     // Result of the last Stop/Dispose: true = clean shutdown, false = incomplete (worker timed out).
-    private bool _lastStopClean;
+    private volatile bool _lastStopClean = true;
 
     // Test seam: allows injecting a custom capture loop for deterministic
     // fault injection (e.g., simulating a stalled worker). Null in production.
@@ -106,9 +106,10 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
     /// Returns true if the last Stop or Dispose completed a clean shutdown
     /// (WASAPI client stopped and all COM objects released). False indicates
     /// the worker did not exit within the bounded wait; the OS stream may
-    /// still be active and COM objects unreleased. Callers should treat the
-    /// source as unavailable until a subsequent Start succeeds (which will
-    /// wait for the previous worker to exit).
+    /// still be active and COM objects unreleased. While the previous capture
+    /// worker is still alive, <see cref="Start"/> throws <see
+    /// cref="NanoException"/>; once that worker exits, a later <see
+    /// cref="Start"/> can be retried.
     /// </summary>
     public bool LastStopClean => _lastStopClean;
 
@@ -146,6 +147,11 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
                     {
                         _testCaptureLoopOverride!(_startedEvent);
                     }
+                    catch (Exception ex)
+                    {
+                        CleanupFailedStartup(ex);
+                        _startedEvent.Set();
+                    }
                     finally
                     {
                         _testCleanupCompleteCallback?.Invoke();
@@ -164,11 +170,23 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
         if (!_startedEvent.Wait(TimeSpan.FromSeconds(10)))
         {
             // Startup timed out - request stop and wait for cleanup.
+            Thread? worker;
             lock (_gate)
             {
                 _stopRequested = true;
+                _running = false;
+                worker = _worker;
             }
-            _worker?.Join(TimeSpan.FromSeconds(5));
+            var joined = worker?.Join(TimeSpan.FromSeconds(5)) ?? true;
+            lock (_gate)
+            {
+                _lastStopClean = joined && _cleanupComplete;
+                if (joined)
+                {
+                    _worker = null;
+                    _stopRequested = false;
+                }
+            }
             throw new NanoException(-1, "WASAPI capture startup timed out");
         }
 
@@ -296,7 +314,7 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
         }
         catch (Exception ex)
         {
-            _startError = ex;
+            CleanupFailedStartup(ex);
         }
         finally
         {
@@ -467,6 +485,14 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
         ThrowOnHResult(_client.Start(), "start audio client");
     }
 
+    private void CleanupFailedStartup(Exception ex)
+    {
+        _startError = ex;
+        ReleaseOnWorkerThread();
+        _cleanupComplete = true;
+        _stoppedEvent.Set();
+    }
+
     private void ReleaseOnWorkerThread()
     {
         try
@@ -563,9 +589,8 @@ public sealed class WasapiCaptureSource : IAudioCaptureSource
 
         if (ReferenceEquals(worker, Thread.CurrentThread))
         {
-            // Reentrant dispose from the worker thread: the finally block
-            // owns the cleanup. Signal completion and return.
-            _stoppedEvent.Wait(TimeSpan.FromSeconds(5));
+            // Reentrant dispose from the worker thread: the worker's finally
+            // block owns the cleanup after the loop observes _stopRequested.
             return;
         }
 
