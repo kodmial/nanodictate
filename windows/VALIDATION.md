@@ -106,6 +106,84 @@ the 45-minute job budget.
   configuration. Authenticode is reported separately as `VALID` or
   `UNVERIFIED`; a passing install never implies a signed build.
 
+## Hosted real-dictation qualification (opt-in, issue #254)
+
+`windows.yml` and the published-distribution smoke prove installation,
+configuration and synthetic/smoke behavior; they do not prove real interactive
+dictation. `.github/workflows/windows-real-dictation.yml` is the separate,
+opt-in qualification for the real product path on a standard GitHub-hosted
+`windows-latest` runner:
+
+1. install the actual published installer (or an exact-commit candidate built
+   by the same workflow) and start exactly one background agent;
+2. focus Notepad and inject a real Double-Alt through `SendInput`, which the
+   product's `WH_KEYBOARD_LL` hook receives;
+3. observe the transient HUD, distinguish the 178-point recording panel from
+   the 150-point starting/error panel, and capture BMP evidence;
+4. enumerate MMDevice endpoints, require an active virtual capture endpoint
+   that is the product's **default console capture endpoint**, and render a
+   test-owned spoken WAV into the paired virtual render endpoint;
+5. stop dictation through the product hotkey, let the configured real STT
+   provider answer, and assert the normalized phrase in the focused editor
+   (classic Edit text or a clipboard round-trip).
+
+The workflow is `workflow_dispatch` only, read-only (`contents: read`), has no
+schedule/push/pull-request trigger, is not a required check, and never installs
+a driver, reboots the runner, uses credentials or mocks a transcript/provider
+response. It is opt-in, so the automated implementation flow must not dispatch
+it; a maintainer dispatches it when qualification evidence is needed:
+
+```bash
+gh workflow run windows-real-dictation.yml --ref <branch> -f source=published
+gh workflow run windows-real-dictation.yml --ref <branch> -f probe_only=true
+gh workflow run windows-real-dictation.yml --ref <branch> -f source=published \
+  -f phrase_wav=<repo-relative-test.wav> -f config_path=<repo-relative-config.toml>
+```
+
+For a full audio assertion the spoken phrase must be intelligible to the
+configured model. The keyless default provider uses a Russian model, while
+hosted Windows SAPI voices are typically English-only; supply a test-owned
+`phrase_wav` (16-bit PCM) and/or a non-secret `config_path` that matches the
+provider language when the defaults do not. Both paths must resolve inside the
+checkout, and `config_path` must never contain credentials; the harness copies
+it to `%APPDATA%` and does not upload it.
+
+`probe_only` records the session/desktop/audio-endpoint facts without
+installing or launching the product. It reports `NOT VERIFIED / PROBE ONLY` as
+a diagnostic, not as a qualification verdict. A full run uploads
+`windows/artifacts/real-dictation/` (`evidence.json`, `summary.md`, HUD and
+desktop screenshots, the synthesized phrase WAV) plus installer logs, and exits
+nonzero unless the status is `FULL E2E VERIFIED`, so a green job cannot be
+mistaken for real dictation. The job summary and the artifact report exactly
+one status:
+
+- `FULL E2E VERIFIED` — install, foreground editor, real Double-Alt, recording
+  HUD, virtual capture into genuine WASAPI capture, real STT and insertion all
+  observed;
+- `PARTIAL VERIFIED` — one complete leg was observed (the full GUI activation
+  path or the full audio/STT/insertion path), with the remaining segments
+  named;
+- `NOT VERIFIED / HOSTED RUNNER BLOCKED` — no complete leg was observed (for
+  example no interactive input desktop or no virtual capture endpoint). The
+  observed limitation and the failing proof are recorded.
+
+A per-segment PASS only means that step was observed; only the reported status
+and attached evidence count as qualification. A purely synthetic pass, a loaded
+audio fixture and a mocked transcript are never accepted as verification.
+
+**Current status: `NOT VERIFIED` — no hosted real-dictation qualification run
+has been observed as of 2026-11-16.** No run was dispatched while this opt-in
+workflow was added (the automated implementation flow is not authorized to
+dispatch workflows), so there is no run URL, tested build, screenshot or log to
+cite yet. This is neither `FULL E2E VERIFIED` nor `PARTIAL VERIFIED`; the
+`NOT VERIFIED / HOSTED RUNNER BLOCKED` variant also may not be claimed until a
+dispatched run records the actual runner limitation. The unverified segments
+are the entire path: real installer launch and background agent, foreground
+Notepad, real Double-Alt hotkey delivery, recording HUD, virtual capture into
+the product's genuine WASAPI input, real STT response and focused-editor
+insertion. The physical Windows 10/11 desktop checklist below remains mandatory
+for hardware, privacy, device-loss and insertion parity.
+
 ## Evidence status by stage
 
 | Stage | Automated evidence | Physical Windows status |
@@ -120,10 +198,13 @@ the 45-minute job budget.
 | WASAPI microphone, privacy denial, device loss | Classifier and synthetic pipeline tests | **Outstanding real device/privacy check** |
 | STT request/response and failover | Mock transport and Rust policy vectors | Live provider over real network **outstanding** |
 | Unicode/Russian/emoji insertion, undo, clipboard | Sender/chunk/undo tests | **Outstanding real focused-app check** |
+| Hosted real-dictation path (#254) | Opt-in `windows-real-dictation.yml`: install, real Double-Alt, HUD, virtual capture, real STT, editor assertion | `NOT VERIFIED` — no hosted qualification run observed |
 
 Do not infer supported hardware behavior from `doctor`, the ZIP smoke, a
 virtual audio device or a hosted runner. Record a real Windows 10 and Windows
-11 desktop run before claiming it.
+11 desktop run before claiming it. The opt-in hosted qualification above only
+reports what that hosted runner observed; it never substitutes for the
+physical checklist.
 
 ## Manual hardware checklist
 
