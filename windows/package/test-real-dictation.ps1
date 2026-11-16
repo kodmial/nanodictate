@@ -82,6 +82,7 @@ $installedDirectory = $null
 $notepadProcess = $null
 $notepadProcessId = 0
 $notepadWindow = $null
+$editorOwned = $false
 $installerSha256 = ''
 $testedVersion = $Version
 $testedCommit = if ($env:GITHUB_SHA) { $env:GITHUB_SHA } else { 'unknown' }
@@ -265,7 +266,8 @@ function Resolve-InstallerAsset {
             Add-Segment 'published release commit resolved' $true "v$resolvedVersion -> $($script:testedCommit)"
         }
     } catch {
-        Add-Limitation "Could not resolve the commit for published release v$resolvedVersion; evidence keeps the workflow commit '$script:testedCommit' as the observed checkout."
+        $script:testedCommit = 'unknown'
+        Add-Limitation "Could not resolve the commit for published release v$resolvedVersion; evidence records the tested commit as unknown and the workflow checkout only under environment.run.sha."
     }
     $assetName = "nanodictate-$resolvedVersion-windows-x64-setup.exe"
     $asset = @($release.assets) | Where-Object { $_.name -eq $assetName } | Select-Object -First 1
@@ -389,7 +391,7 @@ try {
     if (-not (Test-RealDictationPlatform)) {
         throw 'The real-dictation qualification requires Windows.'
     }
-    if (@(Get-DictationTokens -Text $PhraseText).Count -lt 2) {
+    if ((Get-DictationTokens -Text $PhraseText).Count -lt 2) {
         throw "PhraseText must contain at least two words so the assertion cannot pass on an unrelated transcript; got '$PhraseText'."
     }
 
@@ -496,25 +498,35 @@ try {
     # ---------------------------------------------------------------
     # Foreground editor + real Double-Alt + HUD.
     # ---------------------------------------------------------------
-    $notepadProcess = Start-Process -FilePath 'notepad.exe' -PassThru
+    $editorFileStem = 'nanodictate-real-dictation-' + [guid]::NewGuid().ToString('N')
+    $editorPath = Join-Path $tempRoot ($editorFileStem + '.txt')
+    $null = New-Item -ItemType File -Path $editorPath -Force
+    # A uniquely named test file keeps the editor window attributable to this
+    # run even when Windows hands notepad.exe to a packaged process; the
+    # fallback below can therefore never adopt a pre-existing Notepad window.
+    $editorTitlePattern = [regex]::Escape($editorFileStem)
+    $notepadProcess = Start-Process -FilePath 'notepad.exe' -ArgumentList ('"{0}"' -f $editorPath) -PassThru
     $notepadWindow = $null
     $notepadProcessId = [int]$notepadProcess.Id
     $startedUtc = [DateTime]::UtcNow
     $deadline = $startedUtc.AddSeconds($AppLaunchTimeoutSeconds)
     while ([DateTime]::UtcNow -lt $deadline) {
         $windows = @(Get-RealDictationProcessWindow -ProcessId $notepadProcessId |
-            Where-Object { $_.Title -match 'Notepad' })
+            Where-Object { $_.Title -match 'Notepad' -or $_.Title -match $editorTitlePattern })
         if ($windows.Count -gt 0) {
             $notepadWindow = $windows[0]
+            $editorOwned = $true
             break
         }
         # Windows 11 may hand notepad.exe to a packaged process, so the
         # launched pid can exit before its editor window appears. Fall back to
-        # the visible editor window and use its owning process from then on.
+        # the editor window opened for this run's unique test file and use its
+        # owning process from then on.
         if ([DateTime]::UtcNow -gt $startedUtc.AddSeconds(5)) {
-            $fallback = Get-RealDictationWindowByTitlePattern -Pattern 'Notepad\s*$'
+            $fallback = Get-RealDictationWindowByTitlePattern -Pattern $editorTitlePattern
             if ($null -ne $fallback) {
                 $notepadWindow = $fallback
+                $editorOwned = $true
                 break
             }
         }
@@ -645,7 +657,7 @@ try {
     Add-Limitation "The qualification harness stopped before completing the product path: $($_.Exception.Message)"
     Write-Warning "Real-dictation qualification failed: $($_.Exception.Message)"
 } finally {
-    if ($null -ne $notepadWindow) {
+    if ($editorOwned -and $null -ne $notepadWindow) {
         try { Stop-Process -Id $notepadWindow.ProcessId -Force -ErrorAction SilentlyContinue } catch { }
     }
     if ($null -ne $notepadProcess -and $notepadProcess.Id -ne $notepadProcessId) {

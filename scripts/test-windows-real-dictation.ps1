@@ -178,6 +178,29 @@ $routeByName = Resolve-VirtualAudioRoute -Endpoints @(
 ) -DefaultCaptureEndpoint ([pscustomobject]@{ Id = ''; Name = 'CABLE Output (VB-Audio Virtual Cable)'; Flow = 'capture'; State = 'active' })
 Assert-True 'name-based route works when ids are empty' $routeByName.DefaultCaptureIsVirtual 'name fallback'
 
+$twoCableRoutes = @(
+    [pscustomobject]@{ Id = 'cap-a'; Name = 'CABLE Output (VB-Audio Virtual Cable)'; Flow = 'capture'; State = 'active' }
+    [pscustomobject]@{ Id = 'ren-a'; Name = 'CABLE Input (VB-Audio Virtual Cable)'; Flow = 'render'; State = 'active' }
+    [pscustomobject]@{ Id = 'cap-b'; Name = 'VoiceMeeter Output (VB-Audio VoiceMeeter VAIO)'; Flow = 'capture'; State = 'active' }
+    [pscustomobject]@{ Id = 'ren-b'; Name = 'VoiceMeeter Input (VB-Audio VoiceMeeter VAIO)'; Flow = 'render'; State = 'active' }
+)
+$routeSecondDefault = Resolve-VirtualAudioRoute -Endpoints $twoCableRoutes -DefaultCaptureEndpoint $twoCableRoutes[2]
+Assert-Equal 'default virtual capture is selected over the first cable' $routeSecondDefault.VirtualCapture.Id 'cap-b'
+Assert-True 'default virtual capture is the product route' $routeSecondDefault.DefaultCaptureIsVirtual 'default must win over enumeration order'
+Assert-Equal 'default virtual capture pairs its own render endpoint' $routeSecondDefault.PairedRender.Id 'ren-b'
+
+$routeSameNameDifferentId = Resolve-VirtualAudioRoute -Endpoints @(
+    [pscustomobject]@{ Id = 'cap-a'; Name = 'CABLE Output (VB-Audio Virtual Cable)'; Flow = 'capture'; State = 'active' }
+    [pscustomobject]@{ Id = 'ren-a'; Name = 'CABLE Input (VB-Audio Virtual Cable)'; Flow = 'render'; State = 'active' }
+) -DefaultCaptureEndpoint ([pscustomobject]@{ Id = 'cap-b'; Name = 'CABLE Output (VB-Audio Virtual Cable)'; Flow = 'capture'; State = 'active' })
+Assert-True 'a friendly-name match does not override different nonempty ids' `
+    (-not $routeSameNameDifferentId.DefaultCaptureIsVirtual) 'ids must decide identity'
+
+$defaultPhraseTokens = (Get-DictationTokens -Text 'quick brown fox jumps').Count
+Assert-Equal 'default qualification phrase has four tokens' $defaultPhraseTokens 4
+Assert-True 'default qualification phrase passes the harness token guard' `
+    ($defaultPhraseTokens -ge 2) 'the default phrase must satisfy the minimum-two-token guard'
+
 # ---------------------------------------------------------------------------
 # Verdict vocabulary
 # ---------------------------------------------------------------------------
@@ -301,10 +324,16 @@ $harness = Read-Text 'windows/package/test-real-dictation.ps1'
 Assert-Contains 'harness installs the actual installer' $harness 'Invoke-BoundedInstallerProcess'
 Assert-Contains 'harness verifies the published SHA-256' $harness 'SHA256SUMS.txt'
 Assert-Contains 'harness resolves the tested published release commit' $harness 'commits/v$resolvedVersion'
+Assert-Contains 'harness records an unknown tested commit when release resolution fails' `
+    $harness "`$script:testedCommit = 'unknown'"
+Assert-Contains 'harness counts phrase tokens directly' `
+    $harness 'if ((Get-DictationTokens -Text $PhraseText).Count -lt 2)'
 Assert-Contains 'harness requires an interactive input desktop' $harness 'InputDesktopAvailable'
 Assert-Contains 'harness enumerates real WASAPI endpoints' $harness 'Get-RealDictationAudioEndpoint'
 Assert-Contains 'harness focuses Notepad' $harness "notepad.exe"
 Assert-Contains 'harness tolerates packaged Notepad hosting' $harness 'Get-RealDictationWindowByTitlePattern'
+Assert-Contains 'harness scopes the editor fallback to its own unique file' $harness 'nanodictate-real-dictation-'
+Assert-Contains 'harness only terminates an editor it owns' $harness 'if ($editorOwned -and $null -ne $notepadWindow)'
 Assert-Contains 'harness sends a real Double-Alt' $harness 'Send-RealDictationDoubleAlt'
 Assert-Contains 'harness observes the recording HUD phase' $harness 'RecordingObserved'
 Assert-Contains 'harness routes the WAV into the virtual cable' $harness 'Invoke-RealDictationWavPlayback'

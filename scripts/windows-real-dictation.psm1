@@ -136,16 +136,16 @@ function Test-DictationPhraseInserted {
     }
 }
 
-function Find-VirtualCaptureEndpoint {
+function Find-VirtualCaptureEndpointMatch {
     <#
-      Returns the first active capture endpoint whose friendly name identifies
-      a virtual audio device, or $null. Pure: takes endpoint objects with
+      Returns every active capture endpoint whose friendly name identifies a
+      virtual audio device. Pure: takes endpoint objects with
       Flow/Name/State/Id properties.
     #>
     param($Endpoints)
 
     if ($null -eq $Endpoints) {
-        return $null
+        return
     }
     foreach ($endpoint in @($Endpoints)) {
         if ($null -eq $endpoint) {
@@ -159,14 +159,52 @@ function Find-VirtualCaptureEndpoint {
         }
         foreach ($pattern in $script:VirtualAudioNamePatterns) {
             if ([string]$endpoint.Name -like $pattern) {
-                return [pscustomobject]@{
+                [pscustomobject]@{
                     Endpoint = $endpoint
                     MatchedPattern = $pattern
                 }
+                break
             }
         }
     }
-    return $null
+}
+
+function Find-VirtualCaptureEndpoint {
+    <#
+      Returns the first active capture endpoint whose friendly name identifies
+      a virtual audio device, or $null.
+    #>
+    param($Endpoints)
+
+    $found = @(Find-VirtualCaptureEndpointMatch -Endpoints $Endpoints)
+    if ($found.Count -eq 0) {
+        return $null
+    }
+    return $found[0]
+}
+
+function Test-EndpointIdentityMatch {
+    <#
+      Compares two audio endpoints. Stable device ids decide identity when both
+      sides expose one; the friendly name is only a fallback for backends that
+      do not return ids.
+    #>
+    param($Candidate, $Reference)
+
+    if ($null -eq $Candidate -or $null -eq $Reference) {
+        return $false
+    }
+    $candidateId = [string]$Candidate.Id
+    $referenceId = [string]$Reference.Id
+    if (-not [string]::IsNullOrEmpty($candidateId) -and -not [string]::IsNullOrEmpty($referenceId)) {
+        return $candidateId -eq $referenceId
+    }
+    $candidateName = [string]$Candidate.Name
+    $referenceName = [string]$Reference.Name
+    if ([string]::IsNullOrEmpty($candidateName) -or [string]::IsNullOrEmpty($referenceName)) {
+        return $false
+    }
+    return $candidateName -eq $referenceName
 }
 
 function Get-EndpointNameGroup {
@@ -271,8 +309,8 @@ function Resolve-VirtualAudioRoute {
     #>
     param($Endpoints, $DefaultCaptureEndpoint)
 
-    $virtual = Find-VirtualCaptureEndpoint -Endpoints $Endpoints
-    if ($null -eq $virtual) {
+    $virtualEndpoints = @(Find-VirtualCaptureEndpointMatch -Endpoints $Endpoints)
+    if ($virtualEndpoints.Count -eq 0) {
         return [pscustomobject]@{
             VirtualCapture = $null
             PairedRender = $null
@@ -282,19 +320,22 @@ function Resolve-VirtualAudioRoute {
             Reason = 'no active virtual capture endpoint is installed on this runner'
         }
     }
-    $capture = $virtual.Endpoint
+
+    # The product opens the default console capture endpoint, so prefer that
+    # exact endpoint when it is one of the active virtual captures instead of
+    # always taking the first cable the enumerator returned.
+    $selected = $virtualEndpoints[0]
     $isDefault = $false
     if ($null -ne $DefaultCaptureEndpoint) {
-        if (-not [string]::IsNullOrEmpty([string]$capture.Id) -and
-            [string]$capture.Id -eq [string]$DefaultCaptureEndpoint.Id) {
-            $isDefault = $true
-        } elseif ([string]$capture.Name -eq [string]$DefaultCaptureEndpoint.Name -and
-            -not [string]::IsNullOrEmpty([string]$capture.Name)) {
-            # Device ids are stable; names are the documented fallback when a
-            # backend does not return ids.
-            $isDefault = $true
+        foreach ($candidate in $virtualEndpoints) {
+            if (Test-EndpointIdentityMatch -Candidate $candidate.Endpoint -Reference $DefaultCaptureEndpoint) {
+                $selected = $candidate
+                $isDefault = $true
+                break
+            }
         }
     }
+    $capture = $selected.Endpoint
     $paired = Get-PairedRenderEndpoint -CaptureEndpoint $capture -RenderEndpoints $Endpoints
     $reason = if ($isDefault) {
         "the product's default console capture endpoint is the virtual device '$($capture.Name)'"
@@ -304,7 +345,7 @@ function Resolve-VirtualAudioRoute {
     }
     return [pscustomobject]@{
         VirtualCapture = $capture
-        VirtualCapturePattern = $virtual.MatchedPattern
+        VirtualCapturePattern = $selected.MatchedPattern
         PairedRender = $paired.Endpoint
         PairedRenderReason = $paired.Reason
         DefaultCapture = $DefaultCaptureEndpoint
@@ -629,10 +670,40 @@ function Get-RealDictationEditorText {
     $text = [NanoDictate.RealDictation.Native]::GetChildEditText($Handle)
     $method = 'edit-control'
     if ([string]::IsNullOrWhiteSpace($text) -and $UseClipboardFallback) {
-        $null = Set-RealDictationForegroundWindow -Handle $Handle
+        if (-not (Set-RealDictationForegroundWindow -Handle $Handle)) {
+            # Ctrl+A/Ctrl+C would target whatever window owns the foreground;
+            # without focus the clipboard cannot be attributed to this editor.
+            return [pscustomobject]@{
+                Text = [string]::Empty
+                Method = 'clipboard-focus-unavailable'
+                Read = $false
+            }
+        }
         # Clear first so a failed copy can never leave stale clipboard text
-        # behind and turn an unrelated string into a false pass.
-        try { Set-Clipboard -Value ([string]::Empty) -ErrorAction Stop } catch { }
+        # behind and turn an unrelated string into a false pass. If the clear
+        # still fails after bounded retries, reject the observation.
+        $cleared = $false
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try {
+                Set-Clipboard -Value ([string]::Empty) -ErrorAction Stop
+                if ([string]::IsNullOrEmpty([string](Get-Clipboard -Raw -ErrorAction Stop))) {
+                    $cleared = $true
+                    break
+                }
+            } catch {
+                Write-Verbose "Clipboard clear attempt $attempt failed: $($_.Exception.Message)"
+            }
+            if ($attempt -lt 3) {
+                Start-Sleep -Milliseconds 100
+            }
+        }
+        if (-not $cleared) {
+            return [pscustomobject]@{
+                Text = [string]::Empty
+                Method = 'clipboard-clear-failed'
+                Read = $false
+            }
+        }
         Send-RealDictationKey -Key 'ctrl-a'
         Send-RealDictationKey -Key 'ctrl-c'
         Start-Sleep -Milliseconds 250
