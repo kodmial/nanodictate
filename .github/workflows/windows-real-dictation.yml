@@ -16,6 +16,12 @@ name: Windows real dictation qualification
 # never be mistaken for proof. The authoritative outcome is the reported status
 # and the uploaded artifact. It never fakes a transcript, provider response or
 # microphone.
+#
+# GitHub only registers workflow_dispatch workflows that exist on the default
+# branch, so the first dispatch is possible only after this file is merged. A
+# dispatch against a feature branch that does not yet contain the workflow on
+# main returns HTTP 404 ("workflow ... not found on the default branch"), which
+# is a registration limitation, not a runner result.
 
 on:
   workflow_dispatch:

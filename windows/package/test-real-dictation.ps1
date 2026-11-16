@@ -256,6 +256,17 @@ function Resolve-InstallerAsset {
     if ($resolvedVersion -notmatch '^\d+\.\d+\.\d+$') {
         throw "Unexpected release tag for the published installer: $($release.tag_name)"
     }
+    try {
+        # Identify the source commit of the published tag, not the workflow
+        # checkout: a published installer must be attributable to its release.
+        $releaseCommit = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/commits/v$resolvedVersion" -Headers $headers
+        if ([string]$releaseCommit.sha -match '^[0-9a-fA-F]{40}$') {
+            $script:testedCommit = ([string]$releaseCommit.sha).ToLowerInvariant()
+            Add-Segment 'published release commit resolved' $true "v$resolvedVersion -> $($script:testedCommit)"
+        }
+    } catch {
+        Add-Limitation "Could not resolve the commit for published release v$resolvedVersion; evidence keeps the workflow commit '$script:testedCommit' as the observed checkout."
+    }
     $assetName = "nanodictate-$resolvedVersion-windows-x64-setup.exe"
     $asset = @($release.assets) | Where-Object { $_.name -eq $assetName } | Select-Object -First 1
     if ($null -eq $asset) {
@@ -316,8 +327,7 @@ function Watch-RealDictationHud {
       recording HUD from a starting/error overlay without reading internals.
     #>
     param(
-        [ValidateRange(1, 60)][int]$TimeoutSeconds = 10,
-        [ValidateRange(1, 60)][int]$ObserveSeconds = 3
+        [ValidateRange(1, 60)][int]$TimeoutSeconds = 10
     )
     $observations = [System.Collections.Generic.List[object]]::new()
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -325,21 +335,18 @@ function Watch-RealDictationHud {
     while ($stopwatch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
         $window = Get-RealDictationWindow -Title 'NanoDictate'
         if ($null -ne $window) {
-            $firstSeenMs = [int]$stopwatch.ElapsedMilliseconds
+            if ($null -eq $firstSeenMs) {
+                $firstSeenMs = [int]$stopwatch.ElapsedMilliseconds
+            }
             $observations.Add($window)
-            break
+            # Stop as soon as the recording panel is observed so the spoken
+            # phrase is fed immediately instead of after an arbitrary delay.
+            $scale = if ($window.Width -gt 0) { $window.Width / 220.0 } else { 1.0 }
+            if ([math]::Abs($window.Height - (178.0 * $scale)) -le (4.0 * $scale)) {
+                break
+            }
         }
         Start-Sleep -Milliseconds 50
-    }
-    if ($null -ne $firstSeenMs) {
-        $observeUntil = $stopwatch.Elapsed.TotalSeconds + $ObserveSeconds
-        while ($stopwatch.Elapsed.TotalSeconds -lt $observeUntil) {
-            $window = Get-RealDictationWindow -Title 'NanoDictate'
-            if ($null -ne $window) {
-                $observations.Add($window)
-            }
-            Start-Sleep -Milliseconds 100
-        }
     }
     $recording = $false
     $phases = @()
@@ -536,14 +543,16 @@ try {
     $hudBefore = Get-RealDictationWindow -Title 'NanoDictate'
     Add-Segment 'HUD hidden before activation' ($null -eq $hudBefore) `
         'no visible NanoDictate window before Double-Alt'
-    $guiFlags.DoubleAltDelivered = $true
     Send-RealDictationDoubleAlt -GapMilliseconds 90
-    $hud = Watch-RealDictationHud -TimeoutSeconds $HudTimeoutSeconds -ObserveSeconds 3
+    # Only record delivery after SendInput actually succeeded; a thrown
+    # injection is a fatal harness failure, not an observed hotkey.
+    $guiFlags.DoubleAltDelivered = $true
+    $hud = Watch-RealDictationHud -TimeoutSeconds $HudTimeoutSeconds
     $guiFlags.HudAppeared = $null -ne $hud.FirstSeenMilliseconds
     $guiFlags.RecordingPhase = [bool]$hud.RecordingObserved
     if ($guiFlags.HudAppeared) {
         $first = $hud.Observations[0]
-        Add-Segment 'recording HUD appeared' $true `
+        Add-Segment 'HUD appeared after Double-Alt' $true `
             ("visible NanoDictate HUD after $($hud.FirstSeenMilliseconds) ms at {0}x{1} (phases: {2})" -f
                 $first.Width, $first.Height, (($hud.Phases | Select-Object -Unique) -join ', '))
         Save-EvidenceScreenshot -Name 'hud-first-visible' -Kind window -Handle $first.Handle
@@ -555,7 +564,7 @@ try {
             Add-Limitation 'The HUD appeared but never reached the recording phase: NanoDictate could not start capture on this runner (microphone missing, privacy denial or WASAPI failure). The authentic activation path is proven; capture is not.'
         }
     } else {
-        Add-Segment 'recording HUD appeared' $false `
+        Add-Segment 'HUD appeared after Double-Alt' $false `
             "no visible NanoDictate HUD within $HudTimeoutSeconds seconds after a real Double-Alt"
         Add-Limitation 'A real Double-Alt produced no HUD: the global hook, capture start or window rendering is blocked in this session.'
     }

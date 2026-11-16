@@ -206,6 +206,16 @@ $guiOnly = Get-RealDictationVerdict -Gui $guiPass -Audio $audioFail
 Assert-Equal 'GUI-only evidence is PARTIAL VERIFIED' $guiOnly.Status 'PARTIAL VERIFIED'
 Assert-Equal 'GUI-only evidence names the four audio segments' $guiOnly.UnverifiedSegments.Count 4
 
+$guiWithoutRecording = [pscustomobject]@{
+    AppLaunched = $true; EditorFocused = $true; DoubleAltDelivered = $true
+    HudAppeared = $true; RecordingPhase = $false
+}
+$activationOnly = Get-RealDictationVerdict -Gui $guiWithoutRecording -Audio $audioFail
+Assert-Equal 'activation without a recording HUD is not a partial leg' `
+    $activationOnly.Status 'NOT VERIFIED / HOSTED RUNNER BLOCKED'
+Assert-True 'activation without recording names the missing recording phase' `
+    ($activationOnly.UnverifiedSegments -contains 'recording HUD phase reached') 'recording phase must be required'
+
 $audioOnly = Get-RealDictationVerdict -Gui $guiFail -Audio $audioPass
 Assert-Equal 'audio-only evidence is PARTIAL VERIFIED' $audioOnly.Status 'PARTIAL VERIFIED'
 
@@ -239,7 +249,7 @@ $summary = Format-RealDictationSummary -Evidence ([pscustomobject]@{
         session = [pscustomobject]@{ sessionId = 1; desktopName = 'Default'; inputDesktopAvailable = $true }
     }
     segments = @(
-        [pscustomobject]@{ name = 'recording HUD appeared'; observed = $true; detail = 'visible after 240 ms' }
+        [pscustomobject]@{ name = 'HUD appeared after Double-Alt'; observed = $true; detail = 'visible after 240 ms' }
         [pscustomobject]@{ name = 'virtual capture endpoint present'; observed = $false; detail = 'no active virtual capture endpoint' }
     )
     limitations = @('no active virtual capture endpoint is installed on this runner')
@@ -285,10 +295,12 @@ Assert-Contains 'qualification can test the published installer' $workflow 'sour
 Assert-Contains 'qualification can test an exact-commit candidate' $workflow 'candidate'
 Assert-Contains 'qualification retains evidence on failure' $workflow 'if: always()'
 Assert-Contains 'qualification uploads evidence artifacts' $workflow 'windows/artifacts/real-dictation/**'
+Assert-Contains 'qualification documents default-branch dispatch registration' $workflow 'not found on the default branch'
 
 $harness = Read-Text 'windows/package/test-real-dictation.ps1'
 Assert-Contains 'harness installs the actual installer' $harness 'Invoke-BoundedInstallerProcess'
 Assert-Contains 'harness verifies the published SHA-256' $harness 'SHA256SUMS.txt'
+Assert-Contains 'harness resolves the tested published release commit' $harness 'commits/v$resolvedVersion'
 Assert-Contains 'harness requires an interactive input desktop' $harness 'InputDesktopAvailable'
 Assert-Contains 'harness enumerates real WASAPI endpoints' $harness 'Get-RealDictationAudioEndpoint'
 Assert-Contains 'harness focuses Notepad' $harness "notepad.exe"
@@ -310,11 +322,15 @@ Assert-Contains 'module exposes the three-status verdict' $module "FULL E2E VERI
 Assert-Contains 'module exposes the blocked status' $module 'NOT VERIFIED / HOSTED RUNNER BLOCKED'
 Assert-Contains 'module keeps a specific no-cable reason' $module 'no active virtual capture endpoint is installed on this runner'
 Assert-Contains 'module does not mock the product' $module 'Nothing here mocks a transcript'
-Assert-Contains 'module synthesizes the phrase as 16 kHz 16-bit mono PCM' $module '$stream.Format.Type = 14'
+Assert-Contains 'module synthesizes the phrase as 16 kHz 16-bit mono PCM' $module '$stream.Format.Type = 18'
+Assert-Match 'module sets the PCM format before opening the WAV stream' `
+    $module '(?s)\$stream\.Format\.Type = 18.*?\$stream\.Open\('
 
 $interop = Read-Text 'scripts/windows-real-dictation-interop.cs'
 Assert-Contains 'interop injects real keyboard input' $interop 'SendInput(1, new[] { input }'
 Assert-Contains 'interop sizes the x64 INPUT union' $interop 'private struct MouseInput'
+Assert-Match 'interop sizes PROPVARIANT for the native x64 layout' `
+    $interop '(?s)StructLayout\(LayoutKind\.Explicit, Size = 24\).*?struct PropVariant'
 Assert-Contains 'interop renders into a real WASAPI endpoint' $interop 'PlayWavToDevice'
 Assert-Contains 'interop probes the interactive desktop' $interop 'OpenInputDesktop'
 
@@ -323,6 +339,8 @@ Assert-Contains 'validation documents the opt-in workflow' $validation 'windows-
 Assert-Contains 'validation uses the accepted status vocabulary' $validation 'FULL E2E VERIFIED'
 Assert-Contains 'validation names the unverified state' $validation 'NOT VERIFIED'
 Assert-Match 'validation states the current hosted evidence status' $validation 'no hosted real-dictation qualification run\s+has been observed'
+Assert-Contains 'validation records the default-branch dispatch blocker' $validation 'not found on the default branch'
+Assert-Contains 'validation does not call the registration blocker a runner limitation' $validation 'workflow-registration blocker'
 Assert-NotContains 'validation does not claim a passed hosted dictation run' $validation 'FULL E2E VERIFIED on'
 
 Write-Host ''

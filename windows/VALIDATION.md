@@ -130,15 +130,22 @@ opt-in qualification for the real product path on a standard GitHub-hosted
 The workflow is `workflow_dispatch` only, read-only (`contents: read`), has no
 schedule/push/pull-request trigger, is not a required check, and never installs
 a driver, reboots the runner, uses credentials or mocks a transcript/provider
-response. It is opt-in, so the automated implementation flow must not dispatch
-it; a maintainer dispatches it when qualification evidence is needed:
+response. It is opt-in; the issue's admission policy reserves dispatch for the
+maintainer automation, and GitHub only registers `workflow_dispatch` workflows
+that exist on the default branch. The first dispatch therefore happens after
+this file is merged to `main`:
 
 ```bash
-gh workflow run windows-real-dictation.yml --ref <branch> -f source=published
-gh workflow run windows-real-dictation.yml --ref <branch> -f probe_only=true
-gh workflow run windows-real-dictation.yml --ref <branch> -f source=published \
+gh workflow run windows-real-dictation.yml -f source=published
+gh workflow run windows-real-dictation.yml -f probe_only=true
+gh workflow run windows-real-dictation.yml -f source=published \
   -f phrase_wav=<repo-relative-test.wav> -f config_path=<repo-relative-config.toml>
 ```
+
+Dispatching the same workflow against a feature branch before that merge is
+rejected with HTTP 404 ("workflow ... not found on the default branch"). That
+is a registration limitation, not a runner result: it neither proves nor
+excludes an interactive desktop or a virtual capture endpoint.
 
 For a full audio assertion the spoken phrase must be intelligible to the
 configured model. The keyless default provider uses a Russian model, while
@@ -160,9 +167,11 @@ one status:
 - `FULL E2E VERIFIED` — install, foreground editor, real Double-Alt, recording
   HUD, virtual capture into genuine WASAPI capture, real STT and insertion all
   observed;
-- `PARTIAL VERIFIED` — one complete leg was observed (the full GUI activation
-  path or the full audio/STT/insertion path), with the remaining segments
-  named;
+- `PARTIAL VERIFIED` — one complete leg was observed: the full GUI activation
+  path through the recording-phase HUD, or the full audio/STT/insertion path,
+  with the remaining segments named. A HUD that only reaches the
+  starting/error phase proves the hook fired, not that capture ran, and is not
+  a partial GUI leg;
 - `NOT VERIFIED / HOSTED RUNNER BLOCKED` — no complete leg was observed (for
   example no interactive input desktop or no virtual capture endpoint). The
   observed limitation and the failing proof are recorded.
@@ -172,17 +181,23 @@ and attached evidence count as qualification. A purely synthetic pass, a loaded
 audio fixture and a mocked transcript are never accepted as verification.
 
 **Current status: `NOT VERIFIED` — no hosted real-dictation qualification run
-has been observed as of 2026-11-16.** No run was dispatched while this opt-in
-workflow was added (the automated implementation flow is not authorized to
-dispatch workflows), so there is no run URL, tested build, screenshot or log to
-cite yet. This is neither `FULL E2E VERIFIED` nor `PARTIAL VERIFIED`; the
-`NOT VERIFIED / HOSTED RUNNER BLOCKED` variant also may not be claimed until a
-dispatched run records the actual runner limitation. The unverified segments
-are the entire path: real installer launch and background agent, foreground
-Notepad, real Double-Alt hotkey delivery, recording HUD, virtual capture into
-the product's genuine WASAPI input, real STT response and focused-editor
-insertion. The physical Windows 10/11 desktop checklist below remains mandatory
-for hardware, privacy, device-loss and insertion parity.
+has been observed as of 2026-11-16.** The required DoD status cannot be applied
+yet because no runner was observed: on 2026-11-16 the implementation branch
+contained this workflow but `main` did not, and
+`gh workflow run windows-real-dictation.yml --ref opencode/429-checkpoint-opencode-429-issue-issue254-gen-1`
+was rejected with HTTP 404 ("workflow ... not found on the default branch").
+GitHub only registers `workflow_dispatch` workflows from the default branch, so
+the first probe and full qualification must follow the merge. This is a
+workflow-registration blocker, not `NOT VERIFIED / HOSTED RUNNER BLOCKED`:
+no interactive desktop, audio endpoint, provider or insertion capability has
+been tested or excluded. There is no run URL, tested build, screenshot or log
+to cite yet, and neither `FULL E2E VERIFIED` nor `PARTIAL VERIFIED` may be
+claimed. The unverified segments are the entire path: real installer launch
+and background agent, foreground Notepad, real Double-Alt hotkey delivery,
+recording HUD, virtual capture into the product's genuine WASAPI input, real
+STT response and focused-editor insertion. The physical Windows 10/11 desktop
+checklist below remains mandatory for hardware, privacy, device-loss and
+insertion parity.
 
 ## Evidence status by stage
 
@@ -198,7 +213,7 @@ for hardware, privacy, device-loss and insertion parity.
 | WASAPI microphone, privacy denial, device loss | Classifier and synthetic pipeline tests | **Outstanding real device/privacy check** |
 | STT request/response and failover | Mock transport and Rust policy vectors | Live provider over real network **outstanding** |
 | Unicode/Russian/emoji insertion, undo, clipboard | Sender/chunk/undo tests | **Outstanding real focused-app check** |
-| Hosted real-dictation path (#254) | Opt-in `windows-real-dictation.yml`: install, real Double-Alt, HUD, virtual capture, real STT, editor assertion | `NOT VERIFIED` — no hosted qualification run observed |
+| Hosted real-dictation path (#254) | Opt-in `windows-real-dictation.yml`: install, real Double-Alt, HUD, virtual capture, real STT, editor assertion | `NOT VERIFIED` — dispatch blocked until the workflow is registered on `main`; no hosted run observed |
 
 Do not infer supported hardware behavior from `doctor`, the ZIP smoke, a
 virtual audio device or a hosted runner. Record a real Windows 10 and Windows

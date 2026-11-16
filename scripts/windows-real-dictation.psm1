@@ -335,7 +335,7 @@ function Get-RealDictationVerdict {
                 'app installed and started',
                 'foreground editor focused',
                 'real Double-Alt delivered',
-                'recording HUD appeared',
+                'HUD appeared after Double-Alt',
                 'recording HUD phase reached',
                 'virtual capture endpoint present',
                 'product default capture is virtual',
@@ -349,7 +349,7 @@ function Get-RealDictationVerdict {
         'app installed and started'          = [bool]$Gui.AppLaunched
         'foreground editor focused'          = [bool]$Gui.EditorFocused
         'real Double-Alt delivered'          = [bool]$Gui.DoubleAltDelivered
-        'recording HUD appeared'             = [bool]$Gui.HudAppeared
+        'HUD appeared after Double-Alt'      = [bool]$Gui.HudAppeared
         'recording HUD phase reached'        = [bool]$Gui.RecordingPhase
         'virtual capture endpoint present'   = [bool]$Audio.VirtualCaptureEndpointPresent
         'product default capture is virtual' = [bool]$Audio.DefaultCaptureIsVirtual
@@ -364,7 +364,12 @@ function Get-RealDictationVerdict {
     }
 
     $full = $unverified.Count -eq 0
-    $guiSegment = [bool]($Gui.AppLaunched -and $Gui.EditorFocused -and $Gui.DoubleAltDelivered -and $Gui.HudAppeared)
+    # The GUI leg is only complete when the panel actually reached the
+    # recording phase. A starting/error panel proves the hook fired but not
+    # that NanoDictate captured audio, so it must not be reported as a
+    # competing leg on its own.
+    $guiSegment = [bool]($Gui.AppLaunched -and $Gui.EditorFocused -and
+        $Gui.DoubleAltDelivered -and $Gui.HudAppeared -and $Gui.RecordingPhase)
     $audioSegment = [bool]($Audio.VirtualCaptureEndpointPresent -and $Audio.DefaultCaptureIsVirtual -and
         $Audio.WavPlayed -and $Audio.PhraseMatched)
     $status = if ($full) {
@@ -711,10 +716,11 @@ function New-RealDictationPhraseWav {
             throw 'No SAPI voice is installed on this runner; supply -PhraseWav with a prerecorded test-owned phrase.'
         }
         $voiceName = [string]$voice.Voice.GetDescription()
-        # SSFMCreateForWrite = 3; SAFT16kHz16BitMono = 14, the 16-bit PCM
-        # format the harness WAV reader accepts.
+        # SSFMCreateForWrite = 3; SAFT16kHz16BitMono = 18, the 16-bit PCM
+        # format the harness WAV reader accepts. Set the format before Open:
+        # SpFileStream applies Format when the file is opened.
+        $stream.Format.Type = 18
         $stream.Open($Path, 3, $false)
-        $stream.Format.Type = 14
         $voice.AudioOutputStream = $stream
         $null = $voice.Speak($Text)
         $stream.Close()

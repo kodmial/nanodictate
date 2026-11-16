@@ -930,7 +930,11 @@ namespace NanoDictate.RealDictation
             public int propertyId;
         }
 
-        [StructLayout(LayoutKind.Explicit)]
+        // PROPVARIANT is 24 bytes on x64 (vt at 0, padding, 16-byte union at
+        // offset 8). Declaring only IntPtr would marshal 16 bytes and let
+        // IPropertyStore.GetValue overwrite the stack. Size = 24 is also a
+        // safe superset of the 16-byte x86 layout.
+        [StructLayout(LayoutKind.Explicit, Size = 24)]
         private struct PropVariant
         {
             [FieldOffset(0)]
