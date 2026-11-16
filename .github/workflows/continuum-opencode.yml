@@ -268,6 +268,9 @@ jobs:
     with:
       continuum_ref: main
       runner_os: "${{ needs.resolve-platform.outputs.runner_os }}"
+      # Linux OpenCode baseline uses existing portable Rust CI checks;
+      # interactive Windows dictation is qualified separately by issue #254.
+      validation_command: "cd rust && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test"
       mode: "${{ inputs.mode }}"
       issue_number: "${{ inputs.issue_number }}"
       pr_number: "${{ inputs.pr_number }}"
