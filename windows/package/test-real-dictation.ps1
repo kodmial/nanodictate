@@ -85,7 +85,10 @@ $notepadWindow = $null
 $editorOwned = $false
 $installerSha256 = ''
 $testedVersion = $Version
-$testedCommit = if ($env:GITHUB_SHA) { $env:GITHUB_SHA } else { 'unknown' }
+# A candidate installer is built from the workflow checkout, so that SHA is
+# the tested commit. A published installer must be attributed to its own
+# release commit, which is resolved later; never fall back to the checkout.
+$testedCommit = if ($Source -eq 'candidate' -and $env:GITHUB_SHA) { $env:GITHUB_SHA } else { 'unknown' }
 $providerLabel = [pscustomobject]@{ Provider = 'unknown'; Model = 'unknown' }
 $audioInventory = $null
 $audioRoute = $null
@@ -257,15 +260,20 @@ function Resolve-InstallerAsset {
     if ($resolvedVersion -notmatch '^\d+\.\d+\.\d+$') {
         throw "Unexpected release tag for the published installer: $($release.tag_name)"
     }
+    $releaseCommit = $null
     try {
         # Identify the source commit of the published tag, not the workflow
         # checkout: a published installer must be attributable to its release.
         $releaseCommit = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/commits/v$resolvedVersion" -Headers $headers
-        if ([string]$releaseCommit.sha -match '^[0-9a-fA-F]{40}$') {
-            $script:testedCommit = ([string]$releaseCommit.sha).ToLowerInvariant()
-            Add-Segment 'published release commit resolved' $true "v$resolvedVersion -> $($script:testedCommit)"
-        }
     } catch {
+        $releaseCommit = $null
+    }
+    if ($null -ne $releaseCommit -and [string]$releaseCommit.sha -match '^[0-9a-fA-F]{40}$') {
+        $script:testedCommit = ([string]$releaseCommit.sha).ToLowerInvariant()
+        Add-Segment 'published release commit resolved' $true "v$resolvedVersion -> $($script:testedCommit)"
+    } else {
+        # An unresolved or malformed release commit must stay unknown rather
+        # than borrowing the workflow checkout SHA recorded in run.sha.
         $script:testedCommit = 'unknown'
         Add-Limitation "Could not resolve the commit for published release v$resolvedVersion; evidence records the tested commit as unknown and the workflow checkout only under environment.run.sha."
     }

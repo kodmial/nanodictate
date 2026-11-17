@@ -326,6 +326,12 @@ Assert-Contains 'harness verifies the published SHA-256' $harness 'SHA256SUMS.tx
 Assert-Contains 'harness resolves the tested published release commit' $harness 'commits/v$resolvedVersion'
 Assert-Contains 'harness records an unknown tested commit when release resolution fails' `
     $harness "`$script:testedCommit = 'unknown'"
+Assert-Contains 'published qualification starts with an unknown tested commit' `
+    $harness "`$testedCommit = if (`$Source -eq 'candidate' -and `$env:GITHUB_SHA) { `$env:GITHUB_SHA } else { 'unknown' }"
+Assert-Contains 'published qualification requires a validated release commit' `
+    $harness "if (`$null -ne `$releaseCommit -and [string]`$releaseCommit.sha -match '^[0-9a-fA-F]{40}$')"
+Assert-Contains 'workflow checkout SHA stays in environment.run.sha' `
+    $harness 'sha = [string]$env:GITHUB_SHA'
 Assert-Contains 'harness counts phrase tokens directly' `
     $harness 'if ((Get-DictationTokens -Text $PhraseText).Count -lt 2)'
 Assert-Contains 'harness requires an interactive input desktop' $harness 'InputDesktopAvailable'
