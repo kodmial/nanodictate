@@ -669,13 +669,22 @@ try {
     Add-Limitation "The qualification harness stopped before completing the product path: $($_.Exception.Message)"
     Write-Warning "Real-dictation qualification failed: $($_.Exception.Message)"
 } finally {
-    # Only terminate an editor process this run created. When Notepad handed
-    # the file to a process that already existed, that process may own
-    # unrelated documents, so leave it running instead of discarding them.
+    # Close only the editor window this run created. A matching window can
+    # still belong to a shared process (Windows 11 Notepad hosts several
+    # documents in one process and new processes may restore tabs), so the
+    # editor process is never force-terminated. The ordinary WM_CLOSE path
+    # prompts before discarding anything and leaves unrelated documents alone.
     if ($editorOwned -and $null -ne $notepadWindow) {
-        try { Stop-Process -Id $notepadWindow.ProcessId -Force -ErrorAction SilentlyContinue } catch { }
+        try {
+            $editorProcess = Get-Process -Id $notepadWindow.ProcessId -ErrorAction SilentlyContinue
+            if ($null -ne $editorProcess -and -not $editorProcess.HasExited) {
+                $null = $editorProcess.CloseMainWindow()
+            }
+        } catch { }
     }
     if ($null -ne $notepadProcess -and $notepadProcess.Id -ne $notepadProcessId) {
+        # This launcher process was started by the harness itself; when
+        # Windows handed the test file to another process it has exited.
         try {
             if (-not $notepadProcess.HasExited) {
                 Stop-Process -Id $notepadProcess.Id -Force -ErrorAction SilentlyContinue
