@@ -430,6 +430,24 @@ function Get-RealDictationVerdict {
     }
 }
 
+function Test-RealDictationEditorProcessOwned {
+    <#
+      An editor process may be terminated only when it did not exist before
+      this run launched its own editor. Windows 11 Notepad can host several
+      files in one process, so a pre-existing process may contain unrelated
+      unsaved documents even when the window title matches this run's file.
+    #>
+    param(
+        [Parameter(Mandatory)][int]$EditorProcessId,
+        [int[]]$PreexistingProcessIds = @()
+    )
+
+    if ($EditorProcessId -le 0) {
+        return $false
+    }
+    return ($PreexistingProcessIds -notcontains $EditorProcessId)
+}
+
 function Get-RealDictationExitCode {
     <#
       Maps a finished qualification to the process exit code. Probe-only runs
@@ -824,6 +842,7 @@ Export-ModuleMember -Function @(
     'Get-PairedRenderEndpoint'
     'Resolve-VirtualAudioRoute'
     'Get-RealDictationVerdict'
+    'Test-RealDictationEditorProcessOwned'
     'Get-RealDictationExitCode'
     'Format-RealDictationSummary'
     'Get-RealDictationSessionProbe'

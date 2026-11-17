@@ -121,6 +121,19 @@ Assert-Throws 'single-word expected phrase is rejected' {
 } 'at least two words'
 
 # ---------------------------------------------------------------------------
+# Editor process ownership
+# ---------------------------------------------------------------------------
+Assert-True 'a Notepad process created by this run is owned' `
+    (Test-RealDictationEditorProcessOwned -EditorProcessId 4242 -PreexistingProcessIds @(100, 200)) `
+    'a new process must be cleanable'
+Assert-True 'a pre-existing Notepad process is not owned' `
+    (-not (Test-RealDictationEditorProcessOwned -EditorProcessId 100 -PreexistingProcessIds @(100, 200))) `
+    'a shared process must never be terminated'
+Assert-True 'an invalid editor process id is not owned' `
+    (-not (Test-RealDictationEditorProcessOwned -EditorProcessId 0 -PreexistingProcessIds @(100))) `
+    'a missing process cannot be cleaned up'
+
+# ---------------------------------------------------------------------------
 # Virtual audio endpoint heuristics and routing
 # ---------------------------------------------------------------------------
 $physical = @(
@@ -339,6 +352,14 @@ Assert-Contains 'harness enumerates real WASAPI endpoints' $harness 'Get-RealDic
 Assert-Contains 'harness focuses Notepad' $harness "notepad.exe"
 Assert-Contains 'harness tolerates packaged Notepad hosting' $harness 'Get-RealDictationWindowByTitlePattern'
 Assert-Contains 'harness scopes the editor fallback to its own unique file' $harness 'nanodictate-real-dictation-'
+Assert-Contains 'harness requires its unique file for initial editor discovery' `
+    $harness 'Where-Object { $_.Title -match $editorTitlePattern }'
+Assert-NotContains 'harness initial editor discovery does not accept any Notepad title' `
+    $harness "`$_.Title -match 'Notepad'"
+Assert-Contains 'harness snapshots pre-existing Notepad processes before launching' `
+    $harness 'Get-Process -Name notepad'
+Assert-Contains 'harness checks editor process ownership before cleanup' `
+    $harness 'Test-RealDictationEditorProcessOwned'
 Assert-Contains 'harness only terminates an editor it owns' $harness 'if ($editorOwned -and $null -ne $notepadWindow)'
 Assert-Contains 'harness sends a real Double-Alt' $harness 'Send-RealDictationDoubleAlt'
 Assert-Contains 'harness observes the recording HUD phase' $harness 'RecordingObserved'

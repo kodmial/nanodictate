@@ -510,9 +510,13 @@ try {
     $editorPath = Join-Path $tempRoot ($editorFileStem + '.txt')
     $null = New-Item -ItemType File -Path $editorPath -Force
     # A uniquely named test file keeps the editor window attributable to this
-    # run even when Windows hands notepad.exe to a packaged process; the
-    # fallback below can therefore never adopt a pre-existing Notepad window.
+    # run even when Windows hands notepad.exe to a packaged process; both
+    # discovery paths require it so neither can adopt a pre-existing Notepad
+    # window. A pre-existing Notepad process may be shared with unrelated
+    # documents, so it is never treated as owned by this run.
     $editorTitlePattern = [regex]::Escape($editorFileStem)
+    $preexistingEditorProcessIds = @(Get-Process -Name notepad -ErrorAction SilentlyContinue |
+        ForEach-Object { [int]$_.Id })
     $notepadProcess = Start-Process -FilePath 'notepad.exe' -ArgumentList ('"{0}"' -f $editorPath) -PassThru
     $notepadWindow = $null
     $notepadProcessId = [int]$notepadProcess.Id
@@ -520,10 +524,9 @@ try {
     $deadline = $startedUtc.AddSeconds($AppLaunchTimeoutSeconds)
     while ([DateTime]::UtcNow -lt $deadline) {
         $windows = @(Get-RealDictationProcessWindow -ProcessId $notepadProcessId |
-            Where-Object { $_.Title -match 'Notepad' -or $_.Title -match $editorTitlePattern })
+            Where-Object { $_.Title -match $editorTitlePattern })
         if ($windows.Count -gt 0) {
             $notepadWindow = $windows[0]
-            $editorOwned = $true
             break
         }
         # Windows 11 may hand notepad.exe to a packaged process, so the
@@ -534,7 +537,6 @@ try {
             $fallback = Get-RealDictationWindowByTitlePattern -Pattern $editorTitlePattern
             if ($null -ne $fallback) {
                 $notepadWindow = $fallback
-                $editorOwned = $true
                 break
             }
         }
@@ -544,6 +546,8 @@ try {
         throw "Notepad did not expose a visible top-level window within $AppLaunchTimeoutSeconds seconds."
     }
     $notepadProcessId = [int]$notepadWindow.ProcessId
+    $editorOwned = Test-RealDictationEditorProcessOwned -EditorProcessId $notepadProcessId `
+        -PreexistingProcessIds $preexistingEditorProcessIds
     if (-not (Set-RealDictationForegroundWindow -Handle $notepadWindow.Handle)) {
         throw 'Could not move Notepad to the foreground; a real global hotkey test needs a focused editor.'
     }
@@ -665,6 +669,9 @@ try {
     Add-Limitation "The qualification harness stopped before completing the product path: $($_.Exception.Message)"
     Write-Warning "Real-dictation qualification failed: $($_.Exception.Message)"
 } finally {
+    # Only terminate an editor process this run created. When Notepad handed
+    # the file to a process that already existed, that process may own
+    # unrelated documents, so leave it running instead of discarding them.
     if ($editorOwned -and $null -ne $notepadWindow) {
         try { Stop-Process -Id $notepadWindow.ProcessId -Force -ErrorAction SilentlyContinue } catch { }
     }
