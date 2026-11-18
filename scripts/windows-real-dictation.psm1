@@ -448,6 +448,34 @@ function Test-RealDictationEditorProcessOwned {
     return ($PreexistingProcessIds -notcontains $EditorProcessId)
 }
 
+function Test-RealDictationActiveEditorWindow {
+    <#
+      Confirms the foreground window is the discovered editor and its title
+      still names this run's unique test file. Windows 11 Notepad hosts
+      several tabs in one window and titles the active document, so this
+      prevents Ctrl+A/Ctrl+C from reading a different tab that merely shares
+      the editor window.
+    #>
+    param(
+        [AllowNull()]$Foreground = $null,
+        [Parameter(Mandatory)][long]$EditorHandle,
+        [Parameter(Mandatory)][string]$TitlePattern
+    )
+
+    if ($null -eq $Foreground -or $EditorHandle -le 0) {
+        return $false
+    }
+    if ([long]$Foreground.Handle -ne $EditorHandle) {
+        return $false
+    }
+    $title = [string]$Foreground.Title
+    if ([string]::IsNullOrEmpty($title)) {
+        return $false
+    }
+    return [regex]::IsMatch($title, $TitlePattern,
+        [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+}
+
 function Get-RealDictationExitCode {
     <#
       Maps a finished qualification to the process exit code. Probe-only runs
@@ -843,6 +871,7 @@ Export-ModuleMember -Function @(
     'Resolve-VirtualAudioRoute'
     'Get-RealDictationVerdict'
     'Test-RealDictationEditorProcessOwned'
+    'Test-RealDictationActiveEditorWindow'
     'Get-RealDictationExitCode'
     'Format-RealDictationSummary'
     'Get-RealDictationSessionProbe'

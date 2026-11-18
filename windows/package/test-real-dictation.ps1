@@ -637,7 +637,49 @@ try {
                 Send-RealDictationKey -Key 'escape'
             }
 
-            $editorText = Get-RealDictationEditorText -Handle $notepadWindow.Handle -UseClipboardFallback
+            # Re-focus the editor and verify that its active tab still names
+            # this run's unique file before reading. Windows 11 Notepad hosts
+            # several files in one window, and the clipboard fallback would
+            # otherwise read whichever tab is active. An unverified tab must
+            # leave the assertion uncredited instead of reading unrelated text.
+            $editorRefocused = Set-RealDictationForegroundWindow -Handle $notepadWindow.Handle
+            $activeBeforeRead = Get-RealDictationForegroundWindow
+            $tabActiveBeforeRead = $editorRefocused -and
+                (Test-RealDictationActiveEditorWindow -Foreground $activeBeforeRead `
+                    -EditorHandle $notepadWindow.Handle -TitlePattern $editorTitlePattern)
+            Add-Segment 'test-owned editor tab active before reading' $tabActiveBeforeRead `
+                ("foreground is '{0}' (pid {1}); expected this run's unique file '{2}'" -f
+                    $(if ($activeBeforeRead) { $activeBeforeRead.Title } else { '<none>' }),
+                    $(if ($activeBeforeRead) { $activeBeforeRead.ProcessId } else { 0 }),
+                    $editorFileStem)
+            if (-not $tabActiveBeforeRead) {
+                $editorText = [pscustomobject]@{
+                    Text = [string]::Empty
+                    Method = 'active-tab-unverified'
+                    Read = $false
+                }
+                Add-Limitation 'The active Notepad tab could not be verified as this run''s unique test file; the editor text was not read, so the insertion assertion is unverified.'
+            } else {
+                $editorText = Get-RealDictationEditorText -Handle $notepadWindow.Handle -UseClipboardFallback
+                # Recheck after the read so a tab switch during Ctrl+A/Ctrl+C
+                # cannot be credited as this run's insertion.
+                $activeAfterRead = Get-RealDictationForegroundWindow
+                $tabActiveAfterRead = Test-RealDictationActiveEditorWindow -Foreground $activeAfterRead `
+                    -EditorHandle $notepadWindow.Handle -TitlePattern $editorTitlePattern
+                Add-Segment 'test-owned editor tab active after reading' $tabActiveAfterRead `
+                    ("foreground is '{0}' (pid {1}); expected this run's unique file '{2}'" -f
+                        $(if ($activeAfterRead) { $activeAfterRead.Title } else { '<none>' }),
+                        $(if ($activeAfterRead) { $activeAfterRead.ProcessId } else { 0 }),
+                        $editorFileStem)
+                if (-not $tabActiveAfterRead) {
+                    $editorText = [pscustomobject]@{
+                        Text = [string]::Empty
+                        Method = 'active-tab-changed-during-read'
+                        Read = $false
+                    }
+                    Add-Limitation 'The active Notepad tab changed while the editor text was read; the insertion assertion cannot be credited.'
+                }
+            }
             $match = Test-DictationPhraseInserted -Transcript $editorText.Text -Expected $PhraseText
             $audioFlags.PhraseMatched = [bool]$match.Matched
             Add-Segment 'real STT phrase inserted in Notepad' $match.Matched `

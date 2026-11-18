@@ -134,6 +134,34 @@ Assert-True 'an invalid editor process id is not owned' `
     'a missing process cannot be cleaned up'
 
 # ---------------------------------------------------------------------------
+# Active editor tab verification
+# ---------------------------------------------------------------------------
+$activeEditorTitlePattern = [regex]::Escape('nanodictate-real-dictation-abc123')
+$activeEditorForeground = [pscustomobject]@{
+    Handle = 4242
+    Title = 'nanodictate-real-dictation-abc123.txt - Notepad'
+    ProcessId = 99
+}
+Assert-True 'the test-owned editor tab is active when its title is in the foreground' `
+    (Test-RealDictationActiveEditorWindow -Foreground $activeEditorForeground `
+        -EditorHandle 4242 -TitlePattern $activeEditorTitlePattern) `
+    'a matching foreground title must verify the test tab'
+Assert-True 'another Notepad tab is not treated as the test editor' `
+    (-not (Test-RealDictationActiveEditorWindow -Foreground ([pscustomobject]@{
+        Handle = 4242; Title = 'unrelated.txt - Notepad'; ProcessId = 99
+    }) -EditorHandle 4242 -TitlePattern $activeEditorTitlePattern)) `
+    'an active unrelated tab must not verify the test tab'
+Assert-True 'a different foreground window is not treated as the test editor' `
+    (-not (Test-RealDictationActiveEditorWindow -Foreground ([pscustomobject]@{
+        Handle = 9999; Title = 'nanodictate-real-dictation-abc123.txt - Notepad'; ProcessId = 99
+    }) -EditorHandle 4242 -TitlePattern $activeEditorTitlePattern)) `
+    'a different foreground window must not verify the test tab'
+Assert-True 'a missing foreground window is not treated as the test editor' `
+    (-not (Test-RealDictationActiveEditorWindow -Foreground $null `
+        -EditorHandle 4242 -TitlePattern $activeEditorTitlePattern)) `
+    'a missing foreground window cannot verify the test tab'
+
+# ---------------------------------------------------------------------------
 # Virtual audio endpoint heuristics and routing
 # ---------------------------------------------------------------------------
 $physical = @(
@@ -366,6 +394,14 @@ Assert-NotContains 'harness never force-stops the discovered Notepad host' `
     $harness 'Stop-Process -Id $notepadWindow.ProcessId'
 Assert-NotContains 'harness never force-stops Notepad by process name' `
     $harness 'Stop-Process -Name notepad'
+Assert-Contains 'harness verifies the test-owned editor tab before reading' `
+    $harness 'test-owned editor tab active before reading'
+Assert-Contains 'harness refuses to read an unverified editor tab' `
+    $harness "Method = 'active-tab-unverified'"
+Assert-Contains 'harness rechecks the test-owned editor tab after reading' `
+    $harness 'test-owned editor tab active after reading'
+Assert-Contains 'harness rejects text read while the editor tab changed' `
+    $harness "Method = 'active-tab-changed-during-read'"
 Assert-Contains 'harness sends a real Double-Alt' $harness 'Send-RealDictationDoubleAlt'
 Assert-Contains 'harness observes the recording HUD phase' $harness 'RecordingObserved'
 Assert-Contains 'harness routes the WAV into the virtual cable' $harness 'Invoke-RealDictationWavPlayback'
