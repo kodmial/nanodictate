@@ -686,25 +686,25 @@ try {
                     Add-Limitation 'The active Notepad tab changed while the editor text was read; the insertion assertion cannot be credited.'
                 }
             }
-            $contentOwned = $editorText.Read -and
-                (Test-RealDictationEditorContentOwned -Text $editorText.Text -Marker $editorMarker)
+            $insertion = Test-RealDictationInsertion -EditorText $editorText.Text `
+                -Marker $editorMarker -Expected $PhraseText
+            $match = $insertion.Comparison
+            $contentOwned = [bool]($editorText.Read -and $insertion.Owned)
             Add-Segment 'editor text belongs to this run''s test document' $contentOwned `
                 ("read via {0}; unique document marker '{1}' {2}" -f
                     $editorText.Method, $editorMarker, $(if ($contentOwned) { 'present' } else { 'missing' }))
             if ($editorText.Read -and -not $contentOwned) {
                 Add-Limitation 'The read editor text did not contain this run''s unique document marker: another Notepad tab was active during the read, so the insertion assertion cannot be credited.'
             }
-            # The marker proves ownership but may itself contain the expected
-            # phrase (for example "real dictation" in the marker name), so it
-            # must not participate in the phrase assertion.
-            $phraseText = Remove-RealDictationEditorMarker -Text $editorText.Text -Marker $editorMarker
-            $match = Test-DictationPhraseInserted -Transcript $phraseText -Expected $PhraseText
+            # Test-RealDictationInsertion strips the marker before matching, so
+            # it can never satisfy the expected phrase (for example "real
+            # dictation" appears in the marker name).
             $phraseInserted = [bool]($match.Matched -and $contentOwned)
             $audioFlags.PhraseMatched = $phraseInserted
             Add-Segment 'real STT phrase inserted in Notepad' $phraseInserted `
                 ("editor text ({0}, {1} chars): '{2}' | expected '{3}' | matched {4}/{5} tokens" -f
-                    $editorText.Method, $phraseText.Length,
-                    (ConvertTo-NormalizedDictationText -Text $phraseText),
+                    $editorText.Method, $insertion.TranscriptText.Length,
+                    $match.TranscriptNormalized,
                     $match.ExpectedNormalized,
                     $match.OrderedTokens, $match.ExpectedTokenCount)
             if (-not $match.Matched) {

@@ -208,6 +208,43 @@ Assert-True 'an insertion before the marker is still credited' `
     ((Test-DictationPhraseInserted -Transcript $insertedBeforeMarkerCompared -Expected $markerPhrase).Matched) `
     'the marker position must not decide the phrase assertion'
 
+# Regression: the harness comparison must keep the expected phrase intact.
+# PowerShell variable names are case-insensitive, so a local "$phraseText"
+# assignment used to overwrite the $PhraseText parameter and match the editor
+# text against itself.
+$insertionUnrelated = Test-RealDictationInsertion `
+    -EditorText "$editorMarker`r`nhello world" `
+    -Marker $editorMarker -Expected 'quick brown fox jumps'
+Assert-True 'an unrelated two-word transcript is not credited as insertion' `
+    (-not $insertionUnrelated.Matched) `
+    'an unrelated transcript must not satisfy the expected phrase'
+Assert-Equal 'the expected phrase survives the unrelated comparison' `
+    $insertionUnrelated.Comparison.ExpectedNormalized 'quick brown fox jumps'
+Assert-Equal 'the unrelated transcript is compared unchanged' `
+    $insertionUnrelated.Comparison.TranscriptNormalized 'hello world'
+Assert-True 'the unrelated transcript still belongs to this run''s document' `
+    $insertionUnrelated.Owned 'the marker was present, so ownership itself is not the reason'
+
+$insertionEmpty = Test-RealDictationInsertion `
+    -EditorText "$editorMarker`r`n" `
+    -Marker $editorMarker -Expected 'quick brown fox jumps'
+Assert-True 'an empty transcript is not credited as insertion' `
+    (-not $insertionEmpty.Matched) 'a marker-only read has no transcription to credit'
+Assert-Equal 'an empty transcript compares against the expected phrase' `
+    $insertionEmpty.Comparison.ExpectedNormalized 'quick brown fox jumps'
+
+$insertionUnread = Test-RealDictationInsertion -EditorText '' `
+    -Marker $editorMarker -Expected 'quick brown fox jumps'
+Assert-True 'an unread editor is not owned or credited' `
+    (-not $insertionUnread.Owned -and -not $insertionUnread.Matched) `
+    'a failed read cannot be credited'
+
+$insertionReal = Test-RealDictationInsertion `
+    -EditorText "$editorMarker`r`nquick brown fox jumps" `
+    -Marker $editorMarker -Expected 'quick brown fox jumps'
+Assert-True 'a real insertion is still credited' $insertionReal.Matched `
+    'the marker-aware helper must not reject a genuine insertion'
+
 # ---------------------------------------------------------------------------
 # Virtual audio endpoint heuristics and routing
 # ---------------------------------------------------------------------------
@@ -452,17 +489,20 @@ Assert-Contains 'harness rejects text read while the editor tab changed' `
 Assert-Contains 'harness seeds a run-unique marker into its test document' `
     $harness "`$editorMarker = 'nanodictate-real-dictation-marker-'"
 Assert-Contains 'harness binds the read text to its test document marker' `
-    $harness 'Test-RealDictationEditorContentOwned -Text $editorText.Text -Marker $editorMarker'
-Assert-Contains 'harness removes its document marker before phrase matching' `
-    $harness 'Remove-RealDictationEditorMarker -Text $editorText.Text -Marker $editorMarker'
-Assert-Contains 'harness matches the phrase against marker-stripped text' `
-    $harness 'Test-DictationPhraseInserted -Transcript $phraseText -Expected $PhraseText'
+    $harness 'Test-RealDictationInsertion -EditorText $editorText.Text'
+Assert-Contains 'harness matches against the expected phrase parameter' `
+    $harness '-Marker $editorMarker -Expected $PhraseText'
+Assert-NotMatch 'harness never reassigns the expected phrase variable' `
+    $harness '(?s)\$phraseText\s*='
+Assert-NotContains 'harness no longer reuses the expected phrase variable name' `
+    $harness '$phraseText'
 Assert-Contains 'harness requires marker ownership before crediting insertion' `
     $harness '$phraseInserted = [bool]($match.Matched -and $contentOwned)'
 Assert-Contains 'harness sends a real Double-Alt' $harness 'Send-RealDictationDoubleAlt'
 Assert-Contains 'harness observes the recording HUD phase' $harness 'RecordingObserved'
 Assert-Contains 'harness routes the WAV into the virtual cable' $harness 'Invoke-RealDictationWavPlayback'
-Assert-Contains 'harness asserts the inserted phrase' $harness 'Test-DictationPhraseInserted'
+Assert-Contains 'harness asserts the inserted phrase through the marker-aware helper' `
+    $harness 'Test-RealDictationInsertion'
 Assert-Contains 'harness stops dictation through the product hotkey' $harness "Send-RealDictationKey -Key 'return'"
 Assert-Contains 'harness applies an operator provider config' $harness 'config.toml'
 Assert-Contains 'harness never uploads the user config' $harness 'never uploaded'

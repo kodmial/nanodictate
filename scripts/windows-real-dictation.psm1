@@ -517,6 +517,32 @@ function Remove-RealDictationEditorMarker {
     return $Text.Replace($Marker, [string]::Empty)
 }
 
+function Test-RealDictationInsertion {
+    <#
+      Runs the harness insertion assertion in one place: bind the read to this
+      run's document through the unique marker, strip that marker so it cannot
+      satisfy the expected phrase, then require the ordered spoken phrase.
+      The parameters are never reassigned, so the expected phrase cannot be
+      replaced by the marker-stripped editor text (PowerShell variable names are
+      case-insensitive). Only a read owned by this run can be credited.
+    #>
+    param(
+        [AllowNull()][string]$EditorText,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Marker,
+        [Parameter(Mandatory)][string]$Expected
+    )
+
+    $owned = Test-RealDictationEditorContentOwned -Text $EditorText -Marker $Marker
+    $transcript = Remove-RealDictationEditorMarker -Text $EditorText -Marker $Marker
+    $comparison = Test-DictationPhraseInserted -Transcript $transcript -Expected $Expected
+    return [pscustomobject]@{
+        Owned            = [bool]$owned
+        Matched          = [bool]($comparison.Matched -and $owned)
+        TranscriptText   = $transcript
+        Comparison       = $comparison
+    }
+}
+
 function Get-RealDictationExitCode {
     <#
       Maps a finished qualification to the process exit code. Probe-only runs
@@ -915,6 +941,7 @@ Export-ModuleMember -Function @(
     'Test-RealDictationActiveEditorWindow'
     'Test-RealDictationEditorContentOwned'
     'Remove-RealDictationEditorMarker'
+    'Test-RealDictationInsertion'
     'Get-RealDictationExitCode'
     'Format-RealDictationSummary'
     'Get-RealDictationSessionProbe'
