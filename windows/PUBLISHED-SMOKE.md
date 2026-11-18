@@ -26,7 +26,11 @@ The canary is not a GUI or microphone hardware test: a headless runner does
 not validate the WinUI message loop, double-Alt keys, WASAPI device capture,
 SmartScreen prompts or a full clean Windows 10/11 desktop session. These
 need interactive qualification with genuine Windows hardware. The report
-records this explicitly as `NOT_TESTED`.
+records this explicitly as `NOT_TESTED`. The opt-in
+[`windows-real-dictation.yml`](../.github/workflows/windows-real-dictation.yml)
+qualification attempts that interactive path on a hosted runner and reports
+which legs it actually observed; it never substitutes for the physical
+Windows 10/11 checklist in [VALIDATION.md](VALIDATION.md).
 
 It reports the actual Authenticode status of the public installer.
 An unsigned installer produces a visible warning, **not** a false signed

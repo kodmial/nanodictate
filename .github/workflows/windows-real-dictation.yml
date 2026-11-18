@@ -1,0 +1,183 @@
+name: Windows real dictation qualification
+
+# Opt-in empirical qualification for the real Windows dictation path on a
+# standard GitHub-hosted `windows-latest` runner:
+#   install the actual NanoDictate distribution -> start the background agent
+#   -> focus Notepad -> inject a real Double-Alt -> observe the recording HUD
+#   -> route a test-owned spoken WAV through a virtual capture endpoint into
+#   the product's genuine WASAPI capture -> let the configured real STT
+#   provider answer -> assert the text in Notepad.
+#
+# This workflow is deliberately NOT part of required CI and has no push or
+# pull-request trigger: it consumes a full Windows job and its purpose is
+# qualification evidence, not gating. A completed probe-only run succeeds. A
+# full run succeeds only with FULL E2E VERIFIED; PARTIAL VERIFIED and
+# NOT VERIFIED exit nonzero after writing the evidence, so a green job can
+# never be mistaken for proof. The authoritative outcome is the reported status
+# and the uploaded artifact. It never fakes a transcript, provider response or
+# microphone.
+#
+# GitHub only registers workflow_dispatch workflows that exist on the default
+# branch, so the first dispatch is possible only after this file is merged. A
+# dispatch against a feature branch that does not yet contain the workflow on
+# main returns HTTP 404 ("workflow ... not found on the default branch"), which
+# is a registration limitation, not a runner result.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: 'published = latest public installer; candidate = exact-commit CI build'
+        type: choice
+        options: [published, candidate]
+        default: published
+      version:
+        description: 'Published stable version to test (e.g. 0.1.46); empty = latest release'
+        type: string
+        required: false
+        default: ''
+      probe_only:
+        description: 'Only probe the session/desktop/audio endpoints; no install or dictation'
+        type: boolean
+        required: false
+        default: false
+      phrase_text:
+        description: 'Test-owned phrase the WAV speaks and the assertion expects (plain words avoid brand-name tokenization)'
+        type: string
+        required: false
+        default: 'quick brown fox jumps'
+      phrase_wav:
+        description: 'Optional repository-relative 16-bit PCM WAV of the phrase (default: SAPI synthesizes phrase_text)'
+        type: string
+        required: false
+        default: ''
+      config_path:
+        description: 'Optional repository-relative non-secret config.toml copied to %APPDATA%; never uploaded'
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-real-dictation-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    name: Real dictation (${{ inputs.source }})
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Verify qualification harness contracts
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/test-windows-real-dictation.ps1
+
+      - name: Install .NET
+        if: ${{ inputs.source == 'candidate' && !inputs.probe_only }}
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Ensure MSVC target
+        if: ${{ inputs.source == 'candidate' && !inputs.probe_only }}
+        run: rustup target add x86_64-pc-windows-msvc
+
+      - name: Install Inno Setup compiler
+        if: ${{ inputs.source == 'candidate' && !inputs.probe_only }}
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
+
+      - name: Build exact-commit candidate ZIP and EXE
+        if: ${{ inputs.source == 'candidate' && !inputs.probe_only }}
+        shell: pwsh
+        run: |
+          # make-release builds the Rust DLL and the self-contained WinUI
+          # publish before producing the exact-commit installer, so this is the
+          # same distribution shape as required Windows CI.
+          pwsh windows/package/make-release.ps1 -Version 0.0.0 -OutDir windows/artifacts
+          if ($LASTEXITCODE -ne 0) { throw "Candidate build failed with exit code $LASTEXITCODE" }
+
+      - name: Run real dictation qualification
+        shell: pwsh
+        env:
+          ND_SOURCE: ${{ inputs.source }}
+          ND_VERSION: ${{ inputs.version }}
+          ND_PROBE_ONLY: ${{ inputs.probe_only }}
+          ND_PHRASE_TEXT: ${{ inputs.phrase_text }}
+          ND_PHRASE_WAV: ${{ inputs.phrase_wav }}
+          ND_CONFIG_PATH: ${{ inputs.config_path }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = (Resolve-Path '.').Path
+          $rootPrefix = $root.TrimEnd(
+            [System.IO.Path]::DirectorySeparatorChar,
+            [System.IO.Path]::AltDirectorySeparatorChar
+          ) + [System.IO.Path]::DirectorySeparatorChar
+          function Test-RealDictationPathInside([string]$Path, [string]$Directory) {
+            $prefix = $Directory.TrimEnd(
+              [System.IO.Path]::DirectorySeparatorChar,
+              [System.IO.Path]::AltDirectorySeparatorChar
+            ) + [System.IO.Path]::DirectorySeparatorChar
+            return $Path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
+          }
+          $arguments = @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass',
+            '-File', 'windows/package/test-real-dictation.ps1',
+            '-Source', $env:ND_SOURCE,
+            '-PhraseText', $env:ND_PHRASE_TEXT
+          )
+          if ($env:ND_SOURCE -ne 'candidate' -and $env:ND_VERSION) {
+            $arguments += @('-Version', $env:ND_VERSION)
+          }
+          if ($env:ND_PROBE_ONLY -eq 'true') { $arguments += '-ProbeOnly' }
+          foreach ($option in @(
+            [pscustomobject]@{ Variable = 'ND_PHRASE_WAV'; Flag = '-PhraseWav' },
+            [pscustomobject]@{ Variable = 'ND_CONFIG_PATH'; Flag = '-ConfigPath' }
+          )) {
+            $value = [Environment]::GetEnvironmentVariable($option.Variable)
+            if (-not $value) { continue }
+            $resolved = (Resolve-Path -LiteralPath $value -ErrorAction Stop).Path
+            # Require a descendant of the checkout, not merely a shared path
+            # prefix (C:\work\nanodictate-fixtures must not pass for
+            # C:\work\nanodictate).
+            if (-not $resolved.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+              throw "$($option.Variable) must resolve inside the checked-out repository: $resolved"
+            }
+            if ($option.Variable -eq 'ND_CONFIG_PATH') {
+              foreach ($evidenceRoot in @('windows/artifacts/real-dictation', 'windows/artifacts/installer-logs')) {
+                if (Test-RealDictationPathInside $resolved (Join-Path $root $evidenceRoot)) {
+                  throw "ND_CONFIG_PATH must not point into an uploaded evidence directory: $resolved"
+                }
+              }
+            }
+            $arguments += @($option.Flag, $resolved)
+          }
+          if ($env:ND_SOURCE -eq 'candidate' -and $env:ND_PROBE_ONLY -ne 'true') {
+            # The candidate build is always produced as version 0.0.0.
+            $arguments += @(
+              '-InstallerPath', 'windows/artifacts/nanodictate-0.0.0-windows-x64-setup.exe',
+              '-Version', '0.0.0'
+            )
+          }
+          & pwsh @arguments
+          if ($LASTEXITCODE -ne 0) {
+            throw "Real-dictation qualification exited $LASTEXITCODE. Read the reported status and evidence artifact: 1 = harness failure, 2 = not FULL E2E VERIFIED."
+          }
+
+      - name: Upload real-dictation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-real-dictation-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            windows/artifacts/real-dictation/**
+            windows/artifacts/installer-logs/**
+          if-no-files-found: warn
+          retention-days: 14
