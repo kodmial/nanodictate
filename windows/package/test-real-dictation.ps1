@@ -82,7 +82,6 @@ $installedDirectory = $null
 $notepadProcess = $null
 $notepadProcessId = 0
 $notepadWindow = $null
-$editorOwned = $false
 $installerSha256 = ''
 $testedVersion = $Version
 # A candidate installer is built from the workflow checkout, so that SHA is
@@ -509,14 +508,9 @@ try {
     $editorFileStem = 'nanodictate-real-dictation-' + [guid]::NewGuid().ToString('N')
     $editorPath = Join-Path $tempRoot ($editorFileStem + '.txt')
     $null = New-Item -ItemType File -Path $editorPath -Force
-    # A uniquely named test file keeps the editor window attributable to this
-    # run even when Windows hands notepad.exe to a packaged process; both
-    # discovery paths require it so neither can adopt a pre-existing Notepad
-    # window. A pre-existing Notepad process may be shared with unrelated
-    # documents, so it is never treated as owned by this run.
+    # A unique test filename scopes both window-discovery paths. Windows 11
+    # Notepad can still host the file inside a window with unrelated tabs.
     $editorTitlePattern = [regex]::Escape($editorFileStem)
-    $preexistingEditorProcessIds = @(Get-Process -Name notepad -ErrorAction SilentlyContinue |
-        ForEach-Object { [int]$_.Id })
     $notepadProcess = Start-Process -FilePath 'notepad.exe' -ArgumentList ('"{0}"' -f $editorPath) -PassThru
     $notepadWindow = $null
     $notepadProcessId = [int]$notepadProcess.Id
@@ -546,8 +540,6 @@ try {
         throw "Notepad did not expose a visible top-level window within $AppLaunchTimeoutSeconds seconds."
     }
     $notepadProcessId = [int]$notepadWindow.ProcessId
-    $editorOwned = Test-RealDictationEditorProcessOwned -EditorProcessId $notepadProcessId `
-        -PreexistingProcessIds $preexistingEditorProcessIds
     if (-not (Set-RealDictationForegroundWindow -Handle $notepadWindow.Handle)) {
         throw 'Could not move Notepad to the foreground; a real global hotkey test needs a focused editor.'
     }
@@ -669,28 +661,11 @@ try {
     Add-Limitation "The qualification harness stopped before completing the product path: $($_.Exception.Message)"
     Write-Warning "Real-dictation qualification failed: $($_.Exception.Message)"
 } finally {
-    # Close only the editor window this run created. A matching window can
-    # still belong to a shared process (Windows 11 Notepad hosts several
-    # documents in one process and new processes may restore tabs), so the
-    # editor process is never force-terminated. The ordinary WM_CLOSE path
-    # prompts before discarding anything and leaves unrelated documents alone.
-    if ($editorOwned -and $null -ne $notepadWindow) {
-        try {
-            $editorProcess = Get-Process -Id $notepadWindow.ProcessId -ErrorAction SilentlyContinue
-            if ($null -ne $editorProcess -and -not $editorProcess.HasExited) {
-                $null = $editorProcess.CloseMainWindow()
-            }
-        } catch { }
-    }
-    if ($null -ne $notepadProcess -and $notepadProcess.Id -ne $notepadProcessId) {
-        # This launcher process was started by the harness itself; when
-        # Windows handed the test file to another process it has exited.
-        try {
-            if (-not $notepadProcess.HasExited) {
-                Stop-Process -Id $notepadProcess.Id -Force -ErrorAction SilentlyContinue
-            }
-        } catch { }
-    }
+    # Do not close or kill Notepad here: even a new launcher PID can hand this
+    # test file to a process/window containing unrelated user documents.
+    # The disposable GitHub-hosted runner cleans up the editor after this job.
+    # Local runs intentionally leave the editor untouched rather than risk
+    # destroying another tab or unsaved work.
     try {
         if ($installedDirectory) {
             $null = Stop-NanoDictateProcessesUnderPath -InstallDirectory $installedDirectory -TimeoutSeconds 15

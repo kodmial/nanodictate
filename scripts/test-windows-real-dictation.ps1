@@ -356,16 +356,16 @@ Assert-Contains 'harness requires its unique file for initial editor discovery' 
     $harness 'Where-Object { $_.Title -match $editorTitlePattern }'
 Assert-NotContains 'harness initial editor discovery does not accept any Notepad title' `
     $harness "`$_.Title -match 'Notepad'"
-Assert-Contains 'harness snapshots pre-existing Notepad processes before launching' `
-    $harness 'Get-Process -Name notepad'
-Assert-Contains 'harness checks editor process ownership before cleanup' `
+Assert-NotContains 'harness does not infer Notepad tab ownership from a PID' `
     $harness 'Test-RealDictationEditorProcessOwned'
-Assert-Contains 'harness initializes editor ownership for the finally block' `
-    $harness '$editorOwned = $false'
-Assert-Contains 'harness only closes an editor window it owns' $harness 'if ($editorOwned -and $null -ne $notepadWindow)'
-Assert-Contains 'harness closes the run-owned editor through WM_CLOSE' $harness 'CloseMainWindow()'
-Assert-NotContains 'harness never force-terminates the editor window process' `
+Assert-NotContains 'harness never closes potentially shared Notepad windows' `
+    $harness 'CloseMainWindow()'
+Assert-NotContains 'harness never force-stops the Notepad launcher' `
+    $harness 'Stop-Process -Id $notepadProcess.Id'
+Assert-NotContains 'harness never force-stops the discovered Notepad host' `
     $harness 'Stop-Process -Id $notepadWindow.ProcessId'
+Assert-NotContains 'harness never force-stops Notepad by process name' `
+    $harness 'Stop-Process -Name notepad'
 Assert-Contains 'harness sends a real Double-Alt' $harness 'Send-RealDictationDoubleAlt'
 Assert-Contains 'harness observes the recording HUD phase' $harness 'RecordingObserved'
 Assert-Contains 'harness routes the WAV into the virtual cable' $harness 'Invoke-RealDictationWavPlayback'
