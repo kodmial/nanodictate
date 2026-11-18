@@ -162,6 +162,31 @@ Assert-True 'a missing foreground window is not treated as the test editor' `
     'a missing foreground window cannot verify the test tab'
 
 # ---------------------------------------------------------------------------
+# Editor content ownership
+# ---------------------------------------------------------------------------
+$editorMarker = 'nanodictate-real-dictation-marker-abc123'
+Assert-True 'text carrying the test document marker is owned by this run' `
+    (Test-RealDictationEditorContentOwned `
+        -Text "nanodictate-real-dictation-marker-abc123`r`nquick brown fox jumps" `
+        -Marker $editorMarker) `
+    'the marker must bind the read to the test document'
+Assert-True 'text from a tab that becomes active during the read is not owned' `
+    (-not (Test-RealDictationEditorContentOwned `
+        -Text 'quick brown fox jumps' -Marker $editorMarker)) `
+    'a tab switch during Ctrl+A/Ctrl+C must not credit another tab'
+Assert-True 'an unrelated earlier transcript is not owned' `
+    (-not (Test-RealDictationEditorContentOwned `
+        -Text 'nanodictate-real-dictation-marker-other quick brown fox jumps' `
+        -Marker $editorMarker)) `
+    'another run marker must not satisfy this run'
+Assert-True 'an empty read is not owned' `
+    (-not (Test-RealDictationEditorContentOwned -Text '' -Marker $editorMarker)) `
+    'a failed read cannot be credited'
+Assert-True 'an empty marker never binds a read' `
+    (-not (Test-RealDictationEditorContentOwned -Text 'quick brown fox jumps' -Marker '')) `
+    'the marker must not be optional'
+
+# ---------------------------------------------------------------------------
 # Virtual audio endpoint heuristics and routing
 # ---------------------------------------------------------------------------
 $physical = @(
@@ -402,6 +427,12 @@ Assert-Contains 'harness rechecks the test-owned editor tab after reading' `
     $harness 'test-owned editor tab active after reading'
 Assert-Contains 'harness rejects text read while the editor tab changed' `
     $harness "Method = 'active-tab-changed-during-read'"
+Assert-Contains 'harness seeds a run-unique marker into its test document' `
+    $harness "`$editorMarker = 'nanodictate-real-dictation-marker-'"
+Assert-Contains 'harness binds the read text to its test document marker' `
+    $harness 'Test-RealDictationEditorContentOwned -Text $editorText.Text -Marker $editorMarker'
+Assert-Contains 'harness requires marker ownership before crediting insertion' `
+    $harness '$phraseInserted = [bool]($match.Matched -and $contentOwned)'
 Assert-Contains 'harness sends a real Double-Alt' $harness 'Send-RealDictationDoubleAlt'
 Assert-Contains 'harness observes the recording HUD phase' $harness 'RecordingObserved'
 Assert-Contains 'harness routes the WAV into the virtual cable' $harness 'Invoke-RealDictationWavPlayback'

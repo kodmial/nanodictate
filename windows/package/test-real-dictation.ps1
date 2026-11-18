@@ -507,7 +507,11 @@ try {
     # ---------------------------------------------------------------
     $editorFileStem = 'nanodictate-real-dictation-' + [guid]::NewGuid().ToString('N')
     $editorPath = Join-Path $tempRoot ($editorFileStem + '.txt')
-    $null = New-Item -ItemType File -Path $editorPath -Force
+    # Seed the document with a run-unique marker. Title checks before and
+    # after Ctrl+A/Ctrl+C cannot prove which tab supplied the clipboard text,
+    # so the read itself must carry this marker; no other tab can contain it.
+    $editorMarker = 'nanodictate-real-dictation-marker-' + [guid]::NewGuid().ToString('N')
+    [System.IO.File]::WriteAllText($editorPath, $editorMarker + "`r`n")
     # A unique test filename scopes both window-discovery paths. Windows 11
     # Notepad can still host the file inside a window with unrelated tabs.
     $editorTitlePattern = [regex]::Escape($editorFileStem)
@@ -661,8 +665,10 @@ try {
                 Add-Limitation 'The active Notepad tab could not be verified as this run''s unique test file; the editor text was not read, so the insertion assertion is unverified.'
             } else {
                 $editorText = Get-RealDictationEditorText -Handle $notepadWindow.Handle -UseClipboardFallback
-                # Recheck after the read so a tab switch during Ctrl+A/Ctrl+C
-                # cannot be credited as this run's insertion.
+                # Recheck after the read. Title checks alone cannot prove which
+                # tab supplied Ctrl+A/Ctrl+C (a tab can be active only during
+                # the read), so the unique document marker below is the
+                # authoritative ownership gate.
                 $activeAfterRead = Get-RealDictationForegroundWindow
                 $tabActiveAfterRead = Test-RealDictationActiveEditorWindow -Foreground $activeAfterRead `
                     -EditorHandle $notepadWindow.Handle -TitlePattern $editorTitlePattern
@@ -680,9 +686,18 @@ try {
                     Add-Limitation 'The active Notepad tab changed while the editor text was read; the insertion assertion cannot be credited.'
                 }
             }
+            $contentOwned = $editorText.Read -and
+                (Test-RealDictationEditorContentOwned -Text $editorText.Text -Marker $editorMarker)
+            Add-Segment 'editor text belongs to this run''s test document' $contentOwned `
+                ("read via {0}; unique document marker '{1}' {2}" -f
+                    $editorText.Method, $editorMarker, $(if ($contentOwned) { 'present' } else { 'missing' }))
+            if ($editorText.Read -and -not $contentOwned) {
+                Add-Limitation 'The read editor text did not contain this run''s unique document marker: another Notepad tab was active during the read, so the insertion assertion cannot be credited.'
+            }
             $match = Test-DictationPhraseInserted -Transcript $editorText.Text -Expected $PhraseText
-            $audioFlags.PhraseMatched = [bool]$match.Matched
-            Add-Segment 'real STT phrase inserted in Notepad' $match.Matched `
+            $phraseInserted = [bool]($match.Matched -and $contentOwned)
+            $audioFlags.PhraseMatched = $phraseInserted
+            Add-Segment 'real STT phrase inserted in Notepad' $phraseInserted `
                 ("editor text ({0}, {1} chars): '{2}' | expected '{3}' | matched {4}/{5} tokens" -f
                     $editorText.Method, $editorText.Text.Length,
                     (ConvertTo-NormalizedDictationText -Text $editorText.Text),

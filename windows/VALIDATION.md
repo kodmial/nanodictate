@@ -125,7 +125,10 @@ opt-in qualification for the real product path on a standard GitHub-hosted
    test-owned spoken WAV into the paired virtual render endpoint;
 5. stop dictation through the product hotkey, let the configured real STT
    provider answer, and assert the normalized phrase in the focused editor
-   (classic Edit text or a clipboard round-trip).
+   (classic Edit text or a clipboard round-trip). The harness seeds the test
+   document with a run-unique marker and requires it in the read text, so a
+   different Notepad tab that becomes active only during the clipboard
+   round-trip can never satisfy the assertion.
 
 The workflow is `workflow_dispatch` only, read-only (`contents: read`), has no
 schedule/push/pull-request trigger, is not a required check, and never installs

@@ -476,6 +476,25 @@ function Test-RealDictationActiveEditorWindow {
         [Text.RegularExpressions.RegexOptions]::IgnoreCase)
 }
 
+function Test-RealDictationEditorContentOwned {
+    <#
+      Confirms read editor text still carries this run's unique marker. A tab
+      title can change only around the Ctrl+A/Ctrl+C read, so title checks on
+      both sides cannot prove which tab supplied the clipboard text. The
+      marker is written only to the test-owned document, so text from any other
+      tab (even one holding an earlier transcript) can never be credited.
+    #>
+    param(
+        [AllowNull()][string]$Text,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Marker
+    )
+
+    if ([string]::IsNullOrEmpty($Marker) -or [string]::IsNullOrEmpty($Text)) {
+        return $false
+    }
+    return $Text.IndexOf($Marker, [StringComparison]::Ordinal) -ge 0
+}
+
 function Get-RealDictationExitCode {
     <#
       Maps a finished qualification to the process exit code. Probe-only runs
@@ -872,6 +891,7 @@ Export-ModuleMember -Function @(
     'Get-RealDictationVerdict'
     'Test-RealDictationEditorProcessOwned'
     'Test-RealDictationActiveEditorWindow'
+    'Test-RealDictationEditorContentOwned'
     'Get-RealDictationExitCode'
     'Format-RealDictationSummary'
     'Get-RealDictationSessionProbe'
