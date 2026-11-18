@@ -237,7 +237,11 @@ function Get-PairedRenderEndpoint {
       typically exposes "CABLE Input" (render) and "CABLE Output" (capture) on
       the same adapter, so pairing prefers Input/Output or Render/Capture name
       swaps inside the same adapter group, then the only render endpoint of
-      that group. Returns an object with Endpoint (or $null) and Reason.
+      that group. When more than one active endpoint matches at the winning
+      rank there is no way to know which cable feeds the capture endpoint, so
+      the pairing is rejected as ambiguous instead of picking the first one
+      (sending the phrase into the wrong cable would look like a pass).
+      Returns an object with Endpoint (or $null) and Reason.
     #>
     param($CaptureEndpoint, $RenderEndpoints)
 
@@ -273,20 +277,34 @@ function Get-PairedRenderEndpoint {
     $swapped = $swapped -replace 'output$', 'input'
     $swapped = $swapped -replace 'capture$', 'render'
     $swapped = $swapped -replace 'microphone$', 'speaker'
-    foreach ($candidate in $groupMatches) {
-        if ((Get-EndpointNameBase -Name ([string]$candidate.Name)) -eq $swapped) {
-            return [pscustomobject]@{
-                Endpoint = $candidate
-                Reason = "render endpoint '$($candidate.Name)' feeds '$captureName'"
-            }
+    $swappedMatches = @($groupMatches | Where-Object {
+        (Get-EndpointNameBase -Name ([string]$_.Name)) -eq $swapped
+    })
+    if ($swappedMatches.Count -eq 1) {
+        return [pscustomobject]@{
+            Endpoint = $swappedMatches[0]
+            Reason = "render endpoint '$($swappedMatches[0].Name)' feeds '$captureName'"
         }
     }
-    foreach ($candidate in $groupMatches) {
-        if ((Get-EndpointNameBase -Name ([string]$candidate.Name)) -like '*input*') {
-            return [pscustomobject]@{
-                Endpoint = $candidate
-                Reason = "render input endpoint '$($candidate.Name)' feeds '$captureName'"
-            }
+    if ($swappedMatches.Count -gt 1) {
+        return [pscustomobject]@{
+            Endpoint = $null
+            Reason = "ambiguous render endpoints in adapter group '$group': $($swappedMatches.Count) active endpoints match '$swapped'"
+        }
+    }
+    $inputMatches = @($groupMatches | Where-Object {
+        (Get-EndpointNameBase -Name ([string]$_.Name)) -like '*input*'
+    })
+    if ($inputMatches.Count -eq 1) {
+        return [pscustomobject]@{
+            Endpoint = $inputMatches[0]
+            Reason = "render input endpoint '$($inputMatches[0].Name)' feeds '$captureName'"
+        }
+    }
+    if ($inputMatches.Count -gt 1) {
+        return [pscustomobject]@{
+            Endpoint = $null
+            Reason = "ambiguous render endpoints in adapter group '$group': $($inputMatches.Count) active endpoints contain 'input'"
         }
     }
     if ($groupMatches.Count -eq 1) {
@@ -852,6 +870,7 @@ function Save-RealDictationScreenshot {
         Saved = [bool]$result.Saved
         Path = [string]$result.Path
         Method = [string]$result.Method
+        WindowEvidence = [bool]$result.WindowEvidence
         Width = [int]$result.Width
         Height = [int]$result.Height
         NonBlankPixels = [int]$result.NonBlankPixels
@@ -936,6 +955,7 @@ Export-ModuleMember -Function @(
     'Find-VirtualCaptureEndpoint'
     'Get-PairedRenderEndpoint'
     'Resolve-VirtualAudioRoute'
+    'Test-EndpointIdentityMatch'
     'Get-RealDictationVerdict'
     'Test-RealDictationEditorProcessOwned'
     'Test-RealDictationActiveEditorWindow'

@@ -80,22 +80,22 @@ jobs:
         run: pwsh -NoProfile -File scripts/test-windows-real-dictation.ps1
 
       - name: Install .NET
-        if: ${{ inputs.source == 'candidate' }}
+        if: ${{ inputs.source == 'candidate' && !inputs.probe_only }}
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
 
       - name: Ensure MSVC target
-        if: ${{ inputs.source == 'candidate' }}
+        if: ${{ inputs.source == 'candidate' && !inputs.probe_only }}
         run: rustup target add x86_64-pc-windows-msvc
 
       - name: Install Inno Setup compiler
-        if: ${{ inputs.source == 'candidate' }}
+        if: ${{ inputs.source == 'candidate' && !inputs.probe_only }}
         shell: pwsh
         run: choco install innosetup --yes --no-progress
 
       - name: Build exact-commit candidate ZIP and EXE
-        if: ${{ inputs.source == 'candidate' }}
+        if: ${{ inputs.source == 'candidate' && !inputs.probe_only }}
         shell: pwsh
         run: |
           # make-release builds the Rust DLL and the self-contained WinUI
@@ -116,6 +116,17 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $root = (Resolve-Path '.').Path
+          $rootPrefix = $root.TrimEnd(
+            [System.IO.Path]::DirectorySeparatorChar,
+            [System.IO.Path]::AltDirectorySeparatorChar
+          ) + [System.IO.Path]::DirectorySeparatorChar
+          function Test-RealDictationPathInside([string]$Path, [string]$Directory) {
+            $prefix = $Directory.TrimEnd(
+              [System.IO.Path]::DirectorySeparatorChar,
+              [System.IO.Path]::AltDirectorySeparatorChar
+            ) + [System.IO.Path]::DirectorySeparatorChar
+            return $Path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
+          }
           $arguments = @(
             '-NoProfile', '-ExecutionPolicy', 'Bypass',
             '-File', 'windows/package/test-real-dictation.ps1',
@@ -133,12 +144,22 @@ jobs:
             $value = [Environment]::GetEnvironmentVariable($option.Variable)
             if (-not $value) { continue }
             $resolved = (Resolve-Path -LiteralPath $value -ErrorAction Stop).Path
-            if (-not $resolved.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+            # Require a descendant of the checkout, not merely a shared path
+            # prefix (C:\work\nanodictate-fixtures must not pass for
+            # C:\work\nanodictate).
+            if (-not $resolved.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
               throw "$($option.Variable) must resolve inside the checked-out repository: $resolved"
+            }
+            if ($option.Variable -eq 'ND_CONFIG_PATH') {
+              foreach ($evidenceRoot in @('windows/artifacts/real-dictation', 'windows/artifacts/installer-logs')) {
+                if (Test-RealDictationPathInside $resolved (Join-Path $root $evidenceRoot)) {
+                  throw "ND_CONFIG_PATH must not point into an uploaded evidence directory: $resolved"
+                }
+              }
             }
             $arguments += @($option.Flag, $resolved)
           }
-          if ($env:ND_SOURCE -eq 'candidate') {
+          if ($env:ND_SOURCE -eq 'candidate' -and $env:ND_PROBE_ONLY -ne 'true') {
             # The candidate build is always produced as version 0.0.0.
             $arguments += @(
               '-InstallerPath', 'windows/artifacts/nanodictate-0.0.0-windows-x64-setup.exe',
@@ -154,7 +175,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-real-dictation-evidence-${{ github.run_id }}
+          name: windows-real-dictation-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             windows/artifacts/real-dictation/**
             windows/artifacts/installer-logs/**

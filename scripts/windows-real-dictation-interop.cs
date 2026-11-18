@@ -14,6 +14,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -52,6 +53,9 @@ namespace NanoDictate.RealDictation
         public bool Saved { get; set; }
         public string Path { get; set; }
         public string Method { get; set; }
+        // True only for a successful PrintWindow capture. A BitBlt fallback is
+        // a screen-region copy and may show an overlapping window instead.
+        public bool WindowEvidence { get; set; }
         public int Width { get; set; }
         public int Height { get; set; }
         public int NonBlankPixels { get; set; }
@@ -155,11 +159,18 @@ namespace NanoDictate.RealDictation
                 enumerator = CreateEnumerator();
                 var enumInterface = (IMMDeviceEnumerator)enumerator;
                 int hr = enumInterface.GetDefaultAudioEndpoint(ParseFlow(flow), ParseRole(role), out device);
-                if (hr == ElementNotFound || device == null)
+                if (hr == ElementNotFound)
                 {
                     return null;
                 }
+                // A failing HRESULT other than ELEMENT_NOTFOUND is a probe
+                // failure, not an absent endpoint: surface it instead of
+                // reporting an empty/null device.
                 ThrowIfFailed(hr, "get default audio endpoint");
+                if (device == null)
+                {
+                    return null;
+                }
                 return DescribeDevice((IMMDevice)device, flow);
             }
             finally
@@ -176,11 +187,15 @@ namespace NanoDictate.RealDictation
             try
             {
                 int hr = enumerator.EnumAudioEndpoints(flow, StateAll, out collection);
-                if (hr == ElementNotFound || collection == null)
+                if (hr == ElementNotFound)
                 {
                     return;
                 }
                 ThrowIfFailed(hr, "enumerate audio endpoints");
+                if (collection == null)
+                {
+                    return;
+                }
                 var devices = (IMMDeviceCollection)collection;
                 uint count;
                 ThrowIfFailed(devices.GetCount(out count), "count audio endpoints");
@@ -342,6 +357,13 @@ namespace NanoDictate.RealDictation
                 throw new ArgumentException("A render endpoint id is required.", "deviceId");
             }
             var wav = WavPcm16.Read(wavPath);
+            if (wav.DurationSeconds > MaxPlaybackSeconds)
+            {
+                throw new InvalidDataException(
+                    "The qualification WAV is " + wav.DurationSeconds.ToString("F1") +
+                    " s long; the harness accepts at most " + MaxPlaybackSeconds.ToString("F0") +
+                    " s so a stalled endpoint cannot consume the whole job budget.");
+            }
             object enumerator = null;
             object device = null;
             object clientObject = null;
@@ -389,8 +411,21 @@ namespace NanoDictate.RealDictation
                     {
                         int bytesPerFrame = wav.Channels * 2;
                         int offset = 0;
+                        // Bound the whole render loop, including repeated
+                        // full-buffer polls, so a stalled endpoint cannot keep
+                        // the run alive until the job times out. The budget is
+                        // generous for the file plus engine latency.
+                        var playback = Stopwatch.StartNew();
+                        long playbackBudgetMilliseconds =
+                            (long)Math.Ceiling((wav.DurationSeconds + PlaybackGraceSeconds) * 1000.0);
                         while (offset < wav.Data.Length)
                         {
+                            if (playback.ElapsedMilliseconds > playbackBudgetMilliseconds)
+                            {
+                                throw new TimeoutException(
+                                    "WAV playback exceeded " + playbackBudgetMilliseconds +
+                                    " ms after rendering " + offset + " of " + wav.Data.Length + " bytes.");
+                            }
                             uint padding;
                             ThrowIfFailed(client.GetCurrentPadding(out padding), "read render padding");
                             uint available = bufferFrames - padding;
@@ -679,7 +714,9 @@ namespace NanoDictate.RealDictation
                 string className = ReadClassName(child);
                 if (className == "Edit" || className == "RichEdit20W" || className == "RichEditD2DPT")
                 {
-                    string text = ReadWindowText(child);
+                    // GetWindowText cannot read another process's edit text;
+                    // WM_GETTEXT is the cross-process path for classic controls.
+                    string text = ReadControlText(child);
                     if (text != null)
                     {
                         found = text;
@@ -701,6 +738,23 @@ namespace NanoDictate.RealDictation
             int length = GetWindowTextLength(handle);
             var builder = new StringBuilder(Math.Max(length + 1, 2));
             GetWindowText(handle, builder, builder.Capacity);
+            return builder.ToString();
+        }
+
+        /// <summary>
+        /// Reads classic control text across process boundaries with a bounded
+        /// WM_GETTEXT. A plain SendMessage can wait forever on a hung owner.
+        /// </summary>
+        private static string ReadControlText(IntPtr handle)
+        {
+            var builder = new StringBuilder(ControlTextMaximum);
+            IntPtr result;
+            IntPtr copied = SendMessageTimeout(handle, WmGetText, new IntPtr(ControlTextMaximum),
+                builder, SmtoAbortIfHung, ControlTextTimeoutMilliseconds, out result);
+            if (copied == IntPtr.Zero)
+            {
+                return null;
+            }
             return builder.ToString();
         }
 
@@ -727,26 +781,57 @@ namespace NanoDictate.RealDictation
             {
                 return new ScreenCaptureResult { Saved = false, Path = path };
             }
+
+            // PrintWindow waits synchronously for the window owner to render.
+            // A hung owner must not block the harness before playback or the
+            // evidence writer runs, so capture it on a bounded worker and fall
+            // back to a screen-region copy that is reported as such.
+            byte[] printed = TryPrintWindowPixels(window, probe.Width, probe.Height,
+                PrintWindowTimeoutMilliseconds);
+            if (printed != null)
+            {
+                int printedNonBlank = CountNonBlankPixels(printed);
+                if (printedNonBlank > 0)
+                {
+                    WriteBmp(path, printed, probe.Width, probe.Height);
+                    return new ScreenCaptureResult
+                    {
+                        Saved = true,
+                        Path = path,
+                        Method = "printwindow",
+                        WindowEvidence = true,
+                        Width = probe.Width,
+                        Height = probe.Height,
+                        NonBlankPixels = printedNonBlank,
+                    };
+                }
+            }
+
             return CaptureRegion(path, probe.Width, probe.Height,
                 delegate(IntPtr memoryDc, IntPtr bits)
                 {
-                    bool printed = PrintWindow(window, memoryDc, PwRenderFullContent);
-                    int nonBlank = CountNonBlankPixels(bits, probe.Width, probe.Height);
-                    if (!printed || nonBlank == 0)
+                    IntPtr screen = GetDC(IntPtr.Zero);
+                    bool copied;
+                    try
                     {
-                        IntPtr screen = GetDC(IntPtr.Zero);
-                        try
-                        {
-                            BitBlt(memoryDc, 0, 0, probe.Width, probe.Height, screen,
-                                probe.Left, probe.Top, SrcCopy);
-                        }
-                        finally
-                        {
-                            ReleaseDC(IntPtr.Zero, screen);
-                        }
-                        return "bitblt";
+                        copied = BitBlt(memoryDc, 0, 0, probe.Width, probe.Height, screen,
+                            probe.Left, probe.Top, SrcCopy);
                     }
-                    return "printwindow";
+                    finally
+                    {
+                        ReleaseDC(IntPtr.Zero, screen);
+                    }
+                    if (!copied)
+                    {
+                        return new CaptureOutcome
+                        {
+                            Method = "screen-region-unavailable",
+                            Failed = true,
+                        };
+                    }
+                    // A screen-region copy can include whatever window covers
+                    // the HUD, so it is not proof of the window's content.
+                    return new CaptureOutcome { Method = "screen-region" };
                 });
         }
 
@@ -761,19 +846,113 @@ namespace NanoDictate.RealDictation
             return CaptureRegion(path, width, height, delegate(IntPtr memoryDc, IntPtr bits)
             {
                 IntPtr screen = GetDC(IntPtr.Zero);
+                bool copied;
                 try
                 {
-                    BitBlt(memoryDc, 0, 0, width, height, screen, 0, 0, SrcCopy);
+                    copied = BitBlt(memoryDc, 0, 0, width, height, screen, 0, 0, SrcCopy);
                 }
                 finally
                 {
                     ReleaseDC(IntPtr.Zero, screen);
                 }
-                return "desktop";
+                if (!copied)
+                {
+                    return new CaptureOutcome
+                    {
+                        Method = "desktop-unavailable",
+                        Failed = true,
+                    };
+                }
+                return new CaptureOutcome { Method = "desktop" };
             });
         }
 
-        private delegate string CapturePainter(IntPtr memoryDc, IntPtr bits);
+        private sealed class CaptureOutcome
+        {
+            public string Method;
+            public bool Failed;
+        }
+
+        private delegate CaptureOutcome CapturePainter(IntPtr memoryDc, IntPtr bits);
+
+        private static byte[] TryPrintWindowPixels(IntPtr window, int width, int height,
+            int timeoutMilliseconds)
+        {
+            byte[] pixels = null;
+            var worker = new Thread(delegate()
+            {
+                IntPtr screen = IntPtr.Zero;
+                IntPtr memory = IntPtr.Zero;
+                IntPtr dib = IntPtr.Zero;
+                IntPtr previous = IntPtr.Zero;
+                try
+                {
+                    screen = GetDC(IntPtr.Zero);
+                    memory = CreateCompatibleDC(screen);
+                    var info = CreateBitmapInfo(width, height);
+                    IntPtr bits;
+                    dib = CreateDIBSection(screen, ref info, 0, out bits, IntPtr.Zero, 0);
+                    if (dib == IntPtr.Zero)
+                    {
+                        return;
+                    }
+                    previous = SelectObject(memory, dib);
+                    if (!PrintWindow(window, memory, PwRenderFullContent))
+                    {
+                        return;
+                    }
+                    int stride = width * 4;
+                    var buffer = new byte[stride * height];
+                    Marshal.Copy(bits, buffer, 0, buffer.Length);
+                    pixels = buffer;
+                }
+                catch
+                {
+                    pixels = null;
+                }
+                finally
+                {
+                    if (previous != IntPtr.Zero)
+                    {
+                        SelectObject(memory, previous);
+                    }
+                    if (dib != IntPtr.Zero)
+                    {
+                        DeleteObject(dib);
+                    }
+                    if (memory != IntPtr.Zero)
+                    {
+                        DeleteDC(memory);
+                    }
+                    if (screen != IntPtr.Zero)
+                    {
+                        ReleaseDC(IntPtr.Zero, screen);
+                    }
+                }
+            });
+            worker.IsBackground = true;
+            worker.Start();
+            if (!worker.Join(Math.Max(1, timeoutMilliseconds)))
+            {
+                // Abandon the stalled worker: it owns a private DIB that is
+                // never reused, and a background thread cannot keep the
+                // process alive after the harness finishes.
+                return null;
+            }
+            return pixels;
+        }
+
+        private static BitmapInfo CreateBitmapInfo(int width, int height)
+        {
+            var info = new BitmapInfo();
+            info.headerSize = 40;
+            info.width = width;
+            info.height = -height; // top-down
+            info.planes = 1;
+            info.bitCount = 32;
+            info.compression = 0;
+            return info;
+        }
 
         private static ScreenCaptureResult CaptureRegion(string path, int width, int height, CapturePainter paint)
         {
@@ -784,13 +963,7 @@ namespace NanoDictate.RealDictation
             try
             {
                 memory = CreateCompatibleDC(screen);
-                var info = new BitmapInfo();
-                info.headerSize = 40;
-                info.width = width;
-                info.height = -height; // top-down
-                info.planes = 1;
-                info.bitCount = 32;
-                info.compression = 0;
+                var info = CreateBitmapInfo(width, height);
                 IntPtr bits;
                 dib = CreateDIBSection(screen, ref info, 0, out bits, IntPtr.Zero, 0);
                 if (dib == IntPtr.Zero)
@@ -798,14 +971,25 @@ namespace NanoDictate.RealDictation
                     throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateDIBSection failed");
                 }
                 previous = SelectObject(memory, dib);
-                string method = paint(memory, bits);
+                var outcome = paint(memory, bits);
+                if (outcome.Failed)
+                {
+                    return new ScreenCaptureResult
+                    {
+                        Saved = false,
+                        Path = path,
+                        Method = outcome.Method,
+                        Width = width,
+                        Height = height,
+                    };
+                }
                 int nonBlank = CountNonBlankPixels(bits, width, height);
                 WriteBmp(path, bits, width, height);
                 return new ScreenCaptureResult
                 {
                     Saved = true,
                     Path = path,
-                    Method = method,
+                    Method = outcome.Method,
                     Width = width,
                     Height = height,
                     NonBlankPixels = nonBlank,
@@ -831,14 +1015,17 @@ namespace NanoDictate.RealDictation
 
         private static int CountNonBlankPixels(IntPtr bits, int width, int height)
         {
-            int count = width * height;
             int stride = width * 4;
             var pixels = new byte[stride * height];
             Marshal.Copy(bits, pixels, 0, pixels.Length);
+            return CountNonBlankPixels(pixels);
+        }
+
+        private static int CountNonBlankPixels(byte[] pixels)
+        {
             int nonBlank = 0;
-            for (int index = 0; index < count; index++)
+            for (int offset = 0; offset + 2 < pixels.Length; offset += 4)
             {
-                int offset = index * 4;
                 if ((pixels[offset] | pixels[offset + 1] | pixels[offset + 2]) != 0)
                 {
                     nonBlank++;
@@ -853,6 +1040,13 @@ namespace NanoDictate.RealDictation
             int pixelBytes = stride * height;
             var pixels = new byte[pixelBytes];
             Marshal.Copy(bits, pixels, 0, pixelBytes);
+            WriteBmp(path, pixels, width, height);
+        }
+
+        private static void WriteBmp(string path, byte[] pixels, int width, int height)
+        {
+            int stride = width * 4;
+            int pixelBytes = stride * height;
             var directory = System.IO.Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(directory))
             {
@@ -906,6 +1100,15 @@ namespace NanoDictate.RealDictation
         private const uint UoiName = 2;
         private const int SwRestore = 9;
         private const uint PwRenderFullContent = 2;
+        private const uint WmGetText = 0x000D;
+        private const uint SmtoAbortIfHung = 0x0002;
+        private const int ControlTextMaximum = 4096;
+        private const int ControlTextTimeoutMilliseconds = 1000;
+        private const int PrintWindowTimeoutMilliseconds = 2000;
+        // A qualification phrase is short. Rejecting longer input keeps a
+        // stalled endpoint from consuming the whole job budget.
+        private const double MaxPlaybackSeconds = 30.0;
+        private const double PlaybackGraceSeconds = 10.0;
         private const int SrcCopy = 0x00CC0020;
         private const int SmCxScreen = 0;
         private const int SmCyScreen = 1;
@@ -1239,6 +1442,16 @@ namespace NanoDictate.RealDictation
                         "The qualification requires 16-bit PCM WAV input; got format=" + format +
                         " bits=" + bits + " channels=" + channels + " rate=" + sampleRate);
                 }
+                int bytesPerFrame = channels * 2;
+                if (dataLength <= 0 || dataLength % bytesPerFrame != 0)
+                {
+                    // An empty or partial data chunk would let playback return
+                    // without writing a complete frame while the harness
+                    // reported the spoken-audio step as passed.
+                    throw new InvalidDataException(
+                        "The qualification WAV has no complete 16-bit PCM frames; got " +
+                        dataLength + " data bytes for " + bytesPerFrame + " bytes per frame.");
+                }
                 var data = new byte[dataLength];
                 Array.Copy(bytes, dataOffset, data, 0, dataLength);
                 return new WavPcm16
@@ -1297,6 +1510,10 @@ namespace NanoDictate.RealDictation
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern int GetWindowTextLength(IntPtr handle);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageTimeoutW")]
+        private static extern IntPtr SendMessageTimeout(IntPtr handle, uint message, IntPtr wParam,
+            StringBuilder lParam, uint flags, uint timeout, out IntPtr result);
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern int GetClassName(IntPtr handle, StringBuilder name, int maximum);

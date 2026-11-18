@@ -273,6 +273,22 @@ Assert-Equal 'virtual cable match records its pattern' $found.MatchedPattern 'CA
 $paired = Get-PairedRenderEndpoint -CaptureEndpoint $cable[0] -RenderEndpoints $cable
 Assert-Equal 'CABLE Output pairs with CABLE Input' $paired.Endpoint.Id 'ren-cable'
 
+$duplicateCable = @(
+    [pscustomobject]@{ Id = 'cap-cable'; Name = 'CABLE Output (VB-Audio Virtual Cable)'; Flow = 'capture'; State = 'active' }
+    [pscustomobject]@{ Id = 'ren-cable-a'; Name = 'CABLE Input (VB-Audio Virtual Cable)'; Flow = 'render'; State = 'active' }
+    [pscustomobject]@{ Id = 'ren-cable-b'; Name = 'CABLE Input (VB-Audio Virtual Cable)'; Flow = 'render'; State = 'active' }
+)
+$ambiguousPair = Get-PairedRenderEndpoint -CaptureEndpoint $duplicateCable[0] -RenderEndpoints $duplicateCable
+Assert-True 'ambiguous duplicate render endpoints are not paired' `
+    ($null -eq $ambiguousPair.Endpoint) 'the first duplicate must not be selected'
+Assert-Match 'ambiguous pairing reports the duplicate endpoints' `
+    $ambiguousPair.Reason 'ambiguous render endpoints'
+$ambiguousRoute = Resolve-VirtualAudioRoute -Endpoints $duplicateCable `
+    -DefaultCaptureEndpoint $duplicateCable[0]
+Assert-True 'ambiguous render pairing blocks the reachable route' `
+    (-not $ambiguousRoute.CaptureEndpointReachable) `
+    'a reachable route requires one unambiguous render endpoint'
+
 $voicemeeter = @(
     [pscustomobject]@{ Id = 'cap-vm'; Name = 'VoiceMeeter Output (VB-Audio VoiceMeeter VAIO)'; Flow = 'capture'; State = 'active' }
     [pscustomobject]@{ Id = 'ren-vm'; Name = 'VoiceMeeter Input (VB-Audio VoiceMeeter VAIO)'; Flow = 'render'; State = 'active' }
@@ -430,8 +446,15 @@ $workflow = Read-Text '.github/workflows/windows-real-dictation.yml'
 Assert-Contains 'qualification workflow is manually dispatched' $workflow 'workflow_dispatch:'
 Assert-Match 'qualification workflow is read-only' $workflow '(?m)^permissions:\s*\r?\n\s+contents: read\s*$'
 Assert-NotContains 'qualification workflow has no pull_request trigger' $workflow 'pull_request'
-Assert-NotMatch 'qualification workflow has no push trigger' $workflow '(?m)^\s{2}push:'
-Assert-NotMatch 'qualification workflow has no schedule' $workflow '(?m)^\s{2}schedule:'
+# Extract the whole `on:` block and assert its complete event set. Workflow_run,
+# workflow_call or any other extra trigger must fail this, not only push and
+# schedule.
+$onBlockMatch = [regex]::Match($workflow, '(?ms)^on:\s*\r?\n(?<body>(?:[ \t]+[^\r\n]*(?:\r?\n|\z))*)')
+Assert-True 'qualification workflow declares an on block' $onBlockMatch.Success 'missing on: block'
+$triggerNames = @([regex]::Matches($onBlockMatch.Groups['body'].Value, '(?m)^  ([A-Za-z0-9_]+):') |
+    ForEach-Object { $_.Groups[1].Value })
+Assert-Equal 'qualification workflow declares exactly the workflow_dispatch trigger' `
+    ($triggerNames -join ',') 'workflow_dispatch'
 Assert-NotContains 'qualification workflow uses no secrets' $workflow 'secrets.'
 Assert-Contains 'qualification job uses the hosted Windows runner' $workflow 'runs-on: windows-latest'
 Assert-Contains 'qualification runs its own contract tests first' $workflow 'scripts/test-windows-real-dictation.ps1'
@@ -444,6 +467,15 @@ Assert-Contains 'qualification can test an exact-commit candidate' $workflow 'ca
 Assert-Contains 'qualification retains evidence on failure' $workflow 'if: always()'
 Assert-Contains 'qualification uploads evidence artifacts' $workflow 'windows/artifacts/real-dictation/**'
 Assert-Contains 'qualification documents default-branch dispatch registration' $workflow 'not found on the default branch'
+Assert-Contains 'qualification artifact name includes the run attempt' $workflow '${{ github.run_attempt }}'
+Assert-Match 'qualification requires a descendant path at a directory boundary' `
+    $workflow 'StartsWith\(\$prefix, \[StringComparison\]::OrdinalIgnoreCase\)'
+Assert-Contains 'qualification rejects a config inside uploaded evidence' `
+    $workflow 'ND_CONFIG_PATH must not point into an uploaded evidence directory'
+Assert-Match 'qualification gates candidate setup on a non-probe full run' `
+    $workflow "inputs\.source == 'candidate' && !inputs\.probe_only"
+Assert-Match 'qualification keeps the candidate installer out of probe-only runs' `
+    $workflow "ND_PROBE_ONLY -ne 'true'"
 
 $harness = Read-Text 'windows/package/test-real-dictation.ps1'
 Assert-Contains 'harness installs the actual installer' $harness 'Invoke-BoundedInstallerProcess'
@@ -492,8 +524,24 @@ Assert-Contains 'harness binds the read text to its test document marker' `
     $harness 'Test-RealDictationInsertion -EditorText $editorText.Text'
 Assert-Contains 'harness matches against the expected phrase parameter' `
     $harness '-Marker $editorMarker -Expected $PhraseText'
-Assert-NotMatch 'harness never reassigns the expected phrase variable' `
-    $harness '(?s)\$phraseText\s*='
+# PowerShell variable names are case-insensitive, so a differently cased
+# assignment (for example $PHRASETEXT = $insertion.TranscriptText) must also be
+# rejected. A case-sensitive regex misses it, and a case-insensitive one would
+# also match the parameter default, so inspect real assignment targets with the
+# PowerShell parser.
+$harnessTokens = $null
+$harnessParseErrors = $null
+$harnessAst = [System.Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $repoRoot 'windows/package/test-real-dictation.ps1'), [ref]$harnessTokens, [ref]$harnessParseErrors)
+Assert-True 'harness parses without syntax errors' ($harnessParseErrors.Count -eq 0) `
+    ($harnessParseErrors -join '; ')
+$phraseReassignments = @($harnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+    $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+    $node.Left.VariablePath.UserPath -eq 'PhraseText'
+}, $true))
+Assert-Equal 'harness never reassigns the expected phrase variable' $phraseReassignments.Count 0
 Assert-NotContains 'harness no longer reuses the expected phrase variable name' `
     $harness '$phraseText'
 Assert-Contains 'harness requires marker ownership before crediting insertion' `
@@ -510,6 +558,24 @@ Assert-Contains 'harness records the observed limitation list' $harness 'Add-Lim
 Assert-Contains 'harness documents that limitations never become passes' $harness 'never converted into a pass'
 Assert-Contains 'harness fails a non-full qualification run' $harness 'Get-RealDictationExitCode'
 Assert-Contains 'harness captures screenshot evidence' $harness 'Save-EvidenceScreenshot'
+Assert-Contains 'harness requires window evidence for a window screenshot' `
+    $harness '$result.WindowEvidence'
+Assert-Contains 'harness restores a replaced provider config' $harness '$configExistedBefore'
+Assert-Contains 'harness keeps the config backup outside evidence directories' $harness 'GetTempPath()'
+Assert-Contains 'harness verifies the test-owned editor before activation' `
+    $harness 'test-owned editor tab active before activation'
+Assert-Contains 'harness rechecks the capture route at activation' $harness '$routeReachableAtActivation'
+Assert-Contains 'harness separates rendering from capture evidence' `
+    $harness 'rendering alone is not evidence of capture'
+Assert-Contains 'harness withholds editor text when ownership fails' `
+    $harness 'editor text withheld because document ownership failed'
+Assert-Contains 'harness uninstalls only an installation it created' $harness '$installationOwned'
+Assert-Contains 'harness refuses a pre-existing local installation' `
+    $harness 'pre-existing NanoDictate installation exists'
+Assert-Contains 'harness bounds release requests with deadlines' $harness '-TimeoutSec'
+Assert-Contains 'harness scopes HUD probes to the launched agent' $harness 'AgentProcessIds'
+Assert-Contains 'harness only credits a HUD that changed from the baseline' `
+    $harness 'Test-RealDictationHudChanged -Window $window -Baseline $Baseline'
 
 $module = Read-Text 'scripts/windows-real-dictation.psm1'
 Assert-Contains 'module exposes the three-status verdict' $module "FULL E2E VERIFIED"
@@ -527,6 +593,18 @@ Assert-Match 'interop sizes PROPVARIANT for the native x64 layout' `
     $interop '(?s)StructLayout\(LayoutKind\.Explicit, Size = 24\).*?struct PropVariant'
 Assert-Contains 'interop renders into a real WASAPI endpoint' $interop 'PlayWavToDevice'
 Assert-Contains 'interop probes the interactive desktop' $interop 'OpenInputDesktop'
+Assert-Contains 'interop reads classic editor text with a bounded WM_GETTEXT' $interop 'SendMessageTimeout'
+Assert-Contains 'interop bounds PrintWindow capture' $interop 'TryPrintWindowPixels'
+Assert-Contains 'interop reports screen-region captures separately' $interop 'Method = "screen-region"'
+Assert-Contains 'interop marks only PrintWindow captures as window evidence' `
+    $interop 'WindowEvidence = true'
+Assert-Contains 'interop enforces a playback deadline' $interop 'playbackBudgetMilliseconds'
+Assert-Contains 'interop rejects overlong WAV input' $interop 'MaxPlaybackSeconds'
+Assert-Contains 'interop rejects WAVs without complete PCM frames' $interop 'dataLength % bytesPerFrame'
+Assert-Match 'interop checks the default-endpoint HRESULT before absence' `
+    $interop '(?s)GetDefaultAudioEndpoint\(ParseFlow\(flow\), ParseRole\(role\), out device\);\s*if \(hr == ElementNotFound\)\s*\{\s*return null;\s*\}.*?ThrowIfFailed'
+Assert-Match 'interop checks the enumeration HRESULT before absence' `
+    $interop '(?s)EnumAudioEndpoints\(flow, StateAll, out collection\);\s*if \(hr == ElementNotFound\)\s*\{\s*return;\s*\}\s*ThrowIfFailed'
 
 $validation = Read-Text 'windows/VALIDATION.md'
 Assert-Contains 'validation documents the opt-in workflow' $validation 'windows-real-dictation.yml'

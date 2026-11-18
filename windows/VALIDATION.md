@@ -142,8 +142,17 @@ this file is merged to `main`:
 gh workflow run windows-real-dictation.yml -f source=published
 gh workflow run windows-real-dictation.yml -f probe_only=true
 gh workflow run windows-real-dictation.yml -f source=published \
-  -f phrase_wav=<repo-relative-test.wav> -f config_path=<repo-relative-config.toml>
+  -f phrase_text="quick brown fox jumps" \
+  -f phrase_wav="qualification-input/phrase.wav" \
+  -f config_path="qualification-input/config.toml"
 ```
+
+`phrase_text` must match what the supplied WAV actually says, because the
+assertion compares the editor text against it. Both paths are
+repository-relative and must stay outside `windows/artifacts/real-dictation/`
+and `windows/artifacts/installer-logs/`, which the workflow uploads as
+evidence; a config file inside either directory is rejected before the harness
+starts.
 
 Dispatching the same workflow against a feature branch before that merge is
 rejected with HTTP 404 ("workflow ... not found on the default branch"). That
@@ -155,8 +164,16 @@ configured model. The keyless default provider uses a Russian model, while
 hosted Windows SAPI voices are typically English-only; supply a test-owned
 `phrase_wav` (16-bit PCM) and/or a non-secret `config_path` that matches the
 provider language when the defaults do not. Both paths must resolve inside the
-checkout, and `config_path` must never contain credentials; the harness copies
-it to `%APPDATA%` and does not upload it.
+checkout, and `config_path` must never contain credentials or point into an
+uploaded evidence directory. The harness copies it to `%APPDATA%`, preserves
+and restores any existing `%APPDATA%\NanoDictate\config.toml` in its cleanup
+path (including failures), and removes only the test copy when no file existed
+before.
+
+Window screenshots count as window evidence only when `PrintWindow` captured
+the window. If that capture fails or times out, the harness records a
+screen-region fallback separately; that fallback can show an overlapping
+window and is not proof of the HUD content.
 
 `probe_only` records the session/desktop/audio-endpoint facts without
 installing or launching the product. It reports `NOT VERIFIED / PROBE ONLY` as

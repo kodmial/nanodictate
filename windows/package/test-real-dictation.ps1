@@ -79,10 +79,16 @@ $segments = [System.Collections.Generic.List[object]]::new()
 $limitations = [System.Collections.Generic.List[string]]::new()
 $evidenceFiles = [System.Collections.Generic.List[string]]::new()
 $installedDirectory = $null
+$installationOwned = $false
 $notepadProcess = $null
 $notepadProcessId = 0
 $notepadWindow = $null
 $installerSha256 = ''
+$configTarget = $null
+$configBackupPath = $null
+$configExistedBefore = $false
+$configApplied = $false
+$agentProcessIds = @()
 $testedVersion = $Version
 # A candidate installer is built from the workflow checkout, so that SHA is
 # the tested commit. A published installer must be attributed to its own
@@ -139,17 +145,26 @@ function Save-EvidenceScreenshot {
     )
     $path = Join-Path $EvidenceDirectory ("$Name.bmp")
     $result = Save-RealDictationScreenshot -Kind $Kind -Handle $Handle -Path $path
-    if ($result.Saved -and $result.NonBlankPixels -gt 0) {
+    $windowEvidence = if ($Kind -eq 'window') { [bool]$result.WindowEvidence } else { $true }
+    if ($result.Saved -and $result.NonBlankPixels -gt 0 -and $windowEvidence) {
         Add-EvidenceFile $result.Path
-        Add-Segment $Name $true `
-            ("{0} screenshot via {1} ({2}x{3}, {4} non-blank pixels)" -f
+        Add-Segment -Name $Name -Observed $true -Detail (
+            "{0} screenshot via {1} ({2}x{3}, {4} non-blank pixels)" -f
                 $Kind, $result.Method, $result.Width, $result.Height, $result.NonBlankPixels)
+    } elseif ($result.Saved -and $result.NonBlankPixels -gt 0) {
+        # A BitBlt fallback can capture whatever covers the window, so it is
+        # kept as screen-region evidence but never as verified window content.
+        Add-EvidenceFile $result.Path
+        Add-Segment -Name $Name -Observed $false -Detail (
+            "screen-region capture via {0} ({1}x{2}); a PrintWindow capture was unavailable, so this is not window evidence" -f
+                $result.Method, $result.Width, $result.Height)
+        Add-Limitation "The $Kind screenshot for '$Name' is a screen-region copy because PrintWindow did not complete; it can show an overlapping window and is not proof of the HUD content."
     } elseif ($result.Saved) {
         Add-EvidenceFile $result.Path
-        Add-Segment $Name $false "$Kind screenshot at $path contains no non-blank pixels"
+        Add-Segment -Name $Name -Observed $false -Detail "$Kind screenshot at $path contains no non-blank pixels"
         Add-Limitation "The $Kind screenshot for '$Name' is blank; it is not visual proof of the HUD or editor."
     } else {
-        Add-Segment $Name $false "$Kind screenshot could not be saved to $path"
+        Add-Segment -Name $Name -Observed $false -Detail "$Kind screenshot could not be saved to $path"
         Add-Limitation "The $Kind screenshot for '$Name' was not captured; visual evidence is missing."
     }
 }
@@ -251,9 +266,11 @@ function Resolve-InstallerAsset {
             throw "Version must be a stable semver like 0.1.46; got '$resolvedVersion'"
         }
         $resolvedVersion = $Matches[1]
-        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases/tags/v$resolvedVersion" -Headers $headers
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases/tags/v$resolvedVersion" `
+            -Headers $headers -TimeoutSec 60
     } else {
-        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases/latest" -Headers $headers
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases/latest" `
+            -Headers $headers -TimeoutSec 60
         $resolvedVersion = ([string]$release.tag_name).TrimStart('v')
     }
     if ($resolvedVersion -notmatch '^\d+\.\d+\.\d+$') {
@@ -263,13 +280,14 @@ function Resolve-InstallerAsset {
     try {
         # Identify the source commit of the published tag, not the workflow
         # checkout: a published installer must be attributable to its release.
-        $releaseCommit = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/commits/v$resolvedVersion" -Headers $headers
+        $releaseCommit = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/commits/v$resolvedVersion" `
+            -Headers $headers -TimeoutSec 60
     } catch {
         $releaseCommit = $null
     }
     if ($null -ne $releaseCommit -and [string]$releaseCommit.sha -match '^[0-9a-fA-F]{40}$') {
         $script:testedCommit = ([string]$releaseCommit.sha).ToLowerInvariant()
-        Add-Segment 'published release commit resolved' $true "v$resolvedVersion -> $($script:testedCommit)"
+        Add-Segment -Name 'published release commit resolved' -Observed $true -Detail "v$resolvedVersion -> $($script:testedCommit)"
     } else {
         # An unresolved or malformed release commit must stay unknown rather
         # than borrowing the workflow checkout SHA recorded in run.sha.
@@ -286,7 +304,7 @@ function Resolve-InstallerAsset {
         throw "Release v$resolvedVersion does not publish SHA256SUMS.txt"
     }
     $sumsPath = Join-Path $tempRoot 'SHA256SUMS.txt'
-    Invoke-WebRequest -Uri $sumsAsset.browser_download_url -OutFile $sumsPath -MaximumRedirection 5
+    Invoke-WebRequest -Uri $sumsAsset.browser_download_url -OutFile $sumsPath -MaximumRedirection 5 -TimeoutSec 120
     $sums = Get-Content -LiteralPath $sumsPath -Raw
     $pattern = '(?im)^([a-f0-9]{64})\s+\*?' + [regex]::Escape($assetName) + '\s*$'
     $match = [regex]::Match($sums, $pattern)
@@ -295,14 +313,14 @@ function Resolve-InstallerAsset {
     }
     $expected = $match.Groups[1].Value.ToLowerInvariant()
     $target = Join-Path $tempRoot $assetName
-    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $target -MaximumRedirection 5
+    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $target -MaximumRedirection 5 -TimeoutSec 300
     $actual = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actual -ne $expected) {
         throw "Published installer SHA-256 mismatch: expected $expected, got $actual"
     }
     $script:testedVersion = $resolvedVersion
     $script:installerSha256 = $actual
-    Add-Segment 'published release asset selected' $true "v$resolvedVersion $assetName matches SHA256SUMS.txt"
+    Add-Segment -Name 'published release asset selected' -Observed $true -Detail "v$resolvedVersion $assetName matches SHA256SUMS.txt"
     return $target
 }
 
@@ -328,22 +346,81 @@ function Get-ProviderLabel {
     return [pscustomobject]@{ Provider = $provider; Model = $model }
 }
 
-function Watch-RealDictationHud {
+function Find-RealDictationHudWindow {
     <#
-      Polls for the NanoDictate HUD and records its geometry. The recording
-      panel is 178 points tall versus 150 for every other phase, so the
-      observed height (scaled by the panel width) distinguishes a real
-      recording HUD from a starting/error overlay without reading internals.
+      Finds the visible NanoDictate HUD only among the launched agent's
+      processes, so an unrelated NanoDictate window cannot stand in for the
+      product under test.
+    #>
+    param([Parameter(Mandatory)][int[]]$ProcessIds)
+
+    foreach ($processId in $ProcessIds) {
+        $window = @(Get-RealDictationProcessWindow -ProcessId $processId |
+            Where-Object { $_.Visible -and $_.Title -eq 'NanoDictate' } |
+            Select-Object -First 1)
+        if ($window.Count -gt 0) {
+            return $window[0]
+        }
+    }
+    return $null
+}
+
+function Get-RealDictationHudBaseline {
+    <# Snapshots the launched agent's HUD windows before activation. #>
+    param([Parameter(Mandatory)][int[]]$ProcessIds)
+
+    $windows = [System.Collections.Generic.List[object]]::new()
+    foreach ($processId in $ProcessIds) {
+        foreach ($window in @(Get-RealDictationProcessWindow -ProcessId $processId |
+                Where-Object { $_.Visible -and $_.Title -eq 'NanoDictate' })) {
+            $windows.Add([pscustomobject]@{
+                Handle = [long]$window.Handle
+                Width = [int]$window.Width
+                Height = [int]$window.Height
+            })
+        }
+    }
+    return @($windows)
+}
+
+function Test-RealDictationHudChanged {
+    <#
+      A HUD counts as observed only when it appears after the baseline or
+      changes geometry relative to it. A pre-existing window that never
+      changes cannot credit activation.
     #>
     param(
+        [Parameter(Mandatory)]$Window,
+        [object[]]$Baseline = @()
+    )
+
+    $baselineMatch = @($Baseline | Where-Object { $null -ne $_ -and [long]$_.Handle -eq [long]$Window.Handle })
+    if ($baselineMatch.Count -eq 0) {
+        return $true
+    }
+    return ([int]$baselineMatch[0].Width -ne [int]$Window.Width -or
+        [int]$baselineMatch[0].Height -ne [int]$Window.Height)
+}
+
+function Watch-RealDictationHud {
+    <#
+      Polls for the launched agent's NanoDictate HUD and records its geometry.
+      The recording panel is 178 points tall versus 150 for every other phase,
+      so the observed height (scaled by the panel width) distinguishes a real
+      recording HUD from a starting/error overlay without reading internals.
+      Only a post-hotkey appearance or transition from the baseline counts.
+    #>
+    param(
+        [Parameter(Mandatory)][int[]]$AgentProcessIds,
+        [object[]]$Baseline = @(),
         [ValidateRange(1, 60)][int]$TimeoutSeconds = 10
     )
     $observations = [System.Collections.Generic.List[object]]::new()
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $firstSeenMs = $null
     while ($stopwatch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
-        $window = Get-RealDictationWindow -Title 'NanoDictate'
-        if ($null -ne $window) {
+        $window = Find-RealDictationHudWindow -ProcessIds $AgentProcessIds
+        if ($null -ne $window -and (Test-RealDictationHudChanged -Window $window -Baseline $Baseline)) {
             if ($null -eq $firstSeenMs) {
                 $firstSeenMs = [int]$stopwatch.ElapsedMilliseconds
             }
@@ -383,10 +460,13 @@ function Watch-RealDictationHud {
 }
 
 function Wait-RealDictationHudHidden {
-    param([int]$TimeoutSeconds = 10)
+    param(
+        [Parameter(Mandatory)][int[]]$ProcessIds,
+        [int]$TimeoutSeconds = 10
+    )
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     while ($stopwatch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
-        if ($null -eq (Get-RealDictationWindow -Title 'NanoDictate')) {
+        if ($null -eq (Find-RealDictationHudWindow -ProcessIds $ProcessIds)) {
             return [pscustomobject]@{ Hidden = $true; ElapsedMilliseconds = [int]$stopwatch.ElapsedMilliseconds }
         }
         Start-Sleep -Milliseconds 100
@@ -406,8 +486,8 @@ try {
     # Environment, session and audio feasibility (always recorded).
     # ---------------------------------------------------------------
     $sessionProbe = Get-RealDictationSessionProbe
-    Add-Segment 'interactive session' ([bool]$sessionProbe.InputDesktopAvailable) `
-        ("session {0}, desktop '{1}', input desktop available: {2}" -f
+    Add-Segment -Name 'interactive session' -Observed ([bool]$sessionProbe.InputDesktopAvailable) -Detail (
+        "session {0}, desktop '{1}', input desktop available: {2}" -f
             $sessionProbe.SessionId, $sessionProbe.DesktopName, $sessionProbe.InputDesktopAvailable)
     if (-not $sessionProbe.InputDesktopAvailable) {
         Add-Limitation 'OpenInputDesktop failed: the job is not attached to an interactive input desktop, so real keyboard injection and UI observation cannot be performed in this session.'
@@ -423,9 +503,9 @@ try {
 
     $captureNames = @($audioInventory.Endpoints | Where-Object { $_.Flow -eq 'capture' } | ForEach-Object { "$($_.Name) [$($_.State)]" })
     $renderNames = @($audioInventory.Endpoints | Where-Object { $_.Flow -eq 'render' } | ForEach-Object { "$($_.Name) [$($_.State)]" })
-    Add-Segment 'audio endpoints enumerated' ($captureNames.Count -gt 0 -or $renderNames.Count -gt 0) `
-        ("capture: {0} | render: {1}" -f (($captureNames -join '; ') -replace '\|', '/'), (($renderNames -join '; ') -replace '\|', '/'))
-    Add-Segment 'virtual capture endpoint present' $audioFlags.VirtualCaptureEndpointPresent $audioRoute.Reason
+    Add-Segment -Name 'audio endpoints enumerated' -Observed ($captureNames.Count -gt 0 -or $renderNames.Count -gt 0) -Detail (
+        "capture: {0} | render: {1}" -f (($captureNames -join '; ') -replace '\|', '/'), (($renderNames -join '; ') -replace '\|', '/'))
+    Add-Segment -Name 'virtual capture endpoint present' -Observed $audioFlags.VirtualCaptureEndpointPresent -Detail $audioRoute.Reason
     if (-not $audioFlags.VirtualCaptureEndpointPresent) {
         Add-Limitation $audioRoute.Reason
         Add-Limitation 'No virtual capture endpoint means a test-owned WAV cannot enter NanoDictate''s genuine WASAPI input; loading an audio file in the harness is not microphone capture.'
@@ -435,7 +515,7 @@ try {
     } elseif ($null -eq $audioRoute.PairedRender) {
         Add-Limitation "Virtual capture endpoint found but no render endpoint can feed it: $($audioRoute.PairedRenderReason)"
     } else {
-        Add-Segment 'virtual audio route' $true $audioRoute.PairedRenderReason
+        Add-Segment -Name 'virtual audio route' -Observed $true -Detail $audioRoute.PairedRenderReason
     }
 
     if ($ProbeOnly) {
@@ -455,10 +535,20 @@ try {
         $installer = (Resolve-Path -LiteralPath $InstallerPath).Path
         $script:installerSha256 = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
         $testedVersion = if ($Version) { $Version } else { '0.0.0' }
-        Add-Segment 'exact-commit candidate selected' $true "local candidate $installer ($($script:installerSha256))"
+        Add-Segment -Name 'exact-commit candidate selected' -Observed $true -Detail "local candidate $installer ($($script:installerSha256))"
     }
 
     $installedDirectory = Join-Path $env:LOCALAPPDATA 'Programs\NanoDictate'
+    # A local qualification must never replace or uninstall an installation it
+    # does not own. Refuse before stopping anything; the hosted workflow runs
+    # on a disposable VM, so a fresh directory there is expected.
+    $preexistingInstallation = @('NanoDictate.App.exe', 'unins000.exe') | Where-Object {
+        Test-Path -LiteralPath (Join-Path $installedDirectory $_)
+    } | Select-Object -First 1
+    if ($preexistingInstallation) {
+        throw "A pre-existing NanoDictate installation exists at $installedDirectory. The qualification only installs and uninstalls an installation it created; remove the existing installation first."
+    }
+    $installationOwned = $true
     $null = Stop-NanoDictateProcessesUnderPath -InstallDirectory $installedDirectory -TimeoutSeconds 15
     Invoke-BoundedInstallerProcess -FilePath $installer `
         -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-') `
@@ -475,17 +565,27 @@ try {
         # installer-started agent before replacing it, then start exactly one.
         $null = Stop-NanoDictateProcessesUnderPath -InstallDirectory $installedDirectory -TimeoutSeconds 15
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $configTarget) | Out-Null
+        if (Test-Path -LiteralPath $configTarget) {
+            # Preserve the local user config outside every uploaded directory
+            # and restore it in the finally block on success and failure.
+            $configBackupPath = Join-Path ([System.IO.Path]::GetTempPath()) (
+                'nanodictate-real-dictation-config-' + [guid]::NewGuid().ToString('N') + '.toml')
+            Copy-Item -LiteralPath $configTarget -Destination $configBackupPath -Force
+            $configExistedBefore = $true
+        }
         Copy-Item -LiteralPath $ConfigPath -Destination $configTarget -Force
-        Add-Segment 'operator config applied' $true 'copied the supplied provider config to %APPDATA%\NanoDictate\config.toml (never uploaded)'
+        $configApplied = $true
+        Add-Segment -Name 'operator config applied' -Observed $true -Detail 'copied the supplied provider config to %APPDATA%\NanoDictate\config.toml (never uploaded; any previous file is restored after the run)'
     }
 
     $agents = @(Start-NanoDictateBackgroundIfNeeded -InstallDirectory $installedDirectory -TimeoutSeconds 30)
     if ($agents.Count -ne 1) {
         throw "Expected exactly one NanoDictate background agent after install, found $($agents.Count)"
     }
+    $agentProcessIds = @($agents | ForEach-Object { [int]$_.Id })
     $guiFlags.AppLaunched = $true
-    Add-Segment 'product installed and background agent started' $true `
-        "one NanoDictate.App agent (pid $($agents[0].Id)) from $installedDirectory"
+    Add-Segment -Name 'product installed and background agent started' -Observed $true -Detail (
+        "one NanoDictate.App agent (pid $($agents[0].Id)) from $installedDirectory")
 
     if (-not (Test-Path -LiteralPath $configTarget)) {
         # First-use bootstrap happens just after the agent starts; allow the
@@ -499,8 +599,8 @@ try {
         throw "First-use config was not created at $configTarget"
     }
     $providerLabel = Get-ProviderLabel -Path $configTarget
-    Add-Segment 'real STT provider configured' ($providerLabel.Provider -ne 'unknown') `
-        "active provider '$($providerLabel.Provider)', model '$($providerLabel.Model)' from the installed user config"
+    Add-Segment -Name 'real STT provider configured' -Observed ($providerLabel.Provider -ne 'unknown') -Detail (
+        "active provider '$($providerLabel.Provider)', model '$($providerLabel.Model)' from the installed user config")
 
     # ---------------------------------------------------------------
     # Foreground editor + real Double-Alt + HUD.
@@ -543,50 +643,73 @@ try {
     if ($null -eq $notepadWindow) {
         throw "Notepad did not expose a visible top-level window within $AppLaunchTimeoutSeconds seconds."
     }
-    $notepadProcessId = [int]$notepadWindow.ProcessId
     if (-not (Set-RealDictationForegroundWindow -Handle $notepadWindow.Handle)) {
         throw 'Could not move Notepad to the foreground; a real global hotkey test needs a focused editor.'
     }
     $foreground = Get-RealDictationForegroundWindow
-    $guiFlags.EditorFocused = $null -ne $foreground -and $foreground.ProcessId -eq $notepadProcessId
+    $guiFlags.EditorFocused = Test-RealDictationActiveEditorWindow -Foreground $foreground `
+        -EditorHandle $notepadWindow.Handle -TitlePattern $editorTitlePattern
     $foregroundDescription = if ($null -eq $foreground) {
         '<no foreground window>'
     } else {
-        "'$($foreground.Title)' (pid $($foreground.ProcessId))"
+        "'$($foreground.Title)' (handle $($foreground.Handle), pid $($foreground.ProcessId))"
     }
-    Add-Segment 'foreground editor focused' $guiFlags.EditorFocused `
-        "foreground is $foregroundDescription; expected Notepad pid $notepadProcessId"
+    Add-Segment -Name 'foreground editor focused' -Observed $guiFlags.EditorFocused -Detail (
+        "foreground is $foregroundDescription; expected this run's unique file '$editorFileStem' in window handle $($notepadWindow.Handle)")
     if (-not $guiFlags.EditorFocused) {
         Add-Limitation 'Notepad could not own the foreground; injection would not reach the intended focused editor.'
     }
 
-    $hudBefore = Get-RealDictationWindow -Title 'NanoDictate'
-    Add-Segment 'HUD hidden before activation' ($null -eq $hudBefore) `
-        'no visible NanoDictate window before Double-Alt'
+    # A different Notepad tab can become active after the focus call while the
+    # process id still matches, so verify the exact foreground handle and title
+    # immediately before the hotkey and refuse to activate anything else.
+    $activationForeground = Get-RealDictationForegroundWindow
+    $activationTargetReady = Test-RealDictationActiveEditorWindow -Foreground $activationForeground `
+        -EditorHandle $notepadWindow.Handle -TitlePattern $editorTitlePattern
+    if (-not $activationTargetReady) {
+        $null = Set-RealDictationForegroundWindow -Handle $notepadWindow.Handle
+        $activationForeground = Get-RealDictationForegroundWindow
+        $activationTargetReady = Test-RealDictationActiveEditorWindow -Foreground $activationForeground `
+            -EditorHandle $notepadWindow.Handle -TitlePattern $editorTitlePattern
+    }
+    Add-Segment -Name 'test-owned editor tab active before activation' -Observed $activationTargetReady -Detail (
+        "foreground is '{0}' (handle {1}, pid {2}); expected this run's unique file '{3}' in window handle {4}" -f
+            $(if ($activationForeground) { $activationForeground.Title } else { '<none>' }),
+            $(if ($activationForeground) { $activationForeground.Handle } else { 0 }),
+            $(if ($activationForeground) { $activationForeground.ProcessId } else { 0 }),
+            $editorFileStem, $notepadWindow.Handle)
+    if (-not $activationTargetReady) {
+        throw 'Refusing to send Double-Alt: the foreground handle/title is no longer this run''s test editor.'
+    }
+
+    $hudBaseline = @(Get-RealDictationHudBaseline -ProcessIds $agentProcessIds)
+    Add-Segment -Name 'HUD hidden before activation' -Observed ($hudBaseline.Count -eq 0) -Detail (
+        'no visible NanoDictate HUD owned by the launched agent before Double-Alt')
     Send-RealDictationDoubleAlt -GapMilliseconds 90
     # Only record delivery after SendInput actually succeeded; a thrown
     # injection is a fatal harness failure, not an observed hotkey.
     $guiFlags.DoubleAltDelivered = $true
-    $hud = Watch-RealDictationHud -TimeoutSeconds $HudTimeoutSeconds
+    $hud = Watch-RealDictationHud -AgentProcessIds $agentProcessIds -Baseline $hudBaseline `
+        -TimeoutSeconds $HudTimeoutSeconds
     $guiFlags.HudAppeared = $null -ne $hud.FirstSeenMilliseconds
     $guiFlags.RecordingPhase = [bool]$hud.RecordingObserved
     if ($guiFlags.HudAppeared) {
         $first = $hud.Observations[0]
-        Add-Segment 'HUD appeared after Double-Alt' $true `
-            ("visible NanoDictate HUD after $($hud.FirstSeenMilliseconds) ms at {0}x{1} (phases: {2})" -f
+        Add-Segment -Name 'HUD appeared after Double-Alt' -Observed $true -Detail (
+            "agent-owned NanoDictate HUD appeared after $($hud.FirstSeenMilliseconds) ms at {0}x{1} (phases: {2})" -f
                 $first.Width, $first.Height, (($hud.Phases | Select-Object -Unique) -join ', '))
         Save-EvidenceScreenshot -Name 'hud-first-visible' -Kind window -Handle $first.Handle
         Save-EvidenceScreenshot -Name 'desktop-hud' -Kind desktop
-        Add-Segment 'HUD reached the recording phase' $guiFlags.RecordingPhase `
-            ("observed panel heights: {0}; recording panel is 178 points tall versus 150 for starting/error" -f
+        Add-Segment -Name 'HUD reached the recording phase' -Observed $guiFlags.RecordingPhase -Detail (
+            "observed panel heights: {0}; recording panel is 178 points tall versus 150 for starting/error" -f
                 (($hud.Observations | ForEach-Object { "$($_.Width)x$($_.Height)" } | Select-Object -Unique) -join ', '))
         if (-not $guiFlags.RecordingPhase) {
             Add-Limitation 'The HUD appeared but never reached the recording phase: NanoDictate could not start capture on this runner (microphone missing, privacy denial or WASAPI failure). The authentic activation path is proven; capture is not.'
         }
     } else {
-        Add-Segment 'HUD appeared after Double-Alt' $false `
-            "no visible NanoDictate HUD within $HudTimeoutSeconds seconds after a real Double-Alt"
-        Add-Limitation 'A real Double-Alt produced no HUD: the global hook, capture start or window rendering is blocked in this session.'
+        Add-Segment -Name 'HUD appeared after Double-Alt' -Observed $false -Detail (
+            "no agent-owned NanoDictate HUD appeared or changed within $HudTimeoutSeconds seconds after a real Double-Alt")
+        Add-Limitation 'A real Double-Alt produced no attributable HUD: the global hook, capture start or window rendering is blocked in this session.'
     }
 
     # ---------------------------------------------------------------
@@ -594,48 +717,82 @@ try {
     # ---------------------------------------------------------------
     if ($guiFlags.RecordingPhase) {
         $currentForeground = Get-RealDictationForegroundWindow
-        $editorFocusedDuringRecording = $null -ne $currentForeground -and $currentForeground.ProcessId -eq $notepadProcessId
-        Add-Segment 'focused editor kept the foreground' $editorFocusedDuringRecording `
-            "foreground pid during recording: $(if ($currentForeground) { $currentForeground.ProcessId } else { '<none>' })"
+        $editorFocusedDuringRecording = Test-RealDictationActiveEditorWindow -Foreground $currentForeground `
+            -EditorHandle $notepadWindow.Handle -TitlePattern $editorTitlePattern
+        Add-Segment -Name 'focused editor kept the foreground' -Observed $editorFocusedDuringRecording -Detail (
+            "foreground is '{0}' (handle {1}, pid {2}); expected this run's unique file '{3}'" -f
+                $(if ($currentForeground) { $currentForeground.Title } else { '<none>' }),
+                $(if ($currentForeground) { $currentForeground.Handle } else { 0 }),
+                $(if ($currentForeground) { $currentForeground.ProcessId } else { 0 }),
+                $editorFileStem)
 
-        if (-not $audioRoute.CaptureEndpointReachable) {
-            Add-Limitation 'Recording started, but no virtual capture route feeds the product, so no spoken phrase could be delivered through WASAPI.'
+        # The route was recorded before the installer ran. The product opens
+        # whatever the default capture endpoint is when recording starts, so
+        # re-resolve it now and reject a changed or unresolved route instead of
+        # playing into the endpoint that used to be the default.
+        $activationInventory = Get-RealDictationAudioEndpoint -DefaultFlow capture
+        $activationRoute = Resolve-VirtualAudioRoute -Endpoints $activationInventory.Endpoints `
+            -DefaultCaptureEndpoint $activationInventory.DefaultCapture
+        $routeUnchanged = $null -ne $activationRoute.VirtualCapture -and
+            (Test-EndpointIdentityMatch -Candidate $activationRoute.VirtualCapture -Reference $audioRoute.VirtualCapture) -and
+            (Test-EndpointIdentityMatch -Candidate $activationRoute.PairedRender -Reference $audioRoute.PairedRender)
+        $routeReachableAtActivation = [bool]($routeUnchanged -and $activationRoute.DefaultCaptureIsVirtual -and
+            $null -ne $activationRoute.PairedRender)
+        $activationDefaultName = if ($null -eq $activationInventory.DefaultCapture) {
+            '<none>'
+        } else {
+            [string]$activationInventory.DefaultCapture.Name
+        }
+        $expectedDefaultName = if ($null -eq $audioRoute.VirtualCapture) {
+            '<none>'
+        } else {
+            [string]$audioRoute.VirtualCapture.Name
+        }
+        Add-Segment -Name 'capture route unchanged at activation' -Observed $routeReachableAtActivation -Detail (
+            "default console capture is '$activationDefaultName'; expected '$expectedDefaultName' to remain the default virtual route")
+        if (-not $routeReachableAtActivation) {
+            Add-Limitation "The pre-install audio route could not be confirmed at recording start, so a rendered phrase cannot be attributed to the product's capture path. $($activationRoute.Reason)"
+        }
+
+        if (-not $routeReachableAtActivation) {
             Send-RealDictationKey -Key 'return'
-            $hidden = Wait-RealDictationHudHidden -TimeoutSeconds 20
-            Add-Segment 'dictation stopped cleanly' $hidden.Hidden `
-                "HUD hidden: $($hidden.Hidden) after $($hidden.ElapsedMilliseconds) ms"
+            $hidden = Wait-RealDictationHudHidden -ProcessIds $agentProcessIds -TimeoutSeconds 20
+            Add-Segment -Name 'dictation stopped cleanly' -Observed $hidden.Hidden -Detail (
+                "HUD hidden: $($hidden.Hidden) after $($hidden.ElapsedMilliseconds) ms")
         } else {
             $wavPath = $PhraseWav
             if (-not $wavPath) {
                 $wavPath = Join-Path $EvidenceDirectory 'phrase.wav'
                 $phrase = New-RealDictationPhraseWav -Text $PhraseText -Path $wavPath
-                Add-Segment 'test phrase audio prepared' $true `
-                    "SAPI voice '$($phrase.Voice)' synthesized the test-owned phrase as $($phrase.Format)"
+                Add-Segment -Name 'test phrase audio prepared' -Observed $true -Detail (
+                    "SAPI voice '$($phrase.Voice)' synthesized the test-owned phrase as $($phrase.Format)")
             } elseif (-not (Test-Path -LiteralPath $wavPath)) {
                 throw "PhraseWav does not exist: $wavPath"
             }
             Add-EvidenceFile $wavPath
 
-            $playbackSeconds = Invoke-RealDictationWavPlayback -DeviceId $audioRoute.PairedRender.Id -Path $wavPath
+            $playbackSeconds = Invoke-RealDictationWavPlayback -DeviceId $activationRoute.PairedRender.Id -Path $wavPath
             $audioFlags.WavPlayed = $true
-            Add-Segment 'spoken phrase routed into the virtual capture endpoint' $true `
-                ("rendered {0:N2} s into '{1}'; the product captures the paired device '{2}'" -f
-                    $playbackSeconds, $audioRoute.PairedRender.Name, $audioRoute.VirtualCapture.Name)
+            # Rendering proves the cable received audio. It does not prove the
+            # product captured it; only the insertion assertion below does.
+            Add-Segment -Name 'spoken phrase rendered into the virtual cable' -Observed $true -Detail (
+                "rendered {0:N2} s into '{1}'; the product is expected to capture the paired device '{2}', but rendering alone is not evidence of capture" -f
+                    $playbackSeconds, $activationRoute.PairedRender.Name, $activationRoute.VirtualCapture.Name)
             if ($playbackSeconds -lt $AudioSeconds) {
                 Start-Sleep -Milliseconds ([int](($AudioSeconds - $playbackSeconds) * 1000))
             }
 
-            $hudDuringPlayback = Get-RealDictationWindow -Title 'NanoDictate'
-            Add-Segment 'recording HUD stayed visible during speech' ($null -ne $hudDuringPlayback) `
-                'the recording HUD was still visible after playback'
+            $hudDuringPlayback = Find-RealDictationHudWindow -ProcessIds $agentProcessIds
+            Add-Segment -Name 'recording HUD stayed visible during speech' -Observed ($null -ne $hudDuringPlayback) -Detail (
+                'the launched agent''s recording HUD was still visible after playback')
             if ($null -ne $hudDuringPlayback) {
                 Save-EvidenceScreenshot -Name 'hud-after-speech' -Kind window -Handle $hudDuringPlayback.Handle
             }
 
             Send-RealDictationKey -Key 'return'
-            $hidden = Wait-RealDictationHudHidden -TimeoutSeconds $ResultTimeoutSeconds
-            Add-Segment 'dictation stopped and provider finished' $hidden.Hidden `
-                "HUD hidden: $($hidden.Hidden) after $($hidden.ElapsedMilliseconds) ms"
+            $hidden = Wait-RealDictationHudHidden -ProcessIds $agentProcessIds -TimeoutSeconds $ResultTimeoutSeconds
+            Add-Segment -Name 'dictation stopped and provider finished' -Observed $hidden.Hidden -Detail (
+                "HUD hidden: $($hidden.Hidden) after $($hidden.ElapsedMilliseconds) ms")
             if (-not $hidden.Hidden) {
                 Add-Limitation "The HUD stayed visible for $ResultTimeoutSeconds seconds after stopping; the provider request or insertion never completed."
                 Send-RealDictationKey -Key 'escape'
@@ -651,8 +808,9 @@ try {
             $tabActiveBeforeRead = $editorRefocused -and
                 (Test-RealDictationActiveEditorWindow -Foreground $activeBeforeRead `
                     -EditorHandle $notepadWindow.Handle -TitlePattern $editorTitlePattern)
-            Add-Segment 'test-owned editor tab active before reading' $tabActiveBeforeRead `
-                ("foreground is '{0}' (pid {1}); expected this run's unique file '{2}'" -f
+            Add-Segment -Name 'test-owned editor tab active before reading' `
+                -Observed $tabActiveBeforeRead `
+                -Detail ("foreground is '{0}' (pid {1}); expected this run's unique file '{2}'" -f
                     $(if ($activeBeforeRead) { $activeBeforeRead.Title } else { '<none>' }),
                     $(if ($activeBeforeRead) { $activeBeforeRead.ProcessId } else { 0 }),
                     $editorFileStem)
@@ -672,8 +830,9 @@ try {
                 $activeAfterRead = Get-RealDictationForegroundWindow
                 $tabActiveAfterRead = Test-RealDictationActiveEditorWindow -Foreground $activeAfterRead `
                     -EditorHandle $notepadWindow.Handle -TitlePattern $editorTitlePattern
-                Add-Segment 'test-owned editor tab active after reading' $tabActiveAfterRead `
-                    ("foreground is '{0}' (pid {1}); expected this run's unique file '{2}'" -f
+                Add-Segment -Name 'test-owned editor tab active after reading' `
+                    -Observed $tabActiveAfterRead `
+                    -Detail ("foreground is '{0}' (pid {1}); expected this run's unique file '{2}'" -f
                         $(if ($activeAfterRead) { $activeAfterRead.Title } else { '<none>' }),
                         $(if ($activeAfterRead) { $activeAfterRead.ProcessId } else { 0 }),
                         $editorFileStem)
@@ -690,8 +849,8 @@ try {
                 -Marker $editorMarker -Expected $PhraseText
             $match = $insertion.Comparison
             $contentOwned = [bool]($editorText.Read -and $insertion.Owned)
-            Add-Segment 'editor text belongs to this run''s test document' $contentOwned `
-                ("read via {0}; unique document marker '{1}' {2}" -f
+            Add-Segment -Name 'editor text belongs to this run''s test document' -Observed $contentOwned -Detail (
+                "read via {0}; unique document marker '{1}' {2}" -f
                     $editorText.Method, $editorMarker, $(if ($contentOwned) { 'present' } else { 'missing' }))
             if ($editorText.Read -and -not $contentOwned) {
                 Add-Limitation 'The read editor text did not contain this run''s unique document marker: another Notepad tab was active during the read, so the insertion assertion cannot be credited.'
@@ -701,12 +860,23 @@ try {
             # dictation" appears in the marker name).
             $phraseInserted = [bool]($match.Matched -and $contentOwned)
             $audioFlags.PhraseMatched = $phraseInserted
-            Add-Segment 'real STT phrase inserted in Notepad' $phraseInserted `
-                ("editor text ({0}, {1} chars): '{2}' | expected '{3}' | matched {4}/{5} tokens" -f
+            # Publish the editor/transcript text only for a document this run
+            # owns. When ownership fails the text may belong to another tab, so
+            # record the method and failure without copying it into the console,
+            # JSON evidence or job summary.
+            if ($contentOwned) {
+                $insertionDetail = "editor text ({0}, {1} chars): '{2}' | expected '{3}' | matched {4}/{5} tokens" -f
                     $editorText.Method, $insertion.TranscriptText.Length,
                     $match.TranscriptNormalized,
                     $match.ExpectedNormalized,
-                    $match.OrderedTokens, $match.ExpectedTokenCount)
+                    $match.OrderedTokens, $match.ExpectedTokenCount
+            } else {
+                $insertionDetail = "editor text withheld because document ownership failed (read via {0}); expected '{1}' | matched {2}/{3} tokens" -f
+                    $editorText.Method,
+                    $match.ExpectedNormalized,
+                    $match.OrderedTokens, $match.ExpectedTokenCount
+            }
+            Add-Segment -Name 'real STT phrase inserted in Notepad' -Observed $phraseInserted -Detail $insertionDetail
             if (-not $match.Matched) {
                 Add-Limitation 'The focused editor did not contain the expected phrase. A provider/network failure, empty transcript or insertion failure must be treated as unverified, not as a passing transcription.'
             }
@@ -718,7 +888,7 @@ try {
     }
 } catch {
     $fatal = $_
-    Add-Segment 'qualification harness' $false ($_.Exception.Message -replace '\|', '/')
+    Add-Segment -Name 'qualification harness' -Observed $false -Detail ($_.Exception.Message -replace '\|', '/')
     Add-Limitation "The qualification harness stopped before completing the product path: $($_.Exception.Message)"
     Write-Warning "Real-dictation qualification failed: $($_.Exception.Message)"
 } finally {
@@ -728,14 +898,18 @@ try {
     # Local runs intentionally leave the editor untouched rather than risk
     # destroying another tab or unsaved work.
     try {
-        if ($installedDirectory) {
+        if ($installedDirectory -and $installationOwned) {
             $null = Stop-NanoDictateProcessesUnderPath -InstallDirectory $installedDirectory -TimeoutSeconds 15
         }
     } catch {
         Write-Warning "Could not stop the NanoDictate background agent: $_"
     }
     try {
-        if ($installedDirectory -and (Test-Path -LiteralPath (Join-Path $installedDirectory 'unins000.exe'))) {
+        # Only an installation this run created may be uninstalled. A
+        # pre-existing installation is refused before setup, so its uninstaller
+        # can never be invoked from here.
+        if ($installationOwned -and $installedDirectory -and
+            (Test-Path -LiteralPath (Join-Path $installedDirectory 'unins000.exe'))) {
             Invoke-BoundedInstallerProcess -FilePath (Join-Path $installedDirectory 'unins000.exe') `
                 -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') `
                 -Phase 'real-dictation-uninstall' -TimeoutSeconds 120 `
@@ -743,6 +917,24 @@ try {
         }
     } catch {
         Write-Warning "Qualification cleanup uninstall failed: $_"
+    }
+    # Restore the user's provider config after uninstall so the test copy can
+    # never be mistaken for the local configuration.
+    if ($configApplied) {
+        try {
+            if ($configExistedBefore -and $configBackupPath -and
+                (Test-Path -LiteralPath $configBackupPath)) {
+                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $configTarget) | Out-Null
+                Copy-Item -LiteralPath $configBackupPath -Destination $configTarget -Force
+            } elseif (-not $configExistedBefore -and (Test-Path -LiteralPath $configTarget)) {
+                Remove-Item -LiteralPath $configTarget -Force
+            }
+        } catch {
+            Write-Warning "Could not restore the provider config at ${configTarget}: $_"
+        }
+    }
+    if ($configBackupPath -and (Test-Path -LiteralPath $configBackupPath)) {
+        Remove-Item -LiteralPath $configBackupPath -Force -ErrorAction SilentlyContinue
     }
     if ($tempRoot -and (Test-Path -LiteralPath $tempRoot)) {
         Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
