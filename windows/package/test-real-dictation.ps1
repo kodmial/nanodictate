@@ -694,13 +694,17 @@ try {
             if ($editorText.Read -and -not $contentOwned) {
                 Add-Limitation 'The read editor text did not contain this run''s unique document marker: another Notepad tab was active during the read, so the insertion assertion cannot be credited.'
             }
-            $match = Test-DictationPhraseInserted -Transcript $editorText.Text -Expected $PhraseText
+            # The marker proves ownership but may itself contain the expected
+            # phrase (for example "real dictation" in the marker name), so it
+            # must not participate in the phrase assertion.
+            $phraseText = Remove-RealDictationEditorMarker -Text $editorText.Text -Marker $editorMarker
+            $match = Test-DictationPhraseInserted -Transcript $phraseText -Expected $PhraseText
             $phraseInserted = [bool]($match.Matched -and $contentOwned)
             $audioFlags.PhraseMatched = $phraseInserted
             Add-Segment 'real STT phrase inserted in Notepad' $phraseInserted `
                 ("editor text ({0}, {1} chars): '{2}' | expected '{3}' | matched {4}/{5} tokens" -f
-                    $editorText.Method, $editorText.Text.Length,
-                    (ConvertTo-NormalizedDictationText -Text $editorText.Text),
+                    $editorText.Method, $phraseText.Length,
+                    (ConvertTo-NormalizedDictationText -Text $phraseText),
                     $match.ExpectedNormalized,
                     $match.OrderedTokens, $match.ExpectedTokenCount)
             if (-not $match.Matched) {

@@ -186,6 +186,28 @@ Assert-True 'an empty marker never binds a read' `
     (-not (Test-RealDictationEditorContentOwned -Text 'quick brown fox jumps' -Marker '')) `
     'the marker must not be optional'
 
+$markerPhrase = 'real dictation'
+$markerOnlyRead = "$editorMarker`r`n"
+Assert-True 'a phrase contained in the marker still proves document ownership' `
+    (Test-RealDictationEditorContentOwned -Text $markerOnlyRead -Marker $editorMarker) `
+    'ownership must not depend on the phrase being absent from the marker'
+$markerOnlyCompared = Remove-RealDictationEditorMarker -Text $markerOnlyRead -Marker $editorMarker
+Assert-Equal 'marker removal leaves no phrase behind' `
+    (ConvertTo-NormalizedDictationText -Text $markerOnlyCompared) ''
+Assert-True 'a phrase contained in the marker alone is not credited as insertion' `
+    (-not (Test-DictationPhraseInserted -Transcript $markerOnlyCompared -Expected $markerPhrase).Matched) `
+    'the seeded marker must not satisfy the phrase assertion'
+$insertedAfterMarker = "$editorMarker`r`nreal dictation"
+$insertedAfterMarkerCompared = Remove-RealDictationEditorMarker -Text $insertedAfterMarker -Marker $editorMarker
+Assert-True 'a real insertion beside the marker is still credited' `
+    ((Test-DictationPhraseInserted -Transcript $insertedAfterMarkerCompared -Expected $markerPhrase).Matched) `
+    'marker removal must leave the transcribed phrase intact'
+$insertedBeforeMarker = "real dictation`r`n$editorMarker"
+$insertedBeforeMarkerCompared = Remove-RealDictationEditorMarker -Text $insertedBeforeMarker -Marker $editorMarker
+Assert-True 'an insertion before the marker is still credited' `
+    ((Test-DictationPhraseInserted -Transcript $insertedBeforeMarkerCompared -Expected $markerPhrase).Matched) `
+    'the marker position must not decide the phrase assertion'
+
 # ---------------------------------------------------------------------------
 # Virtual audio endpoint heuristics and routing
 # ---------------------------------------------------------------------------
@@ -431,6 +453,10 @@ Assert-Contains 'harness seeds a run-unique marker into its test document' `
     $harness "`$editorMarker = 'nanodictate-real-dictation-marker-'"
 Assert-Contains 'harness binds the read text to its test document marker' `
     $harness 'Test-RealDictationEditorContentOwned -Text $editorText.Text -Marker $editorMarker'
+Assert-Contains 'harness removes its document marker before phrase matching' `
+    $harness 'Remove-RealDictationEditorMarker -Text $editorText.Text -Marker $editorMarker'
+Assert-Contains 'harness matches the phrase against marker-stripped text' `
+    $harness 'Test-DictationPhraseInserted -Transcript $phraseText -Expected $PhraseText'
 Assert-Contains 'harness requires marker ownership before crediting insertion' `
     $harness '$phraseInserted = [bool]($match.Matched -and $contentOwned)'
 Assert-Contains 'harness sends a real Double-Alt' $harness 'Send-RealDictationDoubleAlt'

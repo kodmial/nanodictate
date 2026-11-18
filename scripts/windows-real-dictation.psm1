@@ -495,6 +495,28 @@ function Test-RealDictationEditorContentOwned {
     return $Text.IndexOf($Marker, [StringComparison]::Ordinal) -ge 0
 }
 
+function Remove-RealDictationEditorMarker {
+    <#
+      Removes this run's seeded marker from the text used for the phrase
+      assertion. Ownership still requires the marker, but the marker itself
+      can contain the expected phrase (for example, "real dictation" appears
+      in "nanodictate-real-dictation-marker-..."), so matching the unstripped
+      text could credit an insertion that never happened.
+    #>
+    param(
+        [AllowNull()][string]$Text,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Marker
+    )
+
+    if ([string]::IsNullOrEmpty($Text)) {
+        return ''
+    }
+    if ([string]::IsNullOrEmpty($Marker)) {
+        return $Text
+    }
+    return $Text.Replace($Marker, [string]::Empty)
+}
+
 function Get-RealDictationExitCode {
     <#
       Maps a finished qualification to the process exit code. Probe-only runs
@@ -892,6 +914,7 @@ Export-ModuleMember -Function @(
     'Test-RealDictationEditorProcessOwned'
     'Test-RealDictationActiveEditorWindow'
     'Test-RealDictationEditorContentOwned'
+    'Remove-RealDictationEditorMarker'
     'Get-RealDictationExitCode'
     'Format-RealDictationSummary'
     'Get-RealDictationSessionProbe'
