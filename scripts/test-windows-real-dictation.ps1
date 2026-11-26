@@ -782,6 +782,154 @@ try {
         (Get-Content -LiteralPath $cleanTarget -Raw).Trim() 'original'
     Assert-True 'successful cleanup removes the backup' `
         (-not (Test-Path -LiteralPath $cleanBackup)) 'backup must not remain'
+
+    # Run the real harness with stub modules so setup fails after creating or
+    # replacing the user config. This exercises the harness finally block, not
+    # just the cleanup helper, and proves a failed installation still restores
+    # an existing config or removes one the installer created.
+    $failureRoot = Join-Path $configRestoreRoot 'installer-failure'
+    $harnessRoot = Join-Path $failureRoot 'repo'
+    $harnessPackage = Join-Path $harnessRoot 'windows/package'
+    $stubScripts = Join-Path $harnessRoot 'scripts'
+    New-Item -ItemType Directory -Force -Path $harnessPackage, $stubScripts | Out-Null
+    $harnessCopy = Join-Path $harnessPackage 'test-real-dictation.ps1'
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'windows/package/test-real-dictation.ps1') `
+        -Destination $harnessCopy -Force
+    $realModulePath = Join-Path $repoRoot 'scripts/windows-real-dictation.psm1'
+    $moduleStub = @'
+Import-Module '__REAL_MODULE__' -Force
+function Test-RealDictationPlatform { return $true }
+function Get-RealDictationSessionProbe {
+    return [pscustomobject]@{
+        SessionId = 1
+        DesktopName = 'Default'
+        InputDesktopAvailable = $true
+        UserInteractive = $true
+    }
+}
+function Get-RealDictationAudioEndpoint {
+    param([string]$DefaultFlow = 'capture')
+    return [pscustomobject]@{ Endpoints = @(); DefaultCapture = $null }
+}
+function Resolve-VirtualAudioRoute {
+    param($Endpoints, $DefaultCaptureEndpoint)
+    return [pscustomobject]@{
+        VirtualCapture = $null
+        DefaultCaptureIsVirtual = $false
+        PairedRender = $null
+        Reason = 'simulated missing virtual capture endpoint'
+        PairedRenderReason = 'simulated missing paired render endpoint'
+    }
+}
+Export-ModuleMember -Function *
+'@
+    $moduleStub = $moduleStub.Replace('__REAL_MODULE__', $realModulePath.Replace("'", "''"))
+    Set-Content -LiteralPath (Join-Path $stubScripts 'windows-real-dictation.psm1') `
+        -Value $moduleStub -Encoding utf8
+    $runnerStub = @'
+function Invoke-BoundedInstallerProcess {
+    param(
+        [string]$FilePath,
+        [string[]]$ArgumentList,
+        [string]$Phase,
+        [int]$TimeoutSeconds,
+        [string]$LogDirectory,
+        [string]$InnoLogFileName
+    )
+    $target = $env:ND_TEST_INSTALLER_CONFIG
+    if ($target) {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+        Set-Content -LiteralPath $target -Value 'installer-created' -Encoding utf8
+    }
+    throw 'simulated installer failure after creating the user config'
+}
+function Stop-NanoDictateProcessesUnderPath {
+    param([string]$InstallDirectory, [int]$TimeoutSeconds = 15)
+    return 0
+}
+Export-ModuleMember -Function 'Invoke-BoundedInstallerProcess', 'Stop-NanoDictateProcessesUnderPath'
+'@
+    Set-Content -LiteralPath (Join-Path $stubScripts 'windows-installer-runner.psm1') `
+        -Value $runnerStub -Encoding utf8
+    $fakeInstaller = Join-Path $failureRoot 'setup.exe'
+    Set-Content -LiteralPath $fakeInstaller -Value 'simulated installer payload' -Encoding utf8
+    $operatorConfig = Join-Path $failureRoot 'operator-config.toml'
+    Set-Content -LiteralPath $operatorConfig -Value 'operator-config' -Encoding utf8
+    $pwshPath = (Get-Process -Id $PID).Path
+    $savedEnvironment = @{
+        APPDATA = $env:APPDATA
+        LOCALAPPDATA = $env:LOCALAPPDATA
+        RUNNER_TEMP = $env:RUNNER_TEMP
+        TMPDIR = $env:TMPDIR
+        TMP = $env:TMP
+        TEMP = $env:TEMP
+        ND_TEST_INSTALLER_CONFIG = $env:ND_TEST_INSTALLER_CONFIG
+    }
+    try {
+        $failureScenarios = @(
+            @{ Name = 'installer failure restores the pre-existing config'; Existing = 'original' }
+            @{ Name = 'installer failure removes a config it created'; Existing = $null }
+        )
+        foreach ($scenario in $failureScenarios) {
+            $scenarioRoot = Join-Path $failureRoot ([guid]::NewGuid().ToString('N'))
+            $appData = Join-Path $scenarioRoot 'appdata'
+            $localAppData = Join-Path $scenarioRoot 'localappdata'
+            $tempDirectory = Join-Path $scenarioRoot 'temp'
+            $evidenceDirectory = Join-Path $scenarioRoot 'evidence'
+            $logDirectory = Join-Path $scenarioRoot 'logs'
+            New-Item -ItemType Directory -Force -Path `
+                $appData, $localAppData, $tempDirectory, $evidenceDirectory, $logDirectory | Out-Null
+            $target = Join-Path $appData 'NanoDictate\config.toml'
+            if ($null -ne $scenario.Existing) {
+                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+                Set-Content -LiteralPath $target -Value $scenario.Existing -Encoding utf8
+            }
+            $env:APPDATA = $appData
+            $env:LOCALAPPDATA = $localAppData
+            $env:RUNNER_TEMP = $tempDirectory
+            $env:TMPDIR = $tempDirectory
+            $env:TMP = $tempDirectory
+            $env:TEMP = $tempDirectory
+            $env:ND_TEST_INSTALLER_CONFIG = $target
+            & $pwshPath -NoProfile -File $harnessCopy `
+                -Source candidate -InstallerPath $fakeInstaller -ConfigPath $operatorConfig `
+                -PhraseText 'two words' -EvidenceDirectory $evidenceDirectory `
+                -LogDirectory $logDirectory *> (Join-Path $scenarioRoot 'harness.log')
+            $exitCode = $LASTEXITCODE
+            Assert-Equal "$($scenario.Name): harness reports the installer failure" $exitCode 1
+            $evidencePath = Join-Path $evidenceDirectory 'evidence.json'
+            Assert-True "$($scenario.Name): harness writes evidence after the failure" `
+                (Test-Path -LiteralPath $evidencePath -PathType Leaf) 'evidence.json is missing'
+            if (Test-Path -LiteralPath $evidencePath -PathType Leaf) {
+                $failureEvidence = Get-Content -LiteralPath $evidencePath -Raw | ConvertFrom-Json
+                $fatalSegments = @($failureEvidence.segments | Where-Object { $_.name -eq 'qualification harness' })
+                Assert-True "$($scenario.Name): evidence records the simulated installer failure" `
+                    ($fatalSegments.Count -eq 1 -and
+                        $fatalSegments[0].detail -match 'simulated installer failure') `
+                    'the failure segment did not describe the installer failure'
+            }
+            if ($null -ne $scenario.Existing) {
+                Assert-True "$($scenario.Name): restored config still exists" `
+                    (Test-Path -LiteralPath $target -PathType Leaf) 'restored config is missing'
+                if (Test-Path -LiteralPath $target -PathType Leaf) {
+                    Assert-Equal "$($scenario.Name): config content is restored" `
+                        (Get-Content -LiteralPath $target -Raw).Trim() $scenario.Existing
+                }
+            } else {
+                Assert-True "$($scenario.Name): created config is removed" `
+                    (-not (Test-Path -LiteralPath $target)) `
+                    'an installer-created config must not remain after a failed setup'
+            }
+        }
+    } finally {
+        foreach ($name in $savedEnvironment.Keys) {
+            if ($null -eq $savedEnvironment[$name]) {
+                Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue
+            } else {
+                Set-Item -Path "Env:$name" -Value $savedEnvironment[$name]
+            }
+        }
+    }
 } finally {
     Remove-Item -LiteralPath $configRestoreRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
