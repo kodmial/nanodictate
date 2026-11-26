@@ -69,6 +69,13 @@ function Assert-Throws([string]$Name, [scriptblock]$Action, [string]$ExpectedPat
         else { Fail $Name "unexpected error: $($_.Exception.Message)" }
     }
 }
+function New-TestDirectoryLink([string]$Path, [string]$Target) {
+    if (Test-RealDictationPlatform) {
+        New-Item -ItemType Junction -Path $Path -Target $Target -ErrorAction Stop | Out-Null
+    } else {
+        New-Item -ItemType SymbolicLink -Path $Path -Target $Target -ErrorAction Stop | Out-Null
+    }
+}
 
 # ---------------------------------------------------------------------------
 # Pure assertion helpers
@@ -646,6 +653,33 @@ try {
         "missing $backupDirectory"
     Remove-Item -LiteralPath $backupDirectory -Recurse -Force -ErrorAction SilentlyContinue
 
+    $aliasReal = Join-Path $configRestoreRoot 'alias-real'
+    $aliasLink = Join-Path $configRestoreRoot 'alias-link'
+    $aliasNested = Join-Path $aliasReal 'nested'
+    New-Item -ItemType Directory -Force -Path $aliasNested | Out-Null
+    New-TestDirectoryLink -Path $aliasLink -Target $aliasReal
+    Assert-True 'path containment resolves a directory alias' `
+        (Test-RealDictationPathInside -Path (Join-Path $aliasLink 'nested') -Directory $aliasReal) `
+        "alias $aliasLink must resolve under $aliasReal"
+    Assert-True 'path containment resolves an aliased directory' `
+        (Test-RealDictationPathInside -Path $aliasNested -Directory $aliasLink) `
+        "alias $aliasLink must resolve under $aliasReal"
+
+    $aliasEvidence = Join-Path $configRestoreRoot 'alias-evidence'
+    New-TestDirectoryLink -Path $aliasEvidence -Target $aliasReal
+    $aliasedBackupDirectory = Resolve-RealDictationConfigBackupDirectory `
+        -ExcludedDirectory @($aliasEvidence) `
+        -CandidateDirectory @($aliasReal)
+    Assert-True 'config backup avoids a directory alias to the candidate' `
+        (-not (Test-RealDictationPathInside -Path $aliasedBackupDirectory -Directory $aliasEvidence)) `
+        "resolved inside $aliasEvidence"
+    Assert-True 'config backup avoids the aliased candidate directory' `
+        (-not (Test-RealDictationPathInside -Path $aliasedBackupDirectory -Directory $aliasReal)) `
+        "resolved inside $aliasReal"
+    Remove-Item -LiteralPath $aliasedBackupDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $aliasEvidence -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $aliasLink -Force -ErrorAction SilentlyContinue
+
     $partialTarget = Join-Path $configRestoreRoot 'partial-config.toml'
     $partialSource = Join-Path $configRestoreRoot 'operator-config.toml'
     $partialBackupDirectory = Join-Path $configRestoreRoot 'partial-backup'
@@ -664,15 +698,21 @@ try {
                 throw 'simulated partial replacement failure'
             }
     } 'simulated partial replacement failure'
+    Assert-Equal 'a partial replacement writes partial content before failing' `
+        (Get-Content -LiteralPath $partialTarget -Raw).Trim() 'partial'
     Assert-Equal 'a partial replacement leaves the original backup intact' `
         (Get-Content -LiteralPath $partialBackup -Raw).Trim() 'original'
+    $partialCleanup = Complete-RealDictationProviderConfigCleanup `
+        -TargetPath $partialTarget -BackupPath $partialBackup -ExistedBefore $true
+    Assert-True 'a partial replacement failure does not fail cleanup' `
+        (-not $partialCleanup.RestoreFailed) $partialCleanup.ErrorMessage
+    Assert-Equal 'a partial replacement failure restores the original config immediately' `
+        (Get-Content -LiteralPath $partialTarget -Raw).Trim() 'original'
+    Assert-True 'a partial replacement failure removes the restored backup' `
+        (-not (Test-Path -LiteralPath $partialBackup)) 'backup must not remain'
     Set-RealDictationProviderConfig -TargetPath $partialTarget -SourcePath $partialSource
     Assert-Equal 'applies the supplied provider config' `
         (Get-Content -LiteralPath $partialTarget -Raw).Trim() 'replacement'
-    Restore-RealDictationProviderConfig -TargetPath $partialTarget `
-        -BackupPath $partialBackup -ExistedBefore $true
-    Assert-Equal 'a partial replacement failure still restores the original config' `
-        (Get-Content -LiteralPath $partialTarget -Raw).Trim() 'original'
 
     $blockedParent = Join-Path $configRestoreRoot 'not-a-directory'
     Set-Content -LiteralPath $blockedParent -Value 'blocks directory creation'

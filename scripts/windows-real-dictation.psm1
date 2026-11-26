@@ -626,6 +626,42 @@ function Get-RealDictationExitCode {
     return 2
 }
 
+function Resolve-RealDictationCanonicalPath {
+    <#
+      Resolves symbolic links and junctions in every existing path component so
+      containment checks cannot be bypassed by a directory alias. Components
+      that do not exist yet are appended unchanged.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [int]$Depth = 0
+    )
+
+    if ($Depth -gt 40) {
+        throw "Too many directory links while resolving $Path."
+    }
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $root = [System.IO.Path]::GetPathRoot($fullPath)
+    $relative = $fullPath.Substring($root.Length)
+    $parts = @($relative -split '[\\/]' | Where-Object { $_ })
+    $current = $root
+    foreach ($part in $parts) {
+        $next = Join-Path $current $part
+        $item = Get-Item -LiteralPath $next -Force -ErrorAction SilentlyContinue
+        if ($null -ne $item -and $item.LinkType) {
+            $target = $item.LinkTarget
+            if ($target) {
+                if (-not [System.IO.Path]::IsPathRooted($target)) {
+                    $target = Join-Path (Split-Path -Parent $next) $target
+                }
+                $next = Resolve-RealDictationCanonicalPath -Path $target -Depth ($Depth + 1)
+            }
+        }
+        $current = $next
+    }
+    return [System.IO.Path]::GetFullPath($current)
+}
+
 function Test-RealDictationPathInside {
     <# Returns $true when Path equals or is nested under Directory. #>
     param(
@@ -642,8 +678,8 @@ function Test-RealDictationPathInside {
         [System.IO.Path]::DirectorySeparatorChar,
         [System.IO.Path]::AltDirectorySeparatorChar
     )
-    $normalizedPath = [System.IO.Path]::GetFullPath($Path).TrimEnd($separators)
-    $normalizedDirectory = [System.IO.Path]::GetFullPath($Directory).TrimEnd($separators)
+    $normalizedPath = (Resolve-RealDictationCanonicalPath -Path $Path).TrimEnd($separators)
+    $normalizedDirectory = (Resolve-RealDictationCanonicalPath -Path $Directory).TrimEnd($separators)
     if ($normalizedPath.Equals($normalizedDirectory, $comparison)) {
         return $true
     }
@@ -664,7 +700,7 @@ function Resolve-RealDictationConfigBackupDirectory {
     )
 
     $excluded = @($ExcludedDirectory | Where-Object { $_ } | ForEach-Object {
-        [System.IO.Path]::GetFullPath($_)
+        Resolve-RealDictationCanonicalPath -Path $_
     })
     $candidates = [System.Collections.Generic.List[string]]::new()
     $candidatePool = @($CandidateDirectory) + @([System.IO.Path]::GetTempPath()) +
@@ -676,7 +712,7 @@ function Resolve-RealDictationConfigBackupDirectory {
     }
 
     foreach ($candidate in $candidates) {
-        $current = [System.IO.Path]::GetFullPath($candidate)
+        $current = Resolve-RealDictationCanonicalPath -Path $candidate
         while ($true) {
             $contained = $false
             foreach ($directory in $excluded) {
