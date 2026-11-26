@@ -592,6 +592,40 @@ Assert-Match 'harness catches screenshot capture exceptions and continues' `
     $harness '(?s)try \{\s*\$result = Save-RealDictationScreenshot.*?\}\s*catch \{.*?return'
 Assert-Contains 'harness restores a replaced provider config' $harness '$configExistedBefore'
 Assert-Contains 'harness keeps the config backup outside evidence directories' $harness 'GetTempPath()'
+Assert-Match 'harness marks the config applied before replacing it' `
+    $harness '(?s)\$configApplied = \$true\s*\r?\n\s*Copy-Item -LiteralPath \$ConfigPath -Destination \$configTarget'
+Assert-Contains 'harness tracks a failed config restoration' `
+    $harness '$configRestoreFailed = $true'
+Assert-Match 'harness retains the config backup when restoration fails' `
+    $harness '(?s)if \(-not \$configRestoreFailed.*?Remove-Item -LiteralPath \$configBackupPath'
+Assert-Contains 'harness reports a failed config restoration' `
+    $harness 'Could not restore the provider config'
+
+$configRestoreRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('nd-config-restore-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path $configRestoreRoot | Out-Null
+try {
+    $restoreTarget = Join-Path $configRestoreRoot 'config.toml'
+    $restoreBackup = Join-Path $configRestoreRoot 'config.backup.toml'
+    Set-Content -LiteralPath $restoreTarget -Value 'test-copy'
+    Set-Content -LiteralPath $restoreBackup -Value 'original'
+    Restore-RealDictationProviderConfig -TargetPath $restoreTarget -BackupPath $restoreBackup -ExistedBefore $true
+    Assert-Equal 'restores the preserved provider config' `
+        (Get-Content -LiteralPath $restoreTarget -Raw).Trim() 'original'
+
+    Set-Content -LiteralPath $restoreTarget -Value 'test-copy'
+    Restore-RealDictationProviderConfig -TargetPath $restoreTarget -BackupPath '' -ExistedBefore $false
+    Assert-True 'removes only the config created by the test' `
+        (-not (Test-Path -LiteralPath $restoreTarget)) `
+        'a test-created config must not remain after cleanup'
+
+    Assert-Throws 'a missing config backup fails restoration' {
+        Restore-RealDictationProviderConfig -TargetPath $restoreTarget `
+            -BackupPath (Join-Path $configRestoreRoot 'missing.toml') -ExistedBefore $true
+    } 'backup is missing'
+} finally {
+    Remove-Item -LiteralPath $configRestoreRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 Assert-Contains 'harness verifies the test-owned editor before activation' `
     $harness 'test-owned editor tab active before activation'
 Assert-Contains 'harness rechecks the capture route at activation' $harness '$routeReachableAtActivation'

@@ -626,6 +626,30 @@ function Get-RealDictationExitCode {
     return 2
 }
 
+function Restore-RealDictationProviderConfig {
+    <#
+      Restores a provider config replaced by the qualification. When a config
+      existed before, the preserved backup must still be present and is copied
+      back; when none existed, only the test copy is removed. Throws when the
+      backup cannot be restored so the caller can retain it and report failure.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$TargetPath,
+        [string]$BackupPath,
+        [bool]$ExistedBefore
+    )
+
+    if ($ExistedBefore) {
+        if (-not $BackupPath -or -not (Test-Path -LiteralPath $BackupPath -PathType Leaf)) {
+            throw "The preserved provider config backup is missing; cannot restore $TargetPath."
+        }
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $TargetPath) | Out-Null
+        Copy-Item -LiteralPath $BackupPath -Destination $TargetPath -Force
+    } elseif (Test-Path -LiteralPath $TargetPath) {
+        Remove-Item -LiteralPath $TargetPath -Force
+    }
+}
+
 function Format-RealDictationSummary {
     <# Renders the markdown job summary for one qualification run. #>
     param($Evidence)
@@ -1004,6 +1028,7 @@ Export-ModuleMember -Function @(
     'Remove-RealDictationEditorMarker'
     'Test-RealDictationInsertion'
     'Get-RealDictationExitCode'
+    'Restore-RealDictationProviderConfig'
     'Format-RealDictationSummary'
     'Get-RealDictationSessionProbe'
     'Get-RealDictationAudioEndpoint'

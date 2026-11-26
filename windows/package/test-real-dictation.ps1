@@ -558,8 +558,10 @@ try {
             Copy-Item -LiteralPath $configTarget -Destination $configBackupPath -Force
             $configExistedBefore = $true
         }
-        Copy-Item -LiteralPath $ConfigPath -Destination $configTarget -Force
+        # Mark the config as applied before replacing it so a copy that fails
+        # after touching the target still restores the preserved user config.
         $configApplied = $true
+        Copy-Item -LiteralPath $ConfigPath -Destination $configTarget -Force
         Add-Segment -Name 'operator config applied' -Observed $true -Detail 'copied the supplied provider config to %APPDATA%\NanoDictate\config.toml (never uploaded; any previous file is restored after the run)'
     }
 
@@ -916,20 +918,24 @@ try {
     }
     # Restore the user's provider config after uninstall so the test copy can
     # never be mistaken for the local configuration.
+    $configRestoreFailed = $false
     if ($configApplied) {
         try {
-            if ($configExistedBefore -and $configBackupPath -and
-                (Test-Path -LiteralPath $configBackupPath)) {
-                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $configTarget) | Out-Null
-                Copy-Item -LiteralPath $configBackupPath -Destination $configTarget -Force
-            } elseif (-not $configExistedBefore -and (Test-Path -LiteralPath $configTarget)) {
-                Remove-Item -LiteralPath $configTarget -Force
-            }
+            Restore-RealDictationProviderConfig -TargetPath $configTarget `
+                -BackupPath $configBackupPath -ExistedBefore $configExistedBefore
         } catch {
-            Write-Warning "Could not restore the provider config at ${configTarget}: $_"
+            $configRestoreFailed = $true
+            $retained = if ($configBackupPath -and (Test-Path -LiteralPath $configBackupPath)) {
+                " The backup was retained at $configBackupPath."
+            } else { '' }
+            Write-Warning "Could not restore the provider config at ${configTarget}: ${_}$retained"
+            Add-Limitation "The provider config at $configTarget could not be restored after the qualification.$retained"
         }
     }
-    if ($configBackupPath -and (Test-Path -LiteralPath $configBackupPath)) {
+    # A failed restoration keeps the backup so the user's config can still be
+    # recovered manually; never delete it while it is the only remaining copy.
+    if (-not $configRestoreFailed -and $configBackupPath -and
+        (Test-Path -LiteralPath $configBackupPath)) {
         Remove-Item -LiteralPath $configBackupPath -Force -ErrorAction SilentlyContinue
     }
     if ($tempRoot -and (Test-Path -LiteralPath $tempRoot)) {
