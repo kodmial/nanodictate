@@ -386,29 +386,11 @@ function Get-RealDictationHudBaseline {
                 Handle = [long]$window.Handle
                 Width = [int]$window.Width
                 Height = [int]$window.Height
+                Phase = Get-RealDictationHudPhase -Window $window
             })
         }
     }
     return @($windows)
-}
-
-function Test-RealDictationHudChanged {
-    <#
-      A HUD counts as observed only when it appears after the baseline or
-      changes geometry relative to it. A pre-existing window that never
-      changes cannot credit activation.
-    #>
-    param(
-        [Parameter(Mandatory)]$Window,
-        [object[]]$Baseline = @()
-    )
-
-    $baselineMatch = @($Baseline | Where-Object { $null -ne $_ -and [long]$_.Handle -eq [long]$Window.Handle })
-    if ($baselineMatch.Count -eq 0) {
-        return $true
-    }
-    return ([int]$baselineMatch[0].Width -ne [int]$Window.Width -or
-        [int]$baselineMatch[0].Height -ne [int]$Window.Height)
 }
 
 function Watch-RealDictationHud {
@@ -436,8 +418,7 @@ function Watch-RealDictationHud {
             $observations.Add($window)
             # Stop as soon as the recording panel is observed so the spoken
             # phrase is fed immediately instead of after an arbitrary delay.
-            $scale = if ($window.Width -gt 0) { $window.Width / 220.0 } else { 1.0 }
-            if ([math]::Abs($window.Height - (178.0 * $scale)) -le (4.0 * $scale)) {
+            if ((Get-RealDictationHudPhase -Window $window) -eq 'recording') {
                 break
             }
         }
@@ -446,16 +427,9 @@ function Watch-RealDictationHud {
     $recording = $false
     $phases = @()
     foreach ($observation in $observations) {
-        $scale = if ($observation.Width -gt 0) { $observation.Width / 220.0 } else { 1.0 }
-        $recordingHeight = 178.0 * $scale
-        $idleHeight = 150.0 * $scale
-        $phase = if ([math]::Abs($observation.Height - $recordingHeight) -le (4.0 * $scale)) {
+        $phase = Get-RealDictationHudPhase -Window $observation
+        if ($phase -eq 'recording') {
             $recording = $true
-            'recording'
-        } elseif ([math]::Abs($observation.Height - $idleHeight) -le (4.0 * $scale)) {
-            'starting-or-error'
-        } else {
-            'unknown'
         }
         $phases += $phase
     }
@@ -693,7 +667,16 @@ try {
 
     $hudBaseline = @(Get-RealDictationHudBaseline -ProcessIds $agentProcessIds)
     Add-Segment -Name 'HUD hidden before activation' -Observed ($hudBaseline.Count -eq 0) -Detail (
-        'no visible NanoDictate HUD owned by the launched agent before Double-Alt')
+        if ($hudBaseline.Count -eq 0) {
+            'no visible NanoDictate HUD owned by the launched agent before Double-Alt'
+        } else {
+            "the launched agent already showed {0} NanoDictate HUD window(s) before Double-Alt ({1})" -f
+                $hudBaseline.Count,
+                (($hudBaseline | ForEach-Object { "$($_.Width)x$($_.Height) $($_.Phase)" }) -join ', ')
+        })
+    if ($hudBaseline.Count -gt 0) {
+        Add-Limitation 'A visible NanoDictate HUD owned by the launched agent already existed before Double-Alt; only a new appearance or a verified phase change away from a recording panel can credit activation.'
+    }
     Send-RealDictationDoubleAlt -GapMilliseconds 90
     # Only record delivery after SendInput actually succeeded; a thrown
     # injection is a fatal harness failure, not an observed hotkey.

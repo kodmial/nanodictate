@@ -373,6 +373,62 @@ function Resolve-VirtualAudioRoute {
     }
 }
 
+function Get-RealDictationHudPhase {
+    <#
+      Classifies a NanoDictate HUD window from its geometry. The recording
+      panel is 178 points tall versus 150 for the starting/error overlay; the
+      observed width scales both thresholds so a DPI change does not change
+      the phase.
+    #>
+    param([Parameter(Mandatory)]$Window)
+
+    $width = [int]$Window.Width
+    $height = [int]$Window.Height
+    $scale = if ($width -gt 0) { $width / 220.0 } else { 1.0 }
+    if ([math]::Abs($height - (178.0 * $scale)) -le (4.0 * $scale)) {
+        return 'recording'
+    }
+    if ([math]::Abs($height - (150.0 * $scale)) -le (4.0 * $scale)) {
+        return 'starting-or-error'
+    }
+    return 'unknown'
+}
+
+function Test-RealDictationHudChanged {
+    <#
+      A HUD is attributable to the activation only when it appears after the
+      baseline or changes phase relative to it. A resize of an already
+      recording HUD is not evidence: the product may re-place the panel for a
+      different monitor DPI without a new hotkey, so a recording phase that
+      was already present in the baseline can never be credited again.
+    #>
+    param(
+        [Parameter(Mandatory)]$Window,
+        [object[]]$Baseline = @()
+    )
+
+    $phase = Get-RealDictationHudPhase -Window $Window
+    $baselineMatch = @($Baseline | Where-Object { $null -ne $_ -and [long]$_.Handle -eq [long]$Window.Handle })
+    if ($baselineMatch.Count -eq 0) {
+        return $true
+    }
+    $baselineWindow = $baselineMatch[0]
+    $baselinePhase = if ($baselineWindow.PSObject.Properties['Phase']) {
+        [string]$baselineWindow.Phase
+    } else {
+        ''
+    }
+    if (-not $baselinePhase) {
+        $baselinePhase = Get-RealDictationHudPhase -Window $baselineWindow
+    }
+    if ($baselinePhase -eq 'recording' -and $phase -eq 'recording') {
+        return $false
+    }
+    $geometryChanged = ([int]$baselineWindow.Width -ne [int]$Window.Width -or
+        [int]$baselineWindow.Height -ne [int]$Window.Height)
+    return [bool]($geometryChanged -or $baselinePhase -ne $phase)
+}
+
 function Get-RealDictationVerdict {
     <#
       Maps observed leg outcomes to the qualification status. FULL requires
@@ -956,6 +1012,8 @@ Export-ModuleMember -Function @(
     'Get-PairedRenderEndpoint'
     'Resolve-VirtualAudioRoute'
     'Test-EndpointIdentityMatch'
+    'Get-RealDictationHudPhase'
+    'Test-RealDictationHudChanged'
     'Get-RealDictationVerdict'
     'Test-RealDictationEditorProcessOwned'
     'Test-RealDictationActiveEditorWindow'

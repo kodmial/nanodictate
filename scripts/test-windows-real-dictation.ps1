@@ -400,6 +400,29 @@ Assert-Equal 'a failed probe-only run exits 1' `
     (Get-RealDictationExitCode -FullyVerified $false -ProbeOnly -Failed) 1
 
 # ---------------------------------------------------------------------------
+# HUD attribution
+# ---------------------------------------------------------------------------
+$recordingHud = [pscustomobject]@{ Handle = 11; Width = 220; Height = 178 }
+$recordingBaseline = @([pscustomobject]@{ Handle = 11; Width = 220; Height = 178; Phase = 'recording' })
+Assert-Equal 'HUD geometry classifies the recording panel' `
+    (Get-RealDictationHudPhase -Window $recordingHud) 'recording'
+Assert-Equal 'HUD phase scales with the observed width' `
+    (Get-RealDictationHudPhase -Window ([pscustomobject]@{ Handle = 14; Width = 440; Height = 356 })) 'recording'
+Assert-True 'an unchanged pre-existing recording HUD is not a new activation' `
+    (-not (Test-RealDictationHudChanged -Window $recordingHud -Baseline $recordingBaseline)) `
+    'a baseline window that never changes must not credit activation'
+Assert-True 'a resize of a pre-existing recording HUD is not a new activation' `
+    (-not (Test-RealDictationHudChanged -Window ([pscustomobject]@{ Handle = 11; Width = 440; Height = 356 }) -Baseline $recordingBaseline)) `
+    'recording-to-recording geometry changes must not credit activation'
+$idleBaseline = @([pscustomobject]@{ Handle = 12; Width = 220; Height = 150; Phase = 'starting-or-error' })
+Assert-True 'a pre-existing starting HUD that reaches recording is a phase transition' `
+    (Test-RealDictationHudChanged -Window ([pscustomobject]@{ Handle = 12; Width = 220; Height = 178 }) -Baseline $idleBaseline) `
+    'starting-to-recording is a real post-hotkey transition'
+Assert-True 'a new HUD after the baseline is attributable' `
+    (Test-RealDictationHudChanged -Window ([pscustomobject]@{ Handle = 13; Width = 220; Height = 178 }) -Baseline $recordingBaseline) `
+    'a window absent from the baseline is a post-hotkey appearance'
+
+# ---------------------------------------------------------------------------
 # Summary rendering
 # ---------------------------------------------------------------------------
 $summary = Format-RealDictationSummary -Evidence ([pscustomobject]@{
@@ -580,6 +603,10 @@ Assert-Contains 'harness bounds release requests with deadlines' $harness '-Time
 Assert-Contains 'harness scopes HUD probes to the launched agent' $harness 'AgentProcessIds'
 Assert-Contains 'harness only credits a HUD that changed from the baseline' `
     $harness 'Test-RealDictationHudChanged -Window $window -Baseline $Baseline'
+Assert-Contains 'harness records the HUD phase in its activation baseline' `
+    $harness 'Phase = Get-RealDictationHudPhase -Window $window'
+Assert-Contains 'harness classifies observed HUD phases through the shared helper' `
+    $harness 'Get-RealDictationHudPhase -Window $observation'
 
 $module = Read-Text 'scripts/windows-real-dictation.psm1'
 Assert-Contains 'module exposes the three-status verdict' $module "FULL E2E VERIFIED"
