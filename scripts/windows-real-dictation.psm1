@@ -767,6 +767,31 @@ function Backup-RealDictationProviderConfig {
     return $backupPath
 }
 
+function Get-RealDictationProviderConfigState {
+    <#
+      Captures the pre-run state of the user provider config before the
+      installer can create or replace it. The installer starts the product,
+      which may bootstrap a default config; recording ExistedBefore only after
+      installation would misclassify that run-created default as a user config.
+      Returns whether the config existed and a backup path for an existing one.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$TargetPath,
+        [Parameter(Mandatory)][string]$BackupDirectory
+    )
+
+    $existedBefore = Test-Path -LiteralPath $TargetPath -PathType Leaf
+    $backupPath = $null
+    if ($existedBefore) {
+        $backupPath = Backup-RealDictationProviderConfig `
+            -TargetPath $TargetPath -BackupDirectory $BackupDirectory
+    }
+    return [pscustomobject]@{
+        ExistedBefore = [bool]$existedBefore
+        BackupPath    = $backupPath
+    }
+}
+
 function Set-RealDictationProviderConfig {
     <#
       Copies a supplied provider config over the user config. Callers must mark
@@ -1231,6 +1256,7 @@ Export-ModuleMember -Function @(
     'Test-RealDictationPathInside'
     'Resolve-RealDictationConfigBackupDirectory'
     'Backup-RealDictationProviderConfig'
+    'Get-RealDictationProviderConfigState'
     'Set-RealDictationProviderConfig'
     'Restore-RealDictationProviderConfig'
     'Complete-RealDictationProviderConfigCleanup'

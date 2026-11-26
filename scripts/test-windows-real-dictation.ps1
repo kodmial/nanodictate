@@ -604,8 +604,12 @@ Assert-Contains 'harness excludes both evidence directories from the config back
     $harness '-ExcludedDirectory @($EvidenceDirectory, $LogDirectory)'
 Assert-NotContains 'harness does not use the raw temp path for the config backup' `
     $harness 'Join-Path ([System.IO.Path]::GetTempPath())'
-Assert-Match 'harness marks the config applied before replacing it' `
-    $harness '(?s)\$configApplied = \$true\s*\r?\n\s*Set-RealDictationProviderConfig'
+Assert-Contains 'harness captures the pre-install config state' `
+    $harness 'Get-RealDictationProviderConfigState'
+Assert-Match 'harness snapshots the config before invoking setup' `
+    $harness '(?s)\$configTarget = Join-Path \$env:APPDATA.*?Get-RealDictationProviderConfigState.*?Invoke-BoundedInstallerProcess -FilePath \$installer'
+Assert-Match 'harness requires cleanup before setup can create the config' `
+    $harness '(?s)\$configCleanupRequired = \$true.*?Invoke-BoundedInstallerProcess -FilePath \$installer'
 Assert-Contains 'harness delegates config restoration and retention' `
     $harness 'Complete-RealDictationProviderConfigCleanup'
 Assert-Match 'harness keeps the backup directory when restoration fails' `
@@ -634,6 +638,42 @@ try {
         Restore-RealDictationProviderConfig -TargetPath $restoreTarget `
             -BackupPath (Join-Path $configRestoreRoot 'missing.toml') -ExistedBefore $true
     } 'backup is missing'
+
+    $snapshotRoot = Join-Path $configRestoreRoot 'snapshot'
+    $snapshotTarget = Join-Path $snapshotRoot 'config.toml'
+    $snapshotBackupDirectory = Join-Path $snapshotRoot 'backup'
+    New-Item -ItemType Directory -Force -Path $snapshotRoot | Out-Null
+    $missingSnapshot = Get-RealDictationProviderConfigState `
+        -TargetPath $snapshotTarget -BackupDirectory $snapshotBackupDirectory
+    Assert-True 'a missing config is recorded as absent before installation' `
+        (-not $missingSnapshot.ExistedBefore) 'config must be recorded as absent'
+    Assert-True 'a missing config has no backup' `
+        ($null -eq $missingSnapshot.BackupPath) 'a missing config must not produce a backup'
+    Set-Content -LiteralPath $snapshotTarget -Value 'installer-default'
+    $missingCleanup = Complete-RealDictationProviderConfigCleanup `
+        -TargetPath $snapshotTarget -BackupPath $missingSnapshot.BackupPath `
+        -ExistedBefore $missingSnapshot.ExistedBefore
+    Assert-True 'cleanup removes a config created after the pre-install snapshot' `
+        (-not (Test-Path -LiteralPath $snapshotTarget)) `
+        'a config created by the installer must be removed'
+
+    Set-Content -LiteralPath $snapshotTarget -Value 'original'
+    $existingSnapshot = Get-RealDictationProviderConfigState `
+        -TargetPath $snapshotTarget -BackupDirectory $snapshotBackupDirectory
+    Assert-True 'an existing config is recorded before installation' `
+        $existingSnapshot.ExistedBefore 'config must be recorded as present'
+    Assert-True 'an existing config is preserved before installation' `
+        ($existingSnapshot.BackupPath -and
+            (Test-Path -LiteralPath $existingSnapshot.BackupPath -PathType Leaf)) `
+        'backup was not created'
+    Set-Content -LiteralPath $snapshotTarget -Value 'installer-replacement'
+    $existingCleanup = Complete-RealDictationProviderConfigCleanup `
+        -TargetPath $snapshotTarget -BackupPath $existingSnapshot.BackupPath `
+        -ExistedBefore $existingSnapshot.ExistedBefore
+    Assert-True 'cleanup after a pre-install snapshot does not fail' `
+        (-not $existingCleanup.RestoreFailed) $existingCleanup.ErrorMessage
+    Assert-Equal 'cleanup restores the config captured before installation' `
+        (Get-Content -LiteralPath $snapshotTarget -Raw).Trim() 'original'
 
     $evidenceRoot = Join-Path $configRestoreRoot 'evidence'
     $logRoot = Join-Path $configRestoreRoot 'logs'

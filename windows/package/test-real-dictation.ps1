@@ -88,7 +88,7 @@ $configTarget = $null
 $configBackupDirectory = $null
 $configBackupPath = $null
 $configExistedBefore = $false
-$configApplied = $false
+$configCleanupRequired = $false
 $agentProcessIds = @()
 $testedVersion = $Version
 # A candidate installer is built from the workflow checkout, so that SHA is
@@ -535,6 +535,27 @@ try {
         throw "A pre-existing NanoDictate installation exists at $installedDirectory. The qualification only installs and uninstalls an installation it created; remove the existing installation first."
     }
     $installationOwned = $true
+    $configTarget = Join-Path $env:APPDATA 'NanoDictate\config.toml'
+    if ($ConfigPath) {
+        if (-not (Test-Path -LiteralPath $ConfigPath)) {
+            throw "ConfigPath does not exist: $ConfigPath"
+        }
+        # Capture the user config state before setup runs. The installer starts
+        # the product, whose first-use bootstrap may create a default config;
+        # recording state afterwards would mistake that run-created default for
+        # a pre-existing user config and restore it instead of removing it.
+        # Keep the backup outside every uploaded directory.
+        $configBackupDirectory = Resolve-RealDictationConfigBackupDirectory `
+            -ExcludedDirectory @($EvidenceDirectory, $LogDirectory)
+        $configState = Get-RealDictationProviderConfigState `
+            -TargetPath $configTarget -BackupDirectory $configBackupDirectory
+        $configExistedBefore = $configState.ExistedBefore
+        $configBackupPath = $configState.BackupPath
+        # Cleanup is required before installation so a config created by the
+        # installer is removed (or an existing one restored) even when setup
+        # fails after creating it.
+        $configCleanupRequired = $true
+    }
     $null = Stop-NanoDictateProcessesUnderPath -InstallDirectory $installedDirectory -TimeoutSeconds 15
     Invoke-BoundedInstallerProcess -FilePath $installer `
         -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-') `
@@ -542,25 +563,11 @@ try {
         -LogDirectory $LogDirectory -InnoLogFileName 'real-dictation-install.log' | Out-Null
     Get-InstalledPayload -Directory $installedDirectory
 
-    $configTarget = Join-Path $env:APPDATA 'NanoDictate\config.toml'
     if ($ConfigPath) {
-        if (-not (Test-Path -LiteralPath $ConfigPath)) {
-            throw "ConfigPath does not exist: $ConfigPath"
-        }
         # The application reads the user config only at launch, so stop the
         # installer-started agent before replacing it, then start exactly one.
         $null = Stop-NanoDictateProcessesUnderPath -InstallDirectory $installedDirectory -TimeoutSeconds 15
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $configTarget) | Out-Null
-        # Preserve the local user config outside every uploaded directory and
-        # restore it in the finally block on success and failure.
-        $configBackupDirectory = Resolve-RealDictationConfigBackupDirectory `
-            -ExcludedDirectory @($EvidenceDirectory, $LogDirectory)
-        $configBackupPath = Backup-RealDictationProviderConfig `
-            -TargetPath $configTarget -BackupDirectory $configBackupDirectory
-        $configExistedBefore = [bool]$configBackupPath
-        # Mark the config as applied before replacing it so a copy that fails
-        # after touching the target still restores the preserved user config.
-        $configApplied = $true
         Set-RealDictationProviderConfig -TargetPath $configTarget -SourcePath $ConfigPath
         Add-Segment -Name 'operator config applied' -Observed $true -Detail 'copied the supplied provider config to %APPDATA%\NanoDictate\config.toml (never uploaded; any previous file is restored after the run)'
     }
@@ -919,7 +926,7 @@ try {
     # Restore the user's provider config after uninstall so the test copy can
     # never be mistaken for the local configuration.
     $configRestoreFailed = $false
-    if ($configApplied) {
+    if ($configCleanupRequired) {
         $configCleanup = Complete-RealDictationProviderConfigCleanup `
             -TargetPath $configTarget -BackupPath $configBackupPath `
             -ExistedBefore $configExistedBefore
