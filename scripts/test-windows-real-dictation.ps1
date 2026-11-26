@@ -560,6 +560,10 @@ Assert-Contains 'harness fails a non-full qualification run' $harness 'Get-RealD
 Assert-Contains 'harness captures screenshot evidence' $harness 'Save-EvidenceScreenshot'
 Assert-Contains 'harness requires window evidence for a window screenshot' `
     $harness '$result.WindowEvidence'
+Assert-Contains 'harness records screenshot capture failures instead of aborting' `
+    $harness 'was not captured because the capture call failed'
+Assert-Match 'harness catches screenshot capture exceptions and continues' `
+    $harness '(?s)try \{\s*\$result = Save-RealDictationScreenshot.*?\}\s*catch \{.*?return'
 Assert-Contains 'harness restores a replaced provider config' $harness '$configExistedBefore'
 Assert-Contains 'harness keeps the config backup outside evidence directories' $harness 'GetTempPath()'
 Assert-Contains 'harness verifies the test-owned editor before activation' `

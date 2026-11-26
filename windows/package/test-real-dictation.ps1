@@ -144,7 +144,16 @@ function Save-EvidenceScreenshot {
         [long]$Handle = 0
     )
     $path = Join-Path $EvidenceDirectory ("$Name.bmp")
-    $result = Save-RealDictationScreenshot -Kind $Kind -Handle $Handle -Path $path
+    try {
+        $result = Save-RealDictationScreenshot -Kind $Kind -Handle $Handle -Path $path
+    } catch {
+        # A capture failure is missing evidence, not a fatal harness error:
+        # record it and keep driving the product path.
+        Add-Segment -Name $Name -Observed $false -Detail (
+            "$Kind screenshot could not be captured: $($_.Exception.Message -replace '\|', '/')")
+        Add-Limitation "The $Kind screenshot for '$Name' was not captured because the capture call failed; visual evidence is missing."
+        return
+    }
     $windowEvidence = if ($Kind -eq 'window') { [bool]$result.WindowEvidence } else { $true }
     if ($result.Saved -and $result.NonBlankPixels -gt 0 -and $windowEvidence) {
         Add-EvidenceFile $result.Path
