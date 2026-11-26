@@ -591,13 +591,18 @@ Assert-Contains 'harness records screenshot capture failures instead of aborting
 Assert-Match 'harness catches screenshot capture exceptions and continues' `
     $harness '(?s)try \{\s*\$result = Save-RealDictationScreenshot.*?\}\s*catch \{.*?return'
 Assert-Contains 'harness restores a replaced provider config' $harness '$configExistedBefore'
-Assert-Contains 'harness keeps the config backup outside evidence directories' $harness 'GetTempPath()'
+Assert-Contains 'harness resolves a config backup outside evidence directories' `
+    $harness 'Resolve-RealDictationConfigBackupDirectory'
+Assert-Contains 'harness excludes both evidence directories from the config backup' `
+    $harness '-ExcludedDirectory @($EvidenceDirectory, $LogDirectory)'
+Assert-NotContains 'harness does not use the raw temp path for the config backup' `
+    $harness 'Join-Path ([System.IO.Path]::GetTempPath())'
 Assert-Match 'harness marks the config applied before replacing it' `
-    $harness '(?s)\$configApplied = \$true\s*\r?\n\s*Copy-Item -LiteralPath \$ConfigPath -Destination \$configTarget'
-Assert-Contains 'harness tracks a failed config restoration' `
-    $harness '$configRestoreFailed = $true'
-Assert-Match 'harness retains the config backup when restoration fails' `
-    $harness '(?s)if \(-not \$configRestoreFailed.*?Remove-Item -LiteralPath \$configBackupPath'
+    $harness '(?s)\$configApplied = \$true\s*\r?\n\s*Set-RealDictationProviderConfig'
+Assert-Contains 'harness delegates config restoration and retention' `
+    $harness 'Complete-RealDictationProviderConfigCleanup'
+Assert-Match 'harness keeps the backup directory when restoration fails' `
+    $harness '(?s)if \(-not \$configRestoreFailed.*?Remove-Item -LiteralPath \$configBackupDirectory'
 Assert-Contains 'harness reports a failed config restoration' `
     $harness 'Could not restore the provider config'
 
@@ -622,6 +627,81 @@ try {
         Restore-RealDictationProviderConfig -TargetPath $restoreTarget `
             -BackupPath (Join-Path $configRestoreRoot 'missing.toml') -ExistedBefore $true
     } 'backup is missing'
+
+    $evidenceRoot = Join-Path $configRestoreRoot 'evidence'
+    $logRoot = Join-Path $configRestoreRoot 'logs'
+    $nestedEvidence = Join-Path $evidenceRoot 'nested'
+    New-Item -ItemType Directory -Force -Path $nestedEvidence, $logRoot | Out-Null
+    $backupDirectory = Resolve-RealDictationConfigBackupDirectory `
+        -ExcludedDirectory @($evidenceRoot, $logRoot) `
+        -CandidateDirectory @($nestedEvidence)
+    Assert-True 'config backup directory is outside the evidence directory' `
+        (-not (Test-RealDictationPathInside -Path $backupDirectory -Directory $evidenceRoot)) `
+        "resolved inside $evidenceRoot"
+    Assert-True 'config backup directory is outside the log directory' `
+        (-not (Test-RealDictationPathInside -Path $backupDirectory -Directory $logRoot)) `
+        "resolved inside $logRoot"
+    Assert-True 'config backup directory exists' `
+        (Test-Path -LiteralPath $backupDirectory -PathType Container) `
+        "missing $backupDirectory"
+    Remove-Item -LiteralPath $backupDirectory -Recurse -Force -ErrorAction SilentlyContinue
+
+    $partialTarget = Join-Path $configRestoreRoot 'partial-config.toml'
+    $partialSource = Join-Path $configRestoreRoot 'operator-config.toml'
+    $partialBackupDirectory = Join-Path $configRestoreRoot 'partial-backup'
+    Set-Content -LiteralPath $partialTarget -Value 'original'
+    Set-Content -LiteralPath $partialSource -Value 'replacement'
+    $partialBackup = Backup-RealDictationProviderConfig `
+        -TargetPath $partialTarget -BackupDirectory $partialBackupDirectory
+    Assert-True 'preserves the existing config before replacement' `
+        ($partialBackup -and (Test-Path -LiteralPath $partialBackup -PathType Leaf)) `
+        'backup was not created'
+    Assert-Throws 'a partial replacement failure is surfaced' {
+        Set-RealDictationProviderConfig -TargetPath $partialTarget -SourcePath $partialSource `
+            -CopyItem {
+                param($From, $To)
+                Set-Content -LiteralPath $To -Value 'partial'
+                throw 'simulated partial replacement failure'
+            }
+    } 'simulated partial replacement failure'
+    Assert-Equal 'a partial replacement leaves the original backup intact' `
+        (Get-Content -LiteralPath $partialBackup -Raw).Trim() 'original'
+    Set-RealDictationProviderConfig -TargetPath $partialTarget -SourcePath $partialSource
+    Assert-Equal 'applies the supplied provider config' `
+        (Get-Content -LiteralPath $partialTarget -Raw).Trim() 'replacement'
+    Restore-RealDictationProviderConfig -TargetPath $partialTarget `
+        -BackupPath $partialBackup -ExistedBefore $true
+    Assert-Equal 'a partial replacement failure still restores the original config' `
+        (Get-Content -LiteralPath $partialTarget -Raw).Trim() 'original'
+
+    $blockedParent = Join-Path $configRestoreRoot 'not-a-directory'
+    Set-Content -LiteralPath $blockedParent -Value 'blocks directory creation'
+    $retainedTarget = Join-Path $blockedParent 'config.toml'
+    $retainedBackupDirectory = Join-Path $configRestoreRoot 'retained-backup'
+    New-Item -ItemType Directory -Force -Path $retainedBackupDirectory | Out-Null
+    $retainedBackup = Join-Path $retainedBackupDirectory 'config.toml'
+    Set-Content -LiteralPath $retainedBackup -Value 'original'
+    $retained = Complete-RealDictationProviderConfigCleanup `
+        -TargetPath $retainedTarget -BackupPath $retainedBackup -ExistedBefore $true
+    Assert-True 'a failed restoration is reported' $retained.RestoreFailed 'restoration should fail'
+    Assert-True 'a failed restoration retains the backup' $retained.BackupRetained 'backup must be retained'
+    Assert-True 'the retained backup still exists' `
+        (Test-Path -LiteralPath $retainedBackup -PathType Leaf) 'backup was deleted'
+
+    $cleanTarget = Join-Path $configRestoreRoot 'clean-config.toml'
+    $cleanBackupDirectory = Join-Path $configRestoreRoot 'clean-backup'
+    New-Item -ItemType Directory -Force -Path $cleanBackupDirectory | Out-Null
+    $cleanBackup = Join-Path $cleanBackupDirectory 'config.toml'
+    Set-Content -LiteralPath $cleanTarget -Value 'test-copy'
+    Set-Content -LiteralPath $cleanBackup -Value 'original'
+    $cleanup = Complete-RealDictationProviderConfigCleanup `
+        -TargetPath $cleanTarget -BackupPath $cleanBackup -ExistedBefore $true
+    Assert-True 'successful cleanup reports no restore failure' `
+        (-not $cleanup.RestoreFailed) 'unexpected restore failure'
+    Assert-Equal 'successful cleanup restores the original config' `
+        (Get-Content -LiteralPath $cleanTarget -Raw).Trim() 'original'
+    Assert-True 'successful cleanup removes the backup' `
+        (-not (Test-Path -LiteralPath $cleanBackup)) 'backup must not remain'
 } finally {
     Remove-Item -LiteralPath $configRestoreRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

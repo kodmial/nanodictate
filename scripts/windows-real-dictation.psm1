@@ -626,6 +626,134 @@ function Get-RealDictationExitCode {
     return 2
 }
 
+function Test-RealDictationPathInside {
+    <# Returns $true when Path equals or is nested under Directory. #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Directory
+    )
+
+    $comparison = if (Test-RealDictationPlatform) {
+        [StringComparison]::OrdinalIgnoreCase
+    } else {
+        [StringComparison]::Ordinal
+    }
+    $separators = @(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    )
+    $normalizedPath = [System.IO.Path]::GetFullPath($Path).TrimEnd($separators)
+    $normalizedDirectory = [System.IO.Path]::GetFullPath($Directory).TrimEnd($separators)
+    if ($normalizedPath.Equals($normalizedDirectory, $comparison)) {
+        return $true
+    }
+    $prefix = $normalizedDirectory + [System.IO.Path]::DirectorySeparatorChar
+    return $normalizedPath.StartsWith($prefix, $comparison)
+}
+
+function Resolve-RealDictationConfigBackupDirectory {
+    <#
+      Chooses a writable directory for a preserved provider config that is not
+      inside any excluded (uploaded) directory. When the preferred temporary
+      directory is inside an excluded directory, walks up to the nearest safe
+      ancestor before creating a unique backup directory.
+    #>
+    param(
+        [string[]]$ExcludedDirectory = @(),
+        [string[]]$CandidateDirectory = @()
+    )
+
+    $excluded = @($ExcludedDirectory | Where-Object { $_ } | ForEach-Object {
+        [System.IO.Path]::GetFullPath($_)
+    })
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    $candidatePool = @($CandidateDirectory) + @([System.IO.Path]::GetTempPath()) +
+        @($env:LOCALAPPDATA, $env:USERPROFILE, $env:HOME)
+    foreach ($candidate in $candidatePool) {
+        if ($candidate -and -not $candidates.Contains($candidate)) {
+            $candidates.Add($candidate)
+        }
+    }
+
+    foreach ($candidate in $candidates) {
+        $current = [System.IO.Path]::GetFullPath($candidate)
+        while ($true) {
+            $contained = $false
+            foreach ($directory in $excluded) {
+                if (Test-RealDictationPathInside -Path $current -Directory $directory) {
+                    $contained = $true
+                    break
+                }
+            }
+            if (-not $contained) {
+                break
+            }
+            $parent = [System.IO.Path]::GetDirectoryName($current)
+            if (-not $parent -or $parent -eq $current) {
+                $current = $null
+                break
+            }
+            $current = $parent
+        }
+        if (-not $current) {
+            continue
+        }
+        $backupDirectory = Join-Path $current (
+            'nanodictate-real-dictation-backup-' + [guid]::NewGuid().ToString('N'))
+        try {
+            New-Item -ItemType Directory -Force -Path $backupDirectory -ErrorAction Stop | Out-Null
+            return $backupDirectory
+        } catch {
+            continue
+        }
+    }
+    throw 'Could not create a provider config backup directory outside the uploaded evidence directories.'
+}
+
+function Backup-RealDictationProviderConfig {
+    <#
+      Preserves an existing provider config in a directory chosen outside the
+      uploaded evidence directories. Returns the backup path, or $null when no
+      config existed before.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$TargetPath,
+        [Parameter(Mandatory)][string]$BackupDirectory
+    )
+
+    if (-not (Test-Path -LiteralPath $TargetPath -PathType Leaf)) {
+        return $null
+    }
+    New-Item -ItemType Directory -Force -Path $BackupDirectory | Out-Null
+    $backupPath = Join-Path $BackupDirectory (
+        'config-' + [guid]::NewGuid().ToString('N') + '.toml')
+    Copy-Item -LiteralPath $TargetPath -Destination $backupPath -Force
+    return $backupPath
+}
+
+function Set-RealDictationProviderConfig {
+    <#
+      Copies a supplied provider config over the user config. Callers must mark
+      the replacement as applied before calling this function so a copy that
+      fails after touching the target still restores the preserved backup.
+      CopyItem is replaceable so tests can simulate a partial replacement.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$TargetPath,
+        [Parameter(Mandatory)][string]$SourcePath,
+        [scriptblock]$CopyItem = {
+            param($From, $To)
+            Copy-Item -LiteralPath $From -Destination $To -Force
+        }
+    )
+
+    if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf)) {
+        throw "ConfigPath does not exist: $SourcePath"
+    }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $TargetPath) | Out-Null
+    & $CopyItem $SourcePath $TargetPath
+}
+
 function Restore-RealDictationProviderConfig {
     <#
       Restores a provider config replaced by the qualification. When a config
@@ -647,6 +775,42 @@ function Restore-RealDictationProviderConfig {
         Copy-Item -LiteralPath $BackupPath -Destination $TargetPath -Force
     } elseif (Test-Path -LiteralPath $TargetPath) {
         Remove-Item -LiteralPath $TargetPath -Force
+    }
+}
+
+function Complete-RealDictationProviderConfigCleanup {
+    <#
+      Restores the user config and removes the backup only when restoration
+      succeeded. A failed restoration retains the backup so the user's config
+      can still be recovered manually; never delete the only remaining copy.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$TargetPath,
+        [string]$BackupPath,
+        [bool]$ExistedBefore
+    )
+
+    $restoreFailed = $false
+    $errorMessage = $null
+    try {
+        Restore-RealDictationProviderConfig -TargetPath $TargetPath `
+            -BackupPath $BackupPath -ExistedBefore $ExistedBefore
+    } catch {
+        $restoreFailed = $true
+        $errorMessage = $_.Exception.Message
+    }
+    $backupRetained = $false
+    if ($BackupPath -and (Test-Path -LiteralPath $BackupPath)) {
+        if ($restoreFailed) {
+            $backupRetained = $true
+        } else {
+            Remove-Item -LiteralPath $BackupPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+    return [pscustomobject]@{
+        RestoreFailed  = [bool]$restoreFailed
+        BackupRetained = [bool]$backupRetained
+        ErrorMessage   = $errorMessage
     }
 }
 
@@ -1028,7 +1192,12 @@ Export-ModuleMember -Function @(
     'Remove-RealDictationEditorMarker'
     'Test-RealDictationInsertion'
     'Get-RealDictationExitCode'
+    'Test-RealDictationPathInside'
+    'Resolve-RealDictationConfigBackupDirectory'
+    'Backup-RealDictationProviderConfig'
+    'Set-RealDictationProviderConfig'
     'Restore-RealDictationProviderConfig'
+    'Complete-RealDictationProviderConfigCleanup'
     'Format-RealDictationSummary'
     'Get-RealDictationSessionProbe'
     'Get-RealDictationAudioEndpoint'

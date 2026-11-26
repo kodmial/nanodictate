@@ -85,6 +85,7 @@ $notepadProcessId = 0
 $notepadWindow = $null
 $installerSha256 = ''
 $configTarget = $null
+$configBackupDirectory = $null
 $configBackupPath = $null
 $configExistedBefore = $false
 $configApplied = $false
@@ -550,18 +551,17 @@ try {
         # installer-started agent before replacing it, then start exactly one.
         $null = Stop-NanoDictateProcessesUnderPath -InstallDirectory $installedDirectory -TimeoutSeconds 15
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $configTarget) | Out-Null
-        if (Test-Path -LiteralPath $configTarget) {
-            # Preserve the local user config outside every uploaded directory
-            # and restore it in the finally block on success and failure.
-            $configBackupPath = Join-Path ([System.IO.Path]::GetTempPath()) (
-                'nanodictate-real-dictation-config-' + [guid]::NewGuid().ToString('N') + '.toml')
-            Copy-Item -LiteralPath $configTarget -Destination $configBackupPath -Force
-            $configExistedBefore = $true
-        }
+        # Preserve the local user config outside every uploaded directory and
+        # restore it in the finally block on success and failure.
+        $configBackupDirectory = Resolve-RealDictationConfigBackupDirectory `
+            -ExcludedDirectory @($EvidenceDirectory, $LogDirectory)
+        $configBackupPath = Backup-RealDictationProviderConfig `
+            -TargetPath $configTarget -BackupDirectory $configBackupDirectory
+        $configExistedBefore = [bool]$configBackupPath
         # Mark the config as applied before replacing it so a copy that fails
         # after touching the target still restores the preserved user config.
         $configApplied = $true
-        Copy-Item -LiteralPath $ConfigPath -Destination $configTarget -Force
+        Set-RealDictationProviderConfig -TargetPath $configTarget -SourcePath $ConfigPath
         Add-Segment -Name 'operator config applied' -Observed $true -Detail 'copied the supplied provider config to %APPDATA%\NanoDictate\config.toml (never uploaded; any previous file is restored after the run)'
     }
 
@@ -920,23 +920,23 @@ try {
     # never be mistaken for the local configuration.
     $configRestoreFailed = $false
     if ($configApplied) {
-        try {
-            Restore-RealDictationProviderConfig -TargetPath $configTarget `
-                -BackupPath $configBackupPath -ExistedBefore $configExistedBefore
-        } catch {
+        $configCleanup = Complete-RealDictationProviderConfigCleanup `
+            -TargetPath $configTarget -BackupPath $configBackupPath `
+            -ExistedBefore $configExistedBefore
+        if ($configCleanup.RestoreFailed) {
             $configRestoreFailed = $true
-            $retained = if ($configBackupPath -and (Test-Path -LiteralPath $configBackupPath)) {
+            $retained = if ($configCleanup.BackupRetained) {
                 " The backup was retained at $configBackupPath."
             } else { '' }
-            Write-Warning "Could not restore the provider config at ${configTarget}: ${_}$retained"
+            Write-Warning "Could not restore the provider config at ${configTarget}: $($configCleanup.ErrorMessage)$retained"
             Add-Limitation "The provider config at $configTarget could not be restored after the qualification.$retained"
         }
     }
-    # A failed restoration keeps the backup so the user's config can still be
-    # recovered manually; never delete it while it is the only remaining copy.
-    if (-not $configRestoreFailed -and $configBackupPath -and
-        (Test-Path -LiteralPath $configBackupPath)) {
-        Remove-Item -LiteralPath $configBackupPath -Force -ErrorAction SilentlyContinue
+    # A failed restoration keeps the backup directory so the user's config can
+    # still be recovered manually; never delete it while it is the only copy.
+    if (-not $configRestoreFailed -and $configBackupDirectory -and
+        (Test-Path -LiteralPath $configBackupDirectory)) {
+        Remove-Item -LiteralPath $configBackupDirectory -Recurse -Force -ErrorAction SilentlyContinue
     }
     if ($tempRoot -and (Test-Path -LiteralPath $tempRoot)) {
         Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
