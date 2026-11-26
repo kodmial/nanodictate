@@ -396,37 +396,20 @@ function Get-RealDictationHudPhase {
 
 function Test-RealDictationHudChanged {
     <#
-      A HUD is attributable to the activation only when it appears after the
-      baseline or changes phase relative to it. A resize of an already
-      recording HUD is not evidence: the product may re-place the panel for a
-      different monitor DPI without a new hotkey, so a recording phase that
-      was already present in the baseline can never be credited again.
+      A HUD is attributable to the activation only when no HUD owned by the
+      agent was visible in the baseline. A pre-existing starting/error panel
+      can advance to recording when an earlier capture delivers its first
+      audio block, and a recording panel can be resized for a different
+      monitor DPI; neither proves that this Double-Alt was handled. Requiring
+      a hidden baseline makes the post-hotkey appearance unambiguous.
     #>
     param(
         [Parameter(Mandatory)]$Window,
         [object[]]$Baseline = @()
     )
 
-    $phase = Get-RealDictationHudPhase -Window $Window
-    $baselineMatch = @($Baseline | Where-Object { $null -ne $_ -and [long]$_.Handle -eq [long]$Window.Handle })
-    if ($baselineMatch.Count -eq 0) {
-        return $true
-    }
-    $baselineWindow = $baselineMatch[0]
-    $baselinePhase = if ($baselineWindow.PSObject.Properties['Phase']) {
-        [string]$baselineWindow.Phase
-    } else {
-        ''
-    }
-    if (-not $baselinePhase) {
-        $baselinePhase = Get-RealDictationHudPhase -Window $baselineWindow
-    }
-    if ($baselinePhase -eq 'recording' -and $phase -eq 'recording') {
-        return $false
-    }
-    $geometryChanged = ([int]$baselineWindow.Width -ne [int]$Window.Width -or
-        [int]$baselineWindow.Height -ne [int]$Window.Height)
-    return [bool]($geometryChanged -or $baselinePhase -ne $phase)
+    $observedHandle = [long]$Window.Handle
+    return [bool]($observedHandle -ne 0 -and @($Baseline | Where-Object { $null -ne $_ }).Count -eq 0)
 }
 
 function Get-RealDictationVerdict {

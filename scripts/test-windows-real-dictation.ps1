@@ -415,12 +415,15 @@ Assert-True 'a resize of a pre-existing recording HUD is not a new activation' `
     (-not (Test-RealDictationHudChanged -Window ([pscustomobject]@{ Handle = 11; Width = 440; Height = 356 }) -Baseline $recordingBaseline)) `
     'recording-to-recording geometry changes must not credit activation'
 $idleBaseline = @([pscustomobject]@{ Handle = 12; Width = 220; Height = 150; Phase = 'starting-or-error' })
-Assert-True 'a pre-existing starting HUD that reaches recording is a phase transition' `
-    (Test-RealDictationHudChanged -Window ([pscustomobject]@{ Handle = 12; Width = 220; Height = 178 }) -Baseline $idleBaseline) `
-    'starting-to-recording is a real post-hotkey transition'
-Assert-True 'a new HUD after the baseline is attributable' `
-    (Test-RealDictationHudChanged -Window ([pscustomobject]@{ Handle = 13; Width = 220; Height = 178 }) -Baseline $recordingBaseline) `
-    'a window absent from the baseline is a post-hotkey appearance'
+Assert-True 'a pre-existing starting HUD that reaches recording without the test hotkey is not a new activation' `
+    (-not (Test-RealDictationHudChanged -Window ([pscustomobject]@{ Handle = 12; Width = 220; Height = 178 }) -Baseline $idleBaseline)) `
+    'an earlier capture can advance starting to recording when its first audio block arrives'
+Assert-True 'a new HUD handle is not credited while a pre-existing HUD is visible' `
+    (-not (Test-RealDictationHudChanged -Window ([pscustomobject]@{ Handle = 13; Width = 220; Height = 178 }) -Baseline $recordingBaseline)) `
+    'HUD attribution requires a hidden baseline'
+Assert-True 'a HUD that appears after a hidden baseline is attributable' `
+    (Test-RealDictationHudChanged -Window ([pscustomobject]@{ Handle = 13; Width = 220; Height = 178 }) -Baseline @()) `
+    'a window observed while no agent HUD was visible is a post-hotkey appearance'
 
 # ---------------------------------------------------------------------------
 # Summary rendering
@@ -601,7 +604,7 @@ Assert-Contains 'harness refuses a pre-existing local installation' `
     $harness 'pre-existing NanoDictate installation exists'
 Assert-Contains 'harness bounds release requests with deadlines' $harness '-TimeoutSec'
 Assert-Contains 'harness scopes HUD probes to the launched agent' $harness 'AgentProcessIds'
-Assert-Contains 'harness only credits a HUD that changed from the baseline' `
+Assert-Contains 'harness only credits a HUD when the baseline was hidden' `
     $harness 'Test-RealDictationHudChanged -Window $window -Baseline $Baseline'
 Assert-Contains 'harness records the HUD phase in its activation baseline' `
     $harness 'Phase = Get-RealDictationHudPhase -Window $window'

@@ -399,7 +399,9 @@ function Watch-RealDictationHud {
       The recording panel is 178 points tall versus 150 for every other phase,
       so the observed height (scaled by the panel width) distinguishes a real
       recording HUD from a starting/error overlay without reading internals.
-      Only a post-hotkey appearance or transition from the baseline counts.
+      Only an appearance while the baseline is empty counts; a pre-existing
+      HUD, including one that advances from starting to recording, is never
+      credited to this activation.
     #>
     param(
         [Parameter(Mandatory)][int[]]$AgentProcessIds,
@@ -675,7 +677,7 @@ try {
                 (($hudBaseline | ForEach-Object { "$($_.Width)x$($_.Height) $($_.Phase)" }) -join ', ')
         })
     if ($hudBaseline.Count -gt 0) {
-        Add-Limitation 'A visible NanoDictate HUD owned by the launched agent already existed before Double-Alt; only a new appearance or a verified phase change away from a recording panel can credit activation.'
+        Add-Limitation 'A visible NanoDictate HUD owned by the launched agent already existed before Double-Alt; HUD attribution requires a hidden baseline, so this activation cannot be credited even if that pre-existing HUD later changes phase.'
     }
     Send-RealDictationDoubleAlt -GapMilliseconds 90
     # Only record delivery after SendInput actually succeeded; a thrown
@@ -775,9 +777,11 @@ try {
             }
 
             $hudDuringPlayback = Find-RealDictationHudWindow -ProcessIds $agentProcessIds
-            Add-Segment -Name 'recording HUD stayed visible during speech' -Observed ($null -ne $hudDuringPlayback) -Detail (
+            $recordingHudVisible = $null -ne $hudDuringPlayback -and
+                (Get-RealDictationHudPhase -Window $hudDuringPlayback) -eq 'recording'
+            Add-Segment -Name 'recording HUD stayed visible during speech' -Observed $recordingHudVisible -Detail (
                 'the launched agent''s recording HUD was still visible after playback')
-            if ($null -ne $hudDuringPlayback) {
+            if ($recordingHudVisible) {
                 Save-EvidenceScreenshot -Name 'hud-after-speech' -Kind window -Handle $hudDuringPlayback.Handle
             }
 
