@@ -81,15 +81,19 @@ function Get-WorkflowTriggerNames {
       Minimal YAML-aware extraction of the top-level `on:` mapping keys.
       PowerShell ships no YAML parser, so this walks the block structurally:
       it accepts a quoted `"on"` key, quoted event keys (for example
-      `"workflow_call":`) and comments, and stops at the next top-level key.
-      Comparing the complete parsed key set keeps an extra trigger from hiding
-      behind quoting, which a spelling-based regex missed.
+      `"workflow_call":`), explicit mapping keys (`? workflow_call` followed
+      by `:`) and comments, and stops at the next top-level key. Comparing the
+      complete parsed key set keeps an extra trigger from hiding behind quoting
+      or explicit key syntax, which a spelling-based regex missed. Unsupported
+      event-level YAML is rejected instead of silently returning an incomplete
+      key set.
     #>
     param([string]$Text)
 
     $events = [System.Collections.Generic.List[string]]::new()
     $onIndent = $null
     $eventIndent = $null
+    $explicitKeyPending = $false
     foreach ($line in ($Text -split '\r?\n')) {
         $trimmed = $line.Trim()
         if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
@@ -111,6 +115,39 @@ function Get-WorkflowTriggerNames {
         if ($indent -le $onIndent) { break }
         if ($null -eq $eventIndent) { $eventIndent = $indent }
         if ($indent -ne $eventIndent) { continue }
+        if ($explicitKeyPending) {
+            if ($trimmed.StartsWith(':')) {
+                $explicitKeyPending = $false
+                continue
+            }
+            # An explicit key may omit its value indicator on the same line.
+            $explicitKeyPending = $false
+        }
+        if ($trimmed.StartsWith('?')) {
+            $keyText = $trimmed.Substring(1).Trim()
+            $inlineValue = [regex]::Match($keyText, '^(?<key>.*?)\s+:\s*(?<value>.*)$')
+            if ($inlineValue.Success) {
+                $keyText = $inlineValue.Groups['key'].Value.Trim()
+            } else {
+                $explicitKeyPending = $true
+            }
+            $key = [regex]::Match($keyText, '^(?:"(?<dq>[^"]+)"|''(?<sq>[^'']+)''|(?<plain>[^:#\s][^:]*?))\s*$')
+            if (-not $key.Success) {
+                throw "Unsupported YAML explicit key in the 'on:' mapping: $trimmed"
+            }
+            $name = if ($key.Groups['dq'].Success) {
+                $key.Groups['dq'].Value
+            } elseif ($key.Groups['sq'].Success) {
+                $key.Groups['sq'].Value
+            } else {
+                $key.Groups['plain'].Value.Trim()
+            }
+            $events.Add($name)
+            continue
+        }
+        if ($trimmed.StartsWith(':')) {
+            throw "Unexpected YAML value indicator in the 'on:' mapping: $trimmed"
+        }
         $key = [regex]::Match($line, '^\s*(?:"(?<dq>[^"]+)"|''(?<sq>[^'']+)''|(?<plain>[^:#\s][^:]*?))\s*:')
         if ($key.Success) {
             $name = if ($key.Groups['dq'].Success) {
@@ -121,7 +158,12 @@ function Get-WorkflowTriggerNames {
                 $key.Groups['plain'].Value.Trim()
             }
             $events.Add($name)
+        } else {
+            throw "Unsupported YAML syntax in the 'on:' mapping: $trimmed"
         }
+    }
+    if ($explicitKeyPending) {
+        throw "Unsupported YAML explicit key in the 'on:' mapping: missing value indicator"
     }
     return @($events)
 }
@@ -564,8 +606,14 @@ Assert-Equal 'qualification workflow declares exactly the workflow_dispatch trig
 Assert-Equal 'trigger parsing includes a quoted extra event' `
     ((Get-WorkflowTriggerNames -Text "`"on`":`n  workflow_dispatch:`n  `"workflow_call`":`n    inputs: {}`n") -join ',') `
     'workflow_dispatch,workflow_call'
+Assert-Equal 'trigger parsing reads an explicit mapping key' `
+    ((Get-WorkflowTriggerNames -Text "on:`n  workflow_dispatch:`n  ? workflow_call`n  :`n") -join ',') `
+    'workflow_dispatch,workflow_call'
 Assert-Equal 'trigger parsing reads a flow sequence' `
     ((Get-WorkflowTriggerNames -Text "on: [workflow_dispatch]`n") -join ',') 'workflow_dispatch'
+Assert-Throws 'trigger parsing rejects unsupported event-level YAML' {
+    Get-WorkflowTriggerNames -Text "on:`n  - workflow_dispatch`n"
+} 'Unsupported YAML'
 Assert-NotContains 'qualification workflow uses no secrets' $workflow 'secrets.'
 Assert-Contains 'qualification job uses the hosted Windows runner' $workflow 'runs-on: windows-latest'
 Assert-Contains 'qualification runs its own contract tests first' $workflow 'scripts/test-windows-real-dictation.ps1'
