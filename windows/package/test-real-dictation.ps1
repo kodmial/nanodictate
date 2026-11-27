@@ -542,13 +542,28 @@ try {
 
     $installedDirectory = Join-Path $env:LOCALAPPDATA 'Programs\NanoDictate'
     # A local qualification must never replace or uninstall an installation it
-    # does not own. Refuse before stopping anything; the hosted workflow runs
-    # on a disposable VM, so a fresh directory there is expected.
+    # does not own. Inno Setup defaults UsePreviousAppDir to yes, so a prior
+    # installation registered in another directory would be reused even when
+    # the default directory is empty. Refuse before stopping anything; the
+    # hosted workflow runs on a disposable VM, so a fresh directory is expected.
+    $registeredInstallation = Get-RealDictationRegisteredInstallation
+    if ($registeredInstallation) {
+        $registeredLocation = if ($registeredInstallation.InstallLocation) {
+            " at $($registeredInstallation.InstallLocation)"
+        } else { '' }
+        throw "A registered NanoDictate installation exists$registeredLocation (uninstall key $($registeredInstallation.KeyPath)). The qualification only installs and uninstalls an installation it created; remove the existing installation first."
+    }
     $preexistingInstallation = @('NanoDictate.App.exe', 'unins000.exe') | Where-Object {
         Test-Path -LiteralPath (Join-Path $installedDirectory $_)
     } | Select-Object -First 1
     if ($preexistingInstallation) {
         throw "A pre-existing NanoDictate installation exists at $installedDirectory. The qualification only installs and uninstalls an installation it created; remove the existing installation first."
+    }
+    if (Test-Path -LiteralPath $installedDirectory) {
+        $preexistingEntries = @(Get-ChildItem -LiteralPath $installedDirectory -Force)
+        if ($preexistingEntries.Count -gt 0) {
+            throw "The NanoDictate installation directory $installedDirectory already contains files. The qualification only removes a directory it created; remove the existing directory first."
+        }
     }
     $installationOwned = $true
     $configTarget = Join-Path $env:APPDATA 'NanoDictate\config.toml'
@@ -937,15 +952,29 @@ try {
         # Only an installation this run created may be uninstalled. A
         # pre-existing installation is refused before setup, so its uninstaller
         # can never be invoked from here.
-        if ($installationOwned -and $installedDirectory -and
-            (Test-Path -LiteralPath (Join-Path $installedDirectory 'unins000.exe'))) {
-            Invoke-BoundedInstallerProcess -FilePath (Join-Path $installedDirectory 'unins000.exe') `
-                -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') `
-                -Phase 'real-dictation-uninstall' -TimeoutSeconds 120 `
-                -LogDirectory $LogDirectory -InnoLogFileName 'real-dictation-uninstall.log' | Out-Null
+        if ($installationOwned -and $installedDirectory) {
+            $uninstaller = Join-Path $installedDirectory 'unins000.exe'
+            if (Test-Path -LiteralPath $uninstaller) {
+                Invoke-BoundedInstallerProcess -FilePath $uninstaller `
+                    -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') `
+                    -Phase 'real-dictation-uninstall' -TimeoutSeconds 120 `
+                    -LogDirectory $LogDirectory -InnoLogFileName 'real-dictation-uninstall.log' | Out-Null
+            }
         }
     } catch {
         Write-Warning "Qualification cleanup uninstall failed: $_"
+    }
+    try {
+        # A failed setup can leave partial payload files without unins000.exe.
+        # The directory is test-owned: a pre-existing installation or a
+        # non-empty directory is refused before setup, so removing leftovers
+        # cannot destroy an installation this run did not create.
+        if ($installationOwned -and $installedDirectory -and
+            (Test-Path -LiteralPath $installedDirectory)) {
+            Remove-Item -LiteralPath $installedDirectory -Recurse -Force -ErrorAction Stop
+        }
+    } catch {
+        Write-Warning "Could not remove the test installation directory: $_"
     }
     # Restore the user's provider config after uninstall so the test copy can
     # never be mistaken for the local configuration.

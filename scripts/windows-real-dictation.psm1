@@ -747,6 +747,51 @@ function Resolve-RealDictationScratchDirectory {
     throw 'Could not create a scratch directory outside the uploaded evidence directories.'
 }
 
+function Get-RealDictationUninstallRegistryPaths {
+    <#
+      Returns the Inno Setup uninstall registry keys that can register a
+      NanoDictate installation. Inno Setup appends "_is1" to a non-GUID AppId,
+      so a prior installation is registered even when it lives outside
+      DefaultDirName and would be reused by UsePreviousAppDir.
+    #>
+    param([string]$AppId = 'NanoDictate')
+
+    $keyName = if ($AppId -match '^\{[0-9A-Fa-f-]+\}$') { $AppId } else { "${AppId}_is1" }
+    return @(
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$keyName"
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$keyName"
+        "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\$keyName"
+    )
+}
+
+function Get-RealDictationRegisteredInstallation {
+    <#
+      Finds a NanoDictate installation registered with Windows, regardless of
+      its directory, so the qualification can refuse to modify or uninstall an
+      installation it does not own. Returns $null on non-Windows hosts.
+    #>
+    param([string]$AppId = 'NanoDictate')
+
+    if (-not (Test-RealDictationPlatform)) {
+        return $null
+    }
+    foreach ($keyPath in Get-RealDictationUninstallRegistryPaths -AppId $AppId) {
+        if (-not (Test-Path -LiteralPath $keyPath)) {
+            continue
+        }
+        $properties = Get-ItemProperty -LiteralPath $keyPath -ErrorAction SilentlyContinue
+        $location = ''
+        if ($null -ne $properties -and $properties.PSObject.Properties['InstallLocation']) {
+            $location = [string]$properties.InstallLocation
+        }
+        return [pscustomobject]@{
+            KeyPath = $keyPath
+            InstallLocation = $location
+        }
+    }
+    return $null
+}
+
 function Resolve-RealDictationConfigBackupDirectory {
     <#
       Chooses a writable directory for a preserved provider config that is not
@@ -1272,6 +1317,8 @@ Export-ModuleMember -Function @(
     'Get-RealDictationExitCode'
     'Test-RealDictationPathInside'
     'Resolve-RealDictationScratchDirectory'
+    'Get-RealDictationUninstallRegistryPaths'
+    'Get-RealDictationRegisteredInstallation'
     'Resolve-RealDictationConfigBackupDirectory'
     'Backup-RealDictationProviderConfig'
     'Get-RealDictationProviderConfigState'

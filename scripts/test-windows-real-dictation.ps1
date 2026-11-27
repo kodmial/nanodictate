@@ -623,6 +623,36 @@ Assert-Match 'harness keeps the backup directory when restoration fails' `
     $harness '(?s)if \(-not \$configRestoreFailed.*?Remove-Item -LiteralPath \$configBackupDirectory'
 Assert-Contains 'harness reports a failed config restoration' `
     $harness 'Could not restore the provider config'
+Assert-Contains 'harness detects a registered installation before setup' `
+    $harness 'Get-RealDictationRegisteredInstallation'
+Assert-Match 'harness refuses a registered installation before invoking setup' `
+    $harness '(?s)Get-RealDictationRegisteredInstallation.*?throw "A registered NanoDictate installation'
+Assert-Contains 'harness refuses a non-empty installation directory before setup' `
+    $harness 'already contains files'
+Assert-Match 'harness removes partial setup files when no uninstaller exists' `
+    $harness '(?s)unins000\.exe.*?Remove-Item -LiteralPath \$installedDirectory -Recurse -Force'
+
+$uninstallKeys = @(Get-RealDictationUninstallRegistryPaths -AppId 'NanoDictate')
+Assert-Equal 'uninstall registration probes three registry scopes' $uninstallKeys.Count 3
+Assert-True 'uninstall registration probes the per-user key' `
+    ($uninstallKeys -contains 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\NanoDictate_is1') `
+    'the per-user uninstall key is missing'
+Assert-True 'uninstall registration probes the machine-wide key' `
+    ($uninstallKeys -contains 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\NanoDictate_is1') `
+    'the machine-wide uninstall key is missing'
+Assert-True 'uninstall registration probes the 32-bit machine-wide key' `
+    ($uninstallKeys -contains 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\NanoDictate_is1') `
+    'the 32-bit machine-wide uninstall key is missing'
+$guidAppId = '{12345678-1234-1234-1234-123456789012}'
+$guidKeys = @(Get-RealDictationUninstallRegistryPaths -AppId $guidAppId)
+Assert-True 'a GUID AppId is not given the Inno Setup suffix' `
+    ($guidKeys -contains "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$guidAppId") `
+    'the GUID uninstall key is missing'
+if (-not (Test-RealDictationPlatform)) {
+    Assert-True 'registered installation lookup is empty off Windows' `
+        ($null -eq (Get-RealDictationRegisteredInstallation)) `
+        'a non-Windows host must not probe the Windows registry'
+}
 
 $configRestoreRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('nd-config-restore-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $configRestoreRoot | Out-Null
@@ -842,6 +872,16 @@ function Resolve-VirtualAudioRoute {
         PairedRenderReason = 'simulated missing paired render endpoint'
     }
 }
+function Get-RealDictationRegisteredInstallation {
+    param([string]$AppId = 'NanoDictate')
+    if ($env:ND_TEST_REGISTERED_INSTALL_LOCATION) {
+        return [pscustomobject]@{
+            KeyPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\NanoDictate_is1'
+            InstallLocation = $env:ND_TEST_REGISTERED_INSTALL_LOCATION
+        }
+    }
+    return $null
+}
 Export-ModuleMember -Function *
 '@
     $moduleStub = $moduleStub.Replace('__REAL_MODULE__', $realModulePath.Replace("'", "''"))
@@ -857,6 +897,15 @@ function Invoke-BoundedInstallerProcess {
         [string]$LogDirectory,
         [string]$InnoLogFileName
     )
+    if ($env:ND_TEST_INSTALLER_MARKER) {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $env:ND_TEST_INSTALLER_MARKER) | Out-Null
+        Set-Content -LiteralPath $env:ND_TEST_INSTALLER_MARKER -Value 'invoked' -Encoding utf8
+    }
+    if ($env:ND_TEST_INSTALLER_PARTIAL) {
+        $partialDirectory = Join-Path $env:LOCALAPPDATA 'Programs\NanoDictate'
+        New-Item -ItemType Directory -Force -Path $partialDirectory | Out-Null
+        Set-Content -LiteralPath (Join-Path $partialDirectory 'partial-install.tmp') -Value 'partial' -Encoding utf8
+    }
     $target = $env:ND_TEST_INSTALLER_CONFIG
     if ($target) {
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
@@ -885,6 +934,9 @@ Export-ModuleMember -Function 'Invoke-BoundedInstallerProcess', 'Stop-NanoDictat
         TMP = $env:TMP
         TEMP = $env:TEMP
         ND_TEST_INSTALLER_CONFIG = $env:ND_TEST_INSTALLER_CONFIG
+        ND_TEST_INSTALLER_MARKER = $env:ND_TEST_INSTALLER_MARKER
+        ND_TEST_INSTALLER_PARTIAL = $env:ND_TEST_INSTALLER_PARTIAL
+        ND_TEST_REGISTERED_INSTALL_LOCATION = $env:ND_TEST_REGISTERED_INSTALL_LOCATION
     }
     try {
         $failureScenarios = @(
@@ -917,6 +969,9 @@ Export-ModuleMember -Function 'Invoke-BoundedInstallerProcess', 'Stop-NanoDictat
             $env:TMP = $tempDirectory
             $env:TEMP = $tempDirectory
             $env:ND_TEST_INSTALLER_CONFIG = $target
+            $env:ND_TEST_INSTALLER_MARKER = ''
+            $env:ND_TEST_INSTALLER_PARTIAL = ''
+            $env:ND_TEST_REGISTERED_INSTALL_LOCATION = ''
             & $pwshPath -NoProfile -File $harnessCopy `
                 -Source candidate -InstallerPath $fakeInstaller -ConfigPath $operatorConfig `
                 -PhraseText 'two words' -EvidenceDirectory $evidenceDirectory `
@@ -952,6 +1007,88 @@ Export-ModuleMember -Function 'Invoke-BoundedInstallerProcess', 'Stop-NanoDictat
                     'an installer-created config must not remain after a failed setup'
             }
         }
+
+        # A registered installation in another directory must stop the harness
+        # before Inno Setup's UsePreviousAppDir can reuse and modify it.
+        $registeredRoot = Join-Path $failureRoot ('registered-' + [guid]::NewGuid().ToString('N'))
+        $registeredAppData = Join-Path $registeredRoot 'appdata'
+        $registeredLocalAppData = Join-Path $registeredRoot 'localappdata'
+        $registeredTemp = Join-Path $registeredRoot 'temp'
+        $registeredEvidence = Join-Path $registeredRoot 'evidence'
+        $registeredLogs = Join-Path $registeredRoot 'logs'
+        New-Item -ItemType Directory -Force -Path `
+            $registeredAppData, $registeredLocalAppData, $registeredTemp, `
+            $registeredEvidence, $registeredLogs | Out-Null
+        $registeredInstall = Join-Path $registeredRoot 'elsewhere/NanoDictate'
+        New-Item -ItemType Directory -Force -Path $registeredInstall | Out-Null
+        $registeredSentinel = Join-Path $registeredInstall 'NanoDictate.App.exe'
+        Set-Content -LiteralPath $registeredSentinel -Value 'pre-existing' -Encoding utf8
+        $installerMarker = Join-Path $registeredRoot 'installer-invoked.txt'
+        $env:APPDATA = $registeredAppData
+        $env:LOCALAPPDATA = $registeredLocalAppData
+        $env:RUNNER_TEMP = $registeredTemp
+        $env:TMPDIR = $registeredTemp
+        $env:TMP = $registeredTemp
+        $env:TEMP = $registeredTemp
+        $env:ND_TEST_INSTALLER_CONFIG = ''
+        $env:ND_TEST_INSTALLER_MARKER = $installerMarker
+        $env:ND_TEST_INSTALLER_PARTIAL = ''
+        $env:ND_TEST_REGISTERED_INSTALL_LOCATION = $registeredInstall
+        & $pwshPath -NoProfile -File $harnessCopy `
+            -Source candidate -InstallerPath $fakeInstaller `
+            -PhraseText 'two words' -EvidenceDirectory $registeredEvidence `
+            -LogDirectory $registeredLogs *> (Join-Path $registeredRoot 'harness.log')
+        $registeredExitCode = $LASTEXITCODE
+        Assert-Equal 'registered installation: harness refuses the run' $registeredExitCode 1
+        Assert-True 'registered installation: setup is never invoked' `
+            (-not (Test-Path -LiteralPath $installerMarker)) `
+            'the installer ran despite a registered installation'
+        Assert-True 'registered installation: the pre-existing payload is untouched' `
+            (Test-Path -LiteralPath $registeredSentinel -PathType Leaf) `
+            'the pre-existing installation was modified'
+        $registeredEvidencePath = Join-Path $registeredEvidence 'evidence.json'
+        Assert-True 'registered installation: harness writes evidence after refusing' `
+            (Test-Path -LiteralPath $registeredEvidencePath -PathType Leaf) 'evidence.json is missing'
+        if (Test-Path -LiteralPath $registeredEvidencePath -PathType Leaf) {
+            $registeredEvidenceJson = Get-Content -LiteralPath $registeredEvidencePath -Raw | ConvertFrom-Json
+            $registeredFatal = @($registeredEvidenceJson.segments | Where-Object { $_.name -eq 'qualification harness' })
+            Assert-True 'registered installation: evidence names the registration guard' `
+                ($registeredFatal.Count -eq 1 -and
+                    $registeredFatal[0].detail -match 'registered NanoDictate installation') `
+                'the failure segment did not describe the registered installation'
+        }
+
+        # A failed setup that leaves payload files without unins000.exe must
+        # still be cleaned up because the directory is test-owned.
+        $partialRoot = Join-Path $failureRoot ('partial-' + [guid]::NewGuid().ToString('N'))
+        $partialAppData = Join-Path $partialRoot 'appdata'
+        $partialLocalAppData = Join-Path $partialRoot 'localappdata'
+        $partialTemp = Join-Path $partialRoot 'temp'
+        $partialEvidence = Join-Path $partialRoot 'evidence'
+        $partialLogs = Join-Path $partialRoot 'logs'
+        New-Item -ItemType Directory -Force -Path `
+            $partialAppData, $partialLocalAppData, $partialTemp, `
+            $partialEvidence, $partialLogs | Out-Null
+        $env:APPDATA = $partialAppData
+        $env:LOCALAPPDATA = $partialLocalAppData
+        $env:RUNNER_TEMP = $partialTemp
+        $env:TMPDIR = $partialTemp
+        $env:TMP = $partialTemp
+        $env:TEMP = $partialTemp
+        $env:ND_TEST_INSTALLER_CONFIG = ''
+        $env:ND_TEST_INSTALLER_MARKER = ''
+        $env:ND_TEST_INSTALLER_PARTIAL = '1'
+        $env:ND_TEST_REGISTERED_INSTALL_LOCATION = ''
+        & $pwshPath -NoProfile -File $harnessCopy `
+            -Source candidate -InstallerPath $fakeInstaller `
+            -PhraseText 'two words' -EvidenceDirectory $partialEvidence `
+            -LogDirectory $partialLogs *> (Join-Path $partialRoot 'harness.log')
+        $partialExitCode = $LASTEXITCODE
+        Assert-Equal 'partial setup: harness reports the installer failure' $partialExitCode 1
+        $partialInstallDirectory = Join-Path $partialLocalAppData 'Programs\NanoDictate'
+        Assert-True 'partial setup: leftovers are removed without an uninstaller' `
+            (-not (Test-Path -LiteralPath $partialInstallDirectory)) `
+            'partial installation files remained after cleanup'
     } finally {
         foreach ($name in $savedEnvironment.Keys) {
             if ($null -eq $savedEnvironment[$name]) {
