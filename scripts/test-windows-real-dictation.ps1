@@ -952,6 +952,8 @@ Assert-Contains 'harness separates rendering from capture evidence' `
     $harness 'rendering alone is not evidence of capture'
 Assert-Contains 'harness withholds editor text when ownership fails' `
     $harness 'editor text withheld because document ownership failed'
+Assert-Match 'harness withholds the desktop screenshot when ownership fails' `
+    $harness "(?s)if \(\`$contentOwned\) \{\s*Save-EvidenceScreenshot -Name 'desktop-after-insertion' -Kind desktop"
 Assert-Contains 'harness uninstalls only an installation it created' $harness '$installationOwned'
 Assert-Contains 'harness refuses a pre-existing local installation' `
     $harness 'pre-existing NanoDictate installation exists'

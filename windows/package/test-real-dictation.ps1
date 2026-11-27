@@ -895,7 +895,12 @@ try {
             if (-not $editorText.Read) {
                 Add-Limitation "The editor text could not be read ($($editorText.Method)); the phrase assertion cannot be credited."
             }
-            Save-EvidenceScreenshot -Name 'desktop-after-insertion' -Kind desktop
+            # Capture the desktop only when the editor content belongs to this
+            # run's test document. A desktop screenshot of an unowned tab (or a
+            # different document) would publish unrelated text as evidence.
+            if ($contentOwned) {
+                Save-EvidenceScreenshot -Name 'desktop-after-insertion' -Kind desktop
+            }
         }
     }
 } catch {
