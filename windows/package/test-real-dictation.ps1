@@ -71,9 +71,10 @@ if (-not $LogDirectory) {
 New-Item -ItemType Directory -Force -Path $EvidenceDirectory | Out-Null
 New-Item -ItemType Directory -Force -Path $LogDirectory | Out-Null
 $startedAt = [DateTime]::UtcNow
-$tempBase = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { Join-Path $EvidenceDirectory '.tmp' }
-$tempRoot = Join-Path $tempBase ('nd-real-dictation-' + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
+$tempCandidates = @(
+    if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath() }
+)
+$tempRoot = Resolve-RealDictationScratchDirectory -ExcludedDirectory @($EvidenceDirectory, $LogDirectory) -CandidateDirectory $tempCandidates
 
 $segments = [System.Collections.Generic.List[object]]::new()
 $limitations = [System.Collections.Generic.List[string]]::new()

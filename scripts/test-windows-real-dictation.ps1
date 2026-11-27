@@ -700,6 +700,20 @@ try {
         "missing $backupDirectory"
     Remove-Item -LiteralPath $backupDirectory -Recurse -Force -ErrorAction SilentlyContinue
 
+    $scratchEvidence = Join-Path $configRestoreRoot 'scratch-evidence'
+    $nestedScratchEvidence = Join-Path $scratchEvidence 'nested'
+    New-Item -ItemType Directory -Force -Path $nestedScratchEvidence | Out-Null
+    $scratchDirectory = Resolve-RealDictationScratchDirectory `
+        -ExcludedDirectory @($scratchEvidence) `
+        -CandidateDirectory @($nestedScratchEvidence)
+    Assert-True 'scratch staging stays outside the uploaded evidence directory' `
+        (-not (Test-RealDictationPathInside -Path $scratchDirectory -Directory $scratchEvidence)) `
+        "resolved inside $scratchEvidence"
+    Assert-True 'scratch staging creates a writable directory' `
+        (Test-Path -LiteralPath $scratchDirectory -PathType Container) `
+        "missing $scratchDirectory"
+    Remove-Item -LiteralPath $scratchDirectory -Recurse -Force -ErrorAction SilentlyContinue
+
     $aliasReal = Join-Path $configRestoreRoot 'alias-real'
     $aliasLink = Join-Path $configRestoreRoot 'alias-link'
     $aliasNested = Join-Path $aliasReal 'nested'
@@ -874,8 +888,9 @@ Export-ModuleMember -Function 'Invoke-BoundedInstallerProcess', 'Stop-NanoDictat
     }
     try {
         $failureScenarios = @(
-            @{ Name = 'installer failure restores the pre-existing config'; Existing = 'original' }
-            @{ Name = 'installer failure removes a config it created'; Existing = $null }
+            @{ Name = 'installer failure restores the pre-existing config'; Existing = 'original'; NoRunnerTemp = $false }
+            @{ Name = 'installer failure removes a config it created'; Existing = $null; NoRunnerTemp = $false }
+            @{ Name = 'installer failure without RUNNER_TEMP keeps scratch outside evidence'; Existing = $null; NoRunnerTemp = $true }
         )
         foreach ($scenario in $failureScenarios) {
             $scenarioRoot = Join-Path $failureRoot ([guid]::NewGuid().ToString('N'))
@@ -893,7 +908,11 @@ Export-ModuleMember -Function 'Invoke-BoundedInstallerProcess', 'Stop-NanoDictat
             }
             $env:APPDATA = $appData
             $env:LOCALAPPDATA = $localAppData
-            $env:RUNNER_TEMP = $tempDirectory
+            if ($scenario.NoRunnerTemp) {
+                Remove-Item -Path 'Env:RUNNER_TEMP' -ErrorAction SilentlyContinue
+            } else {
+                $env:RUNNER_TEMP = $tempDirectory
+            }
             $env:TMPDIR = $tempDirectory
             $env:TMP = $tempDirectory
             $env:TEMP = $tempDirectory
@@ -914,6 +933,11 @@ Export-ModuleMember -Function 'Invoke-BoundedInstallerProcess', 'Stop-NanoDictat
                     ($fatalSegments.Count -eq 1 -and
                         $fatalSegments[0].detail -match 'simulated installer failure') `
                     'the failure segment did not describe the installer failure'
+            }
+            if ($scenario.NoRunnerTemp) {
+                Assert-True "$($scenario.Name): no temp staging remains inside the evidence directory" `
+                    (-not (Test-Path -LiteralPath (Join-Path $evidenceDirectory '.tmp'))) `
+                    'the harness staged local temp inside the uploaded evidence directory'
             }
             if ($null -ne $scenario.Existing) {
                 Assert-True "$($scenario.Name): restored config still exists" `
@@ -953,6 +977,12 @@ Assert-Contains 'harness separates rendering from capture evidence' `
 Assert-Contains 'harness withholds editor text when ownership fails' `
     $harness 'editor text withheld because document ownership failed'
 Assert-NotContains 'harness never captures the desktop' $harness '-Kind desktop'
+Assert-Contains 'harness resolves scratch staging outside uploaded evidence' `
+    $harness '$tempRoot = Resolve-RealDictationScratchDirectory -ExcludedDirectory @($EvidenceDirectory, $LogDirectory)'
+Assert-Contains 'harness falls back to the system temp path when RUNNER_TEMP is absent' `
+    $harness 'if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath() }'
+Assert-NotContains 'harness never stages local temp inside the evidence directory' `
+    $harness "Join-Path `$EvidenceDirectory '.tmp'"
 Assert-Match 'harness stages screenshots outside the uploaded evidence directory' `
     $harness '(?s)\$capturePath = Join-Path \$tempRoot.*?Save-RealDictationScreenshot -Kind \$Kind -Handle \$Handle -Path \$capturePath'
 Assert-Match 'harness discards screen-region fallback captures' `

@@ -687,16 +687,18 @@ function Test-RealDictationPathInside {
     return $normalizedPath.StartsWith($prefix, $comparison)
 }
 
-function Resolve-RealDictationConfigBackupDirectory {
+function Resolve-RealDictationScratchDirectory {
     <#
-      Chooses a writable directory for a preserved provider config that is not
-      inside any excluded (uploaded) directory. When the preferred temporary
-      directory is inside an excluded directory, walks up to the nearest safe
-      ancestor before creating a unique backup directory.
+      Chooses a writable scratch directory that is not inside any excluded
+      (uploaded) directory. When the preferred temporary directory is inside an
+      excluded directory, walks up to the nearest safe ancestor before creating
+      a unique scratch directory. Staged captures and downloads live here so a
+      failed cleanup can never leave them inside an uploaded evidence artifact.
     #>
     param(
         [string[]]$ExcludedDirectory = @(),
-        [string[]]$CandidateDirectory = @()
+        [string[]]$CandidateDirectory = @(),
+        [string]$Prefix = 'nanodictate-real-dictation-scratch-'
     )
 
     $excluded = @($ExcludedDirectory | Where-Object { $_ } | ForEach-Object {
@@ -734,16 +736,31 @@ function Resolve-RealDictationConfigBackupDirectory {
         if (-not $current) {
             continue
         }
-        $backupDirectory = Join-Path $current (
-            'nanodictate-real-dictation-backup-' + [guid]::NewGuid().ToString('N'))
+        $scratchDirectory = Join-Path $current ($Prefix + [guid]::NewGuid().ToString('N'))
         try {
-            New-Item -ItemType Directory -Force -Path $backupDirectory -ErrorAction Stop | Out-Null
-            return $backupDirectory
+            New-Item -ItemType Directory -Force -Path $scratchDirectory -ErrorAction Stop | Out-Null
+            return $scratchDirectory
         } catch {
             continue
         }
     }
-    throw 'Could not create a provider config backup directory outside the uploaded evidence directories.'
+    throw 'Could not create a scratch directory outside the uploaded evidence directories.'
+}
+
+function Resolve-RealDictationConfigBackupDirectory {
+    <#
+      Chooses a writable directory for a preserved provider config that is not
+      inside any excluded (uploaded) directory.
+    #>
+    param(
+        [string[]]$ExcludedDirectory = @(),
+        [string[]]$CandidateDirectory = @()
+    )
+
+    return Resolve-RealDictationScratchDirectory `
+        -ExcludedDirectory $ExcludedDirectory `
+        -CandidateDirectory $CandidateDirectory `
+        -Prefix 'nanodictate-real-dictation-backup-'
 }
 
 function Backup-RealDictationProviderConfig {
@@ -1254,6 +1271,7 @@ Export-ModuleMember -Function @(
     'Test-RealDictationInsertion'
     'Get-RealDictationExitCode'
     'Test-RealDictationPathInside'
+    'Resolve-RealDictationScratchDirectory'
     'Resolve-RealDictationConfigBackupDirectory'
     'Backup-RealDictationProviderConfig'
     'Get-RealDictationProviderConfigState'
