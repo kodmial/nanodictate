@@ -76,6 +76,55 @@ function New-TestDirectoryLink([string]$Path, [string]$Target) {
         New-Item -ItemType SymbolicLink -Path $Path -Target $Target -ErrorAction Stop | Out-Null
     }
 }
+function Get-WorkflowTriggerNames {
+    <#
+      Minimal YAML-aware extraction of the top-level `on:` mapping keys.
+      PowerShell ships no YAML parser, so this walks the block structurally:
+      it accepts a quoted `"on"` key, quoted event keys (for example
+      `"workflow_call":`) and comments, and stops at the next top-level key.
+      Comparing the complete parsed key set keeps an extra trigger from hiding
+      behind quoting, which a spelling-based regex missed.
+    #>
+    param([string]$Text)
+
+    $events = [System.Collections.Generic.List[string]]::new()
+    $onIndent = $null
+    $eventIndent = $null
+    foreach ($line in ($Text -split '\r?\n')) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
+        $indent = $line.Length - $line.TrimStart().Length
+        if ($null -eq $onIndent) {
+            $match = [regex]::Match($line, '^\s*(?:"on"|''on''|on)\s*:\s*(?<inline>.*)$')
+            if ($match.Success) {
+                $onIndent = $indent
+                $inline = $match.Groups['inline'].Value.Trim()
+                if ($inline -match '^\[(?<items>.*)\]$') {
+                    foreach ($item in ($Matches['items'] -split ',')) {
+                        $name = $item.Trim().Trim('"', "'")
+                        if ($name) { $events.Add($name) }
+                    }
+                }
+            }
+            continue
+        }
+        if ($indent -le $onIndent) { break }
+        if ($null -eq $eventIndent) { $eventIndent = $indent }
+        if ($indent -ne $eventIndent) { continue }
+        $key = [regex]::Match($line, '^\s*(?:"(?<dq>[^"]+)"|''(?<sq>[^'']+)''|(?<plain>[^:#\s][^:]*?))\s*:')
+        if ($key.Success) {
+            $name = if ($key.Groups['dq'].Success) {
+                $key.Groups['dq'].Value
+            } elseif ($key.Groups['sq'].Success) {
+                $key.Groups['sq'].Value
+            } else {
+                $key.Groups['plain'].Value.Trim()
+            }
+            $events.Add($name)
+        }
+    }
+    return @($events)
+}
 
 # ---------------------------------------------------------------------------
 # Pure assertion helpers
@@ -344,6 +393,33 @@ $routeSameNameDifferentId = Resolve-VirtualAudioRoute -Endpoints @(
 Assert-True 'a friendly-name match does not override different nonempty ids' `
     (-not $routeSameNameDifferentId.DefaultCaptureIsVirtual) 'ids must decide identity'
 
+$routeExactIdFirst = Resolve-VirtualAudioRoute -Endpoints @(
+    [pscustomobject]@{ Id = ''; Name = 'CABLE Output (VB-Audio Virtual Cable)'; Flow = 'capture'; State = 'active' }
+    [pscustomobject]@{ Id = 'cap-default'; Name = 'CABLE Output (VB-Audio Virtual Cable)'; Flow = 'capture'; State = 'active' }
+    [pscustomobject]@{ Id = 'ren-default'; Name = 'CABLE Input (VB-Audio Virtual Cable)'; Flow = 'render'; State = 'active' }
+) -DefaultCaptureEndpoint ([pscustomobject]@{ Id = 'cap-default'; Name = 'CABLE Output (VB-Audio Virtual Cable)'; Flow = 'capture'; State = 'active' })
+Assert-Equal 'an exact capture id wins over an earlier same-named candidate' `
+    $routeExactIdFirst.VirtualCapture.Id 'cap-default'
+Assert-True 'the exact id candidate is the product default' `
+    $routeExactIdFirst.DefaultCaptureIsVirtual 'the id match must win'
+
+$routeAmbiguousName = Resolve-VirtualAudioRoute -Endpoints @(
+    [pscustomobject]@{ Id = ''; Name = 'CABLE Output (VB-Audio Virtual Cable)'; Flow = 'capture'; State = 'active' }
+    [pscustomobject]@{ Id = ''; Name = 'CABLE Output (VB-Audio Virtual Cable)'; Flow = 'capture'; State = 'active' }
+    [pscustomobject]@{ Id = 'ren-cable'; Name = 'CABLE Input (VB-Audio Virtual Cable)'; Flow = 'render'; State = 'active' }
+) -DefaultCaptureEndpoint ([pscustomobject]@{ Id = ''; Name = 'CABLE Output (VB-Audio Virtual Cable)'; Flow = 'capture'; State = 'active' })
+Assert-True 'an ambiguous friendly-name fallback is not the product default' `
+    (-not $routeAmbiguousName.DefaultCaptureIsVirtual) 'a name must identify exactly one candidate'
+
+$routeNoRenderId = Resolve-VirtualAudioRoute -Endpoints @(
+    [pscustomobject]@{ Id = 'cap-cable'; Name = 'CABLE Output (VB-Audio Virtual Cable)'; Flow = 'capture'; State = 'active' }
+    [pscustomobject]@{ Id = ''; Name = 'CABLE Input (VB-Audio Virtual Cable)'; Flow = 'render'; State = 'active' }
+) -DefaultCaptureEndpoint ([pscustomobject]@{ Id = 'cap-cable'; Name = 'CABLE Output (VB-Audio Virtual Cable)'; Flow = 'capture'; State = 'active' })
+Assert-True 'a render endpoint without a usable device id is not reachable' `
+    (-not $routeNoRenderId.CaptureEndpointReachable) 'playback needs a device id'
+Assert-Match 'an unusable render id is explained' `
+    $routeNoRenderId.PairedRenderReason 'no usable device id'
+
 $defaultPhraseTokens = (Get-DictationTokens -Text 'quick brown fox jumps').Count
 Assert-Equal 'default qualification phrase has four tokens' $defaultPhraseTokens 4
 Assert-True 'default qualification phrase passes the harness token guard' `
@@ -479,15 +555,17 @@ $workflow = Read-Text '.github/workflows/windows-real-dictation.yml'
 Assert-Contains 'qualification workflow is manually dispatched' $workflow 'workflow_dispatch:'
 Assert-Match 'qualification workflow is read-only' $workflow '(?m)^permissions:\s*\r?\n\s+contents: read\s*$'
 Assert-NotContains 'qualification workflow has no pull_request trigger' $workflow 'pull_request'
-# Extract the whole `on:` block and assert its complete event set. Workflow_run,
-# workflow_call or any other extra trigger must fail this, not only push and
-# schedule.
-$onBlockMatch = [regex]::Match($workflow, '(?ms)^on:\s*\r?\n(?<body>(?:[ \t]+[^\r\n]*(?:\r?\n|\z))*)')
-Assert-True 'qualification workflow declares an on block' $onBlockMatch.Success 'missing on: block'
-$triggerNames = @([regex]::Matches($onBlockMatch.Groups['body'].Value, '(?m)^  ([A-Za-z0-9_]+):') |
-    ForEach-Object { $_.Groups[1].Value })
+# Parse the `on:` mapping structurally and assert its complete event set.
+# Workflow_run, workflow_call or any other extra trigger must fail this, even
+# when the key is quoted, not only push and schedule.
+$triggerNames = @(Get-WorkflowTriggerNames -Text $workflow)
 Assert-Equal 'qualification workflow declares exactly the workflow_dispatch trigger' `
     ($triggerNames -join ',') 'workflow_dispatch'
+Assert-Equal 'trigger parsing includes a quoted extra event' `
+    ((Get-WorkflowTriggerNames -Text "`"on`":`n  workflow_dispatch:`n  `"workflow_call`":`n    inputs: {}`n") -join ',') `
+    'workflow_dispatch,workflow_call'
+Assert-Equal 'trigger parsing reads a flow sequence' `
+    ((Get-WorkflowTriggerNames -Text "on: [workflow_dispatch]`n") -join ',') 'workflow_dispatch'
 Assert-NotContains 'qualification workflow uses no secrets' $workflow 'secrets.'
 Assert-Contains 'qualification job uses the hosted Windows runner' $workflow 'runs-on: windows-latest'
 Assert-Contains 'qualification runs its own contract tests first' $workflow 'scripts/test-windows-real-dictation.ps1'
@@ -509,12 +587,14 @@ Assert-Match 'qualification gates candidate setup on a non-probe full run' `
     $workflow "inputs\.source == 'candidate' && !inputs\.probe_only"
 Assert-Match 'qualification keeps the candidate installer out of probe-only runs' `
     $workflow "ND_PROBE_ONLY -ne 'true'"
+Assert-Match 'qualification skips fixture resolution in probe-only runs' `
+    $workflow '(?s)if \(\$env:ND_PROBE_ONLY -ne ''true''\) \{\s*foreach \(\$option'
 
 # The qualification workflow is dispatch-only, so its focused contract tests
-# also have to run in the pull-request Windows host job to be verified on
-# Windows before merge.
+# run there. They must not become a new pass condition on the required Windows
+# host job (issue #254 keeps CI gates unchanged).
 $windowsHostWorkflow = Read-Text '.github/workflows/windows.yml'
-Assert-Contains 'Windows host CI runs the real-dictation contract tests' `
+Assert-NotContains 'required Windows host CI does not run the qualification contract tests' `
     $windowsHostWorkflow 'pwsh -NoProfile -File scripts/test-windows-real-dictation.ps1'
 
 $harness = Read-Text 'windows/package/test-real-dictation.ps1'
@@ -631,6 +711,23 @@ Assert-Contains 'harness refuses a non-empty installation directory before setup
     $harness 'already contains files'
 Assert-Match 'harness removes partial setup files when no uninstaller exists' `
     $harness '(?s)unins000\.exe.*?Remove-Item -LiteralPath \$installedDirectory -Recurse -Force'
+Assert-Contains 'harness records an audio probe error instead of aborting' `
+    $harness "'audio endpoint probe'"
+Assert-Contains 'harness keeps the GUI leg when the audio probe fails' $harness '$audioProbeError'
+Assert-Contains 'harness refuses an existing NanoDictate startup entry' `
+    $harness 'existing NanoDictate startup entry already exists'
+Assert-Contains 'harness rechecks the test tab before requesting transcription' `
+    $harness 'test-owned editor tab active before requesting transcription'
+Assert-Contains 'harness cancels instead of transcribing into another editor' `
+    $harness 'the recording was cancelled so the transcript cannot be inserted into another document'
+Assert-Contains 'harness records the activation-time default capture flag' `
+    $harness '$audioFlags.DefaultCaptureIsVirtual = $routeReachableAtActivation'
+Assert-Contains 'harness preserves the uninstaller when uninstallation is unconfirmed' `
+    $harness '$uninstallConfirmed'
+Assert-Contains 'harness removes only unregistered partial installations' `
+    $harness '$partialInstallation'
+Assert-Contains 'harness exits nonzero when the provider config cannot be restored' `
+    $harness '-Failed:([bool]$fatal -or $configRestoreFailed -or $cleanupFailed)'
 
 $uninstallKeys = @(Get-RealDictationUninstallRegistryPaths -AppId 'NanoDictate')
 Assert-Equal 'uninstall registration probes three registry scopes' $uninstallKeys.Count 3
@@ -645,9 +742,9 @@ Assert-True 'uninstall registration probes the 32-bit machine-wide key' `
     'the 32-bit machine-wide uninstall key is missing'
 $guidAppId = '{12345678-1234-1234-1234-123456789012}'
 $guidKeys = @(Get-RealDictationUninstallRegistryPaths -AppId $guidAppId)
-Assert-True 'a GUID AppId is not given the Inno Setup suffix' `
-    ($guidKeys -contains "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$guidAppId") `
-    'the GUID uninstall key is missing'
+Assert-True 'a GUID AppId also receives the Inno Setup suffix' `
+    ($guidKeys -contains "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\${guidAppId}_is1") `
+    'the suffixed GUID uninstall key is missing'
 if (-not (Test-RealDictationPlatform)) {
     Assert-True 'registered installation lookup is empty off Windows' `
         ($null -eq (Get-RealDictationRegisteredInstallation)) `
@@ -1076,7 +1173,8 @@ Export-ModuleMember -Function 'Invoke-BoundedInstallerProcess', 'Stop-NanoDictat
         $env:TMP = $partialTemp
         $env:TEMP = $partialTemp
         $env:ND_TEST_INSTALLER_CONFIG = ''
-        $env:ND_TEST_INSTALLER_MARKER = ''
+        $partialMarker = Join-Path $partialRoot 'installer-invoked.txt'
+        $env:ND_TEST_INSTALLER_MARKER = $partialMarker
         $env:ND_TEST_INSTALLER_PARTIAL = '1'
         $env:ND_TEST_REGISTERED_INSTALL_LOCATION = ''
         & $pwshPath -NoProfile -File $harnessCopy `
@@ -1085,6 +1183,11 @@ Export-ModuleMember -Function 'Invoke-BoundedInstallerProcess', 'Stop-NanoDictat
             -LogDirectory $partialLogs *> (Join-Path $partialRoot 'harness.log')
         $partialExitCode = $LASTEXITCODE
         Assert-Equal 'partial setup: harness reports the installer failure' $partialExitCode 1
+        # Prove the installer stub actually ran: without this marker an early
+        # harness exit would also leave no install directory and look clean.
+        Assert-True 'partial setup: the installer stub ran before cleanup' `
+            (Test-Path -LiteralPath $partialMarker -PathType Leaf) `
+            'the installer marker is missing, so the cleanup assertion is meaningless'
         $partialInstallDirectory = Join-Path $partialLocalAppData 'Programs\NanoDictate'
         Assert-True 'partial setup: leftovers are removed without an uninstaller' `
             (-not (Test-Path -LiteralPath $partialInstallDirectory)) `
@@ -1150,6 +1253,10 @@ Assert-Contains 'module does not mock the product' $module 'Nothing here mocks a
 Assert-Contains 'module synthesizes the phrase as 16 kHz 16-bit mono PCM' $module '$stream.Format.Type = 18'
 Assert-Match 'module sets the PCM format before opening the WAV stream' `
     $module '(?s)\$stream\.Format\.Type = 18.*?\$stream\.Open\('
+Assert-Contains 'module accepts only capture and render default flows' `
+    $module '[ValidateSet(''capture'', ''render'')][string]$DefaultFlow'
+Assert-Contains 'module requires a usable render id for a reachable route' `
+    $module '$pairedRenderUsable'
 
 $interop = Read-Text 'scripts/windows-real-dictation-interop.cs'
 Assert-Contains 'interop injects real keyboard input' $interop 'SendInput(1, new[] { input }'
@@ -1170,6 +1277,13 @@ Assert-Match 'interop checks the default-endpoint HRESULT before absence' `
     $interop '(?s)GetDefaultAudioEndpoint\(ParseFlow\(flow\), ParseRole\(role\), out device\);\s*if \(hr == ElementNotFound\)\s*\{\s*return null;\s*\}.*?ThrowIfFailed'
 Assert-Match 'interop checks the enumeration HRESULT before absence' `
     $interop '(?s)EnumAudioEndpoints\(flow, StateAll, out collection\);\s*if \(hr == ElementNotFound\)\s*\{\s*return;\s*\}\s*ThrowIfFailed'
+Assert-Contains 'interop restores the target window asynchronously' `
+    $interop 'ShowWindowAsync(target, SwRestore)'
+Assert-NotContains 'interop never blocks on synchronous ShowWindow' `
+    $interop 'ShowWindow(target, SwRestore)'
+Assert-Contains 'interop bounds the focus retry with the worker join' $interop 'worker.Join(budget)'
+Assert-Contains 'interop drains the render buffer before crediting playback' `
+    $interop 'frames remain queued'
 
 $validation = Read-Text 'windows/VALIDATION.md'
 Assert-Contains 'validation documents the opt-in workflow' $validation 'windows-real-dictation.yml'

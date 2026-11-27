@@ -498,26 +498,42 @@ try {
         Add-Limitation 'Environment.UserInteractive is false; the runner process is not attached to an interactive window station.'
     }
 
-    $audioInventory = Get-RealDictationAudioEndpoint -DefaultFlow capture
-    $audioRoute = Resolve-VirtualAudioRoute -Endpoints $audioInventory.Endpoints -DefaultCaptureEndpoint $audioInventory.DefaultCapture
-    $audioFlags.VirtualCaptureEndpointPresent = [bool]($null -ne $audioRoute.VirtualCapture)
-    $audioFlags.DefaultCaptureIsVirtual = [bool]$audioRoute.DefaultCaptureIsVirtual
-
-    $captureNames = @($audioInventory.Endpoints | Where-Object { $_.Flow -eq 'capture' } | ForEach-Object { "$($_.Name) [$($_.State)]" })
-    $renderNames = @($audioInventory.Endpoints | Where-Object { $_.Flow -eq 'render' } | ForEach-Object { "$($_.Name) [$($_.State)]" })
-    Add-Segment -Name 'audio endpoints enumerated' -Observed ($captureNames.Count -gt 0 -or $renderNames.Count -gt 0) -Detail (
-        "capture: {0} | render: {1}" -f (($captureNames -join '; ') -replace '\|', '/'), (($renderNames -join '; ') -replace '\|', '/'))
-    Add-Segment -Name 'virtual capture endpoint present' -Observed $audioFlags.VirtualCaptureEndpointPresent -Detail $audioRoute.Reason
-    if (-not $audioFlags.VirtualCaptureEndpointPresent) {
-        Add-Limitation $audioRoute.Reason
-        Add-Limitation 'No virtual capture endpoint means a test-owned WAV cannot enter NanoDictate''s genuine WASAPI input; loading an audio file in the harness is not microphone capture.'
-    } elseif (-not $audioFlags.DefaultCaptureIsVirtual) {
-        Add-Limitation $audioRoute.Reason
-        Add-Limitation 'The product always opens the default console capture endpoint, so a non-default virtual cable cannot feed real WASAPI capture without changing the system default device.'
-    } elseif ($null -eq $audioRoute.PairedRender) {
-        Add-Limitation "Virtual capture endpoint found but no render endpoint can feed it: $($audioRoute.PairedRenderReason)"
+    # An MMDevice enumeration failure is an audio limitation, not a reason to
+    # abort the whole qualification: the GUI leg can still be observed, while
+    # playback and insertion stay unverified. It is recorded separately from a
+    # successful probe that simply found no virtual endpoint.
+    $audioProbeError = $null
+    try {
+        $audioInventory = Get-RealDictationAudioEndpoint -DefaultFlow capture
+        $audioRoute = Resolve-VirtualAudioRoute -Endpoints $audioInventory.Endpoints -DefaultCaptureEndpoint $audioInventory.DefaultCapture
+    } catch {
+        $audioProbeError = $_
+    }
+    if ($null -ne $audioProbeError) {
+        Add-Segment -Name 'audio endpoint probe' -Observed $false -Detail (
+            "MMDevice enumeration failed: $($audioProbeError.Exception.Message -replace '\|', '/')")
+        Add-Limitation "The audio endpoint probe failed ($($audioProbeError.Exception.Message)); playback and insertion cannot be verified in this run."
     } else {
-        Add-Segment -Name 'virtual audio route' -Observed $true -Detail $audioRoute.PairedRenderReason
+        $audioFlags.VirtualCaptureEndpointPresent = [bool]($null -ne $audioRoute.VirtualCapture)
+        $audioFlags.DefaultCaptureIsVirtual = [bool]$audioRoute.DefaultCaptureIsVirtual
+
+        $captureNames = @($audioInventory.Endpoints | Where-Object { $_.Flow -eq 'capture' } | ForEach-Object { "$($_.Name) [$($_.State)]" })
+        $renderNames = @($audioInventory.Endpoints | Where-Object { $_.Flow -eq 'render' } | ForEach-Object { "$($_.Name) [$($_.State)]" })
+        Add-Segment -Name 'audio endpoints enumerated' -Observed ($captureNames.Count -gt 0 -or $renderNames.Count -gt 0) -Detail (
+            "capture: {0} | render: {1}" -f (($captureNames -join '; ') -replace '\|', '/'), (($renderNames -join '; ') -replace '\|', '/'))
+        Add-Segment -Name 'virtual capture endpoint present' -Observed $audioFlags.VirtualCaptureEndpointPresent -Detail $audioRoute.Reason
+        if (-not $audioFlags.VirtualCaptureEndpointPresent) {
+            Add-Limitation $audioRoute.Reason
+            Add-Limitation 'No virtual capture endpoint means a test-owned WAV cannot enter NanoDictate''s genuine WASAPI input; loading an audio file in the harness is not microphone capture.'
+        } elseif (-not $audioFlags.DefaultCaptureIsVirtual) {
+            Add-Limitation $audioRoute.Reason
+            Add-Limitation 'The product always opens the default console capture endpoint, so a non-default virtual cable cannot feed real WASAPI capture without changing the system default device.'
+        } elseif ($null -eq $audioRoute.PairedRender -or
+            [string]::IsNullOrWhiteSpace([string]$audioRoute.PairedRender.Id)) {
+            Add-Limitation "Virtual capture endpoint found but no usable render endpoint can feed it: $($audioRoute.PairedRenderReason)"
+        } else {
+            Add-Segment -Name 'virtual audio route' -Observed $true -Detail $audioRoute.PairedRenderReason
+        }
     }
 
     if ($ProbeOnly) {
@@ -564,6 +580,20 @@ try {
         if ($preexistingEntries.Count -gt 0) {
             throw "The NanoDictate installation directory $installedDirectory already contains files. The qualification only removes a directory it created; remove the existing directory first."
         }
+    }
+    # Inno Setup and the Scoop manifest both write the same per-user startup
+    # value. A Scoop copy can live in another directory and have no Inno
+    # uninstall registration, so the guards above would miss it: setup would
+    # replace its startup command and uninstall would delete it.
+    $startupKeyPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    $existingStartup = $null
+    try {
+        $existingStartup = (Get-ItemProperty -LiteralPath $startupKeyPath -Name 'NanoDictate' -ErrorAction Stop).NanoDictate
+    } catch {
+        $existingStartup = $null
+    }
+    if ($existingStartup) {
+        throw "An existing NanoDictate startup entry already exists at $startupKeyPath pointing at '$existingStartup'. Setup would replace it and uninstall would delete it, so the qualification refuses to run; remove the existing installation or startup entry first."
     }
     $installationOwned = $true
     $configTarget = Join-Path $env:APPDATA 'NanoDictate\config.toml'
@@ -769,21 +799,38 @@ try {
         # The route was recorded before the installer ran. The product opens
         # whatever the default capture endpoint is when recording starts, so
         # re-resolve it now and reject a changed or unresolved route instead of
-        # playing into the endpoint that used to be the default.
-        $activationInventory = Get-RealDictationAudioEndpoint -DefaultFlow capture
-        $activationRoute = Resolve-VirtualAudioRoute -Endpoints $activationInventory.Endpoints `
-            -DefaultCaptureEndpoint $activationInventory.DefaultCapture
-        $routeUnchanged = $null -ne $activationRoute.VirtualCapture -and
-            (Test-EndpointIdentityMatch -Candidate $activationRoute.VirtualCapture -Reference $audioRoute.VirtualCapture) -and
-            (Test-EndpointIdentityMatch -Candidate $activationRoute.PairedRender -Reference $audioRoute.PairedRender)
-        $routeReachableAtActivation = [bool]($routeUnchanged -and $activationRoute.DefaultCaptureIsVirtual -and
-            $null -ne $activationRoute.PairedRender)
-        $activationDefaultName = if ($null -eq $activationInventory.DefaultCapture) {
+        # playing into the endpoint that used to be the default. A probe failure
+        # here leaves the audio leg unverified instead of aborting the GUI run.
+        $activationRoute = $null
+        $activationInventory = $null
+        $routeReachableAtActivation = $false
+        $routeReason = 'no audio route was resolved before installation'
+        if ($null -ne $audioRoute) {
+            try {
+                $activationInventory = Get-RealDictationAudioEndpoint -DefaultFlow capture
+                $activationRoute = Resolve-VirtualAudioRoute -Endpoints $activationInventory.Endpoints `
+                    -DefaultCaptureEndpoint $activationInventory.DefaultCapture
+                $routeUnchanged = $null -ne $activationRoute.VirtualCapture -and
+                    (Test-EndpointIdentityMatch -Candidate $activationRoute.VirtualCapture -Reference $audioRoute.VirtualCapture) -and
+                    (Test-EndpointIdentityMatch -Candidate $activationRoute.PairedRender -Reference $audioRoute.PairedRender)
+                $routeReachableAtActivation = [bool]($routeUnchanged -and
+                    $activationRoute.DefaultCaptureIsVirtual -and
+                    $null -ne $activationRoute.PairedRender -and
+                    -not [string]::IsNullOrWhiteSpace([string]$activationRoute.PairedRender.Id))
+                $routeReason = $activationRoute.Reason
+            } catch {
+                $routeReason = "the activation-time audio probe failed: $($_.Exception.Message)"
+            }
+        }
+        # The verdict reads the audio flags, so record the route actually in
+        # force when recording started instead of only the initial inventory.
+        $audioFlags.DefaultCaptureIsVirtual = $routeReachableAtActivation
+        $activationDefaultName = if ($null -eq $activationInventory -or $null -eq $activationInventory.DefaultCapture) {
             '<none>'
         } else {
             [string]$activationInventory.DefaultCapture.Name
         }
-        $expectedDefaultName = if ($null -eq $audioRoute.VirtualCapture) {
+        $expectedDefaultName = if ($null -eq $audioRoute -or $null -eq $audioRoute.VirtualCapture) {
             '<none>'
         } else {
             [string]$audioRoute.VirtualCapture.Name
@@ -791,11 +838,24 @@ try {
         Add-Segment -Name 'capture route unchanged at activation' -Observed $routeReachableAtActivation -Detail (
             "default console capture is '$activationDefaultName'; expected '$expectedDefaultName' to remain the default virtual route")
         if (-not $routeReachableAtActivation) {
-            Add-Limitation "The pre-install audio route could not be confirmed at recording start, so a rendered phrase cannot be attributed to the product's capture path. $($activationRoute.Reason)"
+            Add-Limitation "The pre-install audio route could not be confirmed at recording start, so a rendered phrase cannot be attributed to the product's capture path. $routeReason"
         }
 
         if (-not $routeReachableAtActivation) {
-            Send-RealDictationKey -Key 'return'
+            $stopForeground = Get-RealDictationForegroundWindow
+            $stopTargetActive = Test-RealDictationActiveEditorWindow -Foreground $stopForeground `
+                -EditorHandle $notepadWindow.Handle -TitlePattern $editorTitlePattern
+            Add-Segment -Name 'test-owned editor tab active before stopping dictation' -Observed $stopTargetActive -Detail (
+                "foreground is '{0}' (pid {1}); expected this run's unique file '{2}'" -f
+                    $(if ($stopForeground) { $stopForeground.Title } else { '<none>' }),
+                    $(if ($stopForeground) { $stopForeground.ProcessId } else { 0 }),
+                    $editorFileStem)
+            if ($stopTargetActive) {
+                Send-RealDictationKey -Key 'return'
+            } else {
+                Send-RealDictationKey -Key 'escape'
+                Add-Limitation 'The test-owned editor tab lost the foreground before the stop hotkey; the recording was cancelled without requesting transcription.'
+            }
             $hidden = Wait-RealDictationHudHidden -ProcessIds $agentProcessIds -TimeoutSeconds 20
             Add-Segment -Name 'dictation stopped cleanly' -Observed $hidden.Hidden -Detail (
                 "HUD hidden: $($hidden.Hidden) after $($hidden.ElapsedMilliseconds) ms")
@@ -831,9 +891,32 @@ try {
                 Save-EvidenceScreenshot -Name 'hud-after-speech' -Kind window -Handle $hudDuringPlayback.Handle
             }
 
-            Send-RealDictationKey -Key 'return'
+            # Another tab can take the foreground during playback. Sending
+            # Return then would request transcription for whatever editor is
+            # active, and the product would insert the transcript there; the
+            # marker check can only reject that text, not undo the insertion.
+            $stopForeground = Get-RealDictationForegroundWindow
+            $stopTargetActive = Test-RealDictationActiveEditorWindow -Foreground $stopForeground `
+                -EditorHandle $notepadWindow.Handle -TitlePattern $editorTitlePattern
+            Add-Segment -Name 'test-owned editor tab active before requesting transcription' `
+                -Observed $stopTargetActive `
+                -Detail ("foreground is '{0}' (pid {1}); expected this run's unique file '{2}'" -f
+                    $(if ($stopForeground) { $stopForeground.Title } else { '<none>' }),
+                    $(if ($stopForeground) { $stopForeground.ProcessId } else { 0 }),
+                    $editorFileStem)
+            if ($stopTargetActive) {
+                Send-RealDictationKey -Key 'return'
+            } else {
+                Send-RealDictationKey -Key 'escape'
+                Add-Limitation 'The test-owned editor tab lost the foreground before transcription was requested; the recording was cancelled so the transcript cannot be inserted into another document.'
+            }
             $hidden = Wait-RealDictationHudHidden -ProcessIds $agentProcessIds -TimeoutSeconds $ResultTimeoutSeconds
-            Add-Segment -Name 'dictation stopped and provider finished' -Observed $hidden.Hidden -Detail (
+            $stopSegmentName = if ($stopTargetActive) {
+                'dictation stopped and provider finished'
+            } else {
+                'recording cancelled without transcription'
+            }
+            Add-Segment -Name $stopSegmentName -Observed $hidden.Hidden -Detail (
                 "HUD hidden: $($hidden.Hidden) after $($hidden.ElapsedMilliseconds) ms")
             if (-not $hidden.Hidden) {
                 Add-Limitation "The HUD stayed visible for $ResultTimeoutSeconds seconds after stopping; the provider request or insertion never completed."
@@ -948,33 +1031,64 @@ try {
     } catch {
         Write-Warning "Could not stop the NanoDictate background agent: $_"
     }
-    try {
+    $cleanupFailed = $false
+    $uninstallConfirmed = $false
+    $partialInstallation = $false
+    if ($installationOwned -and $installedDirectory) {
         # Only an installation this run created may be uninstalled. A
         # pre-existing installation is refused before setup, so its uninstaller
         # can never be invoked from here.
-        if ($installationOwned -and $installedDirectory) {
-            $uninstaller = Join-Path $installedDirectory 'unins000.exe'
-            if (Test-Path -LiteralPath $uninstaller) {
+        $uninstaller = Join-Path $installedDirectory 'unins000.exe'
+        if (Test-Path -LiteralPath $uninstaller) {
+            try {
                 Invoke-BoundedInstallerProcess -FilePath $uninstaller `
                     -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') `
                     -Phase 'real-dictation-uninstall' -TimeoutSeconds 120 `
                     -LogDirectory $LogDirectory -InnoLogFileName 'real-dictation-uninstall.log' | Out-Null
+                $remainingRegistration = Get-RealDictationRegisteredInstallation
+                if ($null -eq $remainingRegistration) {
+                    $uninstallConfirmed = $true
+                } else {
+                    $cleanupFailed = $true
+                    Write-Warning "Uninstall left NanoDictate registered at $($remainingRegistration.KeyPath); keeping $installedDirectory for a retry."
+                    Add-Limitation "The qualification uninstaller left NanoDictate registered at $($remainingRegistration.KeyPath); the installation and its uninstaller were preserved for a manual retry."
+                }
+            } catch {
+                $cleanupFailed = $true
+                Write-Warning "Qualification cleanup uninstall failed: $_"
+                Add-Limitation "The qualification uninstall failed ($($_.Exception.Message)); the installation and its uninstaller were preserved for a manual retry."
+            }
+        } else {
+            # A failed setup can leave partial payload files without
+            # unins000.exe. They may only be removed while nothing registered
+            # the directory; otherwise the registration would point at a
+            # deleted installation and the operator would lose the retry path.
+            try {
+                $remainingRegistration = Get-RealDictationRegisteredInstallation
+            } catch {
+                $remainingRegistration = $null
+            }
+            if ($null -eq $remainingRegistration) {
+                $partialInstallation = $true
+            } else {
+                $cleanupFailed = $true
+                Write-Warning "Partial setup left NanoDictate registered at $($remainingRegistration.KeyPath); keeping $installedDirectory."
+                Add-Limitation "A partial qualification setup left NanoDictate registered at $($remainingRegistration.KeyPath); the directory was preserved instead of deleting a registered installation."
             }
         }
-    } catch {
-        Write-Warning "Qualification cleanup uninstall failed: $_"
     }
-    try {
-        # A failed setup can leave partial payload files without unins000.exe.
-        # The directory is test-owned: a pre-existing installation or a
-        # non-empty directory is refused before setup, so removing leftovers
-        # cannot destroy an installation this run did not create.
-        if ($installationOwned -and $installedDirectory -and
-            (Test-Path -LiteralPath $installedDirectory)) {
+    # Recursive removal is limited to a confirmed uninstall or an unregistered
+    # partial installation, so a failed uninstall keeps its uninstaller and
+    # data available for a retry.
+    if (($uninstallConfirmed -or $partialInstallation) -and $installedDirectory -and
+        (Test-Path -LiteralPath $installedDirectory)) {
+        try {
             Remove-Item -LiteralPath $installedDirectory -Recurse -Force -ErrorAction Stop
+        } catch {
+            $cleanupFailed = $true
+            Write-Warning "Could not remove the test installation directory: $_"
+            Add-Limitation "The test installation directory $installedDirectory could not be removed: $($_.Exception.Message)"
         }
-    } catch {
-        Write-Warning "Could not remove the test installation directory: $_"
     }
     # Restore the user's provider config after uninstall so the test copy can
     # never be mistaken for the local configuration.
@@ -1003,6 +1117,6 @@ try {
     }
     $evidence = Write-Evidence
     $exitCode = Get-RealDictationExitCode -FullyVerified ([bool]$evidence.fullyVerified) `
-        -ProbeOnly:$ProbeOnly -Failed:([bool]$fatal)
+        -ProbeOnly:$ProbeOnly -Failed:([bool]$fatal -or $configRestoreFailed -or $cleanupFailed)
     exit $exitCode
 }

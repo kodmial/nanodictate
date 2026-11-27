@@ -341,20 +341,48 @@ function Resolve-VirtualAudioRoute {
 
     # The product opens the default console capture endpoint, so prefer that
     # exact endpoint when it is one of the active virtual captures instead of
-    # always taking the first cable the enumerator returned.
+    # always taking the first cable the enumerator returned. A stable device id
+    # is authoritative; a friendly-name fallback is used only when the default
+    # exposes no id and the name identifies exactly one candidate, so a
+    # same-named endpoint with a different id cannot be credited.
     $selected = $virtualEndpoints[0]
     $isDefault = $false
     if ($null -ne $DefaultCaptureEndpoint) {
-        foreach ($candidate in $virtualEndpoints) {
-            if (Test-EndpointIdentityMatch -Candidate $candidate.Endpoint -Reference $DefaultCaptureEndpoint) {
-                $selected = $candidate
+        $defaultId = [string]$DefaultCaptureEndpoint.Id
+        if (-not [string]::IsNullOrEmpty($defaultId)) {
+            $exactMatches = @($virtualEndpoints | Where-Object {
+                [string]$_.Endpoint.Id -eq $defaultId
+            })
+            if ($exactMatches.Count -eq 1) {
+                $selected = $exactMatches[0]
                 $isDefault = $true
-                break
+            }
+        } else {
+            $defaultName = [string]$DefaultCaptureEndpoint.Name
+            if (-not [string]::IsNullOrEmpty($defaultName)) {
+                $nameMatches = @($virtualEndpoints | Where-Object {
+                    [string]$_.Endpoint.Name -eq $defaultName
+                })
+                if ($nameMatches.Count -eq 1) {
+                    $selected = $nameMatches[0]
+                    $isDefault = $true
+                }
             }
         }
     }
     $capture = $selected.Endpoint
     $paired = Get-PairedRenderEndpoint -CaptureEndpoint $capture -RenderEndpoints $Endpoints
+    # Playback needs a render endpoint the WASAPI layer can open, so an
+    # endpoint whose GetId failed is not a usable route. Keeping it out of the
+    # reachable gate turns that into an observed limitation instead of a fatal
+    # harness error when playback is attempted.
+    $pairedRenderUsable = $null -ne $paired.Endpoint -and
+        -not [string]::IsNullOrWhiteSpace([string]$paired.Endpoint.Id)
+    $pairedReason = if ($null -ne $paired.Endpoint -and -not $pairedRenderUsable) {
+        "render endpoint '$($paired.Endpoint.Name)' exposes no usable device id, so playback cannot target it"
+    } else {
+        $paired.Reason
+    }
     $reason = if ($isDefault) {
         "the product's default console capture endpoint is the virtual device '$($capture.Name)'"
     } else {
@@ -365,10 +393,10 @@ function Resolve-VirtualAudioRoute {
         VirtualCapture = $capture
         VirtualCapturePattern = $selected.MatchedPattern
         PairedRender = $paired.Endpoint
-        PairedRenderReason = $paired.Reason
+        PairedRenderReason = $pairedReason
         DefaultCapture = $DefaultCaptureEndpoint
         DefaultCaptureIsVirtual = [bool]$isDefault
-        CaptureEndpointReachable = [bool]$isDefault -and $null -ne $paired.Endpoint
+        CaptureEndpointReachable = [bool]($isDefault -and $pairedRenderUsable)
         Reason = $reason
     }
 }
@@ -750,13 +778,14 @@ function Resolve-RealDictationScratchDirectory {
 function Get-RealDictationUninstallRegistryPaths {
     <#
       Returns the Inno Setup uninstall registry keys that can register a
-      NanoDictate installation. Inno Setup appends "_is1" to a non-GUID AppId,
-      so a prior installation is registered even when it lives outside
-      DefaultDirName and would be reused by UsePreviousAppDir.
+      NanoDictate installation. Inno Setup appends "_is1" to the AppId,
+      including a brace-delimited GUID, so a prior installation is registered
+      even when it lives outside DefaultDirName and would be reused by
+      UsePreviousAppDir.
     #>
     param([string]$AppId = 'NanoDictate')
 
-    $keyName = if ($AppId -match '^\{[0-9A-Fa-f-]+\}$') { $AppId } else { "${AppId}_is1" }
+    $keyName = "${AppId}_is1"
     return @(
         "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$keyName"
         "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$keyName"
@@ -1013,7 +1042,7 @@ function Get-RealDictationSessionProbe {
 
 function Get-RealDictationAudioEndpoint {
     <# Returns every MMDevice endpoint plus the default console capture one. #>
-    param([ValidateSet('capture', 'render', 'console')][string]$DefaultFlow = 'capture')
+    param([ValidateSet('capture', 'render')][string]$DefaultFlow = 'capture')
 
     Initialize-RealDictationInterop
     $endpoints = @([NanoDictate.RealDictation.Native]::EnumerateAudioEndpoints() | ForEach-Object {

@@ -447,7 +447,27 @@ namespace NanoDictate.RealDictation
                             int pacing = (int)Math.Max(5, frames * 1000.0 / wav.SampleRate / 2.0);
                             Thread.Sleep(pacing);
                         }
-                        Thread.Sleep((int)(bufferFrames * 1000.0 / wav.SampleRate) + 150);
+                        // Wait for the endpoint to consume the queued frames.
+                        // A fixed sleep can return while frames are still
+                        // queued, which the harness would credit as a
+                        // successful render even though the phrase was never
+                        // played. The same playback deadline bounds this drain.
+                        while (true)
+                        {
+                            uint padding;
+                            ThrowIfFailed(client.GetCurrentPadding(out padding), "read render padding");
+                            if (padding == 0)
+                            {
+                                break;
+                            }
+                            if (playback.ElapsedMilliseconds > playbackBudgetMilliseconds)
+                            {
+                                throw new TimeoutException(
+                                    "WAV playback did not drain within " + playbackBudgetMilliseconds +
+                                    " ms; " + padding + " frames remain queued.");
+                            }
+                            Thread.Sleep(5);
+                        }
                     }
                     finally
                     {
@@ -646,46 +666,67 @@ namespace NanoDictate.RealDictation
             {
                 return false;
             }
-            ShowWindow(target, SwRestore);
-            var deadline = Environment.TickCount + Math.Max(1, timeoutMilliseconds);
-            while (Environment.TickCount < deadline)
+            // ShowWindow can wait for a hung window owner to process the
+            // request before the focus deadline even starts; ShowWindowAsync
+            // only queues the restore.
+            ShowWindowAsync(target, SwRestore);
+            int budget = Math.Max(1, timeoutMilliseconds);
+            bool focused = false;
+            // The retry loop runs on a background thread because
+            // AttachThreadInput and the window-manager calls can block against
+            // a hung window. Joining with the same budget keeps the harness on
+            // schedule even when the fallback never returns.
+            var worker = new Thread(delegate()
             {
-                if (SetForegroundWindow(target))
+                var stopwatch = Stopwatch.StartNew();
+                while (stopwatch.ElapsedMilliseconds < budget)
                 {
-                    Thread.Sleep(50);
-                    if (GetForegroundWindow() == target)
+                    if (SetForegroundWindow(target))
                     {
-                        return true;
-                    }
-                }
-                // The foreground lock can reject a focus change; temporarily
-                // joining the target's input queue is the documented mitigation.
-                uint targetThread = GetWindowThreadProcessId(target, IntPtr.Zero);
-                uint currentThread = GetCurrentThreadId();
-                if (targetThread != 0 && targetThread != currentThread)
-                {
-                    if (AttachThreadInput(currentThread, targetThread, true))
-                    {
-                        try
-                        {
-                            BringWindowToTop(target);
-                            SetForegroundWindow(target);
-                            SetFocus(target);
-                        }
-                        finally
-                        {
-                            AttachThreadInput(currentThread, targetThread, false);
-                        }
                         Thread.Sleep(50);
                         if (GetForegroundWindow() == target)
                         {
-                            return true;
+                            focused = true;
+                            return;
                         }
                     }
+                    // The foreground lock can reject a focus change; temporarily
+                    // joining the target's input queue is the documented mitigation.
+                    uint targetThread = GetWindowThreadProcessId(target, IntPtr.Zero);
+                    uint currentThread = GetCurrentThreadId();
+                    if (targetThread != 0 && targetThread != currentThread)
+                    {
+                        if (AttachThreadInput(currentThread, targetThread, true))
+                        {
+                            try
+                            {
+                                BringWindowToTop(target);
+                                SetForegroundWindow(target);
+                                SetFocus(target);
+                            }
+                            finally
+                            {
+                                AttachThreadInput(currentThread, targetThread, false);
+                            }
+                            Thread.Sleep(50);
+                            if (GetForegroundWindow() == target)
+                            {
+                                focused = true;
+                                return;
+                            }
+                        }
+                    }
+                    Thread.Sleep(100);
                 }
-                Thread.Sleep(100);
+                focused = GetForegroundWindow() == target;
+            });
+            worker.IsBackground = true;
+            worker.Start();
+            if (!worker.Join(budget))
+            {
+                return GetForegroundWindow() == target;
             }
-            return GetForegroundWindow() == target;
+            return focused;
         }
 
         public static bool WaitForInputIdle(int processId, int timeoutMilliseconds)
@@ -1543,7 +1584,7 @@ namespace NanoDictate.RealDictation
         private static extern bool AttachThreadInput(uint attach, uint attachTo, bool attachFlag);
 
         [DllImport("user32.dll")]
-        private static extern bool ShowWindow(IntPtr handle, int command);
+        private static extern bool ShowWindowAsync(IntPtr handle, int command);
 
         [DllImport("user32.dll")]
         private static extern bool PrintWindow(IntPtr handle, IntPtr deviceContext, uint flags);

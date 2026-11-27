@@ -89,10 +89,6 @@ jobs:
         shell: pwsh
         run: pwsh -NoProfile -File scripts/test-windows-installer-runner.ps1
 
-      - name: Verify Windows real-dictation qualification contracts
-        shell: pwsh
-        run: pwsh -NoProfile -File scripts/test-windows-real-dictation.ps1
-
       - name: Ensure MSVC target
         run: rustup target add x86_64-pc-windows-msvc
 

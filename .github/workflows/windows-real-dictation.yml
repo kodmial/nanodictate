@@ -137,27 +137,33 @@ jobs:
             $arguments += @('-Version', $env:ND_VERSION)
           }
           if ($env:ND_PROBE_ONLY -eq 'true') { $arguments += '-ProbeOnly' }
-          foreach ($option in @(
-            [pscustomobject]@{ Variable = 'ND_PHRASE_WAV'; Flag = '-PhraseWav' },
-            [pscustomobject]@{ Variable = 'ND_CONFIG_PATH'; Flag = '-ConfigPath' }
-          )) {
-            $value = [Environment]::GetEnvironmentVariable($option.Variable)
-            if (-not $value) { continue }
-            $resolved = (Resolve-Path -LiteralPath $value -ErrorAction Stop).Path
-            # Require a descendant of the checkout, not merely a shared path
-            # prefix (C:\work\nanodictate-fixtures must not pass for
-            # C:\work\nanodictate).
-            if (-not $resolved.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-              throw "$($option.Variable) must resolve inside the checked-out repository: $resolved"
-            }
-            if ($option.Variable -eq 'ND_CONFIG_PATH') {
-              foreach ($evidenceRoot in @('windows/artifacts/real-dictation', 'windows/artifacts/installer-logs')) {
-                if (Test-RealDictationPathInside $resolved (Join-Path $root $evidenceRoot)) {
-                  throw "ND_CONFIG_PATH must not point into an uploaded evidence directory: $resolved"
+          # A probe-only dispatch never installs or dictates, so it does not use
+          # either fixture path. Skipping resolution keeps a stale optional path
+          # from blocking the session/audio evidence the probe is meant to
+          # collect; full runs still validate both paths below.
+          if ($env:ND_PROBE_ONLY -ne 'true') {
+            foreach ($option in @(
+              [pscustomobject]@{ Variable = 'ND_PHRASE_WAV'; Flag = '-PhraseWav' },
+              [pscustomobject]@{ Variable = 'ND_CONFIG_PATH'; Flag = '-ConfigPath' }
+            )) {
+              $value = [Environment]::GetEnvironmentVariable($option.Variable)
+              if (-not $value) { continue }
+              $resolved = (Resolve-Path -LiteralPath $value -ErrorAction Stop).Path
+              # Require a descendant of the checkout, not merely a shared path
+              # prefix (C:\work\nanodictate-fixtures must not pass for
+              # C:\work\nanodictate).
+              if (-not $resolved.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "$($option.Variable) must resolve inside the checked-out repository: $resolved"
+              }
+              if ($option.Variable -eq 'ND_CONFIG_PATH') {
+                foreach ($evidenceRoot in @('windows/artifacts/real-dictation', 'windows/artifacts/installer-logs')) {
+                  if (Test-RealDictationPathInside $resolved (Join-Path $root $evidenceRoot)) {
+                    throw "ND_CONFIG_PATH must not point into an uploaded evidence directory: $resolved"
+                  }
                 }
               }
+              $arguments += @($option.Flag, $resolved)
             }
-            $arguments += @($option.Flag, $resolved)
           }
           if ($env:ND_SOURCE -eq 'candidate' -and $env:ND_PROBE_ONLY -ne 'true') {
             # The candidate build is always produced as version 0.0.0.
