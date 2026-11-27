@@ -936,6 +936,10 @@ Export-ModuleMember -Function 'Invoke-BoundedInstallerProcess', 'Stop-NanoDictat
 
 Assert-Contains 'harness verifies the test-owned editor before activation' `
     $harness 'test-owned editor tab active before activation'
+Assert-Match 'harness verifies the test tab after collecting the HUD baseline' `
+    $harness '(?s)\$hudBaseline = @\(Get-RealDictationHudBaseline.*?\$activationStillReady = Test-RealDictationActiveEditorWindow'
+Assert-Match 'harness aborts instead of sending Double-Alt when the test tab changed' `
+    $harness "(?s)\`$activationStillReady = Test-RealDictationActiveEditorWindow.*?if \(-not \`$activationStillReady\) \{\s*throw 'Refusing to send Double-Alt:.*?\}\s*Send-RealDictationDoubleAlt"
 Assert-Contains 'harness rechecks the capture route at activation' $harness '$routeReachableAtActivation'
 Assert-Contains 'harness separates rendering from capture evidence' `
     $harness 'rendering alone is not evidence of capture'

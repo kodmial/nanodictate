@@ -654,9 +654,24 @@ try {
         Add-Limitation 'Notepad could not own the foreground; injection would not reach the intended focused editor.'
     }
 
+    $hudBaseline = @(Get-RealDictationHudBaseline -ProcessIds $agentProcessIds)
+    Add-Segment -Name 'HUD hidden before activation' -Observed ($hudBaseline.Count -eq 0) -Detail (
+        if ($hudBaseline.Count -eq 0) {
+            'no visible NanoDictate HUD owned by the launched agent before Double-Alt'
+        } else {
+            "the launched agent already showed {0} NanoDictate HUD window(s) before Double-Alt ({1})" -f
+                $hudBaseline.Count,
+                (($hudBaseline | ForEach-Object { "$($_.Width)x$($_.Height) $($_.Phase)" }) -join ', ')
+        })
+    if ($hudBaseline.Count -gt 0) {
+        Add-Limitation 'A visible NanoDictate HUD owned by the launched agent already existed before Double-Alt; HUD attribution requires a hidden baseline, so this activation cannot be credited even if that pre-existing HUD later changes phase.'
+    }
+
     # A different Notepad tab can become active after the focus call while the
     # process id still matches, so verify the exact foreground handle and title
-    # immediately before the hotkey and refuse to activate anything else.
+    # before the hotkey and refuse to activate anything else. Record the result,
+    # then repeat the check after HUD baseline collection as the last action
+    # before SendInput.
     $activationForeground = Get-RealDictationForegroundWindow
     $activationTargetReady = Test-RealDictationActiveEditorWindow -Foreground $activationForeground `
         -EditorHandle $notepadWindow.Handle -TitlePattern $editorTitlePattern
@@ -672,21 +687,13 @@ try {
             $(if ($activationForeground) { $activationForeground.Handle } else { 0 }),
             $(if ($activationForeground) { $activationForeground.ProcessId } else { 0 }),
             $editorFileStem, $notepadWindow.Handle)
-    if (-not $activationTargetReady) {
+    # Evidence bookkeeping above can itself take time, so repeat the check as
+    # the last action before SendInput.
+    $activationForeground = Get-RealDictationForegroundWindow
+    $activationStillReady = Test-RealDictationActiveEditorWindow -Foreground $activationForeground `
+        -EditorHandle $notepadWindow.Handle -TitlePattern $editorTitlePattern
+    if (-not $activationStillReady) {
         throw 'Refusing to send Double-Alt: the foreground handle/title is no longer this run''s test editor.'
-    }
-
-    $hudBaseline = @(Get-RealDictationHudBaseline -ProcessIds $agentProcessIds)
-    Add-Segment -Name 'HUD hidden before activation' -Observed ($hudBaseline.Count -eq 0) -Detail (
-        if ($hudBaseline.Count -eq 0) {
-            'no visible NanoDictate HUD owned by the launched agent before Double-Alt'
-        } else {
-            "the launched agent already showed {0} NanoDictate HUD window(s) before Double-Alt ({1})" -f
-                $hudBaseline.Count,
-                (($hudBaseline | ForEach-Object { "$($_.Width)x$($_.Height) $($_.Phase)" }) -join ', ')
-        })
-    if ($hudBaseline.Count -gt 0) {
-        Add-Limitation 'A visible NanoDictate HUD owned by the launched agent already existed before Double-Alt; HUD attribution requires a hidden baseline, so this activation cannot be credited even if that pre-existing HUD later changes phase.'
     }
     Send-RealDictationDoubleAlt -GapMilliseconds 90
     # Only record delivery after SendInput actually succeeded; a thrown
