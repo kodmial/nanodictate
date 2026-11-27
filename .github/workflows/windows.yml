@@ -20,10 +20,14 @@ on:
       - 'scripts/validate-windows-config.ps1'
       - 'scripts/test-windows-installer-runner.ps1'
       - 'scripts/windows-installer-runner.psm1'
+      - 'scripts/test-windows-real-dictation.ps1'
+      - 'scripts/windows-real-dictation.psm1'
+      - 'scripts/windows-real-dictation-interop.cs'
       - 'scripts/fixtures/**'
       - 'bucket/**'
       - 'config.example.toml'
       - '.github/workflows/windows.yml'
+      - '.github/workflows/windows-real-dictation.yml'
   pull_request:
     paths:
       - 'rust/**'
@@ -37,10 +41,14 @@ on:
       - 'scripts/validate-windows-config.ps1'
       - 'scripts/test-windows-installer-runner.ps1'
       - 'scripts/windows-installer-runner.psm1'
+      - 'scripts/test-windows-real-dictation.ps1'
+      - 'scripts/windows-real-dictation.psm1'
+      - 'scripts/windows-real-dictation-interop.cs'
       - 'scripts/fixtures/**'
       - 'bucket/**'
       - 'config.example.toml'
       - '.github/workflows/windows.yml'
+      - '.github/workflows/windows-real-dictation.yml'
 
 permissions:
   contents: read
@@ -80,6 +88,10 @@ jobs:
       - name: Verify bounded installer process-tree runner
         shell: pwsh
         run: pwsh -NoProfile -File scripts/test-windows-installer-runner.ps1
+
+      - name: Verify Windows real-dictation qualification contracts
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/test-windows-real-dictation.ps1
 
       - name: Ensure MSVC target
         run: rustup target add x86_64-pc-windows-msvc

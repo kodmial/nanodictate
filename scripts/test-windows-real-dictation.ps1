@@ -510,6 +510,13 @@ Assert-Match 'qualification gates candidate setup on a non-probe full run' `
 Assert-Match 'qualification keeps the candidate installer out of probe-only runs' `
     $workflow "ND_PROBE_ONLY -ne 'true'"
 
+# The qualification workflow is dispatch-only, so its focused contract tests
+# also have to run in the pull-request Windows host job to be verified on
+# Windows before merge.
+$windowsHostWorkflow = Read-Text '.github/workflows/windows.yml'
+Assert-Contains 'Windows host CI runs the real-dictation contract tests' `
+    $windowsHostWorkflow 'pwsh -NoProfile -File scripts/test-windows-real-dictation.ps1'
+
 $harness = Read-Text 'windows/package/test-real-dictation.ps1'
 Assert-Contains 'harness installs the actual installer' $harness 'Invoke-BoundedInstallerProcess'
 Assert-Contains 'harness verifies the published SHA-256' $harness 'SHA256SUMS.txt'
