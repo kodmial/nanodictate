@@ -171,15 +171,16 @@ path (including failures), and removes only the test copy when no file existed
 before.
 
 Window screenshots count as window evidence only when `PrintWindow` captured
-the window. If that capture fails or times out, the harness records a
-screen-region fallback separately; that fallback can show an overlapping
-window and is not proof of the HUD content.
+the window. If that capture fails or times out, the harness discards the
+screen-region fallback instead of uploading it, because it can show an
+overlapping window or unrelated desktop content. The harness never captures
+the full desktop.
 
 `probe_only` records the session/desktop/audio-endpoint facts without
 installing or launching the product. It reports `NOT VERIFIED / PROBE ONLY` as
 a diagnostic, not as a qualification verdict. A full run uploads
-`windows/artifacts/real-dictation/` (`evidence.json`, `summary.md`, HUD and
-desktop screenshots, the synthesized phrase WAV) plus installer logs, and exits
+`windows/artifacts/real-dictation/` (`evidence.json`, `summary.md`, verified
+HUD window screenshots, the synthesized phrase WAV) plus installer logs, and exits
 nonzero unless the status is `FULL E2E VERIFIED`, so a green job cannot be
 mistaken for real dictation. The job summary and the artifact report exactly
 one status:

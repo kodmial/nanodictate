@@ -138,15 +138,20 @@ function Add-EvidenceFile {
 }
 
 function Save-EvidenceScreenshot {
-    <# Captures a BMP and records both the evidence file and the observation. #>
+    <#
+      Captures a BMP of the verified HUD window. The capture is staged outside
+      the uploaded evidence directory and published only when PrintWindow
+      produced real window content; a screen-region fallback can include
+      unrelated desktop content and is discarded instead.
+    #>
     param(
         [Parameter(Mandatory)][string]$Name,
-        [Parameter(Mandatory)][ValidateSet('window', 'desktop')][string]$Kind,
+        [Parameter(Mandatory)][ValidateSet('window')][string]$Kind,
         [long]$Handle = 0
     )
-    $path = Join-Path $EvidenceDirectory ("$Name.bmp")
+    $capturePath = Join-Path $tempRoot ("$Name.capture.bmp")
     try {
-        $result = Save-RealDictationScreenshot -Kind $Kind -Handle $Handle -Path $path
+        $result = Save-RealDictationScreenshot -Kind $Kind -Handle $Handle -Path $capturePath
     } catch {
         # A capture failure is missing evidence, not a fatal harness error:
         # record it and keep driving the product path.
@@ -155,26 +160,36 @@ function Save-EvidenceScreenshot {
         Add-Limitation "The $Kind screenshot for '$Name' was not captured because the capture call failed; visual evidence is missing."
         return
     }
-    $windowEvidence = if ($Kind -eq 'window') { [bool]$result.WindowEvidence } else { $true }
+    $windowEvidence = [bool]$result.WindowEvidence
     if ($result.Saved -and $result.NonBlankPixels -gt 0 -and $windowEvidence) {
-        Add-EvidenceFile $result.Path
+        $path = Join-Path $EvidenceDirectory ("$Name.bmp")
+        try {
+            Move-Item -LiteralPath $result.Path -Destination $path -Force -ErrorAction Stop
+        } catch {
+            Remove-Item -LiteralPath $result.Path -Force -ErrorAction SilentlyContinue
+            Add-Segment -Name $Name -Observed $false -Detail (
+                "$Kind screenshot could not be published to ${path}: $($_.Exception.Message -replace '\|', '/')")
+            Add-Limitation "The $Kind screenshot for '$Name' was captured but could not be published as evidence."
+            return
+        }
+        Add-EvidenceFile $path
         Add-Segment -Name $Name -Observed $true -Detail (
             "{0} screenshot via {1} ({2}x{3}, {4} non-blank pixels)" -f
                 $Kind, $result.Method, $result.Width, $result.Height, $result.NonBlankPixels)
     } elseif ($result.Saved -and $result.NonBlankPixels -gt 0) {
-        # A BitBlt fallback can capture whatever covers the window, so it is
-        # kept as screen-region evidence but never as verified window content.
-        Add-EvidenceFile $result.Path
+        # A BitBlt fallback can capture whatever covers the window, including
+        # unrelated desktop content. It is never published as evidence.
+        Remove-Item -LiteralPath $result.Path -Force -ErrorAction SilentlyContinue
         Add-Segment -Name $Name -Observed $false -Detail (
-            "screen-region capture via {0} ({1}x{2}); a PrintWindow capture was unavailable, so this is not window evidence" -f
+            "screen-region capture via {0} ({1}x{2}) was discarded; a PrintWindow capture was unavailable, so this is not window evidence" -f
                 $result.Method, $result.Width, $result.Height)
-        Add-Limitation "The $Kind screenshot for '$Name' is a screen-region copy because PrintWindow did not complete; it can show an overlapping window and is not proof of the HUD content."
+        Add-Limitation "The $Kind screenshot for '$Name' was a screen-region copy because PrintWindow did not complete; it was discarded rather than published because it can show unrelated content."
     } elseif ($result.Saved) {
-        Add-EvidenceFile $result.Path
-        Add-Segment -Name $Name -Observed $false -Detail "$Kind screenshot at $path contains no non-blank pixels"
-        Add-Limitation "The $Kind screenshot for '$Name' is blank; it is not visual proof of the HUD or editor."
+        Remove-Item -LiteralPath $result.Path -Force -ErrorAction SilentlyContinue
+        Add-Segment -Name $Name -Observed $false -Detail "$Kind screenshot at $capturePath contains no non-blank pixels"
+        Add-Limitation "The $Kind screenshot for '$Name' is blank; it is not visual proof of the HUD."
     } else {
-        Add-Segment -Name $Name -Observed $false -Detail "$Kind screenshot could not be saved to $path"
+        Add-Segment -Name $Name -Observed $false -Detail "$Kind screenshot could not be saved to $capturePath"
         Add-Limitation "The $Kind screenshot for '$Name' was not captured; visual evidence is missing."
     }
 }
@@ -709,7 +724,6 @@ try {
             "agent-owned NanoDictate HUD appeared after $($hud.FirstSeenMilliseconds) ms at {0}x{1} (phases: {2})" -f
                 $first.Width, $first.Height, (($hud.Phases | Select-Object -Unique) -join ', '))
         Save-EvidenceScreenshot -Name 'hud-first-visible' -Kind window -Handle $first.Handle
-        Save-EvidenceScreenshot -Name 'desktop-hud' -Kind desktop
         Add-Segment -Name 'HUD reached the recording phase' -Observed $guiFlags.RecordingPhase -Detail (
             "observed panel heights: {0}; recording panel is 178 points tall versus 150 for starting/error" -f
                 (($hud.Observations | ForEach-Object { "$($_.Width)x$($_.Height)" } | Select-Object -Unique) -join ', '))
@@ -895,12 +909,9 @@ try {
             if (-not $editorText.Read) {
                 Add-Limitation "The editor text could not be read ($($editorText.Method)); the phrase assertion cannot be credited."
             }
-            # Capture the desktop only when the editor content belongs to this
-            # run's test document. A desktop screenshot of an unowned tab (or a
-            # different document) would publish unrelated text as evidence.
-            if ($contentOwned) {
-                Save-EvidenceScreenshot -Name 'desktop-after-insertion' -Kind desktop
-            }
+            # No desktop screenshot is taken after insertion: the marked editor
+            # text assertion is the evidence, and a desktop capture could
+            # include unrelated documents that must not be uploaded.
         }
     }
 } catch {

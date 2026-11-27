@@ -952,8 +952,17 @@ Assert-Contains 'harness separates rendering from capture evidence' `
     $harness 'rendering alone is not evidence of capture'
 Assert-Contains 'harness withholds editor text when ownership fails' `
     $harness 'editor text withheld because document ownership failed'
-Assert-Match 'harness withholds the desktop screenshot when ownership fails' `
-    $harness "(?s)if \(\`$contentOwned\) \{\s*Save-EvidenceScreenshot -Name 'desktop-after-insertion' -Kind desktop"
+Assert-NotContains 'harness never captures the desktop' $harness '-Kind desktop'
+Assert-Match 'harness stages screenshots outside the uploaded evidence directory' `
+    $harness '(?s)\$capturePath = Join-Path \$tempRoot.*?Save-RealDictationScreenshot -Kind \$Kind -Handle \$Handle -Path \$capturePath'
+Assert-Match 'harness discards screen-region fallback captures' `
+    $harness "(?s)elseif \(\`$result\.Saved -and \`$result\.NonBlankPixels -gt 0\) \{.*?Remove-Item -LiteralPath \`$result\.Path.*?was discarded"
+Assert-Contains 'harness publishes only verified window screenshots' `
+    $harness 'Move-Item -LiteralPath $result.Path -Destination $path -Force -ErrorAction Stop'
+Assert-Match 'harness records a failed screenshot publication instead of aborting' `
+    $harness "(?s)Move-Item -LiteralPath \`$result\.Path.*?catch \{.*?could not be published as evidence"
+Assert-NotContains 'harness never adds a screen-region fallback to evidence' `
+    $harness "Add-EvidenceFile `$result.Path"
 Assert-Contains 'harness uninstalls only an installation it created' $harness '$installationOwned'
 Assert-Contains 'harness refuses a pre-existing local installation' `
     $harness 'pre-existing NanoDictate installation exists'
