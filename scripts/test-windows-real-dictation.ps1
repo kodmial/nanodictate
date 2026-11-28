@@ -87,8 +87,9 @@ function Get-WorkflowTriggerNames {
       by `:`) and comments, and stops at the next top-level key. Comparing the
       complete parsed key set keeps an extra trigger from hiding behind quoting
       or explicit key syntax, which a spelling-based regex missed. Unsupported
-      event-level YAML is rejected instead of silently returning an incomplete
-      key set.
+      event-level YAML, including inline flow mappings such as
+      `on: {workflow_call: null}`, is rejected instead of silently returning
+      an incomplete key set.
     #>
     param([string]$Text)
 
@@ -107,11 +108,16 @@ function Get-WorkflowTriggerNames {
             if ($match.Success) {
                 $onIndent = $indent
                 $inline = $match.Groups['inline'].Value.Trim()
-                if ($inline -match '^\[(?<items>.*)\]$') {
+                if ($inline -match '^\[(?<items>[^\[\]{}]*)\]$') {
                     foreach ($item in ($Matches['items'] -split ',')) {
                         $name = $item.Trim().Trim('"', "'")
                         if ($name) { $events.Add($name) }
                     }
+                } elseif ($inline -and -not $inline.StartsWith('#')) {
+                    # An inline flow mapping can hide an extra trigger on the
+                    # `on:` line (or continue on later lines). Reject it rather
+                    # than parse only part of the event set.
+                    throw "Unsupported YAML syntax in the 'on:' mapping: $trimmed"
                 }
             }
             continue
@@ -615,6 +621,12 @@ Assert-Equal 'trigger parsing reads an explicit mapping key' `
     'workflow_dispatch,workflow_call'
 Assert-Equal 'trigger parsing reads a flow sequence' `
     ((Get-WorkflowTriggerNames -Text "on: [workflow_dispatch]`n") -join ',') 'workflow_dispatch'
+Assert-Throws 'trigger parsing rejects an inline flow mapping' {
+    Get-WorkflowTriggerNames -Text "on: {workflow_call: null,`n  workflow_dispatch: null}`n"
+} 'Unsupported YAML'
+Assert-Throws 'trigger parsing rejects a single-line inline flow mapping' {
+    Get-WorkflowTriggerNames -Text "on: {workflow_dispatch: null}`n"
+} 'Unsupported YAML'
 Assert-Equal 'trigger parsing ignores an on key inside a block scalar' `
     ((Get-WorkflowTriggerNames -Text "name: |`n  on:`n    workflow_dispatch:`non:`n  workflow_dispatch:`n  workflow_call:`n") -join ',') `
     'workflow_dispatch,workflow_call'
@@ -1060,6 +1072,10 @@ function Invoke-BoundedInstallerProcess {
         $partialDirectory = Join-Path $env:LOCALAPPDATA 'Programs\NanoDictate'
         New-Item -ItemType Directory -Force -Path $partialDirectory | Out-Null
         Set-Content -LiteralPath (Join-Path $partialDirectory 'partial-install.tmp') -Value 'partial' -Encoding utf8
+        if ($env:ND_TEST_INSTALLER_PARTIAL_MARKER) {
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $env:ND_TEST_INSTALLER_PARTIAL_MARKER) | Out-Null
+            Set-Content -LiteralPath $env:ND_TEST_INSTALLER_PARTIAL_MARKER -Value 'payload-created' -Encoding utf8
+        }
     }
     $target = $env:ND_TEST_INSTALLER_CONFIG
     if ($target) {
@@ -1091,6 +1107,7 @@ Export-ModuleMember -Function 'Invoke-BoundedInstallerProcess', 'Stop-NanoDictat
         ND_TEST_INSTALLER_CONFIG = $env:ND_TEST_INSTALLER_CONFIG
         ND_TEST_INSTALLER_MARKER = $env:ND_TEST_INSTALLER_MARKER
         ND_TEST_INSTALLER_PARTIAL = $env:ND_TEST_INSTALLER_PARTIAL
+        ND_TEST_INSTALLER_PARTIAL_MARKER = $env:ND_TEST_INSTALLER_PARTIAL_MARKER
         ND_TEST_REGISTERED_INSTALL_LOCATION = $env:ND_TEST_REGISTERED_INSTALL_LOCATION
     }
     try {
@@ -1126,6 +1143,7 @@ Export-ModuleMember -Function 'Invoke-BoundedInstallerProcess', 'Stop-NanoDictat
             $env:ND_TEST_INSTALLER_CONFIG = $target
             $env:ND_TEST_INSTALLER_MARKER = ''
             $env:ND_TEST_INSTALLER_PARTIAL = ''
+            $env:ND_TEST_INSTALLER_PARTIAL_MARKER = ''
             $env:ND_TEST_REGISTERED_INSTALL_LOCATION = ''
             & $pwshPath -NoProfile -File $harnessCopy `
                 -Source candidate -InstallerPath $fakeInstaller -ConfigPath $operatorConfig `
@@ -1188,6 +1206,7 @@ Export-ModuleMember -Function 'Invoke-BoundedInstallerProcess', 'Stop-NanoDictat
         $env:ND_TEST_INSTALLER_CONFIG = ''
         $env:ND_TEST_INSTALLER_MARKER = $installerMarker
         $env:ND_TEST_INSTALLER_PARTIAL = ''
+        $env:ND_TEST_INSTALLER_PARTIAL_MARKER = ''
         $env:ND_TEST_REGISTERED_INSTALL_LOCATION = $registeredInstall
         & $pwshPath -NoProfile -File $harnessCopy `
             -Source candidate -InstallerPath $fakeInstaller `
@@ -1232,8 +1251,10 @@ Export-ModuleMember -Function 'Invoke-BoundedInstallerProcess', 'Stop-NanoDictat
         $env:TEMP = $partialTemp
         $env:ND_TEST_INSTALLER_CONFIG = ''
         $partialMarker = Join-Path $partialRoot 'installer-invoked.txt'
+        $partialPayloadMarker = Join-Path $partialRoot 'installer-payload-created.txt'
         $env:ND_TEST_INSTALLER_MARKER = $partialMarker
         $env:ND_TEST_INSTALLER_PARTIAL = '1'
+        $env:ND_TEST_INSTALLER_PARTIAL_MARKER = $partialPayloadMarker
         $env:ND_TEST_REGISTERED_INSTALL_LOCATION = ''
         & $pwshPath -NoProfile -File $harnessCopy `
             -Source candidate -InstallerPath $fakeInstaller `
@@ -1241,11 +1262,14 @@ Export-ModuleMember -Function 'Invoke-BoundedInstallerProcess', 'Stop-NanoDictat
             -LogDirectory $partialLogs *> (Join-Path $partialRoot 'harness.log')
         $partialExitCode = $LASTEXITCODE
         Assert-Equal 'partial setup: harness reports the installer failure' $partialExitCode 1
-        # Prove the installer stub actually ran: without this marker an early
-        # harness exit would also leave no install directory and look clean.
+        # Prove the installer stub actually ran and created the partial payload:
+        # an early harness exit would also leave no install directory and look clean.
         Assert-True 'partial setup: the installer stub ran before cleanup' `
             (Test-Path -LiteralPath $partialMarker -PathType Leaf) `
             'the installer marker is missing, so the cleanup assertion is meaningless'
+        Assert-True 'partial setup: the installer stub created the partial payload' `
+            (Test-Path -LiteralPath $partialPayloadMarker -PathType Leaf) `
+            'the payload marker is missing, so the cleanup assertion is meaningless'
         $partialInstallDirectory = Join-Path $partialLocalAppData 'Programs\NanoDictate'
         Assert-True 'partial setup: leftovers are removed without an uninstaller' `
             (-not (Test-Path -LiteralPath $partialInstallDirectory)) `
