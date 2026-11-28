@@ -1,0 +1,53 @@
+name: Windows real dictation contracts
+
+# Focused, non-required contract tests for the opt-in real-dictation
+# qualification (issue #254). They run on pull requests so the workflow trigger
+# guard and harness assertions have a passing result without adding a pass
+# condition to the required Windows host job. The live qualification itself
+# remains dispatch-only in windows-real-dictation.yml.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/windows-real-dictation.yml'
+      - '.github/workflows/windows-real-dictation-contracts.yml'
+      - '.github/workflows/windows.yml'
+      - 'scripts/test-windows-real-dictation.ps1'
+      - 'scripts/windows-real-dictation.psm1'
+      - 'scripts/windows-real-dictation-interop.cs'
+      - 'windows/package/test-real-dictation.ps1'
+      - 'windows/VALIDATION.md'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/windows-real-dictation.yml'
+      - '.github/workflows/windows-real-dictation-contracts.yml'
+      - '.github/workflows/windows.yml'
+      - 'scripts/test-windows-real-dictation.ps1'
+      - 'scripts/windows-real-dictation.psm1'
+      - 'scripts/windows-real-dictation-interop.cs'
+      - 'windows/package/test-real-dictation.ps1'
+      - 'windows/VALIDATION.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-real-dictation-contracts-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    name: Qualification contract tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Run qualification contract tests
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/test-windows-real-dictation.ps1

@@ -661,11 +661,17 @@ Assert-Match 'qualification skips fixture resolution in probe-only runs' `
     $workflow '(?s)if \(\$env:ND_PROBE_ONLY -ne ''true''\) \{\s*foreach \(\$option'
 
 # The qualification workflow is dispatch-only, so its focused contract tests
-# run there. They must not become a new pass condition on the required Windows
+# also run there. A separate non-required pull-request check gives them a
+# passing result without becoming a new pass condition on the required Windows
 # host job (issue #254 keeps CI gates unchanged).
 $windowsHostWorkflow = Read-Text '.github/workflows/windows.yml'
 Assert-NotContains 'required Windows host CI does not run the qualification contract tests' `
     $windowsHostWorkflow 'pwsh -NoProfile -File scripts/test-windows-real-dictation.ps1'
+$contractWorkflow = Read-Text '.github/workflows/windows-real-dictation-contracts.yml'
+Assert-Match 'a separate non-required check runs on pull requests' `
+    $contractWorkflow '(?m)^  pull_request:'
+Assert-Contains 'the separate check runs the qualification contract tests' `
+    $contractWorkflow 'pwsh -NoProfile -File scripts/test-windows-real-dictation.ps1'
 
 $harness = Read-Text 'windows/package/test-real-dictation.ps1'
 Assert-Contains 'harness installs the actual installer' $harness 'Invoke-BoundedInstallerProcess'
