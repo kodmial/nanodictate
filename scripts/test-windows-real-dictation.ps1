@@ -80,7 +80,9 @@ function Get-WorkflowTriggerNames {
     <#
       Minimal YAML-aware extraction of the top-level `on:` mapping keys.
       PowerShell ships no YAML parser, so this walks the block structurally:
-      it accepts a quoted `"on"` key, quoted event keys (for example
+      it only accepts an `on` key at column zero, so a nested `on:` (including
+      one inside a block scalar) cannot be mistaken for the top-level mapping.
+      It accepts a quoted `"on"` key, quoted event keys (for example
       `"workflow_call":`), explicit mapping keys (`? workflow_call` followed
       by `:`) and comments, and stops at the next top-level key. Comparing the
       complete parsed key set keeps an extra trigger from hiding behind quoting
@@ -99,7 +101,9 @@ function Get-WorkflowTriggerNames {
         if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
         $indent = $line.Length - $line.TrimStart().Length
         if ($null -eq $onIndent) {
-            $match = [regex]::Match($line, '^\s*(?:"on"|''on''|on)\s*:\s*(?<inline>.*)$')
+            # A top-level mapping key starts at column zero. This ignores an
+            # `on:` nested in another key's value, including block scalars.
+            $match = [regex]::Match($line, '^(?:"on"|''on''|on)\s*:\s*(?<inline>.*)$')
             if ($match.Success) {
                 $onIndent = $indent
                 $inline = $match.Groups['inline'].Value.Trim()
@@ -611,6 +615,12 @@ Assert-Equal 'trigger parsing reads an explicit mapping key' `
     'workflow_dispatch,workflow_call'
 Assert-Equal 'trigger parsing reads a flow sequence' `
     ((Get-WorkflowTriggerNames -Text "on: [workflow_dispatch]`n") -join ',') 'workflow_dispatch'
+Assert-Equal 'trigger parsing ignores an on key inside a block scalar' `
+    ((Get-WorkflowTriggerNames -Text "name: |`n  on:`n    workflow_dispatch:`non:`n  workflow_dispatch:`n  workflow_call:`n") -join ',') `
+    'workflow_dispatch,workflow_call'
+Assert-Equal 'trigger parsing ignores an indented on key' `
+    ((Get-WorkflowTriggerNames -Text "jobs:`n  build:`n    on: ignored`non:`n  workflow_dispatch:`n") -join ',') `
+    'workflow_dispatch'
 Assert-Throws 'trigger parsing rejects unsupported event-level YAML' {
     Get-WorkflowTriggerNames -Text "on:`n  - workflow_dispatch`n"
 } 'Unsupported YAML'
